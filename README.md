@@ -4,10 +4,10 @@ A C++ real-time 3D voxel world project built with SDL3, bgfx and Vulkan.
 
 The project combines a custom rendering layer, UI system, procedural world generation and asynchronous voxel chunk processing. It is primarily a personal C++ project focused on real-time rendering, multithreading, procedural generation and engine architecture.
 
-[Main menu](screenshots/screen1.png)
-[Main menu (Russian)](screenshots/screen2.png)
-[Generated 2D map](screenshots/screen3.png)
-[Generated world](screenshots/screen4.png)
+![Main menu](screenshots/screen1.png)
+![Main menu (Russian)](screenshots/screen2.png)
+![Generated 2D map](screenshots/screen3.png)
+![Generated world](screenshots/screen4.png)
 
 ## Features
 
