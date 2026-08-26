@@ -1,0 +1,21 @@
+add_library(ui
+    widgets/base_widget.cpp
+    widgets/button.cpp
+    widgets/text.cpp
+    widgets/scroll_container.cpp
+    widgets/scroll_bar.cpp
+    widgets/text_box.cpp
+    widgets/slider.cpp
+    widgets/world_preview.cpp
+    ui_manager.cpp
+    composite/text_button.cpp
+)
+
+target_include_directories(ui
+    PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(ui 
+    PUBLIC 
+    engine
+    game)

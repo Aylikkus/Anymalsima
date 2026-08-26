@@ -1,0 +1,227 @@
+[
+    {
+        "name": "blocks.limestone",
+        "material": "materials.limestone",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 3,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.sandstone",
+        "material": "materials.sandstone",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 1,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.shale",
+        "material": "materials.shale",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.conglomerate",
+        "material": "materials.conglomerate",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 3,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.chalk",
+        "material": "materials.chalk",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 1,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.breccia",
+        "material": "materials.breccia",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.dolomite",
+        "material": "materials.dolomite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 6,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.marble",
+        "material": "materials.marble",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.quartzite",
+        "material": "materials.quartzite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 6,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.slate",
+        "material": "materials.slate",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.phyllite",
+        "material": "materials.phyllite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.schist",
+        "material": "materials.schist",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 6,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.gneiss",
+        "material": "materials.gneiss",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 7,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.serpentinite",
+        "material": "materials.serpentinite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.eclogite",
+        "material": "materials.eclogite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.granite",
+        "material": "materials.granite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 8,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.diorite",
+        "material": "materials.diorite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 8,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.gabbro",
+        "material": "materials.gabbro",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 8,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.peridotite",
+        "material": "materials.peridotite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.basalt",
+        "material": "materials.basalt",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.andesite",
+        "material": "materials.andesite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.rhyolite",
+        "material": "materials.rhyolite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.obsidian",
+        "material": "materials.obsidian",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 10,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.pumice",
+        "material": "materials.pumice",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 5,
+            "flammable": false
+        }
+    },
+    {
+        "name": "blocks.komatiite",
+        "material": "materials.komatiite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 6,
+            "flammable": false
+        }
+    }
+]

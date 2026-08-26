@@ -1,0 +1,233 @@
+[
+    {
+        "name": "rocks.limestone",
+        "block_name": "blocks.limestone",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.2,
+            "permeability": 0.1
+        },
+        "placement": {
+            "allowed_land": [
+                "Shore",
+                "Plains"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Transitional",
+                "Continental"
+            ],
+            "required_features": [],
+            "forbidden_features": [
+                "Volcano"
+            ],
+            "weight": 1.0
+        },
+        "transforms": [
+            {
+                "result": "rocks.marble",
+                "min_depth_m": 50
+            }
+        ]
+    },
+    {
+        "name": "rocks.sandstone",
+        "block_name": "blocks.sandstone",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.25,
+            "permeability": 0.15
+        },
+        "placement": {
+            "allowed_land": [
+                "Shore",
+                "Plains",
+                "Hills"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [
+                "Volcano",
+                "Glacier"
+            ],
+            "weight": 0.9
+        },
+        "body_size_m": [
+            1,
+            10
+        ],
+        "transforms": [
+            {
+                "result": "rocks.quartzite",
+                "min_depth_m": 30
+            }
+        ]
+    },
+    {
+        "name": "rocks.shale",
+        "block_name": "blocks.shale",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.3,
+            "permeability": 0.001
+        },
+        "placement": {
+            "allowed_land": [
+                "Plains",
+                "Hills",
+                "Water"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [
+                "Volcano"
+            ],
+            "weight": 0.8
+        },
+        "body_size_m": [
+            1,
+            6
+        ],
+        "transforms": [
+            {
+                "result": "rocks.slate",
+                "min_depth_m": 30
+            }
+        ]
+    },
+    {
+        "name": "rocks.conglomerate",
+        "block_name": "blocks.conglomerate",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.15,
+            "permeability": 0.08
+        },
+        "placement": {
+            "allowed_land": [
+                "Plains",
+                "Hills",
+                "Shore"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [
+                "Volcano"
+            ],
+            "weight": 0.6
+        },
+        "body_size_m": [
+            1,
+            3
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.chalk",
+        "block_name": "blocks.chalk",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.35,
+            "permeability": 0.2
+        },
+        "placement": {
+            "allowed_land": [
+                "Shore",
+                "Plains",
+                "Water"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [
+                "Volcano"
+            ],
+            "weight": 0.4
+        },
+        "body_size_m": [
+            0,
+            2
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.breccia",
+        "block_name": "blocks.breccia",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.1,
+            "permeability": 0.05
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Plains"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "required_features": [
+                "Cliff"
+            ],
+            "forbidden_features": [],
+            "weight": 0.5
+        },
+        "body_size_m": [
+            0,
+            2
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.dolomite",
+        "block_name": "blocks.dolomite",
+        "category": "Sedimentary",
+        "properties": {
+            "porosity": 0.1,
+            "permeability": 0.05
+        },
+        "placement": {
+            "allowed_land": [
+                "Plains",
+                "Hills"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [
+                "Volcano"
+            ],
+            "weight": 0.5
+        },
+        "body_size_m": [
+            0,
+            5
+        ],
+        "transforms": [
+            {
+                "result": "rocks.marble",
+                "min_depth_m": 50
+            }
+        ]
+    }
+]

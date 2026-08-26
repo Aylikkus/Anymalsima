@@ -1,0 +1,118 @@
+{
+  "fonts": {
+    "regular": "assets/fonts/noto_regular.ttf",
+    "regular_cjk": "assets/fonts/noto_universal_cjk_regular.ttf",
+    "bold": "assets/fonts/noto_bold.ttf",
+    "bold_cjk": "assets/fonts/noto_universal_cjk_bold.ttf"
+  },
+  "textures": {
+    "ui.black.9slice": "assets/textures/ui/black/9slice.png",
+    "ui.black.9slice_thin": "assets/textures/ui/black/9slice_thin.png",
+    "ui.black.thumb_circle": "assets/textures/ui/black/thumb_circle.png",
+    "ui.black.thumb_rect_horizontal": "assets/textures/ui/black/thumb_rect_horizontal.png",
+    "ui.black.thumb_rect_vertical": "assets/textures/ui/black/thumb_rect_vertical.png",
+    "ui.black.track_horizontal": "assets/textures/ui/black/track_horizontal.png",
+    "ui.black.track_horizontal_no_sides": "assets/textures/ui/black/track_horizontal_no_sides.png",
+    "ui.black.track_vertical": "assets/textures/ui/black/track_vertical.png",
+    "ui.black.track_vertical_no_sides": "assets/textures/ui/black/track_vertical_no_sides.png",
+    "ui.white.9slice": "assets/textures/ui/white/9slice.png",
+    "ui.white.9slice_thin": "assets/textures/ui/white/9slice_thin.png",
+    "ui.white.thumb_circle": "assets/textures/ui/white/thumb_circle.png",
+    "ui.white.thumb_rect_horizontal": "assets/textures/ui/white/thumb_rect_horizontal.png",
+    "ui.white.thumb_rect_vertical": "assets/textures/ui/white/thumb_rect_vertical.png",
+    "ui.white.track_horizontal": "assets/textures/ui/white/track_horizontal.png",
+    "ui.white.track_horizontal_no_sides": "assets/textures/ui/white/track_horizontal_no_sides.png",
+    "ui.white.track_vertical": "assets/textures/ui/white/track_vertical.png",
+    "ui.white.track_vertical_no_sides": "assets/textures/ui/white/track_vertical_no_sides.png"
+  },
+  "materials": {
+    "blocks.stones.andesite": "assets/materials/blocks/stones/andesite.png",
+    "blocks.stones.andesite_normal": "assets/materials/blocks/stones/andesite_normal.png",
+    "blocks.stones.basalt": "assets/materials/blocks/stones/basalt.png",
+    "blocks.stones.basalt_normal": "assets/materials/blocks/stones/basalt_normal.png",
+    "blocks.stones.breccia": "assets/materials/blocks/stones/breccia.png",
+    "blocks.stones.breccia_normal": "assets/materials/blocks/stones/breccia_normal.png",
+    "blocks.stones.chalk": "assets/materials/blocks/stones/chalk.png",
+    "blocks.stones.chalk_normal": "assets/materials/blocks/stones/chalk_normal.png",
+    "blocks.stones.conglomerate": "assets/materials/blocks/stones/conglomerate.png",
+    "blocks.stones.conglomerate_normal": "assets/materials/blocks/stones/conglomerate_normal.png",
+    "blocks.stones.diorite": "assets/materials/blocks/stones/diorite.png",
+    "blocks.stones.diorite_normal": "assets/materials/blocks/stones/diorite_normal.png",
+    "blocks.stones.dolomite": "assets/materials/blocks/stones/dolomite.png",
+    "blocks.stones.dolomite_normal": "assets/materials/blocks/stones/dolomite_normal.png",
+    "blocks.stones.eclogite": "assets/materials/blocks/stones/eclogite.png",
+    "blocks.stones.eclogite_normal": "assets/materials/blocks/stones/eclogite_normal.png",
+    "blocks.stones.gabbro": "assets/materials/blocks/stones/gabbro.png",
+    "blocks.stones.gabbro_normal": "assets/materials/blocks/stones/gabbro_normal.png",
+    "blocks.stones.gneiss": "assets/materials/blocks/stones/gneiss.png",
+    "blocks.stones.gneiss_normal": "assets/materials/blocks/stones/gneiss_normal.png",
+    "blocks.stones.granite": "assets/materials/blocks/stones/granite.png",
+    "blocks.stones.granite_normal": "assets/materials/blocks/stones/granite_normal.png",
+    "blocks.stones.komatiite": "assets/materials/blocks/stones/komatiite.png",
+    "blocks.stones.komatiite_normal": "assets/materials/blocks/stones/komatiite_normal.png",
+    "blocks.stones.limestone": "assets/materials/blocks/stones/limestone.png",
+    "blocks.stones.limestone_normal": "assets/materials/blocks/stones/limestone_normal.png",
+    "blocks.stones.marble": "assets/materials/blocks/stones/marble.png",
+    "blocks.stones.marble_normal": "assets/materials/blocks/stones/marble_normal.png",
+    "blocks.stones.obsidian": "assets/materials/blocks/stones/obsidian.png",
+    "blocks.stones.obsidian_normal": "assets/materials/blocks/stones/obsidian_normal.png",
+    "blocks.stones.peridotite": "assets/materials/blocks/stones/peridotite.png",
+    "blocks.stones.peridotite_normal": "assets/materials/blocks/stones/peridotite_normal.png",
+    "blocks.stones.phyllite": "assets/materials/blocks/stones/phyllite.png",
+    "blocks.stones.phyllite_normal": "assets/materials/blocks/stones/phyllite_normal.png",
+    "blocks.stones.pumice": "assets/materials/blocks/stones/pumice.png",
+    "blocks.stones.pumice_normal": "assets/materials/blocks/stones/pumice_normal.png",
+    "blocks.stones.quartzite": "assets/materials/blocks/stones/quartzite.png",
+    "blocks.stones.quartzite_normal": "assets/materials/blocks/stones/quartzite_normal.png",
+    "blocks.stones.rhyolite": "assets/materials/blocks/stones/rhyolite.png",
+    "blocks.stones.rhyolite_normal": "assets/materials/blocks/stones/rhyolite_normal.png",
+    "blocks.stones.sandstone": "assets/materials/blocks/stones/sandstone.png",
+    "blocks.stones.sandstone_normal": "assets/materials/blocks/stones/sandstone_normal.png",
+    "blocks.stones.schist": "assets/materials/blocks/stones/schist.png",
+    "blocks.stones.schist_normal": "assets/materials/blocks/stones/schist_normal.png",
+    "blocks.stones.serpentinite": "assets/materials/blocks/stones/serpentinite.png",
+    "blocks.stones.serpentinite_normal": "assets/materials/blocks/stones/serpentinite_normal.png",
+    "blocks.stones.shale": "assets/materials/blocks/stones/shale.png",
+    "blocks.stones.shale_normal": "assets/materials/blocks/stones/shale_normal.png",
+    "blocks.stones.slate": "assets/materials/blocks/stones/slate.png",
+    "blocks.stones.slate_normal": "assets/materials/blocks/stones/slate_normal.png"
+  },
+  "music": {
+    "reflection": "assets/audio/music/reflection.flac"
+  },
+  "sounds": {
+    "fox_scream": "assets/audio/sounds/fox_scream.flac",
+    "mouse_click": "assets/audio/sounds/mouse_click.mp3"
+  },
+  "shaders": {
+    "block": "assets/shaders/block",
+    "color": "assets/shaders/color",
+    "map_preview": "assets/shaders/map_preview",
+    "river_preview": "assets/shaders/river_preview",
+    "sprite": "assets/shaders/sprite",
+    "text": "assets/shaders/text"
+  },
+  "data": [
+    {
+      "type": "materials",
+      "files": [
+        "assets/data/materials/rocks.json"
+      ]
+    },
+    {
+      "type": "blocks",
+      "files": [
+        "assets/data/blocks/rocks.json"
+      ]
+    },
+    {
+      "type": "rocks",
+      "files": [
+        "assets/data/rocks/igneous_extrusive.json",
+        "assets/data/rocks/igneous_intrusive.json",
+        "assets/data/rocks/metamorphic.json",
+        "assets/data/rocks/sedimentary.json"
+      ]
+    }
+  ]
+}

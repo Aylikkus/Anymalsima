@@ -1,0 +1,130 @@
+[
+    {
+        "name": "rocks.granite",
+        "block_name": "blocks.granite",
+        "category": "Igneous Intrusive",
+        "properties": {
+            "porosity": 0.01,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Plains",
+                "Hills",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "required_features": [],
+            "forbidden_features": [],
+            "weight": 0.6
+        },
+        "body_size_m": [
+            5,
+            30
+        ],
+        "transforms": [
+            {
+                "result": "rocks.gneiss",
+                "min_depth_m": 75
+            }
+        ]
+    },
+    {
+        "name": "rocks.diorite",
+        "block_name": "blocks.diorite",
+        "category": "Igneous Intrusive",
+        "properties": {
+            "porosity": 0.02,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "required_features": [],
+            "forbidden_features": [],
+            "weight": 0.4
+        },
+        "body_size_m": [
+            3,
+            15
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.gabbro",
+        "block_name": "blocks.gabbro",
+        "category": "Igneous Intrusive",
+        "properties": {
+            "porosity": 0.01,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Deep Water",
+                "Water"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [],
+            "weight": 0.7
+        },
+        "body_size_m": [
+            5,
+            25
+        ],
+        "transforms": [
+            {
+                "result": "rocks.eclogite",
+                "min_depth_m": 10
+            }
+        ]
+    },
+    {
+        "name": "rocks.peridotite",
+        "block_name": "blocks.peridotite",
+        "category": "Igneous Intrusive",
+        "properties": {
+            "porosity": 0.005,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Deep Water",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic"
+            ],
+            "required_features": [],
+            "forbidden_features": [],
+            "weight": 0.3
+        },
+        "body_size_m": [
+            10,
+            50
+        ],
+        "transforms": [
+            {
+                "result": "rocks.serpentinite",
+                "min_depth_m": 100
+            }
+        ]
+    }
+]

@@ -1,0 +1,168 @@
+[
+    {
+        "name": "rocks.marble",
+        "block_name": "blocks.marble",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.05,
+            "permeability": 0.0
+        },
+        "placement": {
+            "weight": 0.2
+        },
+        "transforms": []
+    },
+    {
+        "name": "rocks.quartzite",
+        "block_name": "blocks.quartzite",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.02,
+            "permeability": 0.0
+        },
+        "placement": {
+            "weight": 0.2
+        },
+        "transforms": []
+    },
+    {
+        "name": "rocks.slate",
+        "block_name": "blocks.slate",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.03,
+            "permeability": 0.0
+        },
+        "placement": {
+            "weight": 0.2
+        },
+        "transforms": [
+            {
+                "result": "rocks.phyllite",
+                "min_depth_m": 50
+            }
+        ]
+    },
+    {
+        "name": "rocks.phyllite",
+        "block_name": "blocks.phyllite",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.02,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "weight": 0.2
+        },
+        "transforms": [
+            {
+                "result": "rocks.schist",
+                "min_depth_m": 75
+            }
+        ]
+    },
+    {
+        "name": "rocks.schist",
+        "block_name": "blocks.schist",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.01,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "weight": 0.5
+        },
+        "transforms": [
+            {
+                "result": "rocks.gneiss",
+                "min_depth_m": 100
+            }
+        ]
+    },
+    {
+        "name": "rocks.gneiss",
+        "block_name": "blocks.gneiss",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.02,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "weight": 0.4
+        },
+        "transforms": []
+    },
+    {
+        "name": "rocks.serpentinite",
+        "block_name": "blocks.serpentinite",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.05,
+            "permeability": 0.01
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Deep Water"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic",
+                "Transitional"
+            ],
+            "required_features": [],
+            "forbidden_features": [],
+            "weight": 0.4
+        },
+        "transforms": []
+    },
+    {
+        "name": "rocks.eclogite",
+        "block_name": "blocks.eclogite",
+        "category": "Metamorphic",
+        "properties": {
+            "porosity": 0.01,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Deep Water",
+                "Water"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic"
+            ],
+            "weight": 0.2
+        },
+        "transforms": []
+    }
+]

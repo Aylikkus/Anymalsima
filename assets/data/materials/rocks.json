@@ -1,0 +1,127 @@
+[
+    {
+        "name": "materials.limestone",
+        "texture_albedo": "blocks.stones.limestone",
+        "texture_normal": "blocks.stones.limestone_normal"
+    },
+    {
+        "name": "materials.sandstone",
+        "texture_albedo": "blocks.stones.sandstone",
+        "texture_normal": "blocks.stones.sandstone_normal"
+    },
+    {
+        "name": "materials.shale",
+        "texture_albedo": "blocks.stones.shale",
+        "texture_normal": "blocks.stones.shale_normal"
+    },
+    {
+        "name": "materials.conglomerate",
+        "texture_albedo": "blocks.stones.conglomerate",
+        "texture_normal": "blocks.stones.conglomerate_normal"
+    },
+    {
+        "name": "materials.chalk",
+        "texture_albedo": "blocks.stones.chalk",
+        "texture_normal": "blocks.stones.chalk_normal"
+    },
+    {
+        "name": "materials.breccia",
+        "texture_albedo": "blocks.stones.breccia",
+        "texture_normal": "blocks.stones.breccia_normal"
+    },
+    {
+        "name": "materials.dolomite",
+        "texture_albedo": "blocks.stones.dolomite",
+        "texture_normal": "blocks.stones.dolomite_normal"
+    },
+    {
+        "name": "materials.marble",
+        "texture_albedo": "blocks.stones.marble",
+        "texture_normal": "blocks.stones.marble_normal"
+    },
+    {
+        "name": "materials.quartzite",
+        "texture_albedo": "blocks.stones.quartzite",
+        "texture_normal": "blocks.stones.quartzite_normal"
+    },
+    {
+        "name": "materials.slate",
+        "texture_albedo": "blocks.stones.slate",
+        "texture_normal": "blocks.stones.slate_normal"
+    },
+    {
+        "name": "materials.phyllite",
+        "texture_albedo": "blocks.stones.phyllite",
+        "texture_normal": "blocks.stones.phyllite_normal"
+    },
+    {
+        "name": "materials.schist",
+        "texture_albedo": "blocks.stones.schist",
+        "texture_normal": "blocks.stones.schist_normal"
+    },
+    {
+        "name": "materials.gneiss",
+        "texture_albedo": "blocks.stones.gneiss",
+        "texture_normal": "blocks.stones.gneiss_normal"
+    },
+    {
+        "name": "materials.serpentinite",
+        "texture_albedo": "blocks.stones.serpentinite",
+        "texture_normal": "blocks.stones.serpentinite_normal"
+    },
+    {
+        "name": "materials.eclogite",
+        "texture_albedo": "blocks.stones.eclogite",
+        "texture_normal": "blocks.stones.eclogite_normal"
+    },
+    {
+        "name": "materials.granite",
+        "texture_albedo": "blocks.stones.granite",
+        "texture_normal": "blocks.stones.granite_normal"
+    },
+    {
+        "name": "materials.diorite",
+        "texture_albedo": "blocks.stones.diorite",
+        "texture_normal": "blocks.stones.diorite_normal"
+    },
+    {
+        "name": "materials.gabbro",
+        "texture_albedo": "blocks.stones.gabbro",
+        "texture_normal": "blocks.stones.gabbro_normal"
+    },
+    {
+        "name": "materials.peridotite",
+        "texture_albedo": "blocks.stones.peridotite",
+        "texture_normal": "blocks.stones.peridotite_normal"
+    },
+    {
+        "name": "materials.basalt",
+        "texture_albedo": "blocks.stones.basalt",
+        "texture_normal": "blocks.stones.basalt_normal"
+    },
+    {
+        "name": "materials.andesite",
+        "texture_albedo": "blocks.stones.andesite",
+        "texture_normal": "blocks.stones.andesite_normal"
+    },
+    {
+        "name": "materials.rhyolite",
+        "texture_albedo": "blocks.stones.rhyolite",
+        "texture_normal": "blocks.stones.rhyolite_normal"
+    },
+    {
+        "name": "materials.obsidian",
+        "texture_albedo": "blocks.stones.obsidian",
+        "texture_normal": "blocks.stones.obsidian_normal"
+    },
+    {
+        "name": "materials.pumice",
+        "texture_albedo": "blocks.stones.pumice",
+        "texture_normal": "blocks.stones.pumice_normal"
+    },
+    {
+        "name": "materials.komatiite",
+        "texture_albedo": "blocks.stones.komatiite",
+        "texture_normal": "blocks.stones.komatiite_normal"
+    }
+]

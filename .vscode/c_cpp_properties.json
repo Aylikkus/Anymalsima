@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/src/game",
+                "${workspaceFolder}/src/engine",
+                "${workspaceFolder}/src/app",
+                "${workspaceFolder}/src/render",
+                "${workspaceFolder}/src/platform",
+                "${workspaceFolder}/external/entt-3.16.0/src",
+                "${workspaceFolder}/src/i18n"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang-17",
+            "cStandard": "c17",
+            "cppStandard": "c++20",
+            "intelliSenseMode": "linux-clang-x64"
+        }
+    ],
+    "version": 4
+}

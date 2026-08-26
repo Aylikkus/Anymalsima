@@ -1,0 +1,354 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PACKAGE VERSION\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-28 01:07+0300\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=CHARSET\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: src/game/states/create_or_load_state.cpp:22
+msgid "CREATE WORLD"
+msgstr ""
+
+#: src/game/states/create_or_load_state.cpp:35
+msgid "LOAD WORLD"
+msgstr ""
+
+#: src/game/states/create_or_load_state.cpp:48
+#: src/game/states/create_world_state.cpp:30
+msgid "RETURN"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:41
+msgid "GENERATE"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:77
+msgid "Height"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:78
+msgid "Temperature C"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:79
+msgid "Humidity"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:81
+msgid "Biome"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:85
+msgid "Land"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:89
+msgid "Vegetation"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:95
+msgid "River"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:96
+msgid "Direction"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:100
+msgid "Flow Strength"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:104
+msgid "Features"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:118
+#: src/game/utils/region_enum_maps.hpp:148
+#: src/game/utils/region_enum_maps.hpp:178
+msgid "None"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:37
+#: src/game/states/main_menu_state.cpp:53
+#: src/game/states/main_menu_state.cpp:265
+#, c++-format
+msgid "Master Volume {0}"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:58
+#: src/game/states/main_menu_state.cpp:74
+#: src/game/states/main_menu_state.cpp:266
+#, c++-format
+msgid "Music Vol. {0}"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:79
+#: src/game/states/main_menu_state.cpp:95
+#: src/game/states/main_menu_state.cpp:267
+#, c++-format
+msgid "Sound Vol. {0}"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:100
+#: src/game/states/main_menu_state.cpp:116
+#: src/game/states/main_menu_state.cpp:268
+#, c++-format
+msgid "Text Scale {:.0f}%"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:124
+#: src/game/states/main_menu_state.cpp:269
+msgid "APPLY"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:159
+#: src/game/states/main_menu_state.cpp:270
+msgid "SAVE"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:184
+msgid "SAVED!"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:208
+#: src/game/states/main_menu_state.cpp:271
+msgid "PLAY"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:224
+#: src/game/states/main_menu_state.cpp:272
+msgid "SETTINGS"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:253
+#: src/game/states/main_menu_state.cpp:273
+msgid "EXIT"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:12
+msgid "Deep Water"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:13
+msgid "Water"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:14
+msgid "Shore"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:15
+msgid "Plains"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:16
+msgid "Hills"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:17
+msgid "Mountains"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:18
+msgid "Peak"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:43
+msgid "Lake"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:44
+msgid "Delta"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:45
+msgid "Oasis"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:46
+msgid "Ice Sheet"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:47
+msgid "Glacier"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:48
+msgid "Permafrost"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:49
+msgid "Sea Ice"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:50
+msgid "Ravine"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:51
+msgid "Cliff"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:52
+msgid "Plateau"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:53
+msgid "Volcano"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:54
+msgid "Crater"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:55
+msgid "Swamp"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:56
+msgid "Marsh"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:57
+msgid "Floodplain"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:58
+msgid "Mangrove"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:59
+msgid "Dense Forest"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:60
+msgid "Clearing"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:61
+msgid "Dead Zone"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:62
+msgid "Burned Area"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:63
+msgid "Desert Dunes"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:64
+msgid "Salt Flats"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:65
+msgid "Badlands"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:66
+msgid "Beach"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:67
+msgid "Rocky Shore"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:68
+msgid "Coral Reef"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:91
+msgid "Continental"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:92
+msgid "Oceanic"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:93
+msgid "Transitional"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:116
+msgid "Polar"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:117
+msgid "Scorching"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:118
+msgid "Subtropical"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:119
+msgid "Temperate"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:120
+msgid "Tropical"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:121
+msgid "Tundra"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:146
+msgid "Forest"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:147
+msgid "Grass"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:149
+msgid "Rainforest"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:150
+msgid "Shrub"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:175
+msgid "East"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:176
+msgid "North"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:177
+msgid "North-East"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:179
+msgid "Nort-West"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:180
+msgid "South"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:181
+msgid "South-East"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:182
+msgid "South-West"
+msgstr ""
+
+#: src/game/utils/region_enum_maps.hpp:183
+msgid "West"
+msgstr ""

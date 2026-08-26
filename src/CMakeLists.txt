@@ -1,0 +1,8 @@
+add_subdirectory(i18n)
+add_subdirectory(engine)
+add_subdirectory(ui)
+add_subdirectory(game)
+add_subdirectory(platform)
+add_subdirectory(render)
+add_subdirectory(audio)
+add_subdirectory(app)

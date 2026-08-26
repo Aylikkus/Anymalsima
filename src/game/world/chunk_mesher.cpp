@@ -1,0 +1,319 @@
+#include "chunk_mesher.hpp"
+
+#include "items/block.hpp"
+#include "items/material.hpp"
+
+// ---------------------------------------------------------------------------
+// Face descriptors (identical to the original — geometry is unchanged).
+// Normal, tangent, and 4 CCW corners from the outside.
+// ---------------------------------------------------------------------------
+const std::array<ChunkMesher::FaceDesc, 6> ChunkMesher::FACES = {{
+    // PosX
+    {1, 0, 0, 0, 0, -1, {{{1, 0, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}}}},
+    // NegX
+    {-1, 0, 0, 0, 0, 1, {{{0, 0, 1}, {0, 1, 1}, {0, 1, 0}, {0, 0, 0}}}},
+    // PosY
+    {0, 1, 0, 1, 0, 0, {{{0, 1, 1}, {1, 1, 1}, {1, 1, 0}, {0, 1, 0}}}},
+    // NegY
+    {0, -1, 0, 1, 0, 0, {{{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}}}},
+    // PosZ
+    {0, 0, 1, 1, 0, 0, {{{0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}}},
+    // NegZ
+    {0, 0, -1, -1, 0, 0, {{{1, 0, 0}, {0, 0, 0}, {0, 1, 0}, {1, 1, 0}}}},
+}};
+
+// ---------------------------------------------------------------------------
+// emitQuad
+//
+// Emits a single axis-aligned rectangle as two triangles.
+//
+//  origin (ox,oy,oz)  — world-space position of corner 0
+//  du                 — first edge vector  (spans 'width'  of the merged strip)
+//  dv                 — second edge vector (spans 'height' of the merged strip)
+//
+// Winding: 0,1,2, 0,2,3  (counter-clockwise from outside, same as before).
+// UV corners are scaled to [0, width] x [0, height] so textures tile
+// naturally across merged quads.
+// ---------------------------------------------------------------------------
+void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
+                           float dux, float duy, float duz, float dvx,
+                           float dvy, float dvz, Face face,
+                           const FaceKey& key) const {
+    const FaceDesc& fd = FACES[static_cast<int>(face)];
+
+    // Derive the UV extents from the edge vector magnitudes so textures
+    // tile across multi-block quads (integer steps = 1 tile each).
+    float uMax = std::sqrt(dux * dux + duy * duy + duz * duz);
+    float vMax = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
+
+    struct Corner {
+        float x, y, z, u, v;
+    };
+    const Corner corners[4] = {
+        {ox, oy, oz, 0.f, 0.f},
+        {ox + dux, oy + duy, oz + duz, uMax, 0.f},
+        {ox + dux + dvx, oy + duy + dvy, oz + duz + dvz, uMax, vMax},
+        {ox + dvx, oy + dvy, oz + dvz, 0.f, vMax},
+    };
+
+    uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
+
+    for (const auto& c : corners) {
+        BlockVertex v;
+        v.x = c.x;
+        v.y = c.y;
+        v.z = c.z;
+        v.nx = fd.nx;
+        v.ny = fd.ny;
+        v.nz = fd.nz;
+        v.tx = fd.tx;
+        v.ty = fd.ty;
+        v.tz = fd.tz;
+        v.u = c.u;
+        v.v = c.v;
+        v.layer = key.texLayer;
+        v.tint = key.tint;
+        mesh.vertices.push_back(v);
+    }
+
+    mesh.indices.insert(mesh.indices.end(), {base + 0, base + 1, base + 2,
+                                             base + 0, base + 2, base + 3});
+}
+
+// ---------------------------------------------------------------------------
+// build  —  greedy meshing
+//
+// Algorithm overview (per axis, per slab, per face direction):
+//
+//   The chunk has dimensions [SIZE_XY, SIZE_XY, SIZE_Z] in local (lx,ly,lz).
+//   World mapping: wx = originX+lx,  wy = originY+lz,  wz = originZ+ly
+//   (same coord remapping as the original mesher).
+//
+//   We iterate over the 3 axes (d = 0,1,2) and for each axis over all
+//   parallel slabs.  For axis d, the two perpendicular axes are u and v.
+//   Within a slab we build a 2-D "face mask": each cell stores the FaceKey
+//   for the face that should be emitted there (or an invalid key for none).
+//
+//   Two face directions exist per axis: +d and -d.  We process both in the
+//   same slab pass to avoid iterating twice.
+//
+//   Greedy merge:
+//     Scan the mask row by row (along u).  When we find a valid, un-merged
+//     cell, extend as far right (u) as possible while keys match, then
+//     extend downward (v) for the same width.  Emit one quad for the whole
+//     rectangle and mark those cells as consumed (block = nullptr).
+// ---------------------------------------------------------------------------
+ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
+                             const NeighbourFn& neighbour) const {
+    ChunkMesh mesh;
+
+    // World-space origin of this chunk (tile units).
+    const int originX = coord.x * Chunk::SIZE_X;
+    const int originY = coord.y * Chunk::SIZE_Y;
+    const int originZ = coord.z * Chunk::SIZE_Z;
+
+    // Chunk dimensions indexed as [d0][d1][d2].
+    // We re-interpret axes below, but we need a way to address tiles by
+    // any permutation of (x, y, z).  We work entirely in world tile coords
+    // and call neighbour() for adjacency — that handles cross-chunk borders.
+
+    // Axis loop: d = primary (normal) axis; u,v = the two tangent axes.
+    // dims[0] = SIZE_XY (x), dims[1] = SIZE_XY (y/z), dims[2] = SIZE_Z (z/y)
+    // We express everything in world coordinates to keep the neighbour()
+    // call simple.
+
+    // World-space extents
+    const int W = Chunk::SIZE_X;
+    const int H = Chunk::SIZE_Y;
+    const int D = Chunk::SIZE_Z;
+
+    const int dims[3] = {W, H, D};
+
+    auto getNeighbourTile = [&](int x, int y, int z) -> const Tile* {
+        // inside current chunk
+        if ((unsigned)x < W && (unsigned)y < H && (unsigned)z < D) {
+            return &chunk.tiles[z][y][x];
+        }
+
+        // outside chunk -> fallback
+        return neighbour(originX + x, originY + y, originZ + z);
+    };
+
+    // For each of the 3 axes we sweep slabs perpendicular to that axis.
+    for (int d = 0; d < 3; ++d) {
+        // The two tangent axis indices
+        const int u = (d + 1) % 3;
+        const int v = (d + 2) % 3;
+
+        const int slabCount = dims[d];
+        const int uCount = dims[u];
+        const int vCount = dims[v];
+
+        // face mask for this slab: [v][u], two sides (+d/-d)
+        std::vector<FaceKey> maskPos(uCount * vCount);
+        std::vector<FaceKey> maskNeg(uCount * vCount);
+
+        // Helper: world position from (d_val, u_val, v_val) given axis d
+        auto worldPos = [&](int dVal, int uVal, int vVal, int out[3]) {
+            out[d] = dVal;
+            out[u] = uVal;
+            out[v] = vVal;
+            // out is now [wx_offset, wy_offset, wz_offset] relative to origin
+        };
+
+        auto localTile = [&](int x, int y, int z) -> const Tile* {
+            if ((unsigned)x >= W || (unsigned)y >= H || (unsigned)z >= D)
+                return nullptr;
+
+            return &chunk.tiles[z][y][x];
+        };
+
+        // World origin offsets per axis:
+        // axis 0 → world X (originX), axis 1 → world Y (originY), axis 2 →
+        // world Z (originZ)
+        const int origins[3] = {originX, originY, originZ};
+
+        for (int s = 0; s < slabCount; ++s) {
+            // Build the face masks for this slab
+            for (int vi = 0; vi < vCount; ++vi) {
+                for (int ui = 0; ui < uCount; ++ui) {
+                    // Compute world tile coordinates of the current cell
+                    int local[3];
+                    worldPos(s, ui, vi, local);
+
+                    // Retrieve the tile at this world position via neighbour()
+                    const Tile* tile = localTile(local[0], local[1], local[2]);
+                    if (!tile || tile->block_id == 0) continue;
+
+                    const Block &block = blocks.get(tile->block_id);
+                    uint16_t texLayer =
+                        assets.getMaterialAlbedoLayer(block.material);
+                    
+                    // Set tint based on sun exposure (0-15 scale)
+                    uint8_t sunLevel = tile->lightLevel.sun_exposure;
+                    uint8_t brightness = (sunLevel * 255) / 15;  // Map 0-15 to 0-255
+                    uint32_t tint = (0xFF << 24) | (brightness << 16) | (brightness << 8) | brightness;
+
+                    FaceKey key{&block, texLayer, tint};
+
+                    // +d neighbour
+                    {
+                        int nlocal[3] = {local[0], local[1], local[2]};
+                        nlocal[d] += 1;
+
+                        const Tile* nbr =
+                            getNeighbourTile(nlocal[0], nlocal[1], nlocal[2]);
+
+                        if (isFaceVisible(nbr)) maskPos[vi * uCount + ui] = key;
+                    }
+
+                    // -d neighbour
+                    {
+                        int nlocal[3] = {local[0], local[1], local[2]};
+                        nlocal[d] -= 1;
+
+                        const Tile* nbr =
+                            getNeighbourTile(nlocal[0], nlocal[1], nlocal[2]);
+
+                        if (isFaceVisible(nbr)) maskNeg[vi * uCount + ui] = key;
+                    }
+                }
+            }
+
+            // ---------------------------------------------------------------
+            // Greedy merge pass — run once for +d, once for -d
+            // ---------------------------------------------------------------
+            auto greedyPass = [&](std::vector<FaceKey>& mask, bool posDir) {
+                // Face enum index: axis d, direction posDir
+                // Axis 0: PosX=0, NegX=1 | Axis 1: PosY=2, NegY=3 | Axis 2:
+                // PosZ=4, NegZ=5
+                Face faceEnum = static_cast<Face>(d * 2 + (posDir ? 0 : 1));
+
+                for (int vi = 0; vi < vCount; ++vi) {
+                    for (int ui = 0; ui < uCount;) {
+                        const FaceKey& startKey = mask[vi * uCount + ui];
+                        if (!startKey.valid()) {
+                            ++ui;
+                            continue;
+                        }
+
+                        // Extend in the u direction
+                        int w = 1;
+                        while (ui + w < uCount &&
+                               mask[vi * uCount + ui + w] == startKey)
+                            ++w;
+
+                        // Extend in the v direction
+                        int h = 1;
+                        bool canExtend = true;
+                        while (vi + h < vCount && canExtend) {
+                            for (int k = 0; k < w; ++k) {
+                                if (!(mask[(vi + h) * uCount + ui + k] ==
+                                      startKey)) {
+                                    canExtend = false;
+                                    break;
+                                }
+                            }
+                            if (canExtend) ++h;
+                        }
+
+                        // ------------------------------------------------
+                        // Compute world-space origin and edge vectors for
+                        // the merged quad.
+                        //
+                        // The quad lives on the face of the slab at depth s.
+                        // For +d face the surface is at s+1; for -d at s.
+                        // ------------------------------------------------
+                        float qOrigin[3], qDu[3], qDv[3];
+
+                        // Start corner in world space (float)
+                        {
+                            int cell[3];
+                            worldPos(s, ui, vi, cell);
+                            qOrigin[0] = (float)(origins[0] + cell[0]);
+                            qOrigin[1] = (float)(origins[1] + cell[1]);
+                            qOrigin[2] = (float)(origins[2] + cell[2]);
+
+                            // For the +d face, push the surface out by 1 tile
+                            if (posDir) qOrigin[d] += 1.0f;
+                        }
+
+                        // Edge vectors: w tiles along u, h tiles along v
+                        qDu[0] = qDu[1] = qDu[2] = 0.f;
+                        qDu[u] = (float)w;
+                        qDv[0] = qDv[1] = qDv[2] = 0.f;
+                        qDv[v] = (float)h;
+
+                        // For -d face, flip the u edge so winding stays CCW
+                        // when viewed from outside (same convention as FACES).
+                        if (!posDir) {
+                            qDu[u] = -(float)w;
+                            qOrigin[u] += (float)
+                                w;  // shift origin to keep quad in bounds
+                        }
+
+                        emitQuad(mesh, qOrigin[0], qOrigin[1], qOrigin[2],
+                                 qDu[0], qDu[1], qDu[2], qDv[0], qDv[1], qDv[2],
+                                 faceEnum, startKey);
+
+                        // Mark merged cells as consumed
+                        for (int dv = 0; dv < h; ++dv)
+                            for (int du = 0; du < w; ++du)
+                                mask[(vi + dv) * uCount + ui + du] = {};
+
+                        ui += w;
+                    }
+                }
+            };
+
+            greedyPass(maskPos, true);
+            greedyPass(maskNeg, false);
+
+            // Clear masks for next slab
+            std::fill(maskPos.begin(), maskPos.end(), FaceKey{});
+            std::fill(maskNeg.begin(), maskNeg.end(), FaceKey{});
+        }
+    }
+
+    return mesh;
+}

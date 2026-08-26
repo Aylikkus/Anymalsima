@@ -1,0 +1,81 @@
+# Japanese translations for PACKAGE package
+# PACKAGE パッケージに対する英訳.
+# Copyright (C) 2026 THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the PACKAGE package.
+# Automatically generated, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-04-10 01:52+0300\n"
+"PO-Revision-Date: 2026-04-10 01:53+0300\n"
+"Last-Translator: Automatically generated\n"
+"Language-Team: none\n"
+"Language: ja\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=EUC-JP\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"X-Generator: Poedit 3.9\n"
+
+#: src/game/states/create_or_load_state.cpp:17
+msgid "RETURN"
+msgstr "戻る"
+
+#: src/game/states/main_menu_state.cpp:35
+#: src/game/states/main_menu_state.cpp:50
+#: src/game/states/main_menu_state.cpp:252
+#, c++-format
+msgid "Master Volume {0}"
+msgstr "マスターボリューム{0}"
+
+#: src/game/states/main_menu_state.cpp:55
+#: src/game/states/main_menu_state.cpp:70
+#: src/game/states/main_menu_state.cpp:253
+#, c++-format
+msgid "Music Vol. {0}"
+msgstr "音楽の音量{0}"
+
+#: src/game/states/main_menu_state.cpp:75
+#: src/game/states/main_menu_state.cpp:90
+#: src/game/states/main_menu_state.cpp:254
+#, c++-format
+msgid "Sound Vol. {0}"
+msgstr "音量{0}"
+
+#: src/game/states/main_menu_state.cpp:95
+#: src/game/states/main_menu_state.cpp:110
+#: src/game/states/main_menu_state.cpp:255
+#, c++-format
+msgid "Text Scale {:.0f}%"
+msgstr "テキストサイズ{:.0f}%"
+
+#: src/game/states/main_menu_state.cpp:117
+#: src/game/states/main_menu_state.cpp:256
+msgid "APPLY"
+msgstr "適用する"
+
+#: src/game/states/main_menu_state.cpp:151
+#: src/game/states/main_menu_state.cpp:257
+msgid "SAVE"
+msgstr "保存する"
+
+#: src/game/states/main_menu_state.cpp:176
+msgid "SAVED!"
+msgstr "保存されました！"
+
+#: src/game/states/main_menu_state.cpp:199
+#: src/game/states/main_menu_state.cpp:258
+msgid "PLAY"
+msgstr "プレー"
+
+#: src/game/states/main_menu_state.cpp:213
+#: src/game/states/main_menu_state.cpp:259
+msgid "SETTINGS"
+msgstr "設定"
+
+#: src/game/states/main_menu_state.cpp:241
+#: src/game/states/main_menu_state.cpp:260
+msgid "EXIT"
+msgstr "終了"

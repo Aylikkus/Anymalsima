@@ -1,0 +1,183 @@
+[
+    {
+        "name": "rocks.basalt",
+        "block_name": "blocks.basalt",
+        "category": "Igneous Extrusive",
+        "properties": {
+            "porosity": 0.1,
+            "permeability": 0.02
+        },
+        "placement": {
+            "allowed_land": [
+                "Deep Water",
+                "Water"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic"
+            ],
+            "weight": 1.0
+        },
+        "body_size_m": [
+            2,
+            20
+        ],
+        "transforms": [
+            {
+                "result": "rocks.eclogite",
+                "min_depth_m": 50
+            }
+        ]
+    },
+    {
+        "name": "rocks.andesite",
+        "block_name": "blocks.andesite",
+        "category": "Igneous Extrusive",
+        "properties": {
+            "porosity": 0.15,
+            "permeability": 0.03
+        },
+        "placement": {
+            "allowed_land": [
+                "Hills",
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [
+                "Volcano"
+            ],
+            "forbidden_features": [],
+            "weight": 0.8
+        },
+        "body_size_m": [
+            5,
+            30
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.rhyolite",
+        "block_name": "blocks.rhyolite",
+        "category": "Igneous Extrusive",
+        "properties": {
+            "porosity": 0.08,
+            "permeability": 0.01
+        },
+        "placement": {
+            "allowed_land": [
+                "Plains",
+                "Hills",
+                "Mountains"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental"
+            ],
+            "required_features": [
+                "Volcano"
+            ],
+            "forbidden_features": [],
+            "weight": 0.5
+        },
+        "body_size_m": [
+            3,
+            25
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.obsidian",
+        "block_name": "blocks.obsidian",
+        "category": "Igneous Extrusive",
+        "properties": {
+            "porosity": 0.0,
+            "permeability": 0.0
+        },
+        "placement": {
+            "allowed_land": [
+                "Mountains",
+                "Peak"
+            ],
+            "allow_underwater": false,
+            "allowed_crust": [
+                "Continental",
+                "Transitional"
+            ],
+            "required_features": [
+                "Volcano"
+            ],
+            "forbidden_features": [],
+            "weight": 0.2
+        },
+        "body_size_m": [
+            0,
+            5
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.pumice",
+        "block_name": "blocks.pumice",
+        "category": "Igneous Extrusive",
+        "properties": {
+            "porosity": 0.7,
+            "permeability": 0.5
+        },
+        "placement": {
+            "allowed_land": [
+                "Water",
+                "Deep Water",
+                "Shore"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic",
+                "Transitional"
+            ],
+            "required_features": [
+                "Volcano"
+            ],
+            "forbidden_features": [],
+            "weight": 0.3
+        },
+        "body_size_m": [
+            1,
+            10
+        ],
+        "transforms": []
+    },
+    {
+        "name": "rocks.komatiite",
+        "block_name": "blocks.komatiite",
+        "category": "Igneous Extrusive",
+        "properties": {
+            "porosity": 0.05,
+            "permeability": 0.01
+        },
+        "placement": {
+            "allowed_land": [
+                "Deep Water",
+                "Mountains"
+            ],
+            "allow_underwater": true,
+            "allowed_crust": [
+                "Oceanic"
+            ],
+            "required_features": [
+                "Volcano"
+            ],
+            "forbidden_features": [],
+            "weight": 0.1
+        },
+        "body_size_m": [
+            10,
+            50
+        ],
+        "transforms": []
+    }
+]

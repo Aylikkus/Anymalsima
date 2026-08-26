@@ -1,0 +1,11 @@
+# LICENSE
+
+Copyright (c) 2026 Ivan Grinenko (Aylikkus). All rights reserved.
+
+Permission is hereby granted to view, download, and modify this source code solely for personal use, educational purposes, or creating modifications ("mods") for this specific game.
+
+You are strictly forbidden from:
+* Copying, distributing, or publishing this source code (or any modified versions of it) without explicit permission.
+* Using this code, in whole or in part, in any other software, game, or commercial product.
+
+The software is provided "as is", without warranty of any kind.
