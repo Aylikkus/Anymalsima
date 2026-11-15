@@ -5,6 +5,9 @@ add_library(engine
     render/render_target.cpp
     serialization/file_io.cpp
     serialization/saveable.cpp
+    serialization/binary_stream.cpp
+    serialization/compression.cpp
+    serialization/section_container.cpp
     animation/tween.cpp
     animation/animator.cpp
 )
@@ -17,3 +20,4 @@ target_link_libraries(engine PUBLIC BS_thread_pool)
 target_link_libraries(engine PUBLIC i18n)
 target_link_libraries(engine PUBLIC fmt)
 target_link_libraries(engine PUBLIC nlohmann_json)
+target_link_libraries(engine PUBLIC libzstd_static)

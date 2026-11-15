@@ -36,6 +36,16 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/external/bgfx.cmake-1.143-9241-532)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/external/miniaudio-0.11.25)
 
+# Save-file compression. Only the static library is built.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/external/zstd-1.5.7/build/cmake
+    ${CMAKE_BINARY_DIR}/external/zstd EXCLUDE_FROM_ALL)
+
 add_subdirectory(src)
 
 if(BUILD_TESTING)

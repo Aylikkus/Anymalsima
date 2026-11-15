@@ -4,18 +4,21 @@
 
 #include <iostream>
 
+#include "main_menu_state.hpp"
 #include "render/frustrum.hpp"
 
 // How many chunks out from the camera column to request on X and Z axes.
 static constexpr int CHUNK_RADIUS = 8;
 
 GameplayState::GameplayState(Game& game, UIContext& context,
-                             std::unique_ptr<World>&& world,
-                             const Region& initial) {
+                             std::unique_ptr<World>&& world, SaveSlot saveSlot)
+    : slot(std::move(saveSlot)) {
     // name, stage, texture_handle
     u_texture_array.initTexture("u_texture_array", 0,
                                 context.assets->getMaterialAlbedoArray());
     this->world = std::move(world);
+    regionStore =
+        std::make_unique<RegionStore>(slot.directory, context.threadPool);
     uiContext = &context;
     worldEye.initVec4("u_world_eye", {0, 0, 0, TerrainLod::ViewDistance});
     terrainLod = std::make_unique<TerrainLodManager>(
@@ -50,35 +53,90 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
         context.threadPool);
-    locationMgr =
-        std::make_unique<LocationManager>(*chunkManager, *this->world);
+    locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
+                                                    regionStore.get());
 
-    locationMgr->loadRegion(initial.coord, 2);
-
-    const float regionTiles =
-        CHUNKS_PER_REGION * (Chunk::SIZE_X + Chunk::SIZE_Z) / 2;
-
-    float centerX = (float(initial.coord.x) * regionTiles + regionTiles * 0.5f);
-    float centerZ = (float(initial.coord.y) * regionTiles + regionTiles * 0.5f);
-
-    float centerY =
-        chunkManager->generatedSurfaceY(static_cast<unsigned>(centerX),
-                                        static_cast<unsigned>(centerZ)) +
-        10.0f;
-
-    camera.position = {centerX, centerY, centerZ};
-    camera.pitch = -1.5f;
-    camera.yaw = 0;
-    camera.distance = 10.0f;
     camera.terrainSky = true;
+    if (slot.meta.camera) {
+        const auto& saved = *slot.meta.camera;
+        camera.position = saved.position;
+        camera.yaw = saved.yaw;
+        camera.pitch = saved.pitch;
+        camera.distance = saved.distance;
+    } else {
+        const Vec2u initial = slot.meta.startRegion;
+        const float regionTiles =
+            CHUNKS_PER_REGION * (Chunk::SIZE_X + Chunk::SIZE_Z) / 2;
+
+        float centerX = (float(initial.x) * regionTiles + regionTiles * 0.5f);
+        float centerZ = (float(initial.y) * regionTiles + regionTiles * 0.5f);
+
+        float centerY =
+            chunkManager->generatedSurfaceY(static_cast<unsigned>(centerX),
+                                            static_cast<unsigned>(centerZ)) +
+            10.0f;
+
+        camera.position = {centerX, centerY, centerZ};
+        camera.pitch = -1.5f;
+        camera.yaw = 0;
+        camera.distance = 10.0f;
+    }
+
+    const Vec2u startRegion{unsigned(camera.position.x) / 128,
+                            unsigned(camera.position.z) / 128};
+    locationMgr->loadRegion(startRegion, 2);
+    focusRegion = startRegion;
 
     requestChunksAroundCamera();
+}
+
+GameplayState::~GameplayState() {
+    try {
+        locationMgr->saveAll(true);
+        regionStore->flush();
+        writeMeta();
+    } catch (const std::exception& e) {
+        std::cerr << "Saving world failed: " << e.what() << '\n';
+    }
+}
+
+void GameplayState::writeMeta() {
+    slot.meta.lastPlayed = WorldMeta::now();
+    slot.meta.camera = WorldMeta::CameraState{camera.position, camera.yaw,
+                                              camera.pitch, camera.distance};
+    try {
+        save_catalog::writeMeta(slot);
+    } catch (const std::exception& e) {
+        std::cerr << "Saving world.json failed: " << e.what() << '\n';
+    }
+}
+
+void GameplayState::updateAutosave(float dt) {
+    // Rolling checkpoint: one region per frame keeps copies off the frame
+    // budget; regions unloaded meanwhile were already saved on unload.
+    if (!autosaveQueue.empty()) {
+        locationMgr->saveRegion(autosaveQueue.back());
+        autosaveQueue.pop_back();
+        if (autosaveQueue.empty()) writeMeta();
+        return;
+    }
+    autosaveTimer += dt;
+    if (autosaveTimer < AutosaveInterval) return;
+    autosaveTimer = 0;
+    autosaveQueue = locationMgr->loaded();
+    if (autosaveQueue.empty()) writeMeta();
 }
 
 void GameplayState::handleInput(Game& game, const InputEvent& e,
                                 UIContext& context, float dt) {
     if (!ui_manager->handleInput(e, context)) {
         switch (e.type) {
+            case InputEvent::KeyPress:
+                // Leaving the state saves the world in the destructor.
+                if (e.pressed && e.key == SDL_SCANCODE_ESCAPE)
+                    game.changeState<MainMenuState>(game, context);
+                break;
+
             case InputEvent::MouseClick:
                 if (e.button == InputEvent::RIGHT_BUTTON) {
                     rotating = e.pressed;
@@ -168,6 +226,9 @@ void GameplayState::update(Game& game, float dt) {
         locationMgr->onPlayerRegionChanged(region);
         focusRegion = region;
     }
+    locationMgr->update();
+    regionStore->update();
+    updateAutosave(dt);
     terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);

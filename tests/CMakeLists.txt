@@ -9,6 +9,17 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/location_manager.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/chunk_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/region_file.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/region_store.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/world_map_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/world_meta.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/save_catalog.cpp
+    ${PROJECT_SOURCE_DIR}/src/engine/serialization/binary_stream.cpp
+    ${PROJECT_SOURCE_DIR}/src/engine/serialization/compression.cpp
+    ${PROJECT_SOURCE_DIR}/src/engine/serialization/section_container.cpp
+    ${PROJECT_SOURCE_DIR}/src/engine/serialization/file_io.cpp
 )
 target_include_directories(world_logic_cpu PUBLIC
     ${PROJECT_SOURCE_DIR}/src/game
@@ -18,7 +29,7 @@ target_include_directories(world_logic_cpu SYSTEM PUBLIC
     "$<TARGET_PROPERTY:bgfx,INTERFACE_INCLUDE_DIRECTORIES>"
 )
 target_link_libraries(world_logic_cpu PUBLIC
-    BS_thread_pool nlohmann_json i18n Threads::Threads
+    BS_thread_pool nlohmann_json i18n Threads::Threads libzstd_static
 )
 add_executable(world_logic_tests
     support/test_main.cpp
@@ -32,6 +43,9 @@ add_executable(world_logic_tests
     integration/world_lighting_tests.cpp
     integration/sunlight_boundary_tests.cpp
     integration/lighting_priority_tests.cpp
+    integration/region_persistence_tests.cpp
+    unit/engine/serialization/binary_stream_tests.cpp
+    unit/game/world/save_codec_tests.cpp
 )
 add_executable(lighting_benchmark benchmarks/lighting_benchmark.cpp)
 option(ANYMALSIMA_TEST_SANITIZERS "Instrument logic tests with ASan and UBSan" OFF)
@@ -136,6 +150,33 @@ foreach(case IN LISTS priority_cases)
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "integration;gameplay;world;threading;priority" TIMEOUT 15)
 endforeach()
+# Save/load coverage. Scratch worlds live under the build tree.
+target_compile_definitions(world_logic_tests PRIVATE
+    TEST_SCRATCH_DIR="${CMAKE_CURRENT_BINARY_DIR}/scratch")
+foreach(case binary_stream_roundtrip binary_stream_truncation
+             compression_roundtrip section_container_roundtrip
+             section_container_rejects_bad_input)
+    add_test(NAME engine.serialization.${case}
+        COMMAND world_logic_tests ${case})
+    set_tests_properties(engine.serialization.${case} PROPERTIES
+        LABELS "unit;engine;save" TIMEOUT 10)
+endforeach()
+foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
+             chunk_codec_wide_palette chunk_codec_rejects_corrupt
+             region_file_roundtrip world_seed_derivation world_map_roundtrip
+             save_catalog_slots)
+    add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.save.${case} PROPERTIES
+        LABELS "unit;gameplay;save" TIMEOUT 10)
+endforeach()
+foreach(case region_save_and_reload region_edit_persists
+             region_reload_while_writing region_corrupt_file_regenerates
+             region_unload_while_opening)
+    add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.save.${case} PROPERTIES
+        LABELS "integration;gameplay;save;threading" TIMEOUT 30)
+endforeach()
+
 if(ANYMALSIMA_TEST_SANITIZERS)
     get_property(logic_tests DIRECTORY PROPERTY TESTS)
     set_tests_properties(${logic_tests} PROPERTIES

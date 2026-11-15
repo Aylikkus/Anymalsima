@@ -12,6 +12,7 @@
 #include "layers_generator.hpp"
 #include "location_generator.hpp"
 #include "render/ui_context.hpp"
+#include "save/region_file.hpp"
 
 enum class ChunkState { Unloaded, Queued, Ready };
 enum class MeshState { None, Queued, Built };
@@ -29,6 +30,9 @@ struct ChunkHandle {
     bool initialised = false;
     bool uploaded = false;
     uint64_t uploadedRevision = 0;
+    // Tile contents differ from what the region file holds (freshly
+    // generated, or modified through markModified). Lighting never sets it.
+    bool persistDirty = false;
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
 };
@@ -53,8 +57,9 @@ class ChunkManager {
     Signal<const ChunkCoord&> removed;
     void setFocus(Vec3 value) { focus = value; }
     void update();
+    // stored: saved chunk payload; the chunk is decoded instead of generated.
     void registerChunk(const ChunkCoord& coord, const ChunkCoord& regionOrigin,
-                       const Region* region);
+                       const Region* region, ChunkBlob stored = nullptr);
     Chunk* request(const ChunkCoord& coord);
     Chunk* requestLighting(const ChunkCoord& coord, ChunkCoord beneficiary);
     bool isRegistered(const ChunkCoord& coord) const;
@@ -69,6 +74,13 @@ class ChunkManager {
     void unregister(const ChunkCoord& coord);
     void markDirty(const ChunkCoord& coord, bool urgent = false);
     void markAllDirty();
+    // Records a gameplay edit of a Ready chunk: it will be saved and remeshed.
+    void markModified(const ChunkCoord& coord);
+    bool isPersistDirty(const ChunkCoord& coord) const;
+    // Captures Ready chunks of a region that need saving and clears their
+    // persistDirty flags. copy=false shares the live data and is only valid
+    // when the region is unregistered right afterwards.
+    RegionSnapshot snapshotRegion(Vec2u region, bool copy);
     int getColumnTopY(unsigned cx, unsigned cz) const;
     void raiseColumnTopY(unsigned cx, unsigned cz, int worldY);
     int generatedSurfaceY(unsigned tileX, unsigned tileZ);
@@ -133,11 +145,16 @@ class ChunkManager {
         ChunkCoord regionOrigin;
         const Region* region;
         std::optional<ChunkCoord> beneficiary;
+        ChunkBlob stored;
+    };
+    struct GeneratedChunk {
+        std::shared_ptr<Chunk> data;
+        bool fromDisk = false;
     };
     struct GenerationJob {
         ChunkCoord coord;
         uint64_t identity;
-        std::future<std::shared_ptr<Chunk>> future;
+        std::future<GeneratedChunk> future;
     };
     struct MeshJob {
         ChunkCoord coord;

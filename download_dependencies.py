@@ -42,6 +42,8 @@ DEPENDENCIES = (
     ("tracy-eb3df3b-0.13.1", github_archive(
         "wolfpld/tracy", "eb3df3b411438bbe0ae0e3d989427a14019d3270"),
      ("CMakeLists.txt", "public/tracy/Tracy.hpp")),
+    ("zstd-1.5.7", github_archive("facebook/zstd", "v1.5.7"),
+     ("build/cmake/CMakeLists.txt", "lib/zstd.h")),
 )
 
 

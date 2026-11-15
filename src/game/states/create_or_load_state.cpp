@@ -2,6 +2,7 @@
 #include "gettext_wrapper.hpp"
 
 #include "create_world_state.hpp"
+#include "load_world_state.hpp"
 
 CreateOrLoadState::CreateOrLoadState(Game& game, UIContext& context)
 {
@@ -37,7 +38,7 @@ CreateOrLoadState::CreateOrLoadState(Game& game, UIContext& context)
     load_button->setFontSizeRole(FontSizeRole::Title);
     load_button->setGridPlacement({13, 1, 10, 12});
     load_button->onClick.connect([&game, &context](){
-        // game.changeState<MainMenuState>(game, context);
+        game.changeState<LoadWorldState>(game, context);
     });
 
     auto return_btn = ui_manager->createWidget(std::make_unique<TextButton>(

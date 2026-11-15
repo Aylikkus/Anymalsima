@@ -17,7 +17,8 @@ Read `external/json-3.12.0/README.md` and `docs/mkdocs/docs/` for the specific a
 - Keep `from_json` adjacent to the owning type for ADL. Review field names against actual fixtures; neighboring code can contain mismatches and is not proof of a schema. Register new data types and update manifest generation when necessary.
 - Preserve `Settings::saveVersion`, optional-field defaults, and `extra` data when changing persistence. Test old/minimal settings as well as new round trips. Deserialization currently assigns fields directly and emits signals; ensure validation happens before subscribers receive values.
 - Parse at loading boundaries, then use typed data during generation and rendering. Publish immutable loaded data to workers. Avoid JSON parsing or shared JSON mutation in per-chunk hot loops.
-- For save robustness changes, check stream failures and use a temporary file plus replacement when appropriate. Do not claim existing `FileIO` writes are atomic or checked.
+- For save robustness changes, check stream failures. `FileIO::writeJson` is unchecked and non-atomic (settings still use it); `FileIO::writeJsonAtomic`/`writeBytesAtomic` write `path.tmp` and rename it over the target, throwing on failure.
+- World saves keep only metadata in JSON: `WorldMeta` (`src/game/world/save/world_meta.hpp`) is each world's `world.json`. It stores the 64-bit `seed` as a decimal string, rejects unknown `formatVersion` values, and keeps unrecognized keys in `extra` so they are written back. Bulk world data is binary (`SectionContainer`), not JSON.
 
 ## Validation & Sources
 

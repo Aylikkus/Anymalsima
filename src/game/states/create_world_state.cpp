@@ -2,11 +2,14 @@
 
 #include <fmt/xchar.h>
 
+#include <iostream>
+
 #include "gameplay_state.hpp"
 #include "gettext_wrapper.hpp"
 #include "utils/enum_parser.hpp"
 #include "utils/region_enum_maps.hpp"
 #include "widgets/world_preview.hpp"
+#include "world/save/save_catalog.hpp"
 
 CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
     ui_manager = std::make_unique<UIManager>(context);
@@ -44,16 +47,9 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
     generate_btn->setGridPlacement({5, 14, 3, 1});
     generate_btn->onClick.connect([&game, &context, this]() {
         generating = true;
-        WorldGenSettings gen_settigs;
         std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution dis(std::numeric_limits<int>::min(),
-                                          std::numeric_limits<int>::max());
-        gen_settigs.height_seed = dis(gen);
-        gen_settigs.humidity_seed = dis(gen);
-        gen_settigs.temperature_seed = dis(gen);
-        gen_settigs.feature_seed = dis(gen);
-        gen_settigs.energyLevel = 0;
+        std::mt19937_64 gen((uint64_t(rd()) << 32) ^ rd());
+        auto gen_settigs = WorldGenSettings::fromSeed(gen());
         gen_settigs.width = 500;
         gen_settigs.height = 300;
         world_gen.start(gen_settigs, context.assets);
@@ -152,9 +148,13 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
 
     choose_btn->onClick.connect([&game, &context, this, preview]() {
         auto r = preview->getSelectedRegion();
-        if (r) {
+        if (!r || !world) return;
+        try {
+            auto slot = save_catalog::create(*world, r.value()->coord);
             game.changeState<GameplayState>(game, context, std::move(world),
-                                            *r.value());
+                                            std::move(slot));
+        } catch (const std::exception &e) {
+            std::cerr << "Creating world save failed: " << e.what() << '\n';
         }
     });
 

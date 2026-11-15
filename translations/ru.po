@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-27 23:56+0300\n"
+"POT-Creation-Date: 2026-11-15 20:50+0300\n"
 "PO-Revision-Date: 2026-04-27 23:59+0300\n"
 "Last-Translator: Automatically generated\n"
 "Language-Team: none\n"
@@ -20,125 +20,161 @@ msgstr ""
 "n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
 "X-Generator: Poedit 3.9\n"
 
-#: src/game/states/create_or_load_state.cpp:22
+#: src/game/states/create_or_load_state.cpp:23
 msgid "CREATE WORLD"
 msgstr "СОЗДАТЬ МИР"
 
-#: src/game/states/create_or_load_state.cpp:35
+#: src/game/states/create_or_load_state.cpp:36
+#: src/game/states/load_world_state.cpp:35
 msgid "LOAD WORLD"
 msgstr "ЗАГРУЗИТЬ МИР"
 
-#: src/game/states/create_or_load_state.cpp:48
-#: src/game/states/create_world_state.cpp:30
+#: src/game/states/create_or_load_state.cpp:49
+#: src/game/states/create_world_state.cpp:34
+#: src/game/states/load_world_state.cpp:87
 msgid "RETURN"
 msgstr "ОБРАТНО"
 
-#: src/game/states/create_world_state.cpp:41
+#: src/game/states/create_world_state.cpp:45
 msgid "GENERATE"
 msgstr "СГЕНЕРИРОВАТЬ"
 
-#: src/game/states/create_world_state.cpp:77
+#: src/game/states/create_world_state.cpp:62
+msgid "CHOOSE"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:82
 msgid "Height"
 msgstr "Высота"
 
-#: src/game/states/create_world_state.cpp:78
+#: src/game/states/create_world_state.cpp:84
 msgid "Temperature C"
 msgstr "Температура C"
 
-#: src/game/states/create_world_state.cpp:79
+#: src/game/states/create_world_state.cpp:86
 msgid "Humidity"
 msgstr "Влажность"
 
-#: src/game/states/create_world_state.cpp:81
+#: src/game/states/create_world_state.cpp:88
 msgid "Biome"
 msgstr "Биом"
 
-#: src/game/states/create_world_state.cpp:85
+#: src/game/states/create_world_state.cpp:92
 msgid "Land"
 msgstr "Земля"
 
-#: src/game/states/create_world_state.cpp:89
+#: src/game/states/create_world_state.cpp:96
+#: src/game/utils/items_enum_maps.hpp:26
 msgid "Vegetation"
 msgstr "Растительность"
 
-#: src/game/states/create_world_state.cpp:95
+#: src/game/states/create_world_state.cpp:102
 msgid "River"
 msgstr "Река"
 
-#: src/game/states/create_world_state.cpp:96
+#: src/game/states/create_world_state.cpp:103
 msgid "Direction"
 msgstr "Направление"
 
-#: src/game/states/create_world_state.cpp:100
+#: src/game/states/create_world_state.cpp:108
 msgid "Flow Strength"
 msgstr "Сила потока"
 
-#: src/game/states/create_world_state.cpp:104
+#: src/game/states/create_world_state.cpp:112
 msgid "Features"
 msgstr "Особенности"
 
-#: src/game/states/create_world_state.cpp:118
+#: src/game/states/create_world_state.cpp:126
 #: src/game/utils/region_enum_maps.hpp:148
 #: src/game/utils/region_enum_maps.hpp:178
 msgid "None"
 msgstr "Нет"
 
-#: src/game/states/main_menu_state.cpp:37
-#: src/game/states/main_menu_state.cpp:53
-#: src/game/states/main_menu_state.cpp:265
+#: src/game/states/load_world_state.cpp:61
 #, c++-format
-msgid "Master Volume {0}"
-msgstr "Громкость {0}"
+msgid "Seed {}  |  {}x{}  |  created {}  |  played {}"
+msgstr "Сид {}  |  {}x{}  |  создан {}  |  играли {}"
 
-#: src/game/states/main_menu_state.cpp:58
-#: src/game/states/main_menu_state.cpp:74
-#: src/game/states/main_menu_state.cpp:266
-#, c++-format
-msgid "Music Vol. {0}"
-msgstr "Музыка {0}"
+#: src/game/states/load_world_state.cpp:70
+msgid "No saved worlds"
+msgstr "Нет сохранённых миров"
 
-#: src/game/states/main_menu_state.cpp:79
-#: src/game/states/main_menu_state.cpp:95
-#: src/game/states/main_menu_state.cpp:267
-#, c++-format
-msgid "Sound Vol. {0}"
-msgstr "Звуки {0}"
+#: src/game/states/load_world_state.cpp:77
+msgid "LOAD"
+msgstr "ЗАГРУЗИТЬ"
 
-#: src/game/states/main_menu_state.cpp:100
-#: src/game/states/main_menu_state.cpp:116
+#: src/game/states/load_world_state.cpp:112
+msgid "Loading..."
+msgstr "Загрузка..."
+
+#: src/game/states/load_world_state.cpp:133
+msgid "This world could not be loaded"
+msgstr "Не удалось загрузить этот мир"
+
+#: src/game/states/main_menu_state.cpp:123
 #: src/game/states/main_menu_state.cpp:268
-#, c++-format
-msgid "Text Scale {:.0f}%"
-msgstr "Масштаб текста {:.0f}%"
-
-#: src/game/states/main_menu_state.cpp:124
-#: src/game/states/main_menu_state.cpp:269
 msgid "APPLY"
 msgstr "ПРИМЕНИТЬ"
 
-#: src/game/states/main_menu_state.cpp:159
-#: src/game/states/main_menu_state.cpp:270
+#: src/game/states/main_menu_state.cpp:158
+#: src/game/states/main_menu_state.cpp:269
 msgid "SAVE"
 msgstr "СОХРАНИТЬ"
 
-#: src/game/states/main_menu_state.cpp:184
+#: src/game/states/main_menu_state.cpp:183
 msgid "SAVED!"
 msgstr "СОХРАНЕНО!"
 
-#: src/game/states/main_menu_state.cpp:208
-#: src/game/states/main_menu_state.cpp:271
+#: src/game/states/main_menu_state.cpp:207
+#: src/game/states/main_menu_state.cpp:270
 msgid "PLAY"
 msgstr "ИГРАТЬ"
 
-#: src/game/states/main_menu_state.cpp:224
-#: src/game/states/main_menu_state.cpp:272
+#: src/game/states/main_menu_state.cpp:223
+#: src/game/states/main_menu_state.cpp:271
 msgid "SETTINGS"
 msgstr "НАСТРОЙКИ"
 
-#: src/game/states/main_menu_state.cpp:253
-#: src/game/states/main_menu_state.cpp:273
+#: src/game/states/main_menu_state.cpp:252
+#: src/game/states/main_menu_state.cpp:272
 msgid "EXIT"
 msgstr "ВЫХОД"
+
+#: src/game/utils/items_enum_maps.hpp:12
+msgid "Sedimentary"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:13
+msgid "Metamorphic"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:14
+msgid "Igneous Intrusive"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:15
+msgid "Igneous Extrusive"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:22
+msgid "Terrain Rock"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:23
+msgid "Terrain Soil"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:24
+msgid "Structure Wall"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:25
+msgid "Structure Floor"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:27
+msgid "Furniture"
+msgstr ""
 
 #: src/game/utils/region_enum_maps.hpp:12
 msgid "Deep Water"
@@ -355,3 +391,19 @@ msgstr ""
 #: src/game/utils/region_enum_maps.hpp:183
 msgid "West"
 msgstr ""
+
+#, c++-format
+#~ msgid "Master Volume {0}"
+#~ msgstr "Громкость {0}"
+
+#, c++-format
+#~ msgid "Music Vol. {0}"
+#~ msgstr "Музыка {0}"
+
+#, c++-format
+#~ msgid "Sound Vol. {0}"
+#~ msgstr "Звуки {0}"
+
+#, c++-format
+#~ msgid "Text Scale {:.0f}%"
+#~ msgstr "Масштаб текста {:.0f}%"

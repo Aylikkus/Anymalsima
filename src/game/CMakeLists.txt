@@ -4,6 +4,7 @@ add_library(game
     states/create_or_load_state.cpp
     states/create_world_state.cpp
     states/gameplay_state.cpp
+    states/load_world_state.cpp
     world/world.cpp
     world/world_generator.cpp
     world/world_generation_task.cpp
@@ -15,6 +16,13 @@ add_library(game
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp
+    world/location_manager.cpp
+    world/save/chunk_codec.cpp
+    world/save/region_file.cpp
+    world/save/region_store.cpp
+    world/save/world_map_codec.cpp
+    world/save/world_meta.cpp
+    world/save/save_catalog.cpp
     items/soil.hpp
     items/soil_validation.hpp
     world/soil_generator.hpp

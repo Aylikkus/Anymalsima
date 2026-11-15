@@ -135,7 +135,8 @@ external/
 ├── SDL3-3.4.8
 ├── stb
 ├── thread-pool-5.1.0
-└── tracy-eb3df3b-0.13.1
+├── tracy-eb3df3b-0.13.1
+└── zstd-1.5.7
 ```
 
 The exact versions used by the project are listed above.

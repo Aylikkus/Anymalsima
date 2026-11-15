@@ -1,5 +1,9 @@
 #include "chunk_manager.hpp"
 
+#include <iostream>
+
+#include "save/chunk_codec.hpp"
+
 ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
                            const ChunkMesher* mesher, const World& world,
                            IAssets* assets)
@@ -17,13 +21,13 @@ ChunkManager::~ChunkManager() {
 }
 
 void ChunkManager::registerChunk(const ChunkCoord& coord,
-                                 const ChunkCoord& origin,
-                                 const Region* region) {
+                                 const ChunkCoord& origin, const Region* region,
+                                 ChunkBlob stored) {
     if (chunks.contains(coord)) unregister(coord);
     auto& handle = chunks[coord];
     handle.identity = ++nextIdentity;
     handle.regionCoord = region->coord;
-    pending[coord] = {origin, region, std::nullopt};
+    pending[coord] = {origin, region, std::nullopt, std::move(stored)};
     if (!regionLayers.contains(region->coord))
         regionLayers[region->coord] = layersGenerator.get(*region);
     if (!regionSoils.contains(region->coord))
@@ -133,6 +137,38 @@ void ChunkManager::markDirty(const ChunkCoord& coord, bool urgent) {
     ++handle.meshRevision;
     if (mesher) meshQueue.insert(coord);
 }
+void ChunkManager::markModified(const ChunkCoord& coord) {
+    auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
+    it->second.persistDirty = true;
+    markDirty(coord, true);
+}
+bool ChunkManager::isPersistDirty(const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.persistDirty;
+}
+RegionSnapshot ChunkManager::snapshotRegion(Vec2u region, bool copy) {
+    RegionSnapshot snapshot;
+    const ChunkCoord origin{region.x * CHUNKS_PER_REGION, 0,
+                            region.y * CHUNKS_PER_REGION};
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    for (unsigned y = 0; y < Y_CHUNKS; ++y)
+        for (unsigned z = 0; z < CHUNKS_PER_REGION; ++z)
+            for (unsigned x = 0; x < CHUNKS_PER_REGION; ++x) {
+                const ChunkCoord coord{origin.x + x, y, origin.z + z};
+                auto it = chunks.find(coord);
+                if (it == chunks.end() ||
+                    it->second.state != ChunkState::Ready ||
+                    !it->second.persistDirty)
+                    continue;
+                it->second.persistDirty = false;
+                snapshot.chunks.emplace_back(
+                    RegionData::localIndex(coord),
+                    copy ? std::make_shared<const Chunk>(*it->second.data)
+                         : std::shared_ptr<const Chunk>(it->second.data));
+            }
+    return snapshot;
+}
 void ChunkManager::markAllDirty() {
     for (auto& [coord, handle] : chunks)
         if (handle.state == ChunkState::Ready) markDirty(coord);
@@ -228,7 +264,7 @@ void ChunkManager::collect() {
         }
         auto job = std::move(generationJobs[i]);
         generationJobs.erase(generationJobs.begin() + i);
-        std::shared_ptr<Chunk> data;
+        GeneratedChunk data;
         try {
             data = job.future.get();
         } catch (...) {
@@ -241,8 +277,9 @@ void ChunkManager::collect() {
         if (it == chunks.end() || it->second.identity != job.identity) continue;
         {
             std::lock_guard<std::mutex> lock(tileAtMutex);
-            it->second.data = std::move(data);
+            it->second.data = std::move(data.data);
             it->second.state = ChunkState::Ready;
+            it->second.persistDirty = !data.fromDisk;
         }
         pending.erase(job.coord);
         markDirty(job.coord);
@@ -304,11 +341,21 @@ void ChunkManager::update() {
             [generator = generator, coord, columns, origin = info.regionOrigin,
              region = *info.region,
              layers = regionLayers.at(info.region->coord),
-             soil = regionSoils.at(info.region->coord)] {
+             soil = regionSoils.at(info.region->coord), stored = info.stored] {
                 auto result = std::make_shared<Chunk>();
+                if (stored) {
+                    try {
+                        chunk_codec::decode(*stored, *result);
+                        return GeneratedChunk{result, true};
+                    } catch (const std::exception& e) {
+                        std::cerr << "Saved chunk " << coord.x << ',' << coord.y
+                                  << ',' << coord.z << " is unreadable ("
+                                  << e.what() << "); regenerating\n";
+                    }
+                }
                 generator.generateChunk(*result, coord, origin, region, layers,
                                         soil, columns.get());
-                return result;
+                return GeneratedChunk{result, false};
             },
             info.beneficiary ? BS::pr::high : BS::pr::normal);
         generationJobs.push_back({coord, identity, std::move(future)});

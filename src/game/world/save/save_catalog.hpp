@@ -1,0 +1,35 @@
+#pragma once
+
+#include <filesystem>
+#include <memory>
+#include <vector>
+
+#include "world/world.hpp"
+#include "world_meta.hpp"
+
+// One world folder on disk.
+struct SaveSlot {
+    std::filesystem::path directory;
+    WorldMeta meta;
+};
+
+// Discovers, creates, and reads world folders:
+//   saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/
+//     world.json      WorldMeta
+//     world_map.dat   world_map_codec
+//     regions/        region_file per region
+namespace save_catalog {
+
+inline const std::filesystem::path DefaultRoot = "saves";
+
+// Valid slots, most recently played first. Broken folders are skipped.
+std::vector<SaveSlot> list(const std::filesystem::path& root = DefaultRoot);
+// Creates a unique folder for a new world and fills createdAt/lastPlayed.
+SaveSlot create(const World& world, Vec2u startRegion,
+                const std::filesystem::path& root = DefaultRoot);
+void writeMeta(const SaveSlot& slot);
+void writeWorldMap(const SaveSlot& slot, const World& world);
+// Loads the world map. Throws on missing or corrupt data.
+std::unique_ptr<World> readWorldMap(const SaveSlot& slot);
+
+}  // namespace save_catalog

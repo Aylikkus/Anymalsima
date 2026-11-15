@@ -2,12 +2,11 @@
 
 #include <vector>
 
+#include "core/assets_api.hpp"
 #include "core/geometry.hpp"
 #include "enums.hpp"
 #include "region.hpp"
 #include "render/vertex.hpp"
-#include "core/assets_api.hpp"
-
 
 struct MeshChunk {
     std::vector<TerrainVertex> lod0;
@@ -63,8 +62,9 @@ struct RiverPolyline {
     Rect bounds;
 };
 
-
 struct WorldGenSettings {
+    // Master seed identifying the world; the sub-seeds below derive from it.
+    uint64_t seed = 0;
     int width = 500;
     int height = 300;
 
@@ -77,8 +77,26 @@ struct WorldGenSettings {
     float energyLevel;       // don't touch it yet
     float min_temp_c = -40.0f;
     float max_temp_c = 50.0f;
-};
 
+    // Deterministically derives every sub-seed from one master seed.
+    static WorldGenSettings fromSeed(uint64_t seed) {
+        auto next = [state = seed]() mutable {
+            uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            return static_cast<int>(static_cast<uint32_t>(z ^ (z >> 31)));
+        };
+        WorldGenSettings settings;
+        settings.seed = seed;
+        settings.height_seed = next();
+        settings.humidity_seed = next();
+        settings.temperature_seed = next();
+        settings.feature_seed = next();
+        settings.resourceRichness = 0;
+        settings.energyLevel = 0;
+        return settings;
+    }
+};
 
 class World {
    public:

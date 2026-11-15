@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-28 01:07+0300\n"
+"POT-Creation-Date: 2026-11-15 20:50+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,124 +17,160 @@ msgstr ""
 "Content-Type: text/plain; charset=CHARSET\n"
 "Content-Transfer-Encoding: 8bit\n"
 
-#: src/game/states/create_or_load_state.cpp:22
+#: src/game/states/create_or_load_state.cpp:23
 msgid "CREATE WORLD"
 msgstr ""
 
-#: src/game/states/create_or_load_state.cpp:35
+#: src/game/states/create_or_load_state.cpp:36
+#: src/game/states/load_world_state.cpp:35
 msgid "LOAD WORLD"
 msgstr ""
 
-#: src/game/states/create_or_load_state.cpp:48
-#: src/game/states/create_world_state.cpp:30
+#: src/game/states/create_or_load_state.cpp:49
+#: src/game/states/create_world_state.cpp:34
+#: src/game/states/load_world_state.cpp:87
 msgid "RETURN"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:41
+#: src/game/states/create_world_state.cpp:45
 msgid "GENERATE"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:77
+#: src/game/states/create_world_state.cpp:62
+msgid "CHOOSE"
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:82
 msgid "Height"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:78
+#: src/game/states/create_world_state.cpp:84
 msgid "Temperature C"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:79
+#: src/game/states/create_world_state.cpp:86
 msgid "Humidity"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:81
+#: src/game/states/create_world_state.cpp:88
 msgid "Biome"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:85
+#: src/game/states/create_world_state.cpp:92
 msgid "Land"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:89
+#: src/game/states/create_world_state.cpp:96
+#: src/game/utils/items_enum_maps.hpp:26
 msgid "Vegetation"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:95
+#: src/game/states/create_world_state.cpp:102
 msgid "River"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:96
+#: src/game/states/create_world_state.cpp:103
 msgid "Direction"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:100
+#: src/game/states/create_world_state.cpp:108
 msgid "Flow Strength"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:104
+#: src/game/states/create_world_state.cpp:112
 msgid "Features"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:118
+#: src/game/states/create_world_state.cpp:126
 #: src/game/utils/region_enum_maps.hpp:148
 #: src/game/utils/region_enum_maps.hpp:178
 msgid "None"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:37
-#: src/game/states/main_menu_state.cpp:53
-#: src/game/states/main_menu_state.cpp:265
+#: src/game/states/load_world_state.cpp:61
 #, c++-format
-msgid "Master Volume {0}"
+msgid "Seed {}  |  {}x{}  |  created {}  |  played {}"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:58
-#: src/game/states/main_menu_state.cpp:74
-#: src/game/states/main_menu_state.cpp:266
-#, c++-format
-msgid "Music Vol. {0}"
+#: src/game/states/load_world_state.cpp:70
+msgid "No saved worlds"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:79
-#: src/game/states/main_menu_state.cpp:95
-#: src/game/states/main_menu_state.cpp:267
-#, c++-format
-msgid "Sound Vol. {0}"
+#: src/game/states/load_world_state.cpp:77
+msgid "LOAD"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:100
-#: src/game/states/main_menu_state.cpp:116
+#: src/game/states/load_world_state.cpp:112
+msgid "Loading..."
+msgstr ""
+
+#: src/game/states/load_world_state.cpp:133
+msgid "This world could not be loaded"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:123
 #: src/game/states/main_menu_state.cpp:268
-#, c++-format
-msgid "Text Scale {:.0f}%"
-msgstr ""
-
-#: src/game/states/main_menu_state.cpp:124
-#: src/game/states/main_menu_state.cpp:269
 msgid "APPLY"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:159
-#: src/game/states/main_menu_state.cpp:270
+#: src/game/states/main_menu_state.cpp:158
+#: src/game/states/main_menu_state.cpp:269
 msgid "SAVE"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:184
+#: src/game/states/main_menu_state.cpp:183
 msgid "SAVED!"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:208
-#: src/game/states/main_menu_state.cpp:271
+#: src/game/states/main_menu_state.cpp:207
+#: src/game/states/main_menu_state.cpp:270
 msgid "PLAY"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:224
-#: src/game/states/main_menu_state.cpp:272
+#: src/game/states/main_menu_state.cpp:223
+#: src/game/states/main_menu_state.cpp:271
 msgid "SETTINGS"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:253
-#: src/game/states/main_menu_state.cpp:273
+#: src/game/states/main_menu_state.cpp:252
+#: src/game/states/main_menu_state.cpp:272
 msgid "EXIT"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:12
+msgid "Sedimentary"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:13
+msgid "Metamorphic"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:14
+msgid "Igneous Intrusive"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:15
+msgid "Igneous Extrusive"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:22
+msgid "Terrain Rock"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:23
+msgid "Terrain Soil"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:24
+msgid "Structure Wall"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:25
+msgid "Structure Floor"
+msgstr ""
+
+#: src/game/utils/items_enum_maps.hpp:27
+msgid "Furniture"
 msgstr ""
 
 #: src/game/utils/region_enum_maps.hpp:12
