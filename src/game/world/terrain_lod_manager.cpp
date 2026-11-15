@@ -20,13 +20,24 @@ TerrainLodManager::Entry::~Entry() {
 }
 TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
                                      ThreadPool& pool,
-                                     const TerrainLod::Quality& quality)
+                                     const TerrainLod::Quality& quality,
+                                     TerrainEdits* edits)
     : world(world),
       assets(assets),
       pool(pool),
       quality(quality),
+      edits(edits),
       inputs(std::make_shared<SurfaceInputCache>()),
-      detailSampler(world, assets, inputs) {
+      detailSampler(world, assets, inputs,
+                    edits ? edits->snapshot() : nullptr) {
+    if (edits) {
+        // Structures get their own cap next to the patch budget.
+        structures = std::make_unique<StructureLod>(world, assets, pool, inputs,
+                                                    quality.gpuBudget / 8,
+                                                    quality.viewDistance);
+        editConnection = edits->changed.connect(
+            [this](uint64_t column) { editChanged(column); });
+    }
     maxJobs = std::clamp<size_t>(pool.get_thread_count() / 2, 2, 6);
     textureArray.initTexture("u_texture_array", 0,
                              assets.getMaterialAlbedoArray());
@@ -56,6 +67,7 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
     joinLightSlot.initVec4("u_light_slot", {0, 0, 0, 0});
 }
 TerrainLodManager::~TerrainLodManager() {
+    if (edits) edits->changed.disconnect(editConnection);
     for (auto& job : jobs) job.cancel->store(true, std::memory_order_relaxed);
     for (auto& job : jobs) {
         try {
@@ -227,7 +239,18 @@ void TerrainLodManager::collect() {
                 errors.try_emplace(errorKey(job.patch), mesh.error);
             if (inserted || error->second != mesh.error) errorsChanged = true;
             error->second = mesh.error;
-            if (!wanted(job.patch) || entries.contains(job.patch)) continue;
+            if (const auto it = entries.find(job.patch); it != entries.end()) {
+                // Rebuilt after an edit: replaces the drawn mesh on upload.
+                auto& entry = *it->second;
+                if (entry.drawable && entry.stale &&
+                    (!entry.replacement ||
+                     entry.replacementRevision < job.editRevision)) {
+                    entry.replacement = std::move(mesh);
+                    entry.replacementRevision = job.editRevision;
+                }
+                continue;
+            }
+            if (!wanted(job.patch)) continue;
             auto entry = std::make_unique<Entry>();
             entry->cpu = std::move(mesh);
             entries.emplace(job.patch, std::move(entry));
@@ -240,13 +263,19 @@ void TerrainLodManager::collect() {
 void TerrainLodManager::request() {
     for (const auto& p : queue) {
         if (jobs.size() >= maxJobs) break;
-        if (entries.contains(p) ||
-            std::any_of(jobs.begin(), jobs.end(),
-                        [&](const auto& j) { return j.patch == p; }))
+        const auto existing = entries.find(p);
+        const bool rebuild =
+            existing != entries.end() && existing->second->needsBuild();
+        if ((existing != entries.end() && !rebuild) ||
+            std::any_of(jobs.begin(), jobs.end(), [&](const auto& j) {
+                return j.patch == p &&
+                       (!rebuild ||
+                        j.editRevision >= existing->second->staleRevision);
+            }))
             continue;
         const size_t reserve = p.spacing == 1 ? 512 * 1024 : 256 * 1024;
         // A leaf with cached finer leftovers frees their room on upload.
-        if (!makeRoom(reserve) &&
+        if (!rebuild && !makeRoom(reserve) &&
             (splitSet.contains(p) || !drawableBelow.contains(p))) {
             pressure();
             continue;
@@ -254,19 +283,23 @@ void TerrainLodManager::request() {
         auto cancel = std::make_shared<std::atomic_bool>(false);
         auto future = pool.submit_task(
             [source = &world, definitions = &assets, shared = inputs, cancel, p,
-             map = quality.materialMap] {
-                SurfaceSampler sampler(*source, *definitions, shared);
+             map = quality.materialMap,
+             changes = edits ? edits->snapshot() : nullptr] {
+                SurfaceSampler sampler(*source, *definitions, shared, changes);
                 return TerrainLod::build(p, sampler, *cancel, map);
             },
-            // Roots are the fallback for everything else in view.
-            roots.contains(p) ? BS::pr::normal : BS::pr::low);
-        jobs.push_back({p, std::move(cancel), std::move(future)});
+            // Roots are the fallback for everything else in view; edited
+            // terrain should update promptly.
+            roots.contains(p) || rebuild ? BS::pr::normal : BS::pr::low);
+        jobs.push_back({p, edits ? edits->revision() : 0, std::move(cancel),
+                        std::move(future)});
     }
 }
 void TerrainLodManager::update(const Camera& camera, Vec2 viewport) {
     collect();
     choose(camera, viewport);
     request();
+    if (structures) structures->update(camera.eye(), edits->snapshot());
 }
 void TerrainLodManager::upload(IRenderer& renderer) {
     for (const auto& p : queue) {
@@ -284,29 +317,10 @@ void TerrainLodManager::upload(IRenderer& renderer) {
             pressure();
             continue;
         }
-        entry.mesh.initDynamic<BlockVertex>(&renderer, cpu.vertices.size(),
-                                            cpu.indices.size());
-        const auto& gpu = std::get<DynamicMesh>(entry.mesh.get());
-        if (!bgfx::isValid(gpu.vbh) || !bgfx::isValid(gpu.ibh)) {
-            entry.mesh.release();
+        if (!createGpu(entry, p, cpu, renderer)) {
             pressure();
             continue;
         }
-        entry.mesh.update(cpu.vertices.data(), cpu.vertices.size(),
-                          cpu.indices.data(), cpu.indices.size(), true);
-        entry.materialMap = bgfx::createTexture2D(
-            cpu.mapSize, cpu.mapSize, false, 1, bgfx::TextureFormat::RGBA8,
-            BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT |
-                BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP,
-            bgfx::copy(cpu.materials.data(), cpu.materials.size()));
-        if (!bgfx::isValid(entry.materialMap)) {
-            entry.mesh.release();
-            continue;
-        }
-        entry.mapUniform.initTexture("u_surface_map", 1, entry.materialMap);
-        entry.patchUniform.initVec4(
-            "u_lod_patch",
-            {float(p.x), float(p.z), float(p.size()), float(p.spacing)});
         entry.bounds = cpu.bounds;
         entry.bands = cpu.bands;
         entry.bytes = bytes;
@@ -316,6 +330,98 @@ void TerrainLodManager::upload(IRenderer& renderer) {
         uploaded += bytes;
         resident += bytes;
     }
+}
+
+bool TerrainLodManager::createGpu(Entry& entry, const TerrainLod::Patch& p,
+                                  const TerrainLod::Mesh& cpu,
+                                  IRenderer& renderer) {
+    entry.mesh.initDynamic<BlockVertex>(&renderer, cpu.vertices.size(),
+                                        cpu.indices.size());
+    const auto& gpu = std::get<DynamicMesh>(entry.mesh.get());
+    if (!bgfx::isValid(gpu.vbh) || !bgfx::isValid(gpu.ibh)) {
+        entry.mesh.release();
+        return false;
+    }
+    entry.mesh.update(cpu.vertices.data(), cpu.vertices.size(),
+                      cpu.indices.data(), cpu.indices.size(), true);
+    entry.materialMap = bgfx::createTexture2D(
+        cpu.mapSize, cpu.mapSize, false, 1, bgfx::TextureFormat::RGBA8,
+        BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT | BGFX_SAMPLER_U_CLAMP |
+            BGFX_SAMPLER_V_CLAMP,
+        bgfx::copy(cpu.materials.data(), cpu.materials.size()));
+    if (!bgfx::isValid(entry.materialMap)) {
+        entry.mesh.release();
+        return false;
+    }
+    entry.mapUniform.initTexture("u_surface_map", 1, entry.materialMap);
+    entry.patchUniform.initVec4(
+        "u_lod_patch",
+        {float(p.x), float(p.z), float(p.size()), float(p.spacing)});
+    return true;
+}
+
+void TerrainLodManager::uploadReplacements(IRenderer& renderer) {
+    std::vector<TerrainLod::Patch> ready;
+    for (const auto& [p, entry] : entries)
+        if (entry->drawable && entry->replacement) ready.push_back(p);
+    for (const auto& p : ready) {
+        if (uploaded >= quality.uploadBudget) break;
+        auto it = entries.find(p);
+        if (it == entries.end()) continue;
+        const auto bytes = it->second->replacement->bytes();
+        const auto oldBytes = it->second->bytes;
+        if (bytes > oldBytes && !makeRoom(bytes - oldBytes)) {
+            pressure();
+            continue;
+        }
+        // makeRoom may have evicted this entry.
+        it = entries.find(p);
+        if (it == entries.end()) continue;
+        auto& old = *it->second;
+        auto fresh = std::make_unique<Entry>();
+        if (!createGpu(*fresh, p, *old.replacement, renderer)) continue;
+        fresh->bounds = old.replacement->bounds;
+        fresh->bands = old.replacement->bands;
+        fresh->bytes = bytes;
+        fresh->drawable = true;
+        fresh->lastDrawn = old.lastDrawn;
+        fresh->staleRevision = old.staleRevision;
+        fresh->stale = old.replacementRevision < old.staleRevision;
+        uploaded += bytes;
+        resident = resident - old.bytes + bytes;
+        // Drawable either way: the per-ancestor counts are unchanged.
+        it->second = std::move(fresh);
+    }
+}
+
+void TerrainLodManager::editChanged(uint64_t column) {
+    const int x0 = int(column >> 32) * Chunk::SIZE_X - 1,
+              z0 = int(uint32_t(column)) * Chunk::SIZE_Z - 1;
+    const int x1 = x0 + Chunk::SIZE_X + 2, z1 = z0 + Chunk::SIZE_Z + 2;
+    const auto revision = edits->revision();
+    for (auto it = entries.begin(); it != entries.end();) {
+        const auto& p = it->first;
+        // Normals and skirts sample up to one spacing outside the patch.
+        const bool touches =
+            p.x - p.spacing < x1 && p.x + p.size() + p.spacing > x0 &&
+            p.z - p.spacing < z1 && p.z + p.size() + p.spacing > z0;
+        if (!touches) {
+            ++it;
+            continue;
+        }
+        if (!it->second->drawable) {
+            // A result waiting for upload is outdated: build it again.
+            it = entries.erase(it);
+            continue;
+        }
+        it->second->stale = true;
+        it->second->staleRevision = revision;
+        ++it;
+    }
+    detailSampler.setEdits(edits->snapshot());
+    if (structures) structures->edited(column);
+    surfaceBands.erase({int(column >> 32), int(uint32_t(column))});
+    joinedCoverageVersion = UINT64_MAX;
 }
 
 void TerrainLodManager::selectDrawn() {
@@ -455,6 +561,12 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     uploaded = 0;
     updateCoverage(chunks, camera);
     upload(renderer);
+    uploadReplacements(renderer);
+    if (structures)
+        uploaded +=
+            structures->upload(renderer, quality.uploadBudget > uploaded
+                                             ? quality.uploadBudget - uploaded
+                                             : 0);
     selectDrawn();
     uploadJoins(renderer);
     uploadCoverage();
@@ -489,9 +601,32 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
              &joinLightSlot, &joinLightVolume},
             false, std::move(transform), DrawLayer::GAME);
     }
+    if (structures) {
+        // A structure slab hands over to its real chunk exactly when
+        // GameplayState draws that chunk: detailed column, uploaded mesh,
+        // inside the detail chunk box.
+        const int cx = int(camera.position.x) / Chunk::SIZE_X,
+                  cy = int(camera.position.y) / Chunk::SIZE_Y,
+                  cz = int(camera.position.z) / Chunk::SIZE_Z;
+        structures->draw(
+            target, frustum, &joinShader,
+            {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
+             &joinLightSlot, &joinLightVolume},
+            [&](const ChunkCoord& c) {
+                return std::abs(int(c.x) - cx) <= DETAIL_CHUNK_RADIUS &&
+                       std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
+                       std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
+                       detailCoverage.contains(int(c.x), int(c.z)) &&
+                       chunks.hasUploadedMesh(c);
+            });
+    }
     ++frame;
 }
 size_t TerrainLodManager::backlog() const {
-    return std::count_if(queue.begin(), queue.end(),
-                         [&](const auto& p) { return !isDrawable(p); });
+    return (structures ? structures->backlog() : 0) +
+           std::count_if(queue.begin(), queue.end(), [&](const auto& p) {
+               const auto it = entries.find(p);
+               return it == entries.end() || !it->second->drawable ||
+                      it->second->stale;
+           });
 }

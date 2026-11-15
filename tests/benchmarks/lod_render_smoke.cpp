@@ -11,6 +11,7 @@
 #include "resource_manager.hpp"
 #include "world/location_manager.hpp"
 #include "world/sunlight_propagator.hpp"
+#include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 
 int main(int argc, char** argv) {
@@ -24,7 +25,10 @@ int main(int argc, char** argv) {
     int result = 0;
     const std::string scenario = argc > 3 ? argv[3] : "mountains";
     const bool walking = scenario == "handover_walk";
-    const bool handover = scenario == "handover" || walking;
+    // Edit terrain near the camera, then look back at it from 400 tiles away
+    // after its regions unloaded: the pit and structure must remain in LOD.
+    const bool structure = scenario == "structure";
+    const bool handover = scenario == "handover" || walking || structure;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -43,6 +47,10 @@ int main(int argc, char** argv) {
         ChunkManager chunks(generator, pool, &mesher, world, &assets);
         SunLightPropagator sunlight(chunks, assets.getStorage<Block>(), pool);
         LocationManager locations(chunks, world);
+        TerrainEdits edits;
+        TerrainEditTracker tracker(chunks, edits);
+        WorldEditor editor(chunks, &sunlight, assets.getStorage<Block>());
+        tracker.watch(editor);
         const auto color = bgfx::createTexture2D(
             1280, 720, false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_RT);
         const auto depth = bgfx::createTexture2D(
@@ -89,7 +97,8 @@ int main(int argc, char** argv) {
         const std::string blockShader = "block";
         const auto begin = std::chrono::steady_clock::now();
         {
-            TerrainLodManager lod(world, assets, pool);
+            TerrainLodManager lod(world, assets, pool, TerrainLod::Qualities[0],
+                                  structure ? &edits : nullptr);
             size_t maxResident = 0, maxUpload = 0;
             double maxFrame = 0;
             int frame = 0, settled = 0, phase = 0;
@@ -106,6 +115,7 @@ int main(int argc, char** argv) {
                     const int cx = int(camera.position.x) / 16,
                               cy = int(camera.position.y) / 16,
                               cz = int(camera.position.z) / 16;
+                    tracker.update();
                     locations.onPlayerRegionChanged(
                         {unsigned(cx) / 8, unsigned(cz) / 8});
                     chunks.setFocus(camera.position);
@@ -223,7 +233,9 @@ int main(int argc, char** argv) {
                     auto rendered = bgfx::frame();
                     while (rendered < readyFrame) rendered = bgfx::frame();
                     std::ofstream image(
-                        output + (travel ? "_" + std::to_string(phase) : "") +
+                        output +
+                            (travel || structure ? "_" + std::to_string(phase)
+                                                 : "") +
                             (transition ? "_transition" : "") + ".ppm",
                         std::ios::binary);
                     image << "P6\n1280 720\n255\n";
@@ -247,10 +259,13 @@ int main(int argc, char** argv) {
                                .count()
                         << " max_cpu_frame_ms=" << maxFrame
                         << " preserved_detail_checks=" << preservedChecks
-                        << " detail_regressions=" << detailRegressions << '\n';
+                        << " detail_regressions=" << detailRegressions
+                        << " edited_columns=" << edits.size()
+                        << " structure_slabs=" << lod.structureCount() << '\n';
                     if ((!transition && lod.backlog() != 0) || draws == 0 ||
                         (handover && detailed == 0) ||
-                        maxResident > TerrainLod::GpuBudget ||
+                        // Structure proxies have their own 1/8 cap.
+                        maxResident > TerrainLod::GpuBudget * 9 / 8 ||
                         maxUpload > TerrainLod::UploadBudget)
                         result = 1;
                 }
@@ -260,6 +275,50 @@ int main(int argc, char** argv) {
                     maxFrame, std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - frameStart)
                                   .count());
+                if (settled >= 10 && structure) {
+                    if (phase >= 2) break;
+                    ++phase;
+                    settled = 0;
+                    if (phase == 1) {
+                        // A 16x16 pit 8 deep, and a 3x3 pillar 40 tall with
+                        // an 11x11 platform overhanging it.
+                        const int px = int(camera.position.x) + 40,
+                                  pz = int(camera.position.z) + 20;
+                        const int base = surface.height(px, pz);
+                        std::vector<EditRequest> requests;
+                        for (int z = pz - 30; z < pz - 14; ++z)
+                            for (int x = px - 30; x < px - 14; ++x)
+                                for (int y = surface.height(x, z);
+                                     y > surface.height(x, z) - 8; --y)
+                                    requests.push_back(
+                                        {{x, y, z}, EditMode::Remove});
+                        for (int y = 0; y <= 40; ++y)
+                            for (int z = pz - 1; z <= pz + 1; ++z)
+                                for (int x = px - 1; x <= px + 1; ++x)
+                                    if (base + y > surface.height(x, z))
+                                        requests.push_back({{x, base + y, z},
+                                                            EditMode::Replace,
+                                                            1});
+                        for (int z = pz - 5; z <= pz + 5; ++z)
+                            for (int x = px - 5; x <= px + 5; ++x)
+                                requests.push_back(
+                                    {{x, base + 40, z}, EditMode::Replace, 1});
+                        const auto statuses = editor.apply(requests);
+                        std::cout
+                            << "edits_applied="
+                            << std::count(statuses.begin(), statuses.end(),
+                                          EditStatus::Applied)
+                            << "/" << statuses.size() << '\n';
+                    } else {
+                        // Look back at the edits from beyond the keep radius.
+                        camera.position.x += 400;
+                        camera.yaw = -bx::kPiHalf;
+                        camera.position.y =
+                            surface.height(int(camera.position.x),
+                                           int(camera.position.z)) +
+                            30;
+                    }
+                }
                 if (settled >= 10) {
                     if (!travel || phase >= 2) break;
                     ++phase;
@@ -281,6 +340,9 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             if (travel && (phase < 2 || settled < 10)) result = 1;
+            if (structure &&
+                (phase < 2 || edits.size() == 0 || lod.structureCount() == 0))
+                result = 1;
             if (walking && (preservedChecks == 0 || detailRegressions != 0))
                 result = 1;
         }

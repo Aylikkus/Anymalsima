@@ -91,8 +91,20 @@ Terrain shares world-space material mapping, directional/ambient lighting and
 haze with loaded blocks. Sky and haze share the horizon color. Artificial
 light and local sunlight attenuation remain part of block shading.
 
-Persistent edits, vegetation/structure proxies, cave interiors, overhangs,
-water reflections and new river/lake generation are outside this version.
+Gameplay edits are shown at distance (`TerrainEdits`, see
+`src/game/AGENTS.md`). Ground overrides (digging, removed mountains, filled
+pits) enter `SurfaceSampler`, so every patch kind follows them; pit walls keep
+the generated strata, and a block replaced at the original height is not
+shown. Affected cached patches are marked stale and stay drawn until their
+rebuilt mesh replaces them. Structures (solid tiles above the generated
+surface, including overhangs) are voxel proxies, one greedy mesh per 16^3
+slab (`StructureLod`), fully sky-lit and capped at 1/8 of the preset's GPU
+budget. Their border faces read the neighbouring slabs, so structures may
+span chunks and regions without seam faces. A proxy slab is hidden exactly
+when `GameplayState` draws its real chunk (detailed column, uploaded mesh,
+inside `DETAIL_CHUNK_RADIUS`). Vegetation, cave interiors, coarse structure
+meshes for very distant towns, water reflections and new river/lake
+generation are outside this version.
 Coverage changes are atomic geometry replacements; there is no temporal
 crossfade or geomorph. Large teleports can briefly show coarse terrain while
 the destination refines.
@@ -111,6 +123,7 @@ build/tests/lod_render_smoke build/lod_elevated 1600 elevated
 build/tests/lod_render_smoke build/lod_travel 2400 travel
 build/tests/lod_render_smoke build/lod_boundary 2000 handover_walk
 build/tests/lod_render_smoke build/lod_cancel 1 cancel
+build/tests/lod_render_smoke build/lod_structure 3000 structure
 ```
 
 The render tool is opt-in and requires Vulkan with texture readback. It opens
@@ -121,7 +134,9 @@ captures three destinations, including a 512-tile move and a longer teleport.
 The handover scenario streams and lights local chunks and draws their uploaded
 meshes. The boundary scenario walks across a region boundary and back, forces
 mesh revisions, and checks every frame that drawable columns remain visible;
-it also captures a coarse-to-fine transition. Cancel exits immediately with
+it also captures a coarse-to-fine transition. The structure scenario digs a
+pit and builds a pillar with an overhanging platform through `WorldEditor`,
+then moves 400 tiles away (its regions unload) and captures them from there. Cancel exits immediately with
 LOD jobs outstanding. Rendering submits
 the production command payloads through a minimal capture renderer; interactive
 SDL/window/menu behavior still needs an application run.

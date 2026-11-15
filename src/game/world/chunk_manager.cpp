@@ -77,6 +77,21 @@ bool ChunkManager::isQueued(const ChunkCoord& coord) const {
     auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Queued;
 }
+bool ChunkManager::isEdited(const ChunkCoord& coord) const {
+    auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready &&
+           it->second.edited;
+}
+std::shared_ptr<const ChunkColumnInputs> ChunkManager::generatedColumns(
+    unsigned chunkX, unsigned chunkZ) {
+    if (terrainWorld.regions.empty()) return {};
+    const auto it = chunks.find({chunkX, 0, chunkZ});
+    if (it == chunks.end()) return {};
+    const auto rc = it->second.regionCoord;
+    return prepareColumns(
+        {chunkX, 0, chunkZ},
+        terrainWorld.regions[rc.y * terrainWorld.width + rc.x]);
+}
 bool ChunkManager::hasUploadedMesh(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready &&
@@ -333,6 +348,7 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
         it->second.data = std::move(data.data);
         it->second.state = ChunkState::Ready;
         it->second.persistDirty = !data.fromDisk;
+        it->second.edited = data.edited;
     }
     pending.erase(coord);
     markDirty(coord);
@@ -395,7 +411,27 @@ void ChunkManager::dispatchGeneration() {
                 if (stored) {
                     try {
                         chunk_codec::decode(*stored, *result);
-                        return GeneratedChunk{result, true};
+                        // Generated tiles are solid exactly up to the
+                        // surface; anything else is an earlier edit.
+                        bool edited = false;
+                        if (columns)
+                            for (int z = 0; z < Chunk::SIZE_Z && !edited; ++z)
+                                for (int y = 0; y < Chunk::SIZE_Y && !edited;
+                                     ++y)
+                                    for (int x = 0; x < Chunk::SIZE_X; ++x) {
+                                        const int surface =
+                                            columns
+                                                ->columns[z * Chunk::SIZE_X + x]
+                                                .surface_y;
+                                        const int worldY =
+                                            int(coord.y) * Chunk::SIZE_Y + y;
+                                        if (result->tiles[z][y][x].isSolid() !=
+                                            (worldY <= surface)) {
+                                            edited = true;
+                                            break;
+                                        }
+                                    }
+                        return GeneratedChunk{result, true, edited};
                     } catch (const std::exception& e) {
                         std::cerr << "Saved chunk " << coord.x << ',' << coord.y
                                   << ',' << coord.z << " is unreadable ("

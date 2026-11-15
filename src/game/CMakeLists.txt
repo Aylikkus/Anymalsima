@@ -13,12 +13,15 @@ add_library(game
     world/surface_sampler.cpp
     world/terrain_lod.cpp
     world/terrain_lod_manager.cpp
+    world/structure_lod.cpp
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp
     world/light_volume.cpp
     world/light_volume_manager.cpp
     world/world_editor.cpp
+    world/terrain_edits.cpp
+    world/terrain_edit_tracker.cpp
     world/location_manager.cpp
     world/save/chunk_codec.cpp
     world/save/region_file.cpp
@@ -26,6 +29,7 @@ add_library(game
     world/save/world_map_codec.cpp
     world/save/world_meta.cpp
     world/save/save_catalog.cpp
+    world/save/terrain_edits_codec.cpp
     items/soil.hpp
     items/soil_validation.hpp
     world/soil_generator.hpp

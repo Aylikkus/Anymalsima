@@ -11,6 +11,7 @@ namespace {
 
 constexpr const char* MetaFile = "world.json";
 constexpr const char* MapFile = "world_map.dat";
+constexpr const char* EditsFile = "terrain_edits.dat";
 
 std::string folderName(uint64_t seed, const std::string& createdAt) {
     std::string stamp = createdAt;  // YYYY-MM-DDTHH:MM:SS
@@ -85,6 +86,19 @@ void writeWorldMap(const SaveSlot& slot, const World& world) {
 std::unique_ptr<World> readWorldMap(const SaveSlot& slot) {
     const auto bytes = FileIO::readBytes(slot.directory / MapFile);
     return std::make_unique<World>(world_map_codec::decode(bytes));
+}
+
+terrain_edits_codec::File readTerrainEdits(const SaveSlot& slot) {
+    const auto path = slot.directory / EditsFile;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return {};
+    return terrain_edits_codec::decode(FileIO::readBytes(path));
+}
+
+void writeTerrainEdits(const SaveSlot& slot, const EditMap& columns,
+                       const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(slot.directory / EditsFile,
+                             terrain_edits_codec::encode(columns, extra));
 }
 
 }  // namespace save_catalog

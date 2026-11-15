@@ -436,3 +436,75 @@ TEST(lod_detail_coarse_joins) {
         CHECK(a.y == b.y);
     }
 }
+namespace {
+// Lowers every tile of chunk columns [x0, x1] x [z0, z1] by `depth`.
+std::shared_ptr<const EditMap> loweredEdits(SurfaceSampler& generated, int x0,
+                                            int x1, int z0, int z1, int depth) {
+    auto map = std::make_shared<EditMap>();
+    for (int cz = z0; cz <= z1; ++cz)
+        for (int cx = x0; cx <= x1; ++cx) {
+            auto edit = std::make_shared<ColumnEdit>();
+            for (int z = 0; z < 16; ++z)
+                for (int x = 0; x < 16; ++x) {
+                    const int i = ColumnEdit::index(x, z);
+                    edit->groundY[i] = int16_t(
+                        generated.height(cx * 16 + x, cz * 16 + z) - depth);
+                    edit->groundBlock[i] = 1;
+                    edit->waterY[i] = -1;
+                }
+            edit->finish();
+            (*map)[editKey(cx, cz)] = std::move(edit);
+        }
+    return map;
+}
+}  // namespace
+TEST(lod_edits_lower_ground) {
+    test::Assets assets;
+    auto world = worldForLod();
+    SurfaceSampler plain(world, assets);
+    const auto edits = loweredEdits(plain, 17, 17, 17, 17, 10);
+    SurfaceSampler sampler(world, assets, nullptr, edits);
+    for (int z = 272; z < 288; ++z)
+        for (int x = 272; x < 288; ++x) {
+            EQUAL(sampler.height(x, z), plain.height(x, z) - 10, "height");
+            EQUAL(sampler.column(x, z).surfaceY,
+                  plain.column(x, z).surfaceY - 10, "column");
+            // Pit walls keep the generated strata.
+            EQUAL(sampler.materialAt(x, 400, z), plain.materialAt(x, 400, z),
+                  "strata");
+        }
+    EQUAL(sampler.height(271, 280), plain.height(271, 280), "outside");
+    // Stepped patch: tops follow the pit and a side wall reaches its floor.
+    const auto mesh =
+        TerrainLod::build(TerrainLod::Patch{256, 256, 1}, sampler, running);
+    for (int z = 272; z < 288; ++z)
+        for (int x = 272; x < 288; ++x) {
+            const float top = sampler.height(x, z) + 1;
+            CHECK(std::any_of(
+                mesh.vertices.begin(), mesh.vertices.end(), [&](auto& v) {
+                    return v.x == x && v.z == z && v.y == top && v.ny == 1;
+                }));
+        }
+    const float floor = sampler.height(272, 280) + 1;
+    CHECK(std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [&](auto& v) {
+        return v.x == 272 && v.y == floor && v.nx != 0;
+    }));
+    // Smooth patch over a large lowered area sits lower.
+    const auto wide = loweredEdits(plain, 16, 31, 16, 31, 20);
+    SurfaceSampler lowered(world, assets, nullptr, wide);
+    const TerrainLod::Patch smooth{256, 256, 8};
+    const auto average = [&](SurfaceSampler& s) {
+        const auto m = TerrainLod::build(smooth, s, running);
+        double sum = 0;
+        int count = 0;
+        for (const auto& v : m.vertices)
+            if (v.layer == -1 && v.ny > .01f) {
+                sum += v.y;
+                ++count;
+            }
+        CHECK(count > 0);
+        return sum / count;
+    };
+    CHECK(average(lowered) < average(plain) - 15);
+    EQUAL(lowered.structureTop(300, 300), -1, "no structure");
+}

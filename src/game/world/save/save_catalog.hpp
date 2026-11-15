@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "terrain_edits_codec.hpp"
 #include "world/world.hpp"
 #include "world_meta.hpp"
 
@@ -31,5 +32,10 @@ void writeMeta(const SaveSlot& slot);
 void writeWorldMap(const SaveSlot& slot, const World& world);
 // Loads the world map. Throws on missing or corrupt data.
 std::unique_ptr<World> readWorldMap(const SaveSlot& slot);
+// terrain_edits.dat: empty when the file does not exist yet. Throws on
+// corrupt data.
+terrain_edits_codec::File readTerrainEdits(const SaveSlot& slot);
+void writeTerrainEdits(const SaveSlot& slot, const EditMap& columns,
+                       const SectionContainer& extra = {});
 
 }  // namespace save_catalog

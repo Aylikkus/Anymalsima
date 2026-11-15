@@ -20,6 +20,7 @@
 #include "world/save/region_store.hpp"
 #include "world/save/save_catalog.hpp"
 #include "world/sunlight_propagator.hpp"
+#include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/tile_raycast.hpp"
 #include "world/world_editor.hpp"
@@ -57,6 +58,13 @@ class GameplayState : public IGameState {
     // first.
     std::unique_ptr<LightVolumeManager> lightVolumes;
     std::unique_ptr<WorldEditor> editor;
+    // Edits shown at distance (terrain_edits.dat). Declared before the LOD
+    // manager and tracker that hold references to it.
+    std::unique_ptr<TerrainEdits> edits;
+    SectionContainer editsExtra;
+    std::future<void> editsWrite;
+    // Listens to chunkManager and editor; destroyed before both.
+    std::unique_ptr<TerrainEditTracker> editTracker;
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     UIContext* uiContext = nullptr;
@@ -89,5 +97,7 @@ class GameplayState : public IGameState {
     float autosaveTimer = 0;
     std::vector<Vec2u> autosaveQueue;
     void updateAutosave(float dt);
+    // Writes terrain_edits.dat when it changed; wait=false runs on the pool.
+    void saveTerrainEdits(bool wait);
     void writeMeta();
 };

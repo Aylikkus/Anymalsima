@@ -10,6 +10,8 @@
 #include "detail_coverage.hpp"
 #include "lod_cover.hpp"
 #include "render/render_target.hpp"
+#include "structure_lod.hpp"
+#include "terrain_edits.hpp"
 
 // Distant terrain in three tiers: voxel chunks near the camera (owned by
 // DetailCoverage), stepped spacing-1 patches inside the exact radius, and
@@ -19,16 +21,22 @@
 // change never waits for, or discards, unrelated patches.
 class TerrainLodManager {
    public:
+    // edits: gameplay terrain changes shown at distance; optional.
     TerrainLodManager(
         const World& world, IAssets& assets, ThreadPool& pool,
-        const TerrainLod::Quality& quality = TerrainLod::Qualities[0]);
+        const TerrainLod::Quality& quality = TerrainLod::Qualities[0],
+        TerrainEdits* edits = nullptr);
     ~TerrainLodManager();
     void update(const Camera& camera, Vec2 viewport);
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
                 const Camera& camera, Vec2 viewport);
     bool drawsColumn(unsigned x, unsigned z) const;
     size_t residentBytes() const {
-        return resident + (joinsInitialised ? JoinBudget : 0);
+        return resident + (joinsInitialised ? JoinBudget : 0) +
+               (structures ? structures->residentBytes() : 0);
+    }
+    size_t structureCount() const {
+        return structures ? structures->count() : 0;
     }
     size_t patchCount() const { return drawn.size(); }
     size_t jobCount() const { return jobs.size(); }
@@ -49,11 +57,23 @@ class TerrainLodManager {
         bool drawable = false;
         // Frame in which the patch was last selected for drawing.
         uint64_t lastDrawn = 0;
+        // Terrain edits changed under a drawable patch: it stays drawn until
+        // a rebuilt mesh (built from edits revision >= staleRevision)
+        // replaces it.
+        bool stale = false;
+        uint64_t staleRevision = 0;
+        std::optional<TerrainLod::Mesh> replacement;
+        uint64_t replacementRevision = 0;
+        bool needsBuild() const {
+            return stale &&
+                   (!replacement || replacementRevision < staleRevision);
+        }
         ~Entry();
     };
     using Entries = std::map<TerrainLod::Patch, std::unique_ptr<Entry>>;
     struct Job {
         TerrainLod::Patch patch;
+        uint64_t editRevision = 0;
         std::shared_ptr<std::atomic_bool> cancel;
         std::future<TerrainLod::Mesh> future;
     };
@@ -61,6 +81,11 @@ class TerrainLodManager {
     void collect();
     void request();
     void upload(IRenderer& renderer);
+    void uploadReplacements(IRenderer& renderer);
+    // Creates the GPU mesh, material map and uniforms of an entry.
+    bool createGpu(Entry& entry, const TerrainLod::Patch& patch,
+                   const TerrainLod::Mesh& cpu, IRenderer& renderer);
+    void editChanged(uint64_t column);
     void selectDrawn();
     bool wanted(const TerrainLod::Patch& patch) const;
     bool isDrawable(const TerrainLod::Patch& patch) const;
@@ -84,8 +109,12 @@ class TerrainLodManager {
     IAssets& assets;
     ThreadPool& pool;
     const TerrainLod::Quality quality;
+    TerrainEdits* edits;
+    Signal<uint64_t>::Connection editConnection;
     std::shared_ptr<SurfaceInputCache> inputs;
     SurfaceSampler detailSampler;
+    // Built structures at distance; present when edits are tracked.
+    std::unique_ptr<StructureLod> structures;
     TerrainLod::DetailCoverage detailCoverage;
     TerrainLod::DetailCoverage::Columns surfaceBands;
     std::vector<TerrainLod::Patch> joinedLayout;

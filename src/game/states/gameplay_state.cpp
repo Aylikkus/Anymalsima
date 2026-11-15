@@ -8,8 +8,8 @@
 #include "main_menu_state.hpp"
 #include "render/frustrum.hpp"
 
-// How many chunks out from the camera column to request on X and Z axes.
-static constexpr int CHUNK_RADIUS = 8;
+// How many chunks out from the camera chunk to request and draw.
+static constexpr int CHUNK_RADIUS = DETAIL_CHUNK_RADIUS;
 
 GameplayState::GameplayState(Game& game, UIContext& context,
                              std::unique_ptr<World>&& world, SaveSlot saveSlot)
@@ -33,8 +33,19 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     const auto& quality = TerrainLod::Qualities[detail];
     camera.viewDistance = quality.viewDistance;
     worldEye.initVec4("u_world_eye", {0, 0, 0, quality.viewDistance});
+    try {
+        auto file = save_catalog::readTerrainEdits(slot);
+        edits = std::make_unique<TerrainEdits>(std::move(file.columns));
+        editsExtra = std::move(file.extra);
+    } catch (const std::exception& e) {
+        // Edits are derived from chunks: visited areas are rebuilt.
+        std::cerr << "Terrain edits unreadable (" << e.what()
+                  << "); starting empty\n";
+        edits = std::make_unique<TerrainEdits>();
+    }
     terrainLod = std::make_unique<TerrainLodManager>(
-        *this->world, *context.assets, context.threadPool, quality);
+        *this->world, *context.assets, context.threadPool, quality,
+        edits.get());
     ui_manager = std::make_unique<UIManager>(context);
 
     auto root = std::make_unique<Panel>();
@@ -88,6 +99,17 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         *chunkManager, context.assets->getStorage<Block>());
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
+    // Comparing saved chunks with generated terrain is only meaningful when
+    // the save was made by the current generator.
+    const bool sameGenerator =
+        slot.meta.generatorVersion == WorldMeta::GeneratorVersion;
+    if (!sameGenerator)
+        std::cerr << "World generator " << slot.meta.generatorVersion
+                  << " differs from " << WorldMeta::GeneratorVersion
+                  << "; earlier edits are not detected for distant terrain\n";
+    editTracker = std::make_unique<TerrainEditTracker>(*chunkManager, *edits,
+                                                       sameGenerator);
+    editTracker->watch(*editor);
     locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
                                                     regionStore.get());
 
@@ -127,8 +149,11 @@ GameplayState::GameplayState(Game& game, UIContext& context,
 
 GameplayState::~GameplayState() {
     try {
+        // Capture pending edits while their chunks are still loaded.
+        editTracker->update();
         locationMgr->saveAll(true);
         regionStore->flush();
+        saveTerrainEdits(true);
         writeMeta();
     } catch (const std::exception& e) {
         std::cerr << "Saving world failed: " << e.what() << '\n';
@@ -146,20 +171,56 @@ void GameplayState::writeMeta() {
     }
 }
 
+void GameplayState::saveTerrainEdits(bool wait) {
+    using namespace std::chrono_literals;
+    if (editsWrite.valid()) {
+        if (!wait && editsWrite.wait_for(0s) != std::future_status::ready)
+            return;  // the previous write is still running
+        try {
+            editsWrite.get();
+        } catch (const std::exception& e) {
+            std::cerr << "Saving terrain edits failed: " << e.what() << '\n';
+            edits->dirty = true;
+        }
+    }
+    if (!edits->dirty) return;
+    edits->dirty = false;
+    auto write = [target = slot, columns = edits->snapshot(),
+                  extra = editsExtra] {
+        save_catalog::writeTerrainEdits(target, *columns, extra);
+    };
+    if (!wait) {
+        editsWrite = uiContext->threadPool.submit_task(std::move(write));
+        return;
+    }
+    try {
+        write();
+    } catch (const std::exception& e) {
+        std::cerr << "Saving terrain edits failed: " << e.what() << '\n';
+        edits->dirty = true;
+    }
+}
+
 void GameplayState::updateAutosave(float dt) {
     // Rolling checkpoint: one region per frame keeps copies off the frame
     // budget; regions unloaded meanwhile were already saved on unload.
     if (!autosaveQueue.empty()) {
         locationMgr->saveRegion(autosaveQueue.back());
         autosaveQueue.pop_back();
-        if (autosaveQueue.empty()) writeMeta();
+        if (autosaveQueue.empty()) {
+            saveTerrainEdits(false);
+            writeMeta();
+        }
         return;
     }
     autosaveTimer += dt;
     if (autosaveTimer < AutosaveInterval) return;
     autosaveTimer = 0;
     autosaveQueue = locationMgr->loaded();
-    if (autosaveQueue.empty()) writeMeta();
+    if (autosaveQueue.empty()) {
+        saveTerrainEdits(false);
+        writeMeta();
+    }
 }
 
 void GameplayState::handleInput(Game& game, const InputEvent& e,
@@ -301,6 +362,8 @@ void GameplayState::useTool(int mouseX, int mouseY) {
 }
 
 void GameplayState::update(Game& game, float dt) {
+    // Before any region can unload this frame.
+    editTracker->update();
     camera.position.x =
         std::clamp(camera.position.x, 0.f, float(world->width * 128 - 1));
     camera.position.z =
@@ -336,7 +399,10 @@ void GameplayState::update(Game& game, float dt) {
                 " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
                 std::to_string(terrainLod->jobCount()) + " jobs, " +
-                std::to_string(terrainLod->backlog()) + " pending");
+                std::to_string(terrainLod->backlog()) + " pending\n" +
+                std::to_string(edits->size()) + " edited columns, " +
+                std::to_string(terrainLod->structureCount()) +
+                " structure slabs");
         } else {
             const Tile& t = hit->tile;
             std::stringstream ss;

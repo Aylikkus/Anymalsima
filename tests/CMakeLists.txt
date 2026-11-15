@@ -11,6 +11,8 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/world_editor.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edits.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edit_tracker.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/location_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/chunk_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/region_file.cpp
@@ -18,6 +20,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/save/world_map_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/world_meta.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/save_catalog.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/terrain_edits_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/binary_stream.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/compression.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/section_container.cpp
@@ -40,6 +43,7 @@ add_executable(world_logic_tests
     unit/game/world/terrain_tests.cpp
     unit/game/world/lod_tests.cpp
     unit/game/world/mesh_tests.cpp
+    unit/game/world/terrain_edit_tests.cpp
     unit/game/world/light_volume_tests.cpp
     unit/game/world/world_editor_tests.cpp
     unit/game/world/world_tests.cpp
@@ -120,6 +124,13 @@ set(world_cases
     sunlight_dirty_column
     sunlight_stale_result
 )
+list(APPEND world_cases
+    edit_dig_pit_lowers_ground
+    edit_structure_overhang
+    edit_structure_crosses_region
+    edit_unloaded_slab_keeps_structure
+    edit_detected_from_save
+)
 foreach(case IN LISTS world_cases)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
@@ -181,7 +192,8 @@ endforeach()
 foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
              chunk_codec_wide_palette chunk_codec_rejects_corrupt
              region_file_roundtrip world_seed_derivation world_map_roundtrip
-             save_catalog_slots region_index_covers_world_height)
+             save_catalog_slots region_index_covers_world_height
+             terrain_edits_roundtrip terrain_edits_rejects_corrupt)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "unit;gameplay;save" TIMEOUT 10)
@@ -235,7 +247,7 @@ endforeach()
 foreach(case lod_surface_matches_chunks lod_geology_order_independent
              lod_stepped_surface_and_bands lod_smooth_skirts_cover_edges
              lod_stepped_boundary_walls lod_water_and_bounds
-             lod_selection_coverage_balance lod_cover_fallback
+             lod_selection_coverage_balance lod_cover_fallback lod_edits_lower_ground
              lod_loaded_water_mesh lod_detail_survives_refresh
              lod_detail_hysteresis lod_mesh_height_matches_triangles
              lod_detail_coarse_joins)

@@ -35,6 +35,9 @@ struct ChunkHandle {
     // Tile contents differ from what the region file holds (freshly
     // generated, or modified through markModified). Lighting never sets it.
     bool persistDirty = false;
+    // Loaded from disk with solid/air different from generated terrain
+    // (an earlier gameplay edit).
+    bool edited = false;
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
 };
@@ -71,6 +74,13 @@ class ChunkManager {
     bool isReady(const ChunkCoord& coord) const;
     // Requested and waiting for (or running) its generation job.
     bool isQueued(const ChunkCoord& coord) const;
+    // Ready, read from a save, and its solid tiles differ from what the
+    // generator makes there (see LocationGenerator).
+    bool isEdited(const ChunkCoord& coord) const;
+    // Generated surface inputs of a registered chunk column, or null for an
+    // unregistered column or a world without a map (fixtures).
+    std::shared_ptr<const ChunkColumnInputs> generatedColumns(unsigned chunkX,
+                                                              unsigned chunkZ);
     bool isMeshUploaded(const ChunkCoord& coord) const;
     // An older uploaded revision remains drawable while its replacement is
     // queued (for example, after sunlight changes).
@@ -170,6 +180,7 @@ class ChunkManager {
     struct GeneratedChunk {
         std::shared_ptr<Chunk> data;
         bool fromDisk = false;
+        bool edited = false;
     };
     struct GenerationJob {
         ChunkCoord coord;

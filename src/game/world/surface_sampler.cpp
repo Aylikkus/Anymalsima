@@ -24,10 +24,41 @@ int SurfaceSampler::height(int x, int z) {
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
     if (auto it = heights.find(key); it != heights.end()) return it->second;
     if (heights.size() > 65536) heights.clear();
+    const auto* edit = editAt(x, z);
     const int value =
-        int(std::floor(TerrainSampler(input(x, z).terrain).surface(x, z)));
+        edit ? edit->groundY[ColumnEdit::index(x % Chunk::SIZE_X,
+                                               z % Chunk::SIZE_Z)]
+             : int(std::floor(
+                   TerrainSampler(input(x, z).terrain).surface(x, z)));
     heights[key] = value;
     return value;
+}
+
+const ColumnEdit* SurfaceSampler::editAt(int x, int z) {
+    if (!edits || edits->empty()) return nullptr;
+    x = std::clamp(x, 0, width() - 1);
+    z = std::clamp(z, 0, depth() - 1);
+    const uint64_t key =
+        editKey(unsigned(x / Chunk::SIZE_X), unsigned(z / Chunk::SIZE_Z));
+    if (key != lastEditKey) {
+        const auto it = edits->find(key);
+        lastEditKey = key;
+        lastEdit = it == edits->end() ? nullptr : it->second.get();
+    }
+    return lastEdit;
+}
+
+int SurfaceSampler::structureTop(int x, int z) {
+    const auto* edit = editAt(x, z);
+    return edit ? edit->structureTopY() : -1;
+}
+
+void SurfaceSampler::setEdits(std::shared_ptr<const EditMap> value) {
+    edits = std::move(value);
+    lastEditKey = UINT64_MAX;
+    lastEdit = nullptr;
+    // Generated columns stay valid; heights include edits.
+    heights.clear();
 }
 
 uint16_t SurfaceSampler::material(const RegionInput& data,
@@ -57,6 +88,26 @@ uint16_t SurfaceSampler::material(const RegionInput& data,
 }
 
 SurfaceColumn SurfaceSampler::column(int x, int z) {
+    auto result = generatedColumn(x, z);
+    const auto* edit = editAt(x, z);
+    if (!edit) return result;
+    x = std::clamp(x, 0, width() - 1);
+    z = std::clamp(z, 0, depth() - 1);
+    const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
+    result.waterY = edit->waterY[i];
+    // Unchanged tiles keep generated soil and rock materials; a replaced
+    // block at the original height is not shown.
+    if (edit->groundY[i] != result.surfaceY) {
+        result.surfaceY = edit->groundY[i];
+        if (const auto block = edit->groundBlock[i])
+            result.material = result.rockMaterial =
+                assets.getMaterialAlbedoLayer(
+                    assets.getStorage<Block>().get(block).material);
+    }
+    return result;
+}
+
+SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     x = std::clamp(x, 0, width() - 1);
     z = std::clamp(z, 0, depth() - 1);
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
@@ -78,6 +129,6 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
 }
 
 uint16_t SurfaceSampler::materialAt(int x, int y, int z) {
-    const auto value = column(x, z);
+    const auto value = generatedColumn(x, z);
     return material(input(x, z), value, y);
 }

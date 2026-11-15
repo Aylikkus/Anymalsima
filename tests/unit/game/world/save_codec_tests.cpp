@@ -5,6 +5,7 @@
 #include "world/save/chunk_codec.hpp"
 #include "world/save/region_file.hpp"
 #include "world/save/save_catalog.hpp"
+#include "world/save/terrain_edits_codec.hpp"
 #include "world/save/world_map_codec.hpp"
 
 namespace {
@@ -256,4 +257,72 @@ TEST(region_index_covers_world_height) {
     const auto index = RegionData::localIndex(top);
     CHECK(index == RegionData::ChunkCount - 1);
     CHECK(RegionData::worldCoord(region, index) == top);
+}
+
+TEST(terrain_edits_roundtrip) {
+    auto edit = std::make_shared<ColumnEdit>();
+    for (int i = 0; i < ColumnEdit::Tiles; ++i) {
+        edit->groundY[i] = int16_t(400 - i % 7);
+        edit->groundBlock[i] = uint8_t(1 + i % 3);
+        edit->waterY[i] = i % 5 ? -1 : int16_t(385);
+    }
+    Chunk lower, upper;
+    lower.tiles[3][15][4].block_id = 2;
+    upper.tiles[3][0][4].block_id = 2;  // one pillar crossing the slab seam
+    upper.tiles[3][9][5].block_id = 1;
+    edit->structure = {
+        {26, std::make_shared<const Bytes>(chunk_codec::encode(upper))},
+        {25, std::make_shared<const Bytes>(chunk_codec::encode(lower))}};
+    edit->finish();
+    EQUAL(edit->structureTopY(), 26 * 16 + 9, "structure top");
+    CHECK(edit->structure.front().first == 25);  // sorted
+    EditMap columns{{editKey(40, 7), edit}, {editKey(41, 7), edit}};
+    SectionContainer extra;
+    extra.put("FUTR", 3, Bytes{std::byte{7}});
+
+    const auto file = terrain_edits_codec::decode(
+        terrain_edits_codec::encode(columns, extra));
+    EQUAL(file.columns.size(), size_t(2), "columns");
+    const auto& back = *file.columns.at(editKey(41, 7));
+    CHECK(back.groundY == edit->groundY);
+    CHECK(back.groundBlock == edit->groundBlock);
+    CHECK(back.waterY == edit->waterY);
+    EQUAL(back.structureTopY(), edit->structureTopY(), "decoded top");
+    Chunk decoded;
+    chunk_codec::decode(**back.slab(26), decoded);
+    CHECK(sameTiles(decoded, upper));
+    CHECK(back.slab(24) == nullptr);
+    CHECK(file.extra.find("FUTR") != nullptr);  // unknown section kept
+}
+
+TEST(terrain_edits_rejects_corrupt) {
+    auto edit = std::make_shared<ColumnEdit>();
+    edit->groundY.fill(10);
+    Chunk chunk;
+    chunk.tiles[0][0][0].block_id = 1;
+    edit->structure = {
+        {30, std::make_shared<const Bytes>(chunk_codec::encode(chunk))}};
+    edit->finish();
+    const auto bytes = terrain_edits_codec::encode({{editKey(1, 2), edit}});
+    CHECK(throwsSerialization([&] {
+        terrain_edits_codec::decode(ByteView(bytes).first(bytes.size() - 9));
+    }));
+    // Out-of-range ground height inside an otherwise valid container.
+    BinaryWriter out;
+    out.write(uint32_t(1));
+    out.write(uint32_t(0));
+    out.write(uint32_t(0));
+    for (int i = 0; i < ColumnEdit::Tiles; ++i) out.write(int16_t(30000));
+    SectionContainer container;
+    container.put("EDIT", 1, out.take());
+    const auto invalid = container.encode();
+    CHECK(throwsSerialization([&] { terrain_edits_codec::decode(invalid); }));
+    // A missing file is an empty index.
+    const auto root = scratch("edits");
+    std::filesystem::create_directories(root);
+    CHECK(save_catalog::readTerrainEdits({root, {}}).columns.empty());
+    save_catalog::writeTerrainEdits({root, {}}, {{editKey(1, 2), edit}});
+    EQUAL(save_catalog::readTerrainEdits({root, {}}).columns.size(), size_t(1),
+          "written file");
+    std::filesystem::remove_all(root);
 }

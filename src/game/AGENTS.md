@@ -19,11 +19,13 @@ Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/sa
 - `world.json`: `WorldMeta` (format/generator versions, master seed, timestamps, camera).
 - `world_map.dat`: `world_map_codec` sections `GENS`, `RGNS`, `RIVR`. Preview meshes are not stored.
 - `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`) and `TOPS` (column ceilings).
+- `terrain_edits.dat`: `terrain_edits_codec` section `EDIT`, the world-wide index of edited chunk columns that distant terrain shows (`world/terrain_edits.hpp`). It is derived data: region files hold the truth.
 
 Every sub-seed derives from `WorldGenSettings::seed` through `WorldGenSettings::fromSeed`. Bump `WorldMeta::GeneratorVersion` when chunk generation output changes.
 
 `LocationManager` owns region residency. With a `RegionStore` it opens a region asynchronously and registers its chunks with their saved blobs; `ChunkManager` decodes those chunks instead of generating them. Unloading snapshots chunks whose `persistDirty` flag is set and queues a write. `RegionStore` runs at most one job per region at a time and keeps recently released regions warm in RAM. Callers of `ChunkManager::request` never see where data came from.
 
+- Distant terrain shows edits through `TerrainEdits`. Generated tiles are solid exactly up to the generated surface, so each edited column stores a ground override (topmost solid tile at or below that surface) and structure voxels (every solid tile above it). `TerrainEditTracker` recomputes columns from `WorldEditor::blockChanged` and from saved chunks that differ from generation (`ChunkManager::isEdited`, enabled only when the save's `generatorVersion` matches). Edits that bypass `WorldEditor` are not shown at distance until their chunk is reloaded. `GameplayState` writes `terrain_edits.dat` with each autosave cycle and on exit.
 - Lighting is derived and never saved. `SunLightPropagator` writes must not set `persistDirty`.
 - Gameplay edits to tiles must go through `withChunkLocked` followed by `ChunkManager::markModified`, so the chunk is saved and remeshed. Prefer `WorldEditor` (`world/world_editor.hpp`) for block placement and removal: it also remeshes border neighbors, raises column tops and recomputes sunlight.
 - `GameplayState` autosaves one region per frame every 300 s. Its destructor saves every region, flushes the store and writes `world.json`. Keep `regionStore` declared before the chunk systems that use it.
