@@ -147,7 +147,8 @@ class SoilGenerator {
         return out;
     }
 
-   private:
+   public:
+    // Stable world-coordinate fields shared with terrain/profile blending.
     static double unit(int64_t x, int64_t z, uint32_t seed) {
         uint64_t h = static_cast<uint64_t>(x) * 0x9e3779b97f4a7c15ULL;
         h ^= static_cast<uint64_t>(z) * 0xbf58476d1ce4e5b9ULL;
@@ -159,7 +160,7 @@ class SoilGenerator {
         h ^= h >> 31;
         return (h >> 11) * 0x1.0p-53;
     }
-    static double field(int64_t x, int64_t z, int scale, uint32_t seed) {
+    static double field(double x, double z, int scale, uint32_t seed) {
         const auto gx = static_cast<int64_t>(std::floor(double(x) / scale));
         const auto gz = static_cast<int64_t>(std::floor(double(z) / scale));
         double tx = double(x) / scale - gx;

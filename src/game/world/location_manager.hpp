@@ -3,8 +3,8 @@
 #include <unordered_set>
 
 #include "chunk_manager.hpp"
-#include "world.hpp"
 #include "consts.hpp"
+#include "world.hpp"
 
 class LocationManager {
    public:
@@ -16,7 +16,11 @@ class LocationManager {
     void loadRegion(const Vec2u& regionCoord, int radius = 1) {
         for (int dy = -radius; dy <= radius; ++dy) {
             for (int dx = -radius; dx <= radius; ++dx) {
-                Vec2u rc{regionCoord.x + dx, regionCoord.y + dy};
+                const int x = int(regionCoord.x) + dx;
+                const int z = int(regionCoord.y) + dy;
+                if (x < 0 || z < 0 || x >= world.width || z >= world.height)
+                    continue;
+                Vec2u rc{unsigned(x), unsigned(z)};
                 if (loadedRegions.count(rc)) continue;
 
                 registerRegionChunks(rc);
@@ -73,7 +77,6 @@ class LocationManager {
     }
 
     void unregisterRegionChunks(const Vec2u& rc) {
-        const Region& region = world.regions[rc.y * world.width + rc.x];
         const ChunkCoord origin = regionOriginChunk(rc);
 
         for (unsigned int slabY = 0; slabY < Y_CHUNKS; ++slabY) {

@@ -17,6 +17,7 @@ enum class ChunkState { Unloaded, Queued, Ready };
 enum class MeshState { None, Queued, Built };
 
 struct ChunkHandle {
+    Vec2u regionCoord{};
     uint64_t identity = 0;
     ChunkState state = ChunkState::Unloaded;
     std::shared_ptr<Chunk> data;
@@ -64,6 +65,8 @@ class ChunkManager {
     void markAllDirty();
     int getColumnTopY(unsigned cx, unsigned cz) const;
     void raiseColumnTopY(unsigned cx, unsigned cz, int worldY);
+    int generatedSurfaceY(unsigned tileX, unsigned tileZ);
+    size_t cachedColumnInputs() const { return columnInputs.size(); }
     void uploadReadyMeshes(IRenderer& renderer) {
         for (auto& result : readyMeshes) {
             auto it = chunks.find(result.coord);
@@ -137,6 +140,14 @@ class ChunkManager {
     void submitMesh(ChunkCoord coord);
     void collect();
 
+    struct ColumnCache {
+        size_t registrations = 0;
+        std::shared_ptr<const ChunkColumnInputs> data;
+    };
+    std::shared_ptr<const ChunkColumnInputs> prepareColumns(
+        ChunkCoord coord, const Region& region);
+    const TerrainNeighborhood& terrainNeighborhood(Vec2u region);
+    const World& terrainWorld;
     const LocationGenerator& generator;
     ThreadPool& pool;
     const ChunkMesher* mesher;
@@ -151,6 +162,9 @@ class ChunkManager {
     uint64_t nextIdentity = 0;
     std::unordered_map<Vec2u, std::vector<RegionLayer>> regionLayers;
     std::unordered_map<Vec2u, SoilProfile> regionSoils;
+    std::unordered_map<Vec2u, TerrainNeighborhood> regionTerrain;
+    std::unordered_map<Vec2u, size_t> regionRegistrations;
+    std::unordered_map<uint64_t, ColumnCache> columnInputs;
     std::unordered_map<ChunkCoord, ChunkHandle> chunks;
     std::unordered_map<ChunkCoord, PendingInfo> pending;
     std::unordered_map<uint64_t, int> columnTopY;

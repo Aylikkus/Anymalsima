@@ -3,6 +3,7 @@
 find_package(Threads REQUIRED)
 add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/location_generator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
@@ -21,6 +22,7 @@ add_executable(world_logic_tests
     support/test_main.cpp
     unit/game/world/generation_tests.cpp
     unit/game/world/soil_tests.cpp
+    unit/game/world/terrain_tests.cpp
     unit/game/world/mesh_tests.cpp
     unit/game/world/world_tests.cpp
     unit/game/items/block_tests.cpp
@@ -146,6 +148,20 @@ foreach(case soil_data_validation soil_loading_references_capacity
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;data" TIMEOUT 15)
+    if(ANYMALSIMA_TEST_SANITIZERS)
+        set_tests_properties(game.world.${case} PROPERTIES
+            ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endif()
+endforeach()
+
+foreach(case terrain_caps_repeatability terrain_shared_edges_corners
+             terrain_relief_strength terrain_cliff_segments
+             terrain_coast_dry_inland terrain_world_bounds
+             terrain_geology_erosion terrain_soil_transition
+             terrain_streaming_cache terrain_column_inputs_seams)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;terrain" TIMEOUT 15)
     if(ANYMALSIMA_TEST_SANITIZERS)
         set_tests_properties(game.world.${case} PROPERTIES
             ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")

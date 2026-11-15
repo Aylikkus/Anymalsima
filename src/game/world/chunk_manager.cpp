@@ -3,7 +3,8 @@
 ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
                            const ChunkMesher* mesher, const World& world,
                            IAssets* assets)
-    : generator(gen),
+    : terrainWorld(world),
+      generator(gen),
       pool(pool),
       mesher(mesher),
       layersGenerator(world.genSettings, assets),
@@ -21,6 +22,7 @@ void ChunkManager::registerChunk(const ChunkCoord& coord,
     if (chunks.contains(coord)) unregister(coord);
     auto& handle = chunks[coord];
     handle.identity = ++nextIdentity;
+    handle.regionCoord = region->coord;
     pending[coord] = {origin, region, std::nullopt};
     if (!regionLayers.contains(region->coord))
         regionLayers[region->coord] = layersGenerator.get(*region);
@@ -29,6 +31,8 @@ void ChunkManager::registerChunk(const ChunkCoord& coord,
             SoilGenerator::select(*region, *soilAssets, soilSeed);
     const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
     columnTopY.try_emplace(column, region->land_height_m);
+    ++columnInputs[column].registrations;
+    ++regionRegistrations[region->coord];
 }
 
 Chunk* ChunkManager::request(const ChunkCoord& coord) {
@@ -84,7 +88,19 @@ const Tile* ChunkManager::tileAt(int x, int y, int z) {
                  : nullptr;
 }
 void ChunkManager::unregister(const ChunkCoord& coord) {
-    const bool existed = chunks.erase(coord) != 0;
+    const auto found = chunks.find(coord);
+    const bool existed = found != chunks.end();
+    if (existed) {
+        const auto rc = found->second.regionCoord;
+        chunks.erase(found);
+        if (--regionRegistrations.at(rc) == 0) {
+            regionRegistrations.erase(rc);
+            regionTerrain.erase(rc);
+        }
+        const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
+        if (--columnInputs.at(column).registrations == 0)
+            columnInputs.erase(column);
+    }
     pending.erase(coord);
     generationQueue.erase(coord);
     meshQueue.erase(coord);
@@ -253,14 +269,15 @@ void ChunkManager::update() {
         const auto coord = *next;
         const auto& info = pending.at(coord);
         const auto identity = chunks.at(coord).identity;
+        const auto columns = prepareColumns(coord, *info.region);
         auto future = pool.submit_task(
-            [generator = generator, coord, origin = info.regionOrigin,
+            [generator = generator, coord, columns, origin = info.regionOrigin,
              region = *info.region,
              layers = regionLayers.at(info.region->coord),
              soil = regionSoils.at(info.region->coord)] {
                 auto result = std::make_shared<Chunk>();
                 generator.generateChunk(*result, coord, origin, region, layers,
-                                        soil);
+                                        soil, columns.get());
                 return result;
             },
             info.beneficiary ? BS::pr::high : BS::pr::normal);
@@ -284,4 +301,35 @@ MeshHandle* ChunkManager::getMesh(const ChunkCoord& coord) {
     // Keep the current uploaded mesh visible while its replacement is built.
     return it == chunks.end() || !it->second.initialised ? nullptr
                                                          : &it->second.mesh;
+}
+
+const TerrainNeighborhood& ChunkManager::terrainNeighborhood(Vec2u region) {
+    auto it = regionTerrain.find(region);
+    if (it == regionTerrain.end())
+        it = regionTerrain
+                 .emplace(region, TerrainNeighborhood::capture(
+                                      terrainWorld, region, *soilAssets))
+                 .first;
+    return it->second;
+}
+
+std::shared_ptr<const ChunkColumnInputs> ChunkManager::prepareColumns(
+    ChunkCoord coord, const Region& region) {
+    // Synthetic/headless fixtures may deliberately omit the world map.
+    if (terrainWorld.regions.empty()) return {};
+    const uint64_t key = (uint64_t{coord.x} << 32) | coord.z;
+    auto& cache = columnInputs.at(key);
+    if (!cache.data)
+        cache.data = std::make_shared<const ChunkColumnInputs>(
+            TerrainSampler(terrainNeighborhood(region.coord))
+                .columns(coord.x, coord.z));
+    return cache.data;
+}
+
+int ChunkManager::generatedSurfaceY(unsigned tileX, unsigned tileZ) {
+    const Vec2u rc{tileX / TerrainTuning::RegionX,
+                   tileZ / TerrainTuning::RegionZ};
+    return TerrainSampler(terrainNeighborhood(rc))
+        .sample(tileX, tileZ)
+        .surface_y;
 }

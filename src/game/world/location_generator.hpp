@@ -4,6 +4,7 @@
 #include "consts.hpp"
 #include "core/assets_api.hpp"
 #include "soil_generator.hpp"
+#include "terrain_sampler.hpp"
 #include "world/region.hpp"
 
 // Pure stateless generator — no ownership, no side effects.
@@ -13,24 +14,21 @@ class LocationGenerator {
     explicit LocationGenerator() {}
 
     // Fill one chunk. coord is in world-chunk space (region-offset included).
-    // regionOriginChunk is the coord of chunk (0,0) of the owning region —
-    // used to derive local XY position within the region for future noise.
+    // Optional immutable columns enable relief; omitted inputs keep flat
+    // fixtures.
     void generateChunk(Chunk& chunk, const ChunkCoord& coord,
                        const ChunkCoord& regionOriginChunk,
                        const Region& region,
                        const std::vector<RegionLayer>& layers,
-                       const SoilProfile& soil = {}) const;
+                       const SoilProfile& soil = {},
+                       const ChunkColumnInputs* columns = nullptr) const;
 
    private:
-    static int surfaceTileY(const Region& region) {
-        return region.land_height_m;
-    }
-
     const RegionLayer* layerAtDepth(const std::vector<RegionLayer>& layers,
                                     int depth_m) const;
 
     void generateColumn(Chunk& chunk, int localX, int localZ, int chunkBaseY,
                         const Region& region,
                         const std::vector<RegionLayer>& layers,
-                        const SoilColumn& soil) const;
+                        const SoilColumn& soil, int surfaceY) const;
 };

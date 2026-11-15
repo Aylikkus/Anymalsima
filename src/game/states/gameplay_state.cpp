@@ -57,7 +57,10 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     float centerX = (float(initial.coord.x) * regionTiles + regionTiles * 0.5f);
     float centerZ = (float(initial.coord.y) * regionTiles + regionTiles * 0.5f);
 
-    float centerY = initial.land_height_m + 10.0f;
+    float centerY =
+        chunkManager->generatedSurfaceY(static_cast<unsigned>(centerX),
+                                        static_cast<unsigned>(centerZ)) +
+        10.0f;
 
     camera.position = {centerX, centerY, centerZ};
     camera.pitch = -1.5f;

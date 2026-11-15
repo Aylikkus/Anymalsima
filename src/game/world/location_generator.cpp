@@ -14,16 +14,16 @@ const RegionLayer* LocationGenerator::layerAtDepth(
 void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
                                        int chunkBaseY, const Region& region,
                                        const std::vector<RegionLayer>& layers,
-                                       const SoilColumn& soil) const {
-    const int surfaceY = surfaceTileY(region);
-
+                                       const SoilColumn& soil,
+                                       int surfaceY) const {
     for (int localY = 0; localY < Chunk::SIZE_Y; ++localY) {
         const int tileY = chunkBaseY + localY;
         Tile& tile = chunk.tiles[localZ][localY][localX];
 
         if (tileY <= surfaceY) {
             int depth_m = surfaceY - tileY;
-            const RegionLayer* layer = layerAtDepth(layers, depth_m);
+            const RegionLayer* layer =
+                layerAtDepth(layers, region.land_height_m - tileY);
             for (int i = 0; i < soil.count; ++i) {
                 const auto& horizon = soil.layers[i];
                 if (depth_m >= horizon.depth_from_surface_m &&
@@ -55,16 +55,23 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
                                       const ChunkCoord& regionOriginChunk,
                                       const Region& region,
                                       const std::vector<RegionLayer>& layers,
-                                      const SoilProfile& soil) const {
+                                      const SoilProfile& soil,
+                                      const ChunkColumnInputs* columns) const {
     const int chunkBaseY = coord.y * Chunk::SIZE_Y;
 
     (void)regionOriginChunk;
     for (int localZ = 0; localZ < Chunk::SIZE_Z; ++localZ)
         for (int localX = 0; localX < Chunk::SIZE_X; ++localX) {
-            const auto cover = SoilGenerator::sample(
-                soil, region, int64_t(coord.x) * Chunk::SIZE_X + localX,
-                int64_t(coord.z) * Chunk::SIZE_Z + localZ);
-            generateColumn(chunk, localX, localZ, chunkBaseY, region, layers,
-                           cover);
+            const auto cover =
+                columns ? columns->columns[localZ * Chunk::SIZE_X + localX].soil
+                        : SoilGenerator::sample(
+                              soil, region,
+                              int64_t(coord.x) * Chunk::SIZE_X + localX,
+                              int64_t(coord.z) * Chunk::SIZE_Z + localZ);
+            generateColumn(
+                chunk, localX, localZ, chunkBaseY, region, layers, cover,
+                columns ? columns->columns[localZ * Chunk::SIZE_X + localX]
+                              .surface_y
+                        : region.land_height_m);
         }
 }

@@ -8,6 +8,7 @@ add_library(game
     world/world_generator.cpp
     world/world_generation_task.cpp
     world/location_generator.cpp
+    world/terrain_sampler.cpp
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp
