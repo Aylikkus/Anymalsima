@@ -3,6 +3,8 @@ project(Anymalsima)
 
 set(CMAKE_CXX_STANDARD 20)
 
+include(CTest)
+
 find_package(Intl REQUIRED)
 find_package(Gettext REQUIRED)
 
@@ -35,3 +37,7 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/external/bgfx.cmake-1.143-9241-532)
 add_subdirectory(${CMAKE_SOURCE_DIR}/external/miniaudio-0.11.25)
 
 add_subdirectory(src)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
