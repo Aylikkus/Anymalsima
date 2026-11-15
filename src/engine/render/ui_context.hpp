@@ -11,7 +11,7 @@
 #include "render/render_commands.hpp"
 #include "render/renderer_api.hpp"
 
-using ThreadPool = BS::thread_pool<BS::tp::none>;
+using ThreadPool = BS::thread_pool<BS::tp::priority>;
 
 constexpr float REFERENCE_WIDTH = 1920.0f;
 constexpr float REFERENCE_HEIGHT = 1080.0f;

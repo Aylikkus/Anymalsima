@@ -9,6 +9,8 @@ add_library(game
     world/world_generation_task.cpp
     world/location_generator.cpp
     world/chunk_mesher.cpp
+    world/chunk_manager.cpp
+    world/sunlight_propagator.cpp
     world/layers_generator.hpp
 )
 

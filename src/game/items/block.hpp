@@ -11,7 +11,7 @@
 struct BlockProperties {
     int hardness = 0;
     bool flammable = false;
-    uint8_t opacity = 15; // 0 - 15
+    uint8_t opacity = 15;  // 0 - 15
 };
 
 struct Block {
@@ -28,7 +28,7 @@ struct Block {
 inline void from_json(const Json& j, BlockProperties& p) {
     if (j.contains("hardness")) j.at("hardness").get_to(p.hardness);
     if (j.contains("flammable")) j.at("flammable").get_to(p.flammable);
-    if (j.contains("opacity")) j.at("transparent").get_to(p.opacity);
+    if (j.contains("opacity")) j.at("opacity").get_to(p.opacity);
 }
 
 inline void from_json(const Json& j, Block& b) {

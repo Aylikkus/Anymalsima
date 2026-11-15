@@ -9,7 +9,9 @@ TEST(sunlight_generated_ocean) {
     f.registerSlab({0, 24, 0});
     f.chunks.request({0, 23, 0});
     f.chunks.request({0, 24, 0});
+    f.chunks.update();
     f.wait();
+    f.chunks.update();
     CHECK(f.chunks.request({0, 23, 0}) != nullptr);
     CHECK(f.chunks.request({0, 24, 0}) != nullptr);
     CHECK(f.tile(8, SEA_LEVEL_Y, 8).isLiquid());

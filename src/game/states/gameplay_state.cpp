@@ -150,7 +150,10 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
 }
 
 void GameplayState::update(Game& game, float dt) {
+    chunkManager->setFocus(camera.position);
+    sunLight->setFocus(camera.position);
     requestChunksAroundCamera();
+    chunkManager->update();
     sunLight->update();
 
     // --- Tile debug raycast -------------------------------------------------

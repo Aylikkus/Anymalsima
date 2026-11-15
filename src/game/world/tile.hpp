@@ -17,15 +17,11 @@ struct TileLightning {
 struct Tile {
     uint8_t block_id = 0;  // 0 = air
     LiquidType liquid = LiquidType::None;
-    uint8_t liquidLevel = 0;   // 0-255
+    uint8_t liquidLevel = 0;  // 0-255
     TileLightning lightLevel;
 
-    bool isAir() const {
-        return block_id == 0 && liquid == LiquidType::None;
-    }
-    bool isVisible() const {
-        return block_id != 0;
-    }
+    bool isAir() const { return block_id == 0 && liquid == LiquidType::None; }
+    bool isVisible() const { return block_id != 0; }
     bool isSolid() const { return block_id != 0; }
     bool isLiquid() const { return liquid != LiquidType::None; }
 };

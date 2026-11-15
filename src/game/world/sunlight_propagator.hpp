@@ -1,706 +1,124 @@
 #pragma once
-#include <cstdint>
-#include <queue>
+
+#include <array>
+#include <future>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "chunk_manager.hpp"
-#include "consts.hpp"
 
+// Main-thread scheduler. Workers receive owned opacity/direct-light snapshots;
+// they never access ChunkManager, live tiles, or the propagator itself.
 class SunLightPropagator {
    public:
-    explicit SunLightPropagator(ChunkManager& chunks,
-                                const DataStorage<Block>& blocks,
-                                ThreadPool& pool)
-        : chunks(chunks), blocks(blocks), pool(pool) {
-        chunks.becameReady.connect([this](const ChunkCoord& coord) {
-            ColumnKey col{coord.x, coord.z};
+    SunLightPropagator(ChunkManager& chunks, const DataStorage<Block>& blocks,
+                       ThreadPool& pool);
+    ~SunLightPropagator();
+    SunLightPropagator(const SunLightPropagator&) = delete;
+    SunLightPropagator& operator=(const SunLightPropagator&) = delete;
 
-            if (progress.find(col) == progress.end()) {
-                ColumnProgress p;
-
-                int topY = this->chunks.getColumnTopY(col.x, col.z);
-
-                p.nextSlab =
-                    std::clamp(topY / (int)Chunk::SIZE_Y, 0, (int)Y_CHUNKS - 1);
-
-                progress[col] = p;
-            }
-        });
-    }
-
-    // Call once per frame from GameplayState::update(), after
-    // requestChunksAroundCamera().
-    void update() {
-        // Apply completed vertical lighting work.
-        applyFinishedColumns();
-
-        drainMissingSlabRequests();
-
-        for (auto& [col, prog] : progress) {
-            if (prog.inFlight) continue;
-            if (prog.done) continue;
-
-            if (!canAdvance(col, prog)) continue;
-
-            submitColumn(col, prog);
-        }
-    }
-
-    void drainMissingSlabRequests() {
-        std::vector<ChunkCoord> missing;
-        {
-            std::lock_guard<std::mutex> lk(missingMutex);
-            missing.swap(missingSlabRequests);
-        }
-        for (auto& c : missing) chunks.request(c);  // main thread only, safe
-    }
-
-    // Call when a tile changes (block placed/removed, liquid changes).
-    void markColumnDirty(unsigned cx, unsigned cz) {
-        ColumnKey col{cx, cz};
-
-        auto it = progress.find(col);
-
-        if (it == progress.end()) {
-            ColumnProgress p;
-
-            int topY = chunks.getColumnTopY(cx, cz);
-
-            p.nextSlab =
-                std::clamp(topY / (int)Chunk::SIZE_Y, 0, (int)Y_CHUNKS - 1);
-
-            progress[col] = p;
-
-            return;
-        }
-
-        ColumnProgress& prog = it->second;
-
-        ++prog.generation;
-
-        clearColumnLight(col);
-
-        prog.sunLevelInitialised = false;
-        prog.nextSlab =
-            std::clamp(chunks.getColumnTopY(cx, cz) / (int)Chunk::SIZE_Y, 0,
-                       (int)Y_CHUNKS - 1);
-
-        prog.done = false;
+    void update();
+    void setFocus(Vec3 value) { focus = value; }
+    void markColumnDirty(unsigned cx, unsigned cz);
+    bool isIdle() const;
+    bool hasDirect(ChunkCoord coord) const;
+    bool isComplete(ChunkCoord coord) const;
+    size_t inFlightCount() const {
+        return directJobs.size() + indirectJobs.size();
     }
 
    private:
-    struct ColumnKey {
-        unsigned x, z;
-        bool operator==(const ColumnKey& o) const {
-            return x == o.x && z == o.z;
-        }
-    };
-    struct ColumnKeyHash {
-        size_t operator()(const ColumnKey& k) const {
-            return std::hash<uint64_t>{}((uint64_t)k.x << 32 | k.z);
-        }
-    };
+    static constexpr int X = Chunk::SIZE_X;
+    static constexpr int Y = Chunk::SIZE_Y;
+    static constexpr int Z = Chunk::SIZE_Z;
+    static constexpr int VOLUME = X * Y * Z;
+    static constexpr int HALO = 14;
+    static constexpr int HX = X + 2 * HALO;
+    static constexpr int HY = Y + 2 * HALO;
+    static constexpr int HZ = Z + 2 * HALO;
+    using Light = std::array<uint8_t, VOLUME>;
 
-    struct ChunkBatchWrite {
+    struct State {
+        Light direct{};
+        uint64_t revision = 0;
+        bool directKnown = false;
+        bool complete = false;
+    };
+    struct Slab {
         ChunkCoord coord;
-
-        struct LocalWrite {
-            uint16_t lx;
-            uint16_t ly;
-            uint16_t lz;
-
-            uint8_t value;
-        };
-
-        std::vector<LocalWrite> writes;
+        Light opacity;
+    };
+    struct ChunkLight {
+        ChunkCoord coord;
+        Light light{};
+    };
+    struct DirectInput {
+        uint64_t column;
+        uint64_t revision;
+        int topSlab;
+        std::vector<Slab> slabs;
+    };
+    struct DirectResult {
+        uint64_t column;
+        uint64_t revision;
+        std::vector<ChunkLight> chunks;
+        std::vector<ChunkCoord> missing;
+    };
+    struct IndirectInput {
+        ChunkCoord coord;
+        uint64_t revision;
+        std::vector<uint8_t> opacity;
+        std::vector<uint8_t> light;
+    };
+    struct IndirectResult {
+        ChunkCoord coord;
+        uint64_t revision;
+        Light light;
+    };
+    struct DirectJob {
+        uint64_t column;
+        std::future<DirectResult> future;
+    };
+    struct IndirectJob {
+        ChunkCoord coord;
+        std::future<IndirectResult> future;
     };
 
-    struct LightNode {
-        int tx;
-        int ty;
-        int tz;
-        uint8_t value;
-    };
-
-    struct SunHorizontalNode {
-        int tx;
-        int ty;
-        int tz;
-        uint8_t value;
-    };
-
-    static uint64_t makeLightKey(int x, int y, int z) {
-        return ((uint64_t)(unsigned)x << 42) | ((uint64_t)(unsigned)y << 21) |
-               (uint64_t)(unsigned)z;
+    static int index(int x, int y, int z) { return (z * Y + y) * X + x; }
+    static int haloIndex(int x, int y, int z) { return (z * HY + y) * HX + x; }
+    static uint64_t columnKey(unsigned x, unsigned z) {
+        return (uint64_t{x} << 32) | z;
     }
+    static bool offset(ChunkCoord coord, int dx, int dy, int dz,
+                       ChunkCoord& out);
+    static DirectResult sweep(DirectInput input);
+    static IndirectResult spread(IndirectInput input);
+    uint8_t opacity(const Tile& tile) const;
+    void ready(const ChunkCoord& coord);
+    void removed(const ChunkCoord& coord);
+    void invalidateAround(const ChunkCoord& coord);
+    DirectInput snapshotColumn(uint64_t column);
+    IndirectInput snapshotHalo(const ChunkCoord& coord);
+    void collect();
+    void publish(ChunkCoord coord, const Light& light);
+    std::vector<uint64_t> dependencies(ChunkCoord coord) const;
+    ChunkCoord beneficiary(ChunkCoord slab) const;
 
-    struct FinishedLightColumn {
-        ColumnKey col;
-
-        std::vector<ChunkBatchWrite> chunkWrites;
-
-        uint8_t finalSunLevel[Chunk::SIZE_X][Chunk::SIZE_Z];
-
-        // Vertical light writes generated by the vertical sweep.
-        std::unordered_map<uint64_t, uint8_t> pendingVertical;
-
-        uint64_t generation;
-
-        int lowestSlab;
-    };
-
-    struct ColumnProgress {
-        uint8_t sunLevel[Chunk::SIZE_X][Chunk::SIZE_Z] = {};
-        bool sunLevelInitialised = false;
-
-        // Counts down from Y_CHUNKS-1 to -1.
-        int nextSlab = (int)Y_CHUNKS - 1;
-        bool inFlight = false;
-        bool done = false;
-
-        uint64_t generation = 0;
-    };
-
-    struct ChunkCache {
-        ChunkCoord coord{};
-        std::shared_ptr<Chunk> chunk;
-        bool valid = false;
-
-        Tile* get(ChunkManager& mgr, int tx, int ty, int tz) {
-            unsigned cx = tx / Chunk::SIZE_X, cy = ty / Chunk::SIZE_Y,
-                     cz = tz / Chunk::SIZE_Z;
-            ChunkCoord c{cx, cy, cz};
-            if (!valid || !(c == coord)) {
-                chunk = mgr.getChunkShared(c);
-                coord = c;
-                valid = true;
-            }
-            if (!chunk) return nullptr;
-            unsigned lx = tx - cx * Chunk::SIZE_X;
-            unsigned ly = ty - cy * Chunk::SIZE_Y;
-            unsigned lz = tz - cz * Chunk::SIZE_Z;
-            return &chunk->tiles[lz][ly][lx];
-        }
-    };
-
-    ChunkCoord getCoords(int tx, int ty, int tz) {
-        unsigned cx = tx / Chunk::SIZE_X, cy = ty / Chunk::SIZE_Y,
-                 cz = tz / Chunk::SIZE_Z;
-        return ChunkCoord(cx, cy, cz);
-    }
-
-    void sweepSlabReadOnly(const ColumnKey& col, unsigned slabY,
-                           uint8_t sunLevel[Chunk::SIZE_X][Chunk::SIZE_Z],
-                           FinishedLightColumn& result, ChunkCache& mainCache) {
-        constexpr int X = Chunk::SIZE_X, Y = Chunk::SIZE_Y, Z = Chunk::SIZE_Z;
-        int baseTX = (int)col.x * X;
-        int baseTZ = (int)col.z * Z;
-
-        for (int ly = Y - 1; ly >= 0; --ly) {
-            int worldTY = (int)slabY * Y + ly;
-            for (int lx = 0; lx < X; ++lx) {
-                for (int lz = 0; lz < Z; ++lz) {
-                    if (sunLevel[lx][lz] == 0) continue;
-
-                    int tx = baseTX + lx;
-                    int tz = baseTZ + lz;
-
-                    // Cached — locks only when crossing into a new chunk.
-                    const Tile* tile = mainCache.get(chunks, tx, worldTY, tz);
-                    if (!tile) continue;
-
-                    bool isAir =
-                        tile->block_id == 0 && tile->liquid == LiquidType::None;
-
-                    addLightWrite(result, tx, worldTY, tz, sunLevel[lx][lz]);
-
-                    if (!isAir) {
-                        uint8_t opacity = tileOpacity(*tile);
-                        if (opacity >= sunLevel[lx][lz])
-                            sunLevel[lx][lz] = 0;
-                        else
-                            sunLevel[lx][lz] -= opacity;
-                    }
-                }
-            }
-        }
-    }
-
-    void applyFinishedColumns() {
-        std::vector<FinishedLightColumn> batch;
-
-        {
-            std::lock_guard<std::mutex> lk(lightReadyMutex);
-            batch.swap(lightReadyQueue);
-        }
-
-        std::unordered_set<ChunkCoord> toMarkDirty;
-
-        for (auto& result : batch) {
-            auto progressIt = progress.find(result.col);
-
-            if (progressIt == progress.end()) {
-                continue;
-            }
-
-            ColumnProgress& prog = progressIt->second;
-
-            if (result.generation != prog.generation) {
-                prog.inFlight = false;
-                continue;
-            }
-
-            // ---------------------------------------------------------------
-            // Apply ALL lighting writes in one place.
-            // ---------------------------------------------------------------
-
-            for (auto& writeBatch : result.chunkWrites) {
-                bool ok =
-                    chunks.withChunkLocked(writeBatch.coord, [&](Chunk& chunk) {
-                        for (const auto& w : writeBatch.writes) {
-                            Tile& tile = chunk.tiles[w.lz][w.ly][w.lx];
-
-                            tile.lightLevel.sun_exposure = w.value;
-                        }
-                    });
-
-                if (ok) {
-                    toMarkDirty.insert(writeBatch.coord);
-                }
-            }
-
-            // ---------------------------------------------------------------
-            // Update column progress.
-            // ---------------------------------------------------------------
-
-            prog.inFlight = false;
-
-            memcpy(prog.sunLevel, result.finalSunLevel, sizeof(prog.sunLevel));
-
-            prog.sunLevelInitialised = true;
-
-            prog.nextSlab = result.lowestSlab - 1;
-
-            if (prog.nextSlab < 0) {
-                prog.done = true;
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // Mark modified chunks dirty once.
-        // ---------------------------------------------------------------
-
-        for (const ChunkCoord& coord : toMarkDirty) {
-            chunks.markDirty(coord);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    void clearColumnLight(const ColumnKey& col) {
-        constexpr int X = Chunk::SIZE_X;
-        constexpr int Y = Chunk::SIZE_Y;
-        constexpr int Z = Chunk::SIZE_Z;
-        int baseTX = (int)col.x * X;
-        int baseTZ = (int)col.z * Z;
-
-        int topY = chunks.getColumnTopY(col.x, col.z);
-        int topSlab = std::clamp(topY / (int)Y, 0, (int)Y_CHUNKS - 1);
-
-        // Slabs above topSlab are guaranteed untouched (still default 0) —
-        // no need to walk and re-zero chunks that were never written.
-        for (int slabY = topSlab; slabY >= 0; --slabY) {
-            if (!chunks.isReady({col.x, (unsigned)slabY, col.z})) continue;
-            for (int ly = 0; ly < Y; ++ly) {
-                int worldTY = slabY * Y + ly;
-                for (int lx = 0; lx < X; ++lx)
-                    for (int lz = 0; lz < Z; ++lz) {
-                        Tile* t =
-                            mutableTileAt(baseTX + lx, worldTY, baseTZ + lz);
-                        if (t) {
-                            t->lightLevel.sun_exposure = 0;
-                        }
-                    }
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    uint8_t tileOpacity(const Tile& t) {
-        uint8_t blockOp;
-        uint8_t liquidOp;
-        if (t.block_id != 0)
-            blockOp = blocks.get(t.block_id).properties.opacity;
-        else
-            blockOp = 0;
-        if (t.liquid == LiquidType::None)
-            liquidOp = 0;
-        else
-            liquidOp = 8;
-        return std::max(blockOp, liquidOp);
-    }
-
-    Tile* mutableTileAt(int tx, int ty, int tz) {
-        if (tx < 0 || ty < 0 || tz < 0) return nullptr;
-
-        unsigned cx = (unsigned)(tx / Chunk::SIZE_X);
-        unsigned cy = (unsigned)(ty / Chunk::SIZE_Y);
-        unsigned cz = (unsigned)(tz / Chunk::SIZE_Z);
-
-        unsigned lx = (unsigned)tx - cx * Chunk::SIZE_X;
-        unsigned ly = (unsigned)ty - cy * Chunk::SIZE_Y;
-        unsigned lz = (unsigned)tz - cz * Chunk::SIZE_Z;
-
-        Chunk* chunk = chunks.getChunk({cx, cy, cz});
-        if (!chunk) return nullptr;
-        return &chunk->tiles[lz][ly][lx];
-    }
-
-    ChunkCoord worldToChunk(int tx, int ty, int tz) const {
-        return {(unsigned)(tx / Chunk::SIZE_X), (unsigned)(ty / Chunk::SIZE_Y),
-                (unsigned)(tz / Chunk::SIZE_Z)};
-    }
-
-    bool isTransparent(const Tile& tile) const {
-        return tile.block_id == 0 && tile.liquid == LiquidType::None;
-    }
-
-    bool canAdvance(const ColumnKey& col, ColumnProgress& prog) {
-        if (prog.nextSlab < 0) return false;
-        // Top slab must be ready to start
-        if (!chunks.isReady({col.x, (unsigned)prog.nextSlab, col.z})) {
-            chunks.request({col.x, (unsigned)prog.nextSlab, col.z});
-            return false;
-        }
-        return true;
-    }
-
-    void submitColumn(const ColumnKey& col, ColumnProgress& prog) {
-        prog.inFlight = true;
-
-        uint8_t sunLevelSnapshot[Chunk::SIZE_X][Chunk::SIZE_Z];
-        memcpy(sunLevelSnapshot, prog.sunLevel, sizeof(prog.sunLevel));
-        bool initialised = prog.sunLevelInitialised;
-        int startSlab = prog.nextSlab;
-        ColumnKey colCopy = col;
-        uint64_t generation = prog.generation;
-
-        pool.detach_task([this, colCopy, sunLevelSnapshot, initialised,
-                          startSlab, generation]() mutable {
-            FinishedLightColumn result;
-            result.col = colCopy;
-            result.generation = generation;
-
-            uint8_t sunLevel[Chunk::SIZE_X][Chunk::SIZE_Z];
-            memcpy(sunLevel, sunLevelSnapshot, sizeof(sunLevel));
-
-            if (!initialised)
-                for (int lx = 0; lx < Chunk::SIZE_X; ++lx)
-                    for (int lz = 0; lz < Chunk::SIZE_Z; ++lz)
-                        sunLevel[lx][lz] = 15;
-
-            int slab = startSlab;
-            int lastCompletedSlab = startSlab + 1;
-
-            // Declared once for the whole column — persists across every
-            // slab so chunk lookups stay cached instead of re-locking per
-            // slab.
-            ChunkCache mainCache;
-
-            while (slab >= 0) {
-                auto chunkPtr = chunks.getChunkShared(
-                    {colCopy.x, (unsigned)slab, colCopy.z});
-
-                if (!chunkPtr) {
-                    {
-                        std::lock_guard<std::mutex> lk(missingMutex);
-                        missingSlabRequests.push_back(
-                            {colCopy.x, (unsigned)slab, colCopy.z});
-                    }
-                    break;
-                }
-
-                sweepSlabReadOnly(colCopy, (unsigned)slab, sunLevel, result,
-                                  mainCache);
-
-                lastCompletedSlab = slab;
-
-                // Once every column of this slab has hit 0, no lower slab
-                // can ever receive top-down light from this column — every
-                // tile below is still at its untouched default
-                // (sun_exposure = 0), so there's nothing left to compute or
-                // write. Horizontal light reaching those depths from a
-                // neighbouring column's own BFS still applies independently
-                // via the monotonic merge in applyFinishedColumns.
-                bool allDark = true;
-                for (int lx = 0; lx < Chunk::SIZE_X && allDark; ++lx)
-                    for (int lz = 0; lz < Chunk::SIZE_Z; ++lz)
-                        if (sunLevel[lx][lz] != 0) {
-                            allDark = false;
-                            break;
-                        }
-
-                if (allDark) {
-                    lastCompletedSlab = 0;  // treat as having reached bedrock
-                    break;
-                }
-
-                --slab;
-            }
-
-            result.lowestSlab = lastCompletedSlab;
-
-            memcpy(result.finalSunLevel, sunLevel,
-                   sizeof(result.finalSunLevel));
-
-            // ---------------------------------------------------------------
-            // SECOND SUNLIGHT PASS
-            //
-            // The vertical pass has established direct sunlight.
-            //
-            // Now propagate that sunlight horizontally through the world.
-            // This remains entirely inside the worker and modifies only
-            // result.pendingVertical.
-            //
-            // Chunk lighting is still untouched until applyFinishedColumns()
-            // runs on the main thread.
-            // ---------------------------------------------------------------
-
-            ChunkCache horizontalCache;
-
-            propagateHorizontalSunlight(result, horizontalCache);
-
-            // Build chunk-local vertical write batches.
-            // Since the worker already knows which column/slab it
-            // processed, group writes directly by chunk coordinate.
-
-            std::unordered_map<ChunkCoord, size_t> batchIndex;
-
-            for (auto& [key, value] : result.pendingVertical) {
-                int tx = (int)(key >> 42);
-                int ty = (int)((key >> 21) & ((1u << 21) - 1));
-                int tz = (int)(key & ((1u << 21) - 1));
-
-                ChunkCoord cc{(unsigned)(tx / Chunk::SIZE_X),
-                              (unsigned)(ty / Chunk::SIZE_Y),
-                              (unsigned)(tz / Chunk::SIZE_Z)};
-
-                auto [it, inserted] =
-                    batchIndex.emplace(cc, result.chunkWrites.size());
-
-                if (inserted) {
-                    result.chunkWrites.push_back({});
-                    result.chunkWrites.back().coord = cc;
-                }
-
-                ChunkBatchWrite& batch = result.chunkWrites[it->second];
-
-                batch.writes.push_back({(uint16_t)(tx % Chunk::SIZE_X),
-                                        (uint16_t)(ty % Chunk::SIZE_Y),
-                                        (uint16_t)(tz % Chunk::SIZE_Z), value});
-            }
-
-            {
-                std::lock_guard<std::mutex> lk(lightReadyMutex);
-                lightReadyQueue.push_back(std::move(result));
-            }
-        });
-    }
-
-    void propagateHorizontalSunlight(FinishedLightColumn& result,
-                                     ChunkCache& cache) {
-        std::queue<SunHorizontalNode> queue;
-
-        // ------------------------------------------------------------
-        // Seed the propagation from every tile that has direct
-        // sunlight after the vertical pass.
-        //
-        // A value of 15 means this tile has direct access to sunlight.
-        //
-        // Important:
-        // We seed BOTH air and solid blocks.
-        //
-        // This is what allows something like a pillar standing in
-        // open air to receive sunlight from the surrounding air volume.
-        // ------------------------------------------------------------
-
-        for (const auto& [key, value] : result.pendingVertical) {
-            if (value != 15) continue;
-
-            const int tx = (int)(key >> 42);
-            const int ty = (int)((key >> 21) & ((1u << 21) - 1));
-            const int tz = (int)(key & ((1u << 21) - 1));
-
-            queue.push({tx, ty, tz, 15});
-        }
-
-        if (queue.empty()) return;
-
-        // ------------------------------------------------------------
-        // Stores the strongest sunlight found for a tile during THIS
-        // horizontal propagation pass.
-        //
-        // This is local worker state. We never modify the actual
-        // chunk lighting values here.
-        //
-        // Starting from pendingVertical also means we preserve the
-        // vertical pass result as the baseline.
-        // ------------------------------------------------------------
-
-        std::unordered_map<uint64_t, uint8_t> propagated;
-        propagated.reserve(result.pendingVertical.size() * 2);
-
-        for (const auto& [key, value] : result.pendingVertical) {
-            propagated.emplace(key, value);
-        }
-
-        // ------------------------------------------------------------
-        // We intentionally propagate only horizontally.
-        //
-        // The vertical direction has already been solved by your
-        // top-to-bottom sunlight sweep.
-        //
-        // This avoids doing the same vertical work twice.
-        // ------------------------------------------------------------
-
-        constexpr int DX[4] = {1, -1, 0, 0};
-
-        constexpr int DZ[4] = {0, 0, 1, -1};
-
-        while (!queue.empty()) {
-            SunHorizontalNode node = queue.front();
-            queue.pop();
-
-            if (node.value == 0) continue;
-
-            for (int dir = 0; dir < 4; ++dir) {
-                const int nx = node.tx + DX[dir];
-                const int ny = node.ty;
-                const int nz = node.tz + DZ[dir];
-
-                // ----------------------------------------------------
-                // The neighbour may belong to another chunk.
-                //
-                // ChunkCache handles the world -> chunk/local
-                // conversion and keeps the current chunk cached.
-                // ----------------------------------------------------
-
-                Tile* tile = cache.get(chunks, nx, ny, nz);
-
-                if (!tile) continue;
-
-                // ----------------------------------------------------
-                // The sunlight reaching the neighbour.
-                //
-                // A tile receives the current light value first.
-                // This matches the semantics of your vertical pass:
-                //
-                //     write current light
-                //     then apply opacity for propagation beyond it
-                //
-                // So an opaque block directly exposed to sun still
-                // receives the full 15.
-                // ----------------------------------------------------
-
-                const uint8_t receivedLight = node.value;
-
-                const uint64_t key = makeLightKey(nx, ny, nz);
-
-                auto it = propagated.find(key);
-
-                // ----------------------------------------------------
-                // If this tile already has the same or stronger light,
-                // this path doesn't improve anything.
-                // ----------------------------------------------------
-
-                if (it != propagated.end() && it->second >= receivedLight) {
-                    continue;
-                }
-
-                // ----------------------------------------------------
-                // This is the strongest sunlight we've found for the
-                // tile so far.
-                // ----------------------------------------------------
-
-                propagated[key] = receivedLight;
-
-                // ----------------------------------------------------
-                // Store it into the final worker result immediately.
-                //
-                // If some later path gives the tile stronger light,
-                // addLightWrite() will replace the lower value.
-                // ----------------------------------------------------
-
-                addLightWrite(result, nx, ny, nz, receivedLight);
-
-                // ----------------------------------------------------
-                // Now determine how much sunlight can continue THROUGH
-                // this tile.
-                //
-                // Air has zero opacity, so:
-                //
-                //     15 air -> 15
-                //
-                // A block may reduce the value depending on its
-                // configured opacity.
-                //
-                // This exactly follows tileOpacity() and the rules
-                // already used by sweepSlabReadOnly().
-                // ----------------------------------------------------
-
-                uint8_t nextLight = receivedLight;
-
-                if (!tile->isAir()) {
-                    const uint8_t opacity = tileOpacity(*tile);
-
-                    if (opacity >= nextLight)
-                        nextLight = 0;
-                    else
-                        nextLight -= opacity;
-                }
-
-                if (nextLight == 0) continue;
-
-                // ----------------------------------------------------
-                // Continue horizontally.
-                // ----------------------------------------------------
-
-                queue.push({nx, ny, nz, nextLight});
-            }
-        }
-    }
-
-    void addLightWrite(FinishedLightColumn& result, int tx, int ty, int tz,
-                       uint8_t value) {
-        uint64_t key = makeLightKey(tx, ty, tz);
-
-        auto& map = result.pendingVertical;
-
-        auto it = map.find(key);
-
-        if (it != map.end()) {
-            if (value <= it->second) return;
-
-            it->second = value;
-            return;
-        }
-
-        map.emplace(key, value);
-    }
-
-    // -----------------------------------------------------------------------
     ChunkManager& chunks;
     const DataStorage<Block>& blocks;
-
-    std::unordered_map<ColumnKey, ColumnProgress, ColumnKeyHash> progress;
-
-    std::mutex lightReadyMutex;
-    std::vector<FinishedLightColumn> lightReadyQueue;
-    std::unordered_set<ColumnKey, ColumnKeyHash> columnsInFlight;
-
-    std::mutex missingMutex;
-    std::vector<ChunkCoord> missingSlabRequests;
-
     ThreadPool& pool;
+    Signal<const ChunkCoord&>::Connection readyConnection;
+    Signal<const ChunkCoord&>::Connection removedConnection;
+    std::unordered_map<ChunkCoord, State> states;
+    std::unordered_map<uint64_t, uint64_t> columnRevisions;
+    std::unordered_map<uint64_t, std::unordered_set<ChunkCoord>> columnChunks;
+    std::unordered_set<uint64_t> pendingDirect;
+    CameraWorkQueue pendingIndirect;
+    std::unordered_set<ChunkCoord> requested;
+    std::vector<DirectJob> directJobs;
+    std::vector<IndirectJob> indirectJobs;
+    uint64_t nextRevision = 0;
+    uint64_t dispatches = 0;
+    Vec3 focus{0, 0, 0};
 };

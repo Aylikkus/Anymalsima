@@ -105,7 +105,7 @@ TEST(camera_direction) {
 }
 
 TEST(sunlight_open_column) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     f.light();
@@ -113,10 +113,10 @@ TEST(sunlight_open_column) {
 }
 
 TEST(sunlight_opaque_roof) {
-    test::WorldFixture f;
-    // Retain Tile's actual default lighting, as newly generated chunks do.
-    f.load({0, 0, 0}, Tile{}.lightLevel.sun_exposure);
-    f.load({0, 1, 0}, Tile{}.lightLevel.sun_exposure);
+    test::SunlightFixture f;
+    // Deliberately retain obsolete full light to test replacement with zeros.
+    f.load({0, 0, 0}, 15);
+    f.load({0, 1, 0}, 15);
     for (int z = 0; z < 16; ++z)
         for (int x = 0; x < 16; ++x) f.tile(x, 24, z).block_id = 1;
     f.light();
@@ -127,7 +127,7 @@ TEST(sunlight_opaque_roof) {
 }
 
 TEST(sunlight_partial_opacity) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     // Entire planes prevent lateral light from bypassing the attenuator.
@@ -144,7 +144,7 @@ TEST(sunlight_partial_opacity) {
 }
 
 TEST(sunlight_water) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     for (int z = 0; z < 16; ++z)
@@ -161,7 +161,7 @@ TEST(sunlight_water) {
 }
 
 TEST(sunlight_slab_seam) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     for (int z = 0; z < 16; ++z)
@@ -173,22 +173,19 @@ TEST(sunlight_slab_seam) {
 }
 
 TEST(sunlight_late_slab) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.registerSlab({0, 0, 0});
     f.load({0, 1, 0});
-    f.light(2);  // lower slab is requested after the worker finds it missing
-    f.wait();
-    CHECK(!f.chunks.isReady({0, 0, 0}));
-    auto* lower = f.chunks.request({0, 0, 0});
-    CHECK(lower != nullptr);
-    test::fill(*lower);
+    f.light();
+    CHECK(!f.chunks.isReady(f.coord({0, 0, 0})));
+    f.load({0, 0, 0});
     f.light();
     f.expectSun(8, 15, 8, 15);
     f.expectSun(8, 0, 8, 15);
 }
 
 TEST(sunlight_horizontal) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     // A short tunnel opens onto a sunlit shaft at x=7. Its roof blocks
@@ -204,7 +201,7 @@ TEST(sunlight_horizontal) {
 }
 
 TEST(sunlight_dirty_column) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     f.light();
@@ -222,7 +219,7 @@ TEST(sunlight_dirty_column) {
 }
 
 TEST(sunlight_stale_result) {
-    test::WorldFixture f;
+    test::SunlightFixture f;
     f.load({0, 0, 0});
     f.load({0, 1, 0});
     f.sunlight.update();

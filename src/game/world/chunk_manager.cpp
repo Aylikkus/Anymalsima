@@ -1,0 +1,280 @@
+#include "chunk_manager.hpp"
+
+ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
+                           const ChunkMesher* mesher, const World& world,
+                           IAssets* assets)
+    : generator(gen),
+      pool(pool),
+      mesher(mesher),
+      layersGenerator(world.genSettings, assets) {}
+
+ChunkManager::~ChunkManager() {
+    for (auto& job : generationJobs) job.future.wait();
+    for (auto& job : meshJobs) job.future.wait();
+}
+
+void ChunkManager::registerChunk(const ChunkCoord& coord,
+                                 const ChunkCoord& origin,
+                                 const Region* region) {
+    if (chunks.contains(coord)) unregister(coord);
+    auto& handle = chunks[coord];
+    handle.identity = ++nextIdentity;
+    pending[coord] = {origin, region, std::nullopt};
+    if (!regionLayers.contains(region->coord))
+        regionLayers[region->coord] = layersGenerator.get(*region);
+    const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
+    columnTopY.try_emplace(column, region->land_height_m);
+}
+
+Chunk* ChunkManager::request(const ChunkCoord& coord) {
+    auto it = chunks.find(coord);
+    if (it == chunks.end()) return nullptr;
+    if (it->second.state == ChunkState::Ready) return it->second.data.get();
+    it->second.state = ChunkState::Queued;
+    // A submitted job is already represented by this handle's identity.
+    if (std::none_of(generationJobs.begin(), generationJobs.end(),
+                     [&](const auto& job) {
+                         return job.coord == coord &&
+                                job.identity == it->second.identity;
+                     }))
+        generationQueue.insert(coord);
+    return nullptr;
+}
+
+Chunk* ChunkManager::requestLighting(const ChunkCoord& coord,
+                                     ChunkCoord beneficiary) {
+    if (auto it = pending.find(coord); it != pending.end())
+        it->second.beneficiary = beneficiary;
+    return request(coord);
+}
+
+bool ChunkManager::isRegistered(const ChunkCoord& coord) const {
+    return chunks.contains(coord);
+}
+bool ChunkManager::isReady(const ChunkCoord& coord) const {
+    auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready;
+}
+Chunk* ChunkManager::getChunk(const ChunkCoord& coord) {
+    auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready
+               ? it->second.data.get()
+               : nullptr;
+}
+std::shared_ptr<Chunk> ChunkManager::getChunkShared(const ChunkCoord& coord) {
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready
+               ? it->second.data
+               : nullptr;
+}
+const Tile* ChunkManager::tileAt(int x, int y, int z) {
+    if (x < 0 || y < 0 || z < 0) return nullptr;
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    auto* chunk = getChunk({static_cast<unsigned>(x / Chunk::SIZE_X),
+                            static_cast<unsigned>(y / Chunk::SIZE_Y),
+                            static_cast<unsigned>(z / Chunk::SIZE_Z)});
+    return chunk ? &chunk->tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y]
+                                [x % Chunk::SIZE_X]
+                 : nullptr;
+}
+void ChunkManager::unregister(const ChunkCoord& coord) {
+    const bool existed = chunks.erase(coord) != 0;
+    pending.erase(coord);
+    generationQueue.erase(coord);
+    meshQueue.erase(coord);
+    // Submitted jobs own all their inputs. Their identities prevent publication
+    // into a replacement chunk, and unloading never waits for a worker.
+    if (existed) removed.emit(coord);
+}
+void ChunkManager::markDirty(const ChunkCoord& coord, bool urgent) {
+    auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
+    auto& handle = it->second;
+    handle.dirtyPending = true;
+    handle.meshUrgent |= urgent;
+    ++handle.meshRevision;
+    if (mesher) meshQueue.insert(coord);
+}
+void ChunkManager::markAllDirty() {
+    for (auto& [coord, handle] : chunks)
+        if (handle.state == ChunkState::Ready) markDirty(coord);
+}
+int ChunkManager::getColumnTopY(unsigned x, unsigned z) const {
+    auto it = columnTopY.find((uint64_t{x} << 32) | z);
+    return it == columnTopY.end() ? Y_CHUNKS * Chunk::SIZE_Y - 1 : it->second;
+}
+void ChunkManager::raiseColumnTopY(unsigned x, unsigned z, int y) {
+    auto& top = columnTopY[(uint64_t{x} << 32) | z];
+    top = std::max(top, y);
+}
+
+bool ChunkManager::canMesh(ChunkCoord coord) const {
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready ||
+        it->second.meshState == MeshState::Queued)
+        return false;
+    if (it->second.meshState == MeshState::Built) return true;
+    const ChunkCoord neighbors[6] = {
+        {coord.x + 1, coord.y, coord.z}, {coord.x - 1, coord.y, coord.z},
+        {coord.x, coord.y + 1, coord.z}, {coord.x, coord.y - 1, coord.z},
+        {coord.x, coord.y, coord.z + 1}, {coord.x, coord.y, coord.z - 1}};
+    return std::all_of(std::begin(neighbors), std::end(neighbors),
+                       [&](auto neighbor) { return isReady(neighbor); });
+}
+
+void ChunkManager::submitMesh(ChunkCoord coord) {
+    auto& handle = chunks.at(coord);
+    auto data = std::make_shared<Chunk>(*handle.data);
+    std::unordered_map<ChunkCoord, std::shared_ptr<Chunk>> neighbors;
+    const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                               {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    for (const auto& offset : offsets) {
+        const int64_t x = int64_t{coord.x} + offset[0];
+        const int64_t y = int64_t{coord.y} + offset[1];
+        const int64_t z = int64_t{coord.z} + offset[2];
+        if (x < 0 || y < 0 || z < 0) continue;
+        ChunkCoord neighbor{static_cast<unsigned>(x), static_cast<unsigned>(y),
+                            static_cast<unsigned>(z)};
+        if (auto* chunk = getChunk(neighbor))
+            neighbors[neighbor] = std::make_shared<Chunk>(*chunk);
+    }
+    const auto identity = handle.identity, revision = handle.meshRevision;
+    const auto priority = handle.meshUrgent ? BS::pr::high : BS::pr::normal;
+    auto future = pool.submit_task(
+        [coord, data, neighbors = std::move(neighbors), builder = *mesher,
+         identity, revision]() {
+            auto mesh = builder.build(
+                *data, coord, [&](int x, int y, int z) -> const Tile* {
+                    if (x < 0 || y < 0 || z < 0) return nullptr;
+                    ChunkCoord c{static_cast<unsigned>(x / Chunk::SIZE_X),
+                                 static_cast<unsigned>(y / Chunk::SIZE_Y),
+                                 static_cast<unsigned>(z / Chunk::SIZE_Z)};
+                    auto it = neighbors.find(c);
+                    return it == neighbors.end()
+                               ? nullptr
+                               : &it->second->tiles[z % Chunk::SIZE_Z]
+                                                   [y % Chunk::SIZE_Y]
+                                                   [x % Chunk::SIZE_X];
+                });
+            return FinishedMesh{coord, std::move(mesh), identity, revision};
+        },
+        priority);
+    meshJobs.push_back({coord, identity, std::move(future)});
+    handle.meshState = MeshState::Queued;
+    handle.dirtyPending = false;
+    handle.meshUrgent = false;
+    meshQueue.erase(coord);
+}
+
+void ChunkManager::collect() {
+    using namespace std::chrono_literals;
+    for (size_t i = 0; i < generationJobs.size();) {
+        if (generationJobs[i].future.wait_for(0s) !=
+            std::future_status::ready) {
+            ++i;
+            continue;
+        }
+        auto job = std::move(generationJobs[i]);
+        generationJobs.erase(generationJobs.begin() + i);
+        std::shared_ptr<Chunk> data;
+        try {
+            data = job.future.get();
+        } catch (...) {
+            if (auto it = chunks.find(job.coord);
+                it != chunks.end() && it->second.identity == job.identity)
+                generationQueue.insert(job.coord);
+            throw;
+        }
+        auto it = chunks.find(job.coord);
+        if (it == chunks.end() || it->second.identity != job.identity) continue;
+        {
+            std::lock_guard<std::mutex> lock(tileAtMutex);
+            it->second.data = std::move(data);
+            it->second.state = ChunkState::Ready;
+        }
+        pending.erase(job.coord);
+        markDirty(job.coord);
+        becameReady.emit(job.coord);
+    }
+    for (size_t i = 0; i < meshJobs.size();) {
+        if (meshJobs[i].future.wait_for(0s) != std::future_status::ready) {
+            ++i;
+            continue;
+        }
+        auto job = std::move(meshJobs[i]);
+        meshJobs.erase(meshJobs.begin() + i);
+        FinishedMesh result;
+        try {
+            result = job.future.get();
+        } catch (...) {
+            if (auto it = chunks.find(job.coord);
+                it != chunks.end() && it->second.identity == job.identity) {
+                it->second.meshState =
+                    it->second.initialised ? MeshState::Built : MeshState::None;
+                markDirty(job.coord);
+            }
+            throw;
+        }
+        auto it = chunks.find(result.coord);
+        if (it == chunks.end() || it->second.identity != result.identity)
+            continue;
+        auto& handle = it->second;
+        handle.meshState = MeshState::Built;
+        if (handle.meshRevision != result.revision) {
+            meshQueue.insert(result.coord);
+            continue;
+        }
+        readyMeshes.push_back(std::move(result));
+    }
+}
+
+void ChunkManager::update() {
+    collect();
+    while (generationJobs.size() < 4 && !generationQueue.empty()) {
+        auto next = generationQueue.best(
+            focus, (generationDispatches + 1) % 16 == 0,
+            [](auto) { return true; },
+            [&](auto coord) {
+                const auto anchor =
+                    pending.at(coord).beneficiary.value_or(coord);
+                // A camera moving into a former sky prerequisite must not
+                // demote that chunk to the old beneficiary's distant height.
+                return CameraWorkQueue::distance(coord, focus) <
+                               CameraWorkQueue::distance(anchor, focus)
+                           ? coord
+                           : anchor;
+            });
+        const auto coord = *next;
+        const auto& info = pending.at(coord);
+        const auto identity = chunks.at(coord).identity;
+        auto future = pool.submit_task(
+            [generator = generator, coord, origin = info.regionOrigin,
+             region = *info.region,
+             layers = regionLayers.at(info.region->coord)] {
+                auto result = std::make_shared<Chunk>();
+                generator.generateChunk(*result, coord, origin, region, layers);
+                return result;
+            },
+            info.beneficiary ? BS::pr::high : BS::pr::normal);
+        generationJobs.push_back({coord, identity, std::move(future)});
+        generationQueue.erase(coord);
+        ++generationDispatches;
+    }
+    while (meshJobs.size() < 2 && mesher) {
+        auto next = meshQueue.best(
+            focus, (meshDispatches + 1) % 16 == 0,
+            [&](auto coord) { return canMesh(coord); },
+            [](auto coord) { return coord; });
+        if (!next) break;
+        submitMesh(*next);
+        ++meshDispatches;
+    }
+}
+
+MeshHandle* ChunkManager::getMesh(const ChunkCoord& coord) {
+    auto it = chunks.find(coord);
+    // Keep the current uploaded mesh visible while its replacement is built.
+    return it == chunks.end() || !it->second.initialised ? nullptr
+                                                         : &it->second.mesh;
+}

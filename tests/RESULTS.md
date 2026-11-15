@@ -1,69 +1,107 @@
-# Initial gameplay test results
+# Gameplay tests and camera-priority lighting results
 
-Tested against the working tree on 2026-11-15, including pre-existing edits in
-`src/game/world/tile.hpp` and `sunlight_propagator.hpp`. No gameplay fixes were
-made as part of adding the suite. Failures remain enabled as regression tests.
+Verified on 2026-11-15. All original sunlight regressions remain fixed. The suite
+now contains 72 cases, including 14 new scheduling/streaming regressions.
 
-Debug (Clang 22) and Release (GCC 16): **33 passed, 4 failed** in each build,
-37 discovered cases, about 0.15 and 0.08 seconds respectively for execution.
-Both builds report the same four failures. `BUILD_TESTING=OFF` configuration was
-also checked: it omits the `world_logic_tests` target.
-
-| Failing CTest case | Expected | Observed |
+| Configuration | Result | Execution time |
 | --- | --- | --- |
-| `game.world.sunlight_opaque_roof` | Sunlight 0 below an opaque roof at `(8,23,8)` | 15 |
-| `game.world.sunlight_horizontal` | Positive sunlight at open tunnel entrance `(8,20,8)` | 0 |
-| `game.world.sunlight_generated_ocean` | Sunlight 7 at `(8,383,8)`, after entering water at sea level 384 | 15 |
-| `game.items.block_explicit_opacity` | Parse `properties.opacity = 3` | Throws: key `transparent` not found |
+| Debug, Clang 22 | 72 passed, 0 failed | about 0.62 s |
+| Release, GCC 16 | 72 passed, 0 failed | about 0.28 s |
+| RelWithDebInfo, GCC 16, ASan + UBSan | 72 passed, 0 failed | about 2.05 s |
 
-## Reproductions and code findings
+The sanitizer run reported no address, leak, or undefined-behavior errors. UBSan
+terminates on its first error. Sanitizer execution ran outside the restricted
+sandbox so LeakSanitizer could inspect processes. The application target builds.
 
-**Opaque roof:** Two air chunks, Y=0..31, retain the actual `Tile` default
-exposure. An opaque plane covers Y=24. After lighting, the roof and air above
-receive 15, but air below also remains at 15. `TileLightning::sun_exposure`
-defaults to 15. `SunLightPropagator::sweepSlabReadOnly` skips cells once their
-incoming light reaches zero, and the all-dark early exit skips lower slabs.
-Those untouched cells retain their initial exposure. The initial-lighting path
-does not clear them as the dirty-column path does.
+## Camera-priority benchmark
 
-**Tunnel entrance:** Air starts dark. A roof at Y=21 covers X=8..15 in one chunk
-column. The adjacent shaft at `(7,20,8)` receives sunlight 15, but the air at
-`(8,20,8)` remains dark. The call to `propagateHorizontalSunlight` in
-`SunLightPropagator::submitColumn` is currently commented out. The test requires
-positive lateral light without specifying its exact falloff.
+Release/GCC 16, eight workers, 4,913 preloaded chunks (radius eight), with identical
+explicit-air contents. The baseline uses pre-priority source snapshots saved
+before edits under `build/lighting-baseline/`; it runs the same benchmark source
+with `LIGHTING_BASELINE`. Runs were performed sequentially after builds/tests.
 
-**Shallow ocean:** This integration case uses real generation and default tile
-lighting, with seabed Y=382 and sea level Y=384. It produces water at Y=383 and
-Y=384. With water opacity 8, the incoming sequence should be 15, 7, 0 at Y=384,
-383, 382 respectively. `ChunkManager::registerChunk` records column top from
-`region.land_height_m`, and the sunlight propagator starts at that height's slab
-(23), below the top water slab (24). Thus attenuation through the top water cell
-is skipped. This is separate from the default-light shadow problem; adjusting
-the start height alone would not fix untouched dark cells below opaque terrain.
+| Scenario / implementation | First direct light | Complete target light | Full backlog |
+| --- | --- | --- | --- |
+| Startup, baseline | 2,040 updates / 4,719 ms | 2,040 updates / 4,719 ms | 2,603 updates / 6,059 ms |
+| Startup, camera priority | 1 update / 4.4 ms | 3 updates / 13.3 ms | 1,039 updates / 4,387 ms |
+| Teleport, baseline | 742 updates / 1,725 ms | 742 updates / 1,725 ms | 2,603 updates / 7,124 ms |
+| Teleport, camera priority | 1 update / 5.3 ms | 2 updates / 10.5 ms | 860 updates / 3,730 ms |
 
-**Block opacity:** The minimal input is:
+Startup measures the central chunk. Teleport changes focus to a corner at update
+eight; target latencies are measured after the jump, while full-backlog figures
+include the entire run. Baseline direct light appears only with final indirect
+publication, so those two baseline milestones coincide.
 
-```json
-{"name":"glass","material":"glass","properties":{"opacity":3}}
+These are headless scheduler measurements, not game-loading or GPU frame times.
+Each update has a worker completion barrier, with no imposed frame cadence.
+Target counts are update intervals from the initial dispatch or camera jump;
+the first dispatch uses index zero.
+Generation/preload, rendering, and meshing are excluded. The 2 ms dispatch budget
+and runtime load affect full-backlog update counts and timings; no numeric timing
+threshold is asserted in CTest. In particular, these millisecond values do not
+promise an equivalent end-to-end visual startup time.
+
+Reproduce the current benchmark with:
+
+```bash
+cmake --build build/tests-release --target lighting_benchmark --parallel 4
+./build/tests-release/tests/lighting_benchmark
+./build/tests-release/tests/lighting_benchmark teleport
 ```
 
-`from_json(BlockProperties&)` checks `contains("opacity")` but then reads
-`at("transparent")`. This prevents explicit opacity definitions from loading.
-Lighting fixtures use typed block definitions so this parser error does not
-prevent testing the propagation rules independently.
+The saved baseline executable is `build/lighting-baseline/lighting_benchmark` and
+accepts the same scenario argument. Build-directory snapshots are local artifacts,
+not an additional production lighting implementation.
 
-## Validation limits
+## Scheduling behavior verified
 
-Address/undefined-behavior sanitizer instrumentation compiled, but linking failed:
-the local GCC installation references `/usr/lib64/libasan.so.8.0.0`, which is
-absent. No sanitizer execution results are claimed. The optional sanitizer CMake
-switch remains available for a machine with the runtime installed.
+- Direct sunlight publishes progressively for nearby chunks. Indirect jobs wait
+  for current local halo sources rather than all distant column sweeps.
+- Pending work is reranked from the current camera position, including vertical
+  moves and teleports. Camera movement preserves valid existing lighting.
+- Column-ready notifications preserve valid sources. Changed direct buffers
+  invalidate dependent halos; the column index avoids scanning every ready chunk
+  to snapshot a single column.
+- Sky generation inherits beneficiary priority. If the camera moves into that
+  sky slab, its own proximity can take precedence over the earlier beneficiary.
+- Generation and mesh queues stay outside the worker pool until selected.
+  Submission caps are four generation jobs, two mesh jobs, and 1–8 lighting jobs
+  based on worker count. Lighting dispatch checks a 2 ms preparation budget
+  between jobs, allowing one job to ensure progress.
+- Lighting, prerequisite generation, and newly lit remeshes use the shared pool's
+  high-priority tier. Every sixteenth dispatch advances the oldest pending work.
+- Generation and mesh workers own snapshots. Identity/revision checks reject
+  obsolete completions after replacement or edits. Unloading does not wait for
+  submitted generation work, and existing uploaded geometry stays visible while
+  remeshing.
 
-Compiler warnings exposed existing unused variables, a pessimizing move in layer
-generation, and signed/unsigned comparison in data storage; these were left
-unchanged with production code. Tests require no manual game launch. Full
-planetary generation, rendering and concurrent teardown remain outside this suite.
+Promise-gated worker tests and single-worker fixtures verify priority/caps without
+sleep-based races. Tests cover near-first publication, local dependencies,
+continuous arrivals, stable request age, background progress, focus changes,
+replacement, urgent pool work, and remesh selection.
 
-Run all cases with the commands in [README.md](README.md), or reproduce any row
-with `ctest --test-dir build -R '<case-name>' -V`. The latest full output is also
-saved by CTest in `build/Testing/Temporary/LastTest.log`.
+## Existing lighting correctness
+
+The previous roof-shadow, lateral propagation, generated-ocean, and opacity-JSON
+failures still pass. Exact-value tests cover both directions of X/Y/Z boundaries,
+a bend crossing all three axes, opacity/water attenuation, competing sources,
+maximum range, opening/closing passages, late neighbors, missing upper slabs,
+source unload/reload, stale results, raised bounds, and teardown.
+
+Direct light and final exposure remain separate. Indirect jobs use a 14-tile halo
+and six-direction opacity/distance attenuation; camera priority changes scheduling
+and publication, not the settled illumination rules.
+
+## Commands and limits
+
+See [README.md](README.md) for configuration and sanitizer commands. Each build's
+latest full CTest output is in `Testing/Temporary/LastTest.log`.
+
+```bash
+ctest --test-dir build -L gameplay --output-on-failure --no-tests=error
+ctest --test-dir build -L priority --output-on-failure --no-tests=error
+```
+
+GPU appearance and visual startup timing, full planetary-generation correctness,
+every data catalog/seed, and ThreadSanitizer coverage were not validated. Existing
+warnings in layer/noise generation and data storage remain outside these changes.
