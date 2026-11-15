@@ -9,6 +9,8 @@ Runtime resources and JSON definitions live in `assets/`; shader sources live in
 When implementing/refining new/existing features read `IDEA.md` for lore-specific details and vision of the project as a whole.
 You can edit `IDEA.md` only after approval and careful planning with me. 
 
+All `CLAUDE.md` files are respective symlinks to `AGENTS.md` files. `.claude` directory is a symlink to `.agents` folder to respect development with various coding agents.
+
 ## Module Guides
 
 Follow the guide for the source module you are changing:
@@ -59,7 +61,7 @@ The layout is established, but no project-owned automated suite, CTest registrat
 
 ## Commit & Pull Request Guidelines
 
-History contains only brief subjects such as `Init` and `Fix Images`; no formal convention is established. Use concise, imperative subjects describing the change. Keep pull requests focused, explain behavior and validation, link relevant issues, and attach screenshots for rendering or UI changes. Exclude local build output and third-party dependency trees.
+No formal convention is established. Use concise, imperative subjects describing the change. Keep pull requests focused, explain behavior and validation, link relevant issues, and attach screenshots for rendering or UI changes. Exclude local build output and third-party dependency trees.
 
 ## Library Skills & Maintenance
 
