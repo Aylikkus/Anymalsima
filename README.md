@@ -105,9 +105,25 @@ assets/
 
 # Dependencies
 
-Third-party dependencies are not included in this repository.
+The project includes `stb` with a local CMake wrapper. Download the other
+third-party source dependencies with Python 3.12 or newer (no Python packages
+or Git installation required):
 
-Place the following dependencies inside the external/ directory:
+```bash
+python3 download_dependencies.py
+```
+
+The script installs the pinned versions below into `external/`. It can also be
+invoked from another working directory using the path to the script. Internet
+access to GitHub is required for downloads; subsequent builds use local sources.
+
+Existing dependency directories are checked for required files and skipped,
+without verifying their versions or overwriting local changes. To download a
+dependency again, remove its directory explicitly and rerun the script. Failed
+or interrupted downloads are cleaned up; rerun to continue with missing libraries.
+The bundled `stb` directory is never downloaded or modified.
+
+Expected source layout:
 
 ```text
 external/
@@ -124,15 +140,28 @@ external/
 
 The exact versions used by the project are listed above.
 
-These dependencies are intentionally not committed to the repository due to repository size and third-party licensing/distribution considerations. I will setup git submodules later. Please obtain each dependency from its respective upstream repository and place it under external/ using the directory names expected by the project.
+Downloaded dependencies are kept out of version control to limit repository
+size. The downloader uses fixed upstream revisions, including Tracy commit
+`eb3df3b411438bbe0ae0e3d989427a14019d3270` and the bgfx source release containing
+its matching `bgfx`, `bx`, and `bimg` sources. Upstream license files remain in
+the downloaded source trees.
 
 # Building
 
-The project uses CMake.
+Install CMake 3.20+, a C++20 compiler, Intl/Gettext, and the platform development
+libraries required by SDL3 and bgfx. After downloading dependencies, configure
+and build from the repository root:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build --parallel
+```
+
+Run `./build/src/app/app` from the repository root so relative asset paths resolve.
 
 The project is currently developed and built using Visual Studio Code with the CMake Tools extension.
 
-After placing all required dependencies into external/, open the project in VS Code and configure it using the CMake Tools extension. Select the desired CMake build configuration and build the project from the CMake Tools interface (build was tested on recent versions of GCC and Clang).
+After running the dependency downloader, open the project in VS Code and configure it using the CMake Tools extension. Select the desired CMake build configuration and build the project from the CMake Tools interface (build was tested on recent versions of GCC and Clang).
 
 # Controls
 
