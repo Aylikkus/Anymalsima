@@ -1,3 +1,22 @@
+# Streaming and LOD optimization — 2026-11-16
+
+Same machine (16 threads), Release, fixed seed landscape; baseline built from
+commit 2f904c9 in a separate worktree.
+
+| Measurement | Baseline | Optimized |
+|-------------|---------:|----------:|
+| `lighting_benchmark` startup: full lighting of 4,913 chunks | 963 frames, 4,085 ms | 44 frames, 118 ms |
+| `lod_benchmark`: build 244 patches, one thread | 5.92 s | 1.88 s (32 texel map), 4.24 s (64) |
+| `handover_walk` initial load complete | frame 785 | frame 354 |
+| `handover_walk` region crossing | dropped to 20 coarse patches, refined by frame 1575 | stays at 236 patches, done at frame 434 |
+| `handover_walk` walk back | 192 patches still pending at frame 1999 | done at frame 450 |
+| `travel` start / 512-tile move / long teleport | frames 1038 / 1977 / not done by 2399 | frames 464 / 673 / 931 |
+
+All scenarios kept `detail_regressions=0`. The `max_cpu_frame_ms` counter of
+`lod_render_smoke` includes PPM capture frames (GPU readback and a 2.7 MB file
+write); its maxima are those frames in both builds. The High preset stayed
+within its 256 MiB budget in `travel` and `handover_walk`.
+
 # Region-boundary visibility regression — 2026-11-15
 
 Fixed two causes of detailed terrain briefly falling back to LOD while walking:

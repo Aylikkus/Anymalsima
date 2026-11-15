@@ -23,6 +23,12 @@ class LocationGenerator {
                        const SoilProfile& soil = {},
                        const ChunkColumnInputs* columns = nullptr) const;
 
+    // True when generateChunk would leave every tile of the chunk as air, so
+    // callers may skip the worker job. Keep every "is this chunk air?" rule
+    // here (future sky islands and underworld layers must extend it).
+    bool isAirChunk(const ChunkCoord& coord,
+                    const ChunkColumnInputs& columns) const;
+
    private:
     const RegionLayer* layerAtDepth(const std::vector<RegionLayer>& layers,
                                     int depth_m) const;

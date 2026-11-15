@@ -330,6 +330,67 @@ void SunLightPropagator::publish(ChunkCoord coord, const Light& values) {
     if (changed) chunks.markLightChanged(coord);
 }
 
+bool SunLightPropagator::hasQueuedNeighbor(const ChunkCoord& coord) const {
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                ChunkCoord n;
+                if ((dx || dy || dz) && offset(coord, dx, dy, dz, n) &&
+                    chunks.isQueued(n))
+                    return true;
+            }
+    return false;
+}
+
+bool SunLightPropagator::spreadIsIdentity(const ChunkCoord& coord) {
+    const auto it = states.find(coord);
+    if (it == states.end() || !it->second.directKnown) return false;
+    const auto column = columnKey(coord.x, coord.z);
+    if (pendingDirect.contains(column) ||
+        std::any_of(directJobs.begin(), directJobs.end(),
+                    [&](const auto& job) { return job.column == column; }))
+        return false;
+    const auto& direct = it->second.direct;
+    if (std::all_of(direct.begin(), direct.end(),
+                    [](uint8_t v) { return v == 15; }))
+        return true;
+    // Opaque cells pass on max(0, level - 15) = 0, so with an opaque shell
+    // no light other than the direct sweep reaches any cell.
+    bool sealed = false;
+    chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
+        const Tile* first = &chunk.tiles[0][0][0];
+        sealed = std::all_of(first, first + VOLUME, [&](const Tile& tile) {
+            return opacity(tile) >= 15;
+        });
+    });
+    if (!sealed) return false;
+    const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                               {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    for (const auto& o : offsets) {
+        ChunkCoord n;
+        // Outside the world: the halo is opaque padding (255).
+        if (!offset(coord, o[0], o[1], o[2], n)) continue;
+        if (!states.contains(n)) return false;
+        bool covered = false;
+        chunks.withChunkLocked(n, [&](const Chunk& chunk) {
+            covered = true;
+            for (int a = 0; a < 16 && covered; ++a)
+                for (int b = 0; b < 16; ++b) {
+                    const Tile& t = o[0] ? chunk.tiles[a][b][o[0] > 0 ? 0 : 15]
+                                    : o[1]
+                                        ? chunk.tiles[a][o[1] > 0 ? 0 : 15][b]
+                                        : chunk.tiles[o[2] > 0 ? 0 : 15][a][b];
+                    if (opacity(t) < 15) {
+                        covered = false;
+                        break;
+                    }
+                }
+        });
+        if (!covered) return false;
+    }
+    return true;
+}
+
 std::vector<uint64_t> SunLightPropagator::dependencies(ChunkCoord coord) const {
     std::vector<uint64_t> result;
     for (int dz = -1; dz <= 1; ++dz)
@@ -397,6 +458,14 @@ void SunLightPropagator::update() {
                     indirectJobs.begin(), indirectJobs.end(),
                     [&](const auto& job) { return job.coord == coord; }))
                 continue;
+            if (spreadIsIdentity(coord)) {
+                auto& state = states.at(coord);
+                publish(coord, state.direct);
+                state.complete = true;
+                state.lit = true;
+                pendingIndirect.erase(coord);
+                continue;
+            }
             bool waiting = false;
             std::optional<uint64_t> nextColumn;
             double nextDistance = std::numeric_limits<double>::infinity();
@@ -426,13 +495,17 @@ void SunLightPropagator::update() {
                 directJobs.push_back({column, std::move(future)});
                 pendingDirect.erase(column);
                 dispatched = true;
-            } else if (!waiting) {
+            } else if (!waiting && !hasQueuedNeighbor(coord)) {
+                // A neighbour still being generated would invalidate this
+                // result on arrival; its direct lower bound shows meanwhile.
                 auto input = snapshotHalo(coord);
+                // Below meshing and direct sweeps: bounced light refines an
+                // already lit chunk.
                 auto future = pool.submit_task(
                     [input = std::move(input)]() mutable {
                         return spread(std::move(input));
                     },
-                    BS::pr::high);
+                    BS::pr::normal);
                 indirectJobs.push_back({coord, std::move(future)});
                 pendingIndirect.erase(coord);
                 dispatched = true;

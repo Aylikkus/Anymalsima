@@ -1,19 +1,21 @@
 #include "surface_sampler.hpp"
 
-SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
+const SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
     const unsigned rx = std::clamp(x, 0, width() - 1) / TerrainTuning::RegionX;
     const unsigned rz = std::clamp(z, 0, depth() - 1) / TerrainTuning::RegionZ;
     const uint64_t key = (uint64_t(rx) << 32) | rz;
-    if (auto it = regions.find(key); it != regions.end()) return it->second;
+    if (auto it = regions.find(key); it != regions.end()) return *it->second;
     // Large fallback meshes may touch many regions. Bound this worker-local
     // cache; samples and results never retain references into it.
     if (regions.size() >= 64) regions.clear();
-    return regions
-        .emplace(
-            key,
-            RegionInput{TerrainNeighborhood::capture(world, {rx, rz}, assets),
-                        layers.get(world.regions[rz * world.width + rx])})
-        .first->second;
+    const auto make = [&] {
+        return RegionInput{
+            TerrainNeighborhood::capture(world, {rx, rz}, assets),
+            layers.get(world.regions[rz * world.width + rx])};
+    };
+    auto value = shared ? shared->get(key, make)
+                        : std::make_shared<const RegionInput>(make());
+    return *regions.emplace(key, std::move(value)).first->second;
 }
 
 int SurfaceSampler::height(int x, int z) {
@@ -60,7 +62,7 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
     if (auto it = columns.find(key); it != columns.end()) return it->second;
     if (columns.size() > 8192) columns.clear();
-    auto& data = input(x, z);
+    const auto& data = input(x, z);
     TerrainSampler sampler(data.terrain);
     const auto terrain = sampler.sample(x, z);
     SurfaceColumn result;

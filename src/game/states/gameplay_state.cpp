@@ -24,9 +24,17 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     regionStore =
         std::make_unique<RegionStore>(slot.directory, context.threadPool);
     uiContext = &context;
-    worldEye.initVec4("u_world_eye", {0, 0, 0, TerrainLod::ViewDistance});
+    // "terrainDetail" (0 Low, 1 Medium, 2 High) applies on world load.
+    const int detail = std::clamp(
+        context.playerSettings
+            ? context.playerSettings->getExtraOr<int>("terrainDetail", 0)
+            : 0,
+        0, TerrainLod::QualityCount - 1);
+    const auto& quality = TerrainLod::Qualities[detail];
+    camera.viewDistance = quality.viewDistance;
+    worldEye.initVec4("u_world_eye", {0, 0, 0, quality.viewDistance});
     terrainLod = std::make_unique<TerrainLodManager>(
-        *this->world, *context.assets, context.threadPool);
+        *this->world, *context.assets, context.threadPool, quality);
     ui_manager = std::make_unique<UIManager>(context);
 
     auto root = std::make_unique<Panel>();
@@ -381,7 +389,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     int camCY = int(camera.position.y) / Chunk::SIZE_Y;
     int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
 
-    chunkManager->forEachReady([&](const ChunkCoord& coord, Chunk& chunk) {
+    chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
         int dx = std::abs(int(coord.x) - camCX);
         int dy = std::abs(int(coord.y) - camCY);
         int dz = std::abs(int(coord.z) - camCZ);

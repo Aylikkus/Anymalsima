@@ -150,6 +150,25 @@ MainMenuState::MainMenuState(Game& game, UIContext& context)
         language_dd->setSelectedIndex(2);
     }
 
+    // Distant terrain budget/range presets (TerrainLod::Qualities); applied
+    // when a world is entered.
+    auto terrain_dd = ui_manager->createWidget(std::make_unique<Dropdown<int>>(
+        context,
+        "ui.black.9slice",
+        "ui.black.9slice_thin",
+        "mouse_click"), settings_panel);
+    terrain_dd->setGridPlacement({4, 8, 4, 1});
+    terrain_dd->setHeaderFontSize(FontSizeRole::Large);
+    terrain_dd->setFontStyle(FontRole::Bold);
+    terrain_dd->addItem(context, _("Terrain: Low"), 0);
+    terrain_dd->addItem(context, _("Terrain: Medium"), 1);
+    terrain_dd->addItem(context, _("Terrain: High"), 2);
+    terrain_dd->setSelectedIndex(std::clamp(
+        context.playerSettings->getExtraOr<int>("terrainDetail", 0), 0, 2));
+    terrain_dd->onChanged.connect([&context](const int& value) {
+        context.playerSettings->setExtra("terrainDetail", value);
+    });
+
     auto save_settings = ui_manager->createWidget(std::make_unique<TextButton>(
         context, 
         "ui.black.9slice", 

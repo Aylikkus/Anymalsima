@@ -26,8 +26,10 @@ int main() {
     size_t bytes = 0, maxBytes = 0, vertices = 0, triangles = 0;
     const auto start = std::chrono::steady_clock::now();
     std::atomic_bool cancel{false};
+    // Like TerrainLodManager: one region-input cache shared by every job.
+    const auto inputs = std::make_shared<SurfaceInputCache>();
     for (const auto& p : layout) {
-        SurfaceSampler sampler(world, assets);
+        SurfaceSampler sampler(world, assets, inputs);
         const auto mesh = TerrainLod::build(p, sampler, cancel);
         bytes += mesh.bytes();
         maxBytes = std::max(maxBytes, mesh.bytes());

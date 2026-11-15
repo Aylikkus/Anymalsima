@@ -13,7 +13,11 @@ ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
       mesher(mesher),
       layersGenerator(world.genSettings, assets),
       soilAssets(assets),
-      soilSeed(world.genSettings.feature_seed) {}
+      soilSeed(world.genSettings.feature_seed) {
+    const size_t threads = std::max<size_t>(1, pool.get_thread_count());
+    maxGenerationJobs = std::clamp<size_t>(threads * 2, 4, 32);
+    maxMeshJobs = std::clamp<size_t>(threads, 2, 16);
+}
 
 ChunkManager::~ChunkManager() {
     for (auto& job : generationJobs) job.future.wait();
@@ -69,6 +73,10 @@ bool ChunkManager::isReady(const ChunkCoord& coord) const {
     auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready;
 }
+bool ChunkManager::isQueued(const ChunkCoord& coord) const {
+    auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Queued;
+}
 bool ChunkManager::hasUploadedMesh(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready &&
@@ -110,6 +118,7 @@ void ChunkManager::unregister(const ChunkCoord& coord) {
     if (existed) {
         const auto rc = found->second.regionCoord;
         chunks.erase(found);
+        meshed.erase(coord);
         if (--regionRegistrations.at(rc) == 0) {
             regionRegistrations.erase(rc);
             regionTerrain.erase(rc);
@@ -281,17 +290,7 @@ void ChunkManager::collect() {
                 generationQueue.insert(job.coord);
             throw;
         }
-        auto it = chunks.find(job.coord);
-        if (it == chunks.end() || it->second.identity != job.identity) continue;
-        {
-            std::lock_guard<std::mutex> lock(tileAtMutex);
-            it->second.data = std::move(data.data);
-            it->second.state = ChunkState::Ready;
-            it->second.persistDirty = !data.fromDisk;
-        }
-        pending.erase(job.coord);
-        markDirty(job.coord);
-        becameReady.emit(job.coord);
+        publishGenerated(job.coord, job.identity, std::move(data));
     }
     for (size_t i = 0; i < meshJobs.size();) {
         if (meshJobs[i].future.wait_for(0s) != std::future_status::ready) {
@@ -325,26 +324,68 @@ void ChunkManager::collect() {
     }
 }
 
-void ChunkManager::update() {
-    collect();
-    while (generationJobs.size() < 4 && !generationQueue.empty()) {
-        auto next = generationQueue.best(
-            focus, (generationDispatches + 1) % 16 == 0,
-            [](auto) { return true; },
-            [&](auto coord) {
-                const auto anchor =
-                    pending.at(coord).beneficiary.value_or(coord);
-                // A camera moving into a former sky prerequisite must not
-                // demote that chunk to the old beneficiary's distant height.
-                return CameraWorkQueue::distance(coord, focus) <
-                               CameraWorkQueue::distance(anchor, focus)
-                           ? coord
-                           : anchor;
-            });
-        const auto coord = *next;
+void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
+                                    GeneratedChunk data) {
+    auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.identity != identity) return;
+    {
+        std::lock_guard<std::mutex> lock(tileAtMutex);
+        it->second.data = std::move(data.data);
+        it->second.state = ChunkState::Ready;
+        it->second.persistDirty = !data.fromDisk;
+    }
+    pending.erase(coord);
+    markDirty(coord);
+    becameReady.emit(coord);
+}
+
+void ChunkManager::dispatchGeneration() {
+    if (generationQueue.empty()) return;
+    const auto started = std::chrono::steady_clock::now();
+    const auto anchor = [&](ChunkCoord coord) {
+        const auto target = pending.at(coord).beneficiary.value_or(coord);
+        // A camera moving into a former sky prerequisite must not demote
+        // that chunk to the old beneficiary's distant height.
+        return CameraWorkQueue::distance(coord, focus) <
+                       CameraWorkQueue::distance(target, focus)
+                   ? coord
+                   : target;
+    };
+    const auto order = generationQueue.ordered(focus, false, anchor);
+    size_t next = 0;
+    int air = 0;
+    while (std::chrono::steady_clock::now() - started < DispatchBudget) {
+        const bool slots = generationJobs.size() < maxGenerationJobs;
+        if (!slots && air >= AirChunksPerUpdate) break;
+        std::optional<ChunkCoord> picked;
+        bool oldest = false;
+        if (slots && (generationDispatches + 1) % 16 == 0) {
+            picked = generationQueue.best(
+                focus, true, [](auto) { return true; }, anchor);
+            oldest = picked.has_value();
+        }
+        if (!picked) {
+            while (next < order.size() &&
+                   !generationQueue.contains(order[next]))
+                ++next;
+            if (next == order.size()) break;
+            picked = order[next++];
+        }
+        const auto coord = *picked;
         const auto& info = pending.at(coord);
         const auto identity = chunks.at(coord).identity;
         const auto columns = prepareColumns(coord, *info.region);
+        if (!info.stored && columns && generator.isAirChunk(coord, *columns)) {
+            // The oldest pick always proceeds so the starvation guard cannot
+            // spin on an air chunk.
+            if (air >= AirChunksPerUpdate && !oldest) continue;
+            ++air;
+            generationQueue.erase(coord);
+            publishGenerated(coord, identity,
+                             {std::make_shared<Chunk>(), false});
+            continue;
+        }
+        if (!slots) continue;
         auto future = pool.submit_task(
             [generator = generator, coord, columns, origin = info.regionOrigin,
              region = *info.region,
@@ -370,15 +411,90 @@ void ChunkManager::update() {
         generationQueue.erase(coord);
         ++generationDispatches;
     }
-    while (meshJobs.size() < 2 && mesher) {
-        auto next = meshQueue.best(
-            focus, (meshDispatches + 1) % 16 == 0,
-            [&](auto coord) { return canMesh(coord); },
-            [](auto coord) { return coord; });
-        if (!next) break;
-        submitMesh(*next);
+}
+
+bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready ||
+        !it->second.data)
+        return false;
+    const Tile* first = &it->second.data->tiles[0][0][0];
+    const Tile* last = first + Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
+    if (std::all_of(first, last, [](const Tile& t) { return t.isAir(); }))
+        return true;
+    if (!std::all_of(first, last, [](const Tile& t) { return t.isSolid(); }))
+        return false;
+    // A solid chunk has no visible face only when every face neighbour is
+    // loaded and its touching layer is solid too. World edges and missing
+    // neighbours take the regular mesher path.
+    const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                               {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    for (const auto& o : offsets) {
+        const int64_t x = int64_t{coord.x} + o[0];
+        const int64_t y = int64_t{coord.y} + o[1];
+        const int64_t z = int64_t{coord.z} + o[2];
+        if (x < 0 || y < 0 || z < 0) return false;
+        const auto n = chunks.find({unsigned(x), unsigned(y), unsigned(z)});
+        if (n == chunks.end() || n->second.state != ChunkState::Ready ||
+            !n->second.data)
+            return false;
+        const auto& tiles = n->second.data->tiles;
+        for (int a = 0; a < 16; ++a)
+            for (int b = 0; b < 16; ++b) {
+                const Tile& t = o[0]   ? tiles[a][b][o[0] > 0 ? 0 : 15]
+                                : o[1] ? tiles[a][o[1] > 0 ? 0 : 15][b]
+                                       : tiles[o[2] > 0 ? 0 : 15][a][b];
+                if (!t.isSolid()) return false;
+            }
+    }
+    return true;
+}
+
+void ChunkManager::finishEmptyMesh(ChunkCoord coord) {
+    auto& handle = chunks.at(coord);
+    readyMeshes.push_back(
+        FinishedMesh{coord, {}, handle.identity, handle.meshRevision});
+    handle.meshState = MeshState::Built;
+    handle.dirtyPending = false;
+    handle.meshUrgent = false;
+    meshQueue.erase(coord);
+}
+
+void ChunkManager::dispatchMeshes() {
+    if (!mesher || meshQueue.empty()) return;
+    const auto started = std::chrono::steady_clock::now();
+    const auto eligible = [&](ChunkCoord coord) { return canMesh(coord); };
+    const auto order = meshQueue.ordered(focus, false);
+    size_t next = 0;
+    while (std::chrono::steady_clock::now() - started < DispatchBudget) {
+        const bool slots = meshJobs.size() < maxMeshJobs;
+        std::optional<ChunkCoord> picked;
+        if (slots && (meshDispatches + 1) % 16 == 0)
+            picked = meshQueue.best(focus, true, eligible,
+                                    [](auto coord) { return coord; });
+        if (!picked) {
+            while (next < order.size() &&
+                   (!meshQueue.contains(order[next]) || !canMesh(order[next])))
+                ++next;
+            if (next == order.size()) break;
+            picked = order[next++];
+        }
+        // Empty results skip the job and the seven chunk copies; they do
+        // not occupy a worker slot.
+        if (hasNoGeometry(*picked)) {
+            finishEmptyMesh(*picked);
+            continue;
+        }
+        if (!slots) continue;
+        submitMesh(*picked);
         ++meshDispatches;
     }
+}
+
+void ChunkManager::update() {
+    collect();
+    dispatchGeneration();
+    dispatchMeshes();
 }
 
 MeshHandle* ChunkManager::getMesh(const ChunkCoord& coord) {

@@ -111,3 +111,25 @@ TEST(mesh_winding) {
         CHECK(dot > 0);
     }
 }
+
+TEST(mesh_skips_hidden_chunks) {
+    test::WorldFixture f;
+    const ChunkCoord center{4, 4, 4};
+    const ChunkCoord around[] = {center,    {5, 4, 4}, {3, 4, 4}, {4, 5, 4},
+                                 {4, 3, 4}, {4, 4, 5}, {4, 4, 3}};
+    for (const auto& coord : around) test::fill(f.load(coord), 1);
+    for (int i = 0; i < 3; ++i) {
+        f.chunks.update();
+        f.wait();
+    }
+    // Solid and covered on all six faces: finished without a worker job.
+    f.chunks.markDirty(center, true);
+    f.chunks.update();
+    EQUAL(f.chunks.meshInFlight(), size_t(0), "hidden chunk skips meshing");
+    // One opening in a touching neighbour layer exposes a centre face.
+    f.chunks.getChunk({5, 4, 4})->tiles[8][8][0].block_id = 0;
+    f.chunks.markDirty(center, true);
+    f.chunks.update();
+    CHECK(f.chunks.meshInFlight(center));
+    f.wait();
+}

@@ -14,40 +14,19 @@ float distance(const Patch& p, Vec3 eye) {
         std::max({float(p.z) - eye.z, 0.f, eye.z - p.z - p.size()}));
 }
 void children(const Patch& p, const std::function<void(Patch)>& fn) {
-    const int half = p.size() / 2;
-    for (int dz : {0, half})
-        for (int dx : {0, half}) fn(Patch{p.x + dx, p.z + dz, p.spacing / 2});
+    for (const auto& child : TerrainLod::children(p)) fn(child);
 }
 struct Point {
     float x, y, z;
 };
-Point terrainPoint(const Patch& p, SurfaceSampler& sampler, float x, float z) {
-    float h = sampler.height(int(x), int(z)) + 1;
-    if (p.spacing > 1) {
-        if (x == p.x) h = edgeHeight(p, sampler, 0, z - p.z);
-        if (x == p.x + p.size()) h = edgeHeight(p, sampler, 1, z - p.z);
-        if (z == p.z) h = edgeHeight(p, sampler, 2, x - p.x);
-        if (z == p.z + p.size()) h = edgeHeight(p, sampler, 3, x - p.x);
-    }
-    return {x, h, z};
+Point terrainPoint(const Patch&, SurfaceSampler& sampler, float x, float z) {
+    return {x, float(sampler.height(int(x), int(z)) + 1), z};
 }
-std::vector<Point> terrainRing(const Patch& p, SurfaceSampler& sampler, float x,
-                               float z, float x1, float z1) {
-    const int endX = std::min(p.x + p.size(), sampler.width());
-    const int endZ = std::min(p.z + p.size(), sampler.depth());
-    const auto point = [&](float px, float pz) {
-        return terrainPoint(p, sampler, px, pz);
-    };
-    std::vector<Point> ring;
-    ring.push_back(point(x, z));
-    if (x == p.x) ring.push_back(point(x, (z + z1) * .5f));
-    ring.push_back(point(x, z1));
-    if (z1 == endZ) ring.push_back(point((x + x1) * .5f, z1));
-    ring.push_back(point(x1, z1));
-    if (x1 == endX) ring.push_back(point(x1, (z + z1) * .5f));
-    ring.push_back(point(x1, z));
-    if (z == p.z) ring.push_back(point((x + x1) * .5f, z));
-    return ring;
+// Corners of one tessellation cell, counter-clockwise from (x, z).
+std::array<Point, 4> terrainRing(const Patch& p, SurfaceSampler& sampler,
+                                 float x, float z, float x1, float z1) {
+    return {terrainPoint(p, sampler, x, z), terrainPoint(p, sampler, x, z1),
+            terrainPoint(p, sampler, x1, z1), terrainPoint(p, sampler, x1, z)};
 }
 void triangle(Mesh& mesh, Point a, Point b, Point c, float layer) {
     const Point u{b.x - a.x, b.y - a.y, b.z - a.z};
@@ -72,21 +51,33 @@ void quad(Mesh& mesh, Point a, Point b, Point c, Point d, float layer) {
 }
 }  // namespace
 
+std::array<Patch, 4> children(const Patch& p) {
+    const int half = p.size() / 2, spacing = p.spacing / 2;
+    return {Patch{p.x, p.z, spacing}, Patch{p.x + half, p.z, spacing},
+            Patch{p.x, p.z + half, spacing},
+            Patch{p.x + half, p.z + half, spacing}};
+}
+Patch parent(const Patch& p) {
+    const int size = p.size() * 2;
+    return {p.x / size * size, p.z / size * size, p.spacing * 2};
+}
+
 std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
                           const ErrorFn& error, bool coarse, float pixelError,
-                          float exactRadius, std::optional<Vec3> detailFocus) {
+                          float exactRadius, std::optional<Vec3> detailFocus,
+                          float viewDistance) {
     std::vector<Patch> result;
     const auto visible = [&](const Patch& p) {
         return p.x < width && p.z < depth && p.x + p.size() > 0 &&
-               p.z + p.size() > 0 && distance(p, eye) < ViewDistance;
+               p.z + p.size() > 0 && distance(p, eye) < viewDistance;
     };
     std::function<void(Patch)> visit = [&](Patch p) {
         if (!visible(p)) return;
         const float range = std::max(32.f, distance(p, eye));
         const bool exact = distance(p, detailFocus.value_or(eye)) < exactRadius;
-        const float projected = (error ? error(p) : 0.f) * viewportHeight *
-                                .8660254f /
-                                std::hypot(range, std::max(0.f, eye.y - HeightProfile::PlainsTopY));
+        const float projected =
+            (error ? error(p) : 0.f) * viewportHeight * .8660254f /
+            std::hypot(range, std::max(0.f, eye.y - HeightProfile::PlainsTopY));
         if (!coarse && p.spacing > 1 && (exact || projected > pixelError))
             children(p, visit);
         else
@@ -94,12 +85,12 @@ std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
     };
     constexpr int root = Cells * RootSpacing;
     const int x0 =
-        std::max(0, int(std::floor((eye.x - ViewDistance) / root)) * root);
+        std::max(0, int(std::floor((eye.x - viewDistance) / root)) * root);
     const int z0 =
-        std::max(0, int(std::floor((eye.z - ViewDistance) / root)) * root);
-    for (int z = z0; z < std::min(float(depth), eye.z + ViewDistance);
+        std::max(0, int(std::floor((eye.z - viewDistance) / root)) * root);
+    for (int z = z0; z < std::min(float(depth), eye.z + viewDistance);
          z += root)
-        for (int x = x0; x < std::min(float(width), eye.x + ViewDistance);
+        for (int x = x0; x < std::min(float(width), eye.x + viewDistance);
              x += root)
             visit(Patch{x, z, RootSpacing});
     // A small spatial ownership grid avoids quadratic neighbor scans on the
@@ -171,41 +162,12 @@ std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
                 balanced.push_back(result[i]);
         result = std::move(balanced);
     }
-    const auto grid = gridFor();
-    for (auto& p : result) {
-        p.neighbors.fill(0);
-        eachNeighbor(grid, p, [&](int edge, int neighbor) {
-            if (neighbor >= 0) {
-                const int spacing = result[neighbor].spacing;
-                p.neighbors[edge] = p.neighbors[edge]
-                                        ? std::min(p.neighbors[edge], spacing)
-                                        : spacing;
-            }
-        });
-        for (auto& n : p.neighbors)
-            if (!n) n = p.spacing;
-    }
     std::sort(result.begin(), result.end());
     return result;
 }
 
-float edgeHeight(const Patch& p, SurfaceSampler& sampler, int edge,
-                 float along) {
-    // Every smooth cell has an edge midpoint. A fine patch on a coarse edge
-    // interpolates those coarse segments rather than sampling a new height.
-    const int stride = std::max(1, std::max(p.spacing, p.neighbors[edge]) / 2);
-    const int origin = edge < 2 ? p.z : p.x;
-    const float t = origin + along;
-    const float first = std::floor(t / stride) * stride;
-    const auto sample = [&](float at) {
-        return float(
-            sampler.height(
-                edge < 2 ? p.x + (edge == 1 ? p.size() : 0) : int(at),
-                edge < 2 ? int(at) : p.z + (edge == 3 ? p.size() : 0)) +
-            1);
-    };
-    return std::lerp(sample(first), sample(first + stride),
-                     (t - first) / stride);
+float skirtDepth(const Patch& p, float error) {
+    return std::clamp(2 * error + p.spacing, 4.f, 256.f);
 }
 
 float meshHeight(const Patch& p, SurfaceSampler& sampler, float x, float z) {
@@ -313,7 +275,7 @@ Mesh joinDetails(std::span<const Patch> layout,
 }
 
 Mesh build(const Patch& p, SurfaceSampler& sampler,
-           const std::atomic_bool& cancelled) {
+           const std::atomic_bool& cancelled, int materialMap) {
     Mesh mesh;
     const int endX = std::min(p.x + p.size(), sampler.width());
     const int endZ = std::min(p.z + p.size(), sampler.depth());
@@ -332,8 +294,8 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
         for (int x = p.x; x < endX; x += p.spacing) {
             const float x1 = std::min(x + p.spacing, endX);
             const float z1 = std::min(z + p.spacing, endZ);
-            const auto column = sampler.column(x, z);
             if (stepped) {
+                const auto column = sampler.column(x, z);
                 const float y = column.surfaceY + 1;
                 quad(mesh, {float(x), y, float(z)}, {float(x), y, z1},
                      {x1, y, z1}, {x1, y, float(z)}, column.material);
@@ -347,8 +309,14 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                     const bool outside = nx < 0 || nz < 0 ||
                                          nx >= sampler.width() ||
                                          nz >= sampler.depth();
-                    if (boundary && !outside && p.neighbors[edge] > 1) continue;
-                    const int bottom = outside ? 0 : sampler.height(nx, nz) + 1;
+                    // Boundary walls reach below the lower column so they
+                    // overlap any neighbour patch's surface or skirt.
+                    const int neighbour = sampler.height(nx, nz) + 1;
+                    const int bottom =
+                        outside    ? 0
+                        : boundary ? std::max(0, std::min(neighbour, int(y)) -
+                                                     SteppedSkirt)
+                                   : neighbour;
                     for (int y0 = bottom; y0 < int(y);) {
                         const float layer = sampler.materialAt(x, y0, z);
                         int nextY = y0 + 1;
@@ -374,69 +342,66 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                                  {x1, high, z1}, {float(x), high, z1}, layer);
                     }
                 }
-            } else {
-                const float cx = (x + x1) * .5f, cz = (z + z1) * .5f;
-                const auto center = point(cx, cz);
-                const auto ring = cellRing(x, z, x1, z1);
-                const float error = std::abs(
-                    center.y - (point(x, z).y + point(x1, z1).y) * .5f);
-                mesh.error = std::max(mesh.error, error);
-                if (ring.size() == 4 && error <= 1.f)
-                    quad(mesh, ring[0], ring[1], ring[2], ring[3], -1);
-                else
-                    for (size_t i = 0; i < ring.size(); ++i)
-                        triangle(mesh, center, ring[i],
-                                 ring[(i + 1) % ring.size()], -1);
-            }
-            // Clip each terrain triangle against the water plane. The opaque
-            // cap covers only submerged terrain, including partial coast cells.
-            if (stepped) {
+                // Clip each terrain triangle against the water plane. The
+                // opaque cap covers only submerged terrain, including
+                // partial coast cells.
                 if (column.waterY >= 0) {
                     const float y = column.waterY;
                     quad(mesh, {float(x), y, float(z)}, {float(x), y, z1},
                          {x1, y, z1}, {x1, y, float(z)}, -2);
                 }
-            } else {
-                const auto cap = [&](Point a, Point b, Point c) {
-                    constexpr float level = SEA_LEVEL_Y + 1;
-                    std::vector<Point> polygon;
-                    const std::array<Point, 3> input{a, b, c};
-                    for (int i = 0; i < 3; ++i) {
-                        const auto u = input[i], v = input[(i + 1) % 3];
-                        if (u.y < level) polygon.push_back({u.x, level, u.z});
-                        if ((u.y < level) != (v.y < level)) {
-                            const float t = (level - u.y) / (v.y - u.y);
-                            polygon.push_back({std::lerp(u.x, v.x, t), level,
-                                               std::lerp(u.z, v.z, t)});
-                        }
-                    }
-                    for (size_t i = 1; i + 1 < polygon.size(); ++i)
-                        triangle(mesh, polygon[0], polygon[i], polygon[i + 1],
-                                 -2);
-                };
-                const auto center = point((x + x1) * .5f, (z + z1) * .5f);
-                const auto ring = cellRing(x, z, x1, z1);
-                const float error = std::abs(
-                    center.y - (point(x, z).y + point(x1, z1).y) * .5f);
-                if (ring.size() == 4 && error <= 1.f) {
-                    cap(ring[0], ring[1], ring[2]);
-                    cap(ring[0], ring[2], ring[3]);
-                } else
-                    for (size_t i = 0; i < ring.size(); ++i)
-                        cap(center, ring[i], ring[(i + 1) % ring.size()]);
+                continue;
             }
+            const auto center = point((x + x1) * .5f, (z + z1) * .5f);
+            const auto ring = cellRing(x, z, x1, z1);
+            const float error =
+                std::abs(center.y - (ring[0].y + ring[2].y) * .5f);
+            mesh.error = std::max(mesh.error, error);
+            const bool flat = error <= 1.f;
+            if (flat)
+                quad(mesh, ring[0], ring[1], ring[2], ring[3], -1);
+            else
+                for (size_t i = 0; i < ring.size(); ++i)
+                    triangle(mesh, center, ring[i], ring[(i + 1) % ring.size()],
+                             -1);
+            constexpr float level = SEA_LEVEL_Y + 1;
+            if (std::min({center.y, ring[0].y, ring[1].y, ring[2].y,
+                          ring[3].y}) >= level)
+                continue;
+            const auto cap = [&](Point a, Point b, Point c) {
+                std::vector<Point> polygon;
+                const std::array<Point, 3> input{a, b, c};
+                for (int i = 0; i < 3; ++i) {
+                    const auto u = input[i], v = input[(i + 1) % 3];
+                    if (u.y < level) polygon.push_back({u.x, level, u.z});
+                    if ((u.y < level) != (v.y < level)) {
+                        const float t = (level - u.y) / (v.y - u.y);
+                        polygon.push_back({std::lerp(u.x, v.x, t), level,
+                                           std::lerp(u.z, v.z, t)});
+                    }
+                }
+                for (size_t i = 1; i + 1 < polygon.size(); ++i)
+                    triangle(mesh, polygon[0], polygon[i], polygon[i + 1], -2);
+            };
+            if (flat) {
+                cap(ring[0], ring[1], ring[2]);
+                cap(ring[0], ring[2], ring[3]);
+            } else
+                for (size_t i = 0; i < ring.size(); ++i)
+                    cap(center, ring[i], ring[(i + 1) % ring.size()]);
         }
     }
-    // Smooth/stepped joins and finite-world walls share the mesh's canonical
-    // boundary. Each stepped neighbor column gets its own vertical join.
+    // Smooth patches: skirts on inner edges hide cracks against neighbours of
+    // any resolution; walls down to the floor close finite-world edges.
     for (int edge = 0; edge < 4; ++edge) {
         const bool outer = edge == 0   ? p.x == 0
                            : edge == 1 ? endX == sampler.width()
                            : edge == 2 ? p.z == 0
                                        : endZ == sampler.depth();
-        if (stepped || (!outer && p.neighbors[edge] != 1)) continue;
+        if (stepped) continue;
+        const float skirt = skirtDepth(p, mesh.error);
         const int length = edge < 2 ? endZ - p.z : endX - p.x;
-        const int stride = outer ? std::max(1, p.spacing / 2) : 1;
+        const int stride = p.spacing;
         for (int at = 0; at < length; at += stride) {
             if (cancelled.load(std::memory_order_relaxed)) return {};
             const int next = std::min(at + stride, length);
@@ -445,12 +410,9 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
             const float xx = edge < 2 ? x : p.x + next;
             const float zz = edge < 2 ? p.z + next : z;
             const auto a = point(x, z), b = point(xx, zz);
-            const int nx = int(x) - (edge == 0 ? 1 : 0),
-                      nz = int(z) - (edge == 2 ? 1 : 0);
-            const float bottom = outer ? 0 : sampler.height(nx, nz) + 1;
-            const float layer =
-                outer ? -1 : sampler.materialAt(nx, int(bottom) - 1, nz);
-            quad(mesh, a, b, {xx, bottom, zz}, {x, bottom, z}, layer);
+            const float bottom =
+                outer ? 0 : std::max(0.f, std::min(a.y, b.y) - skirt);
+            quad(mesh, a, b, {xx, bottom, zz}, {x, bottom, z}, -1);
         }
     }
     if (stepped) {
@@ -466,7 +428,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 mesh.bands.push_back({cx, cz, low / 16, high / 16});
             }
     }
-    mesh.mapSize = stepped ? 1 : 64;
+    mesh.mapSize = stepped ? 1 : std::max(1, materialMap);
     mesh.materials.resize(mesh.mapSize * mesh.mapSize * 4);
     for (int z = 0; z < mesh.mapSize; ++z) {
         if (cancelled.load(std::memory_order_relaxed)) return {};
@@ -485,11 +447,15 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     // faces in particular should not consume six vertices per quad.
     for (auto& v : mesh.vertices)
         if (v.layer == -1 && v.ny > 0.01f) {
-            const int x = int(v.x), z = int(v.z);
+            // Grid-aligned differences reuse the heights sampled for the
+            // surface instead of four fresh off-grid samples per vertex.
+            const int x = int(v.x), z = int(v.z), step = p.spacing;
             const float dx =
-                (sampler.height(x + 1, z) - sampler.height(x - 1, z)) * .5f;
+                (sampler.height(x + step, z) - sampler.height(x - step, z)) /
+                (2.f * step);
             const float dz =
-                (sampler.height(x, z + 1) - sampler.height(x, z - 1)) * .5f;
+                (sampler.height(x, z + step) - sampler.height(x, z - step)) /
+                (2.f * step);
             const float n = std::sqrt(dx * dx + dz * dz + 1);
             v.nx = -dx / n;
             v.ny = 1 / n;

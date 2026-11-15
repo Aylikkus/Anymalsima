@@ -473,3 +473,22 @@ TEST(terrain_mountain_relief) {
     // Elevation-scaled ridges carve valleys of tens of metres into peaks.
     CHECK(highest - lowest >= 60);
 }
+
+TEST(terrain_air_chunks_skip_jobs) {
+    test::Assets assets;
+    auto world = terrainWorld(1, 1);
+    LocationGenerator generator;
+    ThreadPool pool(1);
+    ChunkManager chunks(generator, pool, nullptr, world, &assets);
+    LocationManager locations(chunks, world);
+    locations.loadRegion({0, 0}, 0);
+    // Far above every generated surface: published in the same update.
+    const ChunkCoord sky{3, Y_CHUNKS - 1, 3}, ground{3, SEA_LEVEL_Y / 16, 3};
+    chunks.request(sky);
+    chunks.request(ground);
+    chunks.update();
+    CHECK(chunks.isReady(sky));
+    CHECK(!chunks.isReady(ground));
+    CHECK(chunks.getChunk(sky)->tiles[15][15][15].isAir());
+    pool.wait();
+}

@@ -45,13 +45,18 @@ class Gate {
     std::future<void> worker;
     bool opened = false;
 };
+// Sky-exposed air finishes without a spread job (its direct light is already
+// 15 everywhere). One opaque tile keeps the direct/indirect staging visible.
+void loadShaded(test::SunlightFixture& f, ChunkCoord local) {
+    f.load(local).tiles[15][8][15].block_id = 1;
+}
 }  // namespace
 
 TEST(priority_progressive_near_first) {
     test::SunlightFixture f;
-    f.load({40, 1, 0});
-    f.load({20, 1, 0});
-    f.load({0, 1, 0});
+    loadShaded(f, {40, 1, 0});
+    loadShaded(f, {20, 1, 0});
+    loadShaded(f, {0, 1, 0});
     f.sunlight.setFocus(focus(0));
     step(f);  // direct near job
     step(f);  // publish direct, submit near indirect
@@ -67,7 +72,7 @@ TEST(priority_progressive_near_first) {
 
 TEST(priority_camera_teleport) {
     test::SunlightFixture f;
-    for (unsigned x : {0u, 20u, 40u}) f.load({x, 1, 0});
+    for (unsigned x : {0u, 20u, 40u}) loadShaded(f, {x, 1, 0});
     f.sunlight.setFocus(focus(0));
     step(f);
     f.sunlight.setFocus(focus(40));
@@ -83,8 +88,8 @@ TEST(priority_camera_teleport) {
 
 TEST(priority_vertical_camera_move) {
     test::SunlightFixture f;
-    f.load({0, 1, 0});
-    f.load({0, 2, 0});
+    loadShaded(f, {0, 1, 0});
+    loadShaded(f, {0, 2, 0});
     f.sunlight.setFocus(focus(0));
     step(f);
     f.sunlight.setFocus(focus(0, 424));
@@ -244,8 +249,11 @@ TEST(priority_mesh_bounded_focus) {
         f.chunks.update();
         f.wait();
     }
-    for (unsigned x : {2u, 20u, 40u})
+    // Empty chunks finish without a worker job; give each target geometry.
+    for (unsigned x : {2u, 20u, 40u}) {
+        f.chunks.getChunk(f.coord({x, 1, 1}))->tiles[8][8][8].block_id = 1;
         f.chunks.markDirty(f.coord({x, 1, 1}), true);
+    }
     f.chunks.setFocus({648, 408, 24});
     f.chunks.update();
     EQUAL(f.chunks.meshInFlight(), 2u, "mesh submission cap");

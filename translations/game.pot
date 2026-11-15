@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-15 20:50+0300\n"
+"POT-Creation-Date: 2026-11-16 01:48+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -28,7 +28,7 @@ msgstr ""
 
 #: src/game/states/create_or_load_state.cpp:49
 #: src/game/states/create_world_state.cpp:34
-#: src/game/states/load_world_state.cpp:87
+#: src/game/states/load_world_state.cpp:85
 msgid "RETURN"
 msgstr ""
 
@@ -87,6 +87,14 @@ msgstr ""
 msgid "None"
 msgstr ""
 
+#: src/game/states/gameplay_state.cpp:76
+msgid "PLACE BLOCK"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:77
+msgid "REMOVE BLOCK"
+msgstr ""
+
 #: src/game/states/load_world_state.cpp:61
 #, c++-format
 msgid "Seed {}  |  {}x{}  |  created {}  |  played {}"
@@ -96,44 +104,56 @@ msgstr ""
 msgid "No saved worlds"
 msgstr ""
 
-#: src/game/states/load_world_state.cpp:77
+#: src/game/states/load_world_state.cpp:76
 msgid "LOAD"
 msgstr ""
 
-#: src/game/states/load_world_state.cpp:112
+#: src/game/states/load_world_state.cpp:111
 msgid "Loading..."
 msgstr ""
 
-#: src/game/states/load_world_state.cpp:133
+#: src/game/states/load_world_state.cpp:132
 msgid "This world could not be loaded"
 msgstr ""
 
 #: src/game/states/main_menu_state.cpp:123
-#: src/game/states/main_menu_state.cpp:268
+#: src/game/states/main_menu_state.cpp:287
 msgid "APPLY"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:158
-#: src/game/states/main_menu_state.cpp:269
+#: src/game/states/main_menu_state.cpp:163
+msgid "Terrain: Low"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:164
+msgid "Terrain: Medium"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:165
+msgid "Terrain: High"
+msgstr ""
+
+#: src/game/states/main_menu_state.cpp:177
+#: src/game/states/main_menu_state.cpp:288
 msgid "SAVE"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:183
+#: src/game/states/main_menu_state.cpp:202
 msgid "SAVED!"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:207
-#: src/game/states/main_menu_state.cpp:270
+#: src/game/states/main_menu_state.cpp:226
+#: src/game/states/main_menu_state.cpp:289
 msgid "PLAY"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:223
-#: src/game/states/main_menu_state.cpp:271
+#: src/game/states/main_menu_state.cpp:242
+#: src/game/states/main_menu_state.cpp:290
 msgid "SETTINGS"
 msgstr ""
 
-#: src/game/states/main_menu_state.cpp:252
-#: src/game/states/main_menu_state.cpp:272
+#: src/game/states/main_menu_state.cpp:271
+#: src/game/states/main_menu_state.cpp:291
 msgid "EXIT"
 msgstr ""
 

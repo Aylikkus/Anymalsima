@@ -1,5 +1,6 @@
 #include <bit>
 #include <chrono>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -8,7 +9,7 @@
 #include "world/chunk_mesher.hpp"
 #include "world/detail_coverage.hpp"
 #include "world/location_generator.hpp"
-#include "world/lod_frontier.hpp"
+#include "world/lod_cover.hpp"
 
 namespace {
 World worldForLod(int width = 6, int depth = 6, int height = 430) {
@@ -150,49 +151,53 @@ TEST(lod_stepped_surface_and_bands) {
         }
     CHECK(mesh.bytes() < TerrainLod::UploadBudget);
 }
-TEST(lod_smooth_stitched_edges) {
+TEST(lod_smooth_skirts_cover_edges) {
     test::Assets assets;
     auto world = worldForLod();
     SurfaceSampler sampler(world, assets);
-    TerrainLod::Patch coarse{256, 256, 4};
-    coarse.neighbors.fill(4);
-    coarse.neighbors[1] = 2;
-    TerrainLod::Patch fine{384, 256, 2};
-    fine.neighbors.fill(2);
-    fine.neighbors[0] = 4;
+    const TerrainLod::Patch coarse{256, 256, 4}, fine{384, 256, 2};
     const auto a = TerrainLod::build(coarse, sampler, running);
     const auto b = TerrainLod::build(fine, sampler, running);
     CHECK(!a.vertices.empty());
     CHECK(!b.vertices.empty());
-    for (int t = 0; t <= 64; ++t) {
-        const float h = TerrainLod::edgeHeight(fine, sampler, 0, t);
-        const int start = t / 2 * 2;
-        const float h0 = TerrainLod::edgeHeight(coarse, sampler, 1, start);
-        const float h1 = TerrainLod::edgeHeight(coarse, sampler, 1, start + 2);
-        CHECK(close(h, std::lerp(h0, h1, (t - start) * .5f)));
-    }
-    const auto coarseEdge = boundary(a, 0, 384), fineEdge = boundary(b, 0, 384);
-    for (const auto& [point, unused] : coarseEdge) {
-        if (point[2] >= 512 && point[2] <= 640) CHECK(fineEdge.contains(point));
+    // Each patch's skirt along the shared edge reaches below both surfaces,
+    // so any T-junction gap between them is closed.
+    const auto lowest = [](const TerrainLod::Mesh& mesh, float z0, float z1) {
+        float result = std::numeric_limits<float>::infinity();
+        for (const auto& v : mesh.vertices)
+            if (v.layer == -1 && close(v.x, 384) && v.z >= z0 && v.z <= z1)
+                result = std::min(result, v.y);
+        return result;
+    };
+    // The fine patch spans z 256..320 of the coarse edge.
+    for (int z = 256; z < 320; ++z) {
+        const float surface =
+            std::min(TerrainLod::meshHeight(coarse, sampler, 384, z + .5f),
+                     TerrainLod::meshHeight(fine, sampler, 384, z + .5f));
+        const float coarseStart = z / 4 * 4, fineStart = z / 2 * 2;
+        CHECK(lowest(a, coarseStart, coarseStart + 4) < surface);
+        CHECK(lowest(b, fineStart, fineStart + 2) < surface);
     }
     CHECK(a.bytes() < TerrainLod::UploadBudget);
 }
-TEST(lod_stepped_smooth_join) {
+TEST(lod_stepped_boundary_walls) {
     test::Assets assets;
     auto world = worldForLod();
     world.regions[2 * 6 + 2].land_height_m = 500;
     world.regions[2 * 6 + 2].addFeature(FeatureMask::CLIFF);
     SurfaceSampler sampler(world, assets);
-    TerrainLod::Patch smooth{320, 256, 2};
-    smooth.neighbors.fill(2);
-    smooth.neighbors[0] = 1;
-    const auto mesh = TerrainLod::build(smooth, sampler, running);
-    // Every column along the transition has a join endpoint at its voxel top.
-    for (int z = 256; z < 320; ++z) {
-        const float y = sampler.height(319, z) + 1;
+    const TerrainLod::Patch stepped{320, 256, 1};
+    const auto mesh = TerrainLod::build(stepped, sampler, running);
+    // Every boundary column has a side wall reaching below the lower of its
+    // own top and the outside column, whatever the neighbour's resolution.
+    for (int z = 256; z < 288; ++z) {
+        const int top = sampler.height(320, z) + 1;
+        const int outside = sampler.height(319, z) + 1;
+        const float bottom =
+            std::max(0, std::min(top, outside) - TerrainLod::SteppedSkirt);
         bool found = false;
         for (const auto& v : mesh.vertices)
-            if (v.x == 320 && v.z == z && close(v.y, y)) {
+            if (v.x == 320 && v.z == z && close(v.y, bottom)) {
                 found = true;
                 break;
             }
@@ -204,7 +209,6 @@ TEST(lod_water_and_bounds) {
     auto world = worldForLod(2, 2, 350);
     SurfaceSampler sampler(world, assets);
     TerrainLod::Patch patch{0, 0, 8};
-    patch.neighbors.fill(8);
     const auto mesh = TerrainLod::build(patch, sampler, running);
     bool water = false, floor = false;
     for (const auto& v : mesh.vertices) {
@@ -240,8 +244,6 @@ TEST(lod_selection_coverage_balance) {
                     seen[z * 129 + x] = true;
                 }
             }
-        for (int n : p.neighbors)
-            CHECK(n <= p.spacing * 2 && n * 2 >= p.spacing);
         if (p.x <= 32000 && p.x + p.size() > 32000 && p.z <= 19200 &&
             p.z + p.size() > 19200)
             EQUAL(p.spacing, 1, "near camera is exact");
@@ -250,34 +252,70 @@ TEST(lod_selection_coverage_balance) {
         for (int x = 0; x < 129; ++x)
             if (std::hypot((x - 64) * 64, (z - 64) * 64) < 4096)
                 CHECK(seen[z * 129 + x]);
+    // 2:1 balance: edge-adjacent patches differ by at most one level.
+    for (const auto& a : layout)
+        for (const auto& b : layout) {
+            const bool alongX = a.x + a.size() == b.x && a.z < b.z + b.size() &&
+                                b.z < a.z + a.size();
+            const bool alongZ = a.z + a.size() == b.z && a.x < b.x + b.size() &&
+                                b.x < a.x + a.size();
+            if (alongX || alongZ)
+                CHECK(a.spacing <= b.spacing * 2 && b.spacing <= a.spacing * 2);
+        }
     const auto corner =
         TerrainLod::select(256, 384, {0, 450, 0}, 720, {}, true);
     CHECK(!corner.empty());
     for (const auto& p : corner) CHECK(p.x >= 0 && p.z >= 0);
 }
-TEST(lod_frontier_delays_and_stale) {
-    TerrainLod::Frontier frontier;
-    TerrainLod::Patch parent{0, 0, 4}, a{0, 0, 2}, b{64, 0, 2}, c{0, 64, 2},
-        d{64, 64, 2};
-    auto token = frontier.stage({parent});
-    CHECK(!frontier.commit());
-    CHECK(frontier.publish(token, parent));
-    CHECK(frontier.commit());
-    token = frontier.stage({a, b, c, d});
-    CHECK(frontier.publish(token, a));
-    CHECK(frontier.publish(token, b));
-    CHECK(frontier.publish(token, c));
-    CHECK(!frontier.commit());
-    CHECK(frontier.current() == std::vector{parent});
-    CHECK(frontier.publish(token, d));
-    CHECK(frontier.commit());
-    const auto stale = token;
-    token = frontier.stage({TerrainLod::Patch{4096, 4096, 64}});
-    CHECK(!frontier.publish(stale, parent));
-    CHECK(!frontier.commit());
-    CHECK(frontier.current() == std::vector({a, b, c, d}));
-    CHECK(frontier.publish(token, frontier.pending()[0]));
-    CHECK(frontier.commit());
+TEST(lod_cover_fallback) {
+    using TerrainLod::Patch;
+    const Patch root{0, 0, 4};
+    const auto parts = TerrainLod::children(root);
+    std::set<Patch> drawable;
+    int width = 128;
+    const auto choose = [&](const std::set<Patch>& split) {
+        const auto inView = [&](const Patch& p) { return p.x < width; };
+        const auto isDrawable = [&](const Patch& p) {
+            return drawable.contains(p);
+        };
+        const auto below = [&](const Patch& p) {
+            return std::any_of(drawable.begin(), drawable.end(), [&](auto& q) {
+                return q.spacing < p.spacing && q.x >= p.x && q.z >= p.z &&
+                       q.x < p.x + p.size() && q.z < p.z + p.size();
+            });
+        };
+        const TerrainLod::Cover cover(split, inView, isDrawable, below);
+        std::vector<Patch> out;
+        cover.select(root, out);
+        // Every in-view tile of the root is covered exactly once.
+        for (int z = 0; z < root.size(); z += 8)
+            for (int x = 0; x < std::min(width, root.size()); x += 8) {
+                int owners = 0;
+                for (const auto& p : out)
+                    owners += x >= p.x && x < p.x + p.size() && z >= p.z &&
+                              z < p.z + p.size();
+                if (!out.empty()) EQUAL(owners, 1, "single coverage");
+            }
+        return out;
+    };
+    const std::set<Patch> splitRoot{root};
+    // Only the coarse root has arrived: it stays until all children exist.
+    drawable = {root, parts[0], parts[1], parts[2]};
+    CHECK(choose(splitRoot) == std::vector{root});
+    drawable.insert(parts[3]);
+    EQUAL(choose(splitRoot).size(), size_t(4), "children replace root");
+    // Zooming out: the desired root is missing, finer leftovers stay.
+    drawable = {parts[0], parts[1], parts[2], parts[3]};
+    EQUAL(choose({}).size(), size_t(4), "leftovers cover a loading root");
+    drawable.insert(root);
+    CHECK(choose({}) == std::vector{root});
+    // Nothing cached yet: nothing drawn (startup).
+    drawable.clear();
+    CHECK(choose(splitRoot).empty());
+    // Children outside the world or view never block a replacement.
+    width = 64;
+    drawable = {root, parts[0], parts[2]};
+    EQUAL(choose(splitRoot).size(), size_t(2), "out-of-view child skipped");
 }
 TEST(lod_loaded_water_mesh) {
     test::Assets assets;
@@ -347,9 +385,7 @@ TEST(lod_mesh_height_matches_triangles) {
     world.regions[2 * 6 + 2].addFeature(FeatureMask::CLIFF);
     SurfaceSampler sampler(world, assets);
     for (int spacing : {2, 4, 8}) {
-        TerrainLod::Patch patch{256, 256, spacing};
-        patch.neighbors.fill(spacing);
-        patch.neighbors[0] = spacing * 2;
+        const TerrainLod::Patch patch{256, 256, spacing};
         const auto mesh = TerrainLod::build(patch, sampler, running);
         int checked = 0;
         for (size_t i = 0; i < mesh.indices.size(); i += 3) {
@@ -373,8 +409,7 @@ TEST(lod_detail_coarse_joins) {
     world.regions[2 * 6 + 2].land_height_m = 500;
     world.regions[2 * 6 + 2].addFeature(FeatureMask::CLIFF);
     SurfaceSampler sampler(world, assets);
-    TerrainLod::Patch patch{256, 256, 8};
-    patch.neighbors.fill(8);
+    const TerrainLod::Patch patch{256, 256, 8};
     const std::array layout{patch};
     const std::array columns{TerrainLod::SurfaceBand{17, 17, 26, 31},
                              TerrainLod::SurfaceBand{18, 17, 26, 31}};

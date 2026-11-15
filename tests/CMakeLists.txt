@@ -98,6 +98,7 @@ set(world_cases
     mesh_material_light
     mesh_merges_across_light
     mesh_winding
+    mesh_skips_hidden_chunks
     light_volume_encoding
     light_volume_neighbor_borders
     light_volume_missing_neighbor
@@ -217,6 +218,7 @@ endforeach()
 foreach(case terrain_caps_repeatability terrain_shared_edges_corners
              terrain_relief_strength terrain_cliff_segments
              terrain_coast_dry_inland terrain_world_bounds
+             terrain_air_chunks_skip_jobs
              terrain_geology_erosion terrain_soil_transition
              terrain_streaming_cache terrain_column_inputs_seams
              terrain_height_profile terrain_coast_organic
@@ -231,9 +233,9 @@ foreach(case terrain_caps_repeatability terrain_shared_edges_corners
 endforeach()
 
 foreach(case lod_surface_matches_chunks lod_geology_order_independent
-             lod_stepped_surface_and_bands lod_smooth_stitched_edges
-             lod_stepped_smooth_join lod_water_and_bounds
-             lod_selection_coverage_balance lod_frontier_delays_and_stale
+             lod_stepped_surface_and_bands lod_smooth_skirts_cover_edges
+             lod_stepped_boundary_walls lod_water_and_bounds
+             lod_selection_coverage_balance lod_cover_fallback
              lod_loaded_water_mesh lod_detail_survives_refresh
              lod_detail_hysteresis lod_mesh_height_matches_triangles
              lod_detail_coarse_joins)

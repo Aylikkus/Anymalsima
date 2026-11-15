@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-15 20:50+0300\n"
+"POT-Creation-Date: 2026-11-16 01:48+0300\n"
 "PO-Revision-Date: 2026-04-27 23:59+0300\n"
 "Last-Translator: Automatically generated\n"
 "Language-Team: none\n"
@@ -31,7 +31,7 @@ msgstr "·°³ÀÃ·¸ÂÌ ¼¸À"
 
 #: src/game/states/create_or_load_state.cpp:49
 #: src/game/states/create_world_state.cpp:34
-#: src/game/states/load_world_state.cpp:87
+#: src/game/states/load_world_state.cpp:85
 msgid "RETURN"
 msgstr "¾±À°Â½¾"
 
@@ -90,6 +90,14 @@ msgstr "¾áŞÑÕİİŞáâØ"
 msgid "None"
 msgstr "½Õâ"
 
+#: src/game/states/gameplay_state.cpp:76
+msgid "PLACE BLOCK"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:77
+msgid "REMOVE BLOCK"
+msgstr ""
+
 #: src/game/states/load_world_state.cpp:61
 #, c++-format
 msgid "Seed {}  |  {}x{}  |  created {}  |  played {}"
@@ -99,44 +107,56 @@ msgstr "ÁØÔ {}  |  {}x{}  |  áŞ×ÔĞİ {}  |  ØÓàĞÛØ {}"
 msgid "No saved worlds"
 msgstr "½Õâ áŞåàĞİñİİëå ÜØàŞÒ"
 
-#: src/game/states/load_world_state.cpp:77
+#: src/game/states/load_world_state.cpp:76
 msgid "LOAD"
 msgstr "·°³ÀÃ·¸ÂÌ"
 
-#: src/game/states/load_world_state.cpp:112
+#: src/game/states/load_world_state.cpp:111
 msgid "Loading..."
 msgstr "·ĞÓàã×ÚĞ..."
 
-#: src/game/states/load_world_state.cpp:133
+#: src/game/states/load_world_state.cpp:132
 msgid "This world could not be loaded"
 msgstr "½Õ ãÔĞÛŞáì ×ĞÓàã×Øâì íâŞâ ÜØà"
 
 #: src/game/states/main_menu_state.cpp:123
-#: src/game/states/main_menu_state.cpp:268
+#: src/game/states/main_menu_state.cpp:287
 msgid "APPLY"
 msgstr "¿À¸¼µ½¸ÂÌ"
 
-#: src/game/states/main_menu_state.cpp:158
-#: src/game/states/main_menu_state.cpp:269
+#: src/game/states/main_menu_state.cpp:163
+msgid "Terrain: Low"
+msgstr "ÀÕÛìÕä: İØ×ÚØÙ"
+
+#: src/game/states/main_menu_state.cpp:164
+msgid "Terrain: Medium"
+msgstr "ÀÕÛìÕä: áàÕÔİØÙ"
+
+#: src/game/states/main_menu_state.cpp:165
+msgid "Terrain: High"
+msgstr "ÀÕÛìÕä: ÒëáŞÚØÙ"
+
+#: src/game/states/main_menu_state.cpp:177
+#: src/game/states/main_menu_state.cpp:288
 msgid "SAVE"
 msgstr "Á¾ÅÀ°½¸ÂÌ"
 
-#: src/game/states/main_menu_state.cpp:183
+#: src/game/states/main_menu_state.cpp:202
 msgid "SAVED!"
 msgstr "Á¾ÅÀ°½µ½¾!"
 
-#: src/game/states/main_menu_state.cpp:207
-#: src/game/states/main_menu_state.cpp:270
+#: src/game/states/main_menu_state.cpp:226
+#: src/game/states/main_menu_state.cpp:289
 msgid "PLAY"
 msgstr "¸³À°ÂÌ"
 
-#: src/game/states/main_menu_state.cpp:223
-#: src/game/states/main_menu_state.cpp:271
+#: src/game/states/main_menu_state.cpp:242
+#: src/game/states/main_menu_state.cpp:290
 msgid "SETTINGS"
 msgstr "½°ÁÂÀ¾¹º¸"
 
-#: src/game/states/main_menu_state.cpp:252
-#: src/game/states/main_menu_state.cpp:272
+#: src/game/states/main_menu_state.cpp:271
+#: src/game/states/main_menu_state.cpp:291
 msgid "EXIT"
 msgstr "²ËÅ¾´"
 

@@ -106,6 +106,11 @@ class SunLightPropagator {
     IndirectInput snapshotHalo(const ChunkCoord& coord);
     void collect();
     void publish(ChunkCoord coord, const Light& light);
+    // Indirect spreading cannot change the direct light: it is 15 everywhere,
+    // or the chunk and the touching layers of its six face neighbours are
+    // fully opaque. Such chunks are finished without a worker job.
+    bool spreadIsIdentity(const ChunkCoord& coord);
+    bool hasQueuedNeighbor(const ChunkCoord& coord) const;
     std::vector<uint64_t> dependencies(ChunkCoord coord) const;
     ChunkCoord beneficiary(ChunkCoord slab) const;
 

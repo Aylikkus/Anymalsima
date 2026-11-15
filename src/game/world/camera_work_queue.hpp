@@ -53,6 +53,12 @@ class CameraWorkQueue {
     }
 
     std::vector<ChunkCoord> ordered(Vec3 focus, bool oldest) const {
+        return ordered(focus, oldest, [](ChunkCoord coord) { return coord; });
+    }
+    // Same order as repeated best() calls with the same anchor, computed once.
+    template <typename Anchor>
+    std::vector<ChunkCoord> ordered(Vec3 focus, bool oldest,
+                                    Anchor anchor) const {
         struct Entry {
             ChunkCoord coord;
             uint64_t age;
@@ -62,7 +68,7 @@ class CameraWorkQueue {
         entries.reserve(ages.size());
         for (const auto& [coord, age] : ages)
             entries.push_back(
-                {coord, age, oldest ? 0 : distance(coord, focus)});
+                {coord, age, oldest ? 0 : distance(anchor(coord), focus)});
         std::sort(
             entries.begin(), entries.end(), [](const auto& a, const auto& b) {
                 return std::tie(a.distance, a.age, a.coord.x, a.coord.y,

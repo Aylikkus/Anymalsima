@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "camera_work_queue.hpp"
@@ -67,6 +69,8 @@ class ChunkManager {
     Chunk* requestLighting(const ChunkCoord& coord, ChunkCoord beneficiary);
     bool isRegistered(const ChunkCoord& coord) const;
     bool isReady(const ChunkCoord& coord) const;
+    // Requested and waiting for (or running) its generation job.
+    bool isQueued(const ChunkCoord& coord) const;
     bool isMeshUploaded(const ChunkCoord& coord) const;
     // An older uploaded revision remains drawable while its replacement is
     // queued (for example, after sunlight changes).
@@ -90,6 +94,8 @@ class ChunkManager {
     void raiseColumnTopY(unsigned cx, unsigned cz, int worldY);
     int generatedSurfaceY(unsigned tileX, unsigned tileZ);
     size_t cachedColumnInputs() const { return columnInputs.size(); }
+    // Uploads finished meshes. Call on the main thread before drawing. Kept
+    // inline: the headless test library does not link bgfx.
     void uploadReadyMeshes(IRenderer& renderer) {
         for (auto& result : readyMeshes) {
             auto it = chunks.find(result.coord);
@@ -105,6 +111,7 @@ class ChunkManager {
                 // Hide a previous mesh when geometry becomes empty.
                 handle.mesh.release();
                 handle.initialised = false;
+                meshed.erase(result.coord);
                 continue;
             }
             if (!handle.initialised) {
@@ -115,6 +122,7 @@ class ChunkManager {
             handle.mesh.update(handle.vertices.data(), handle.vertices.size(),
                                handle.indices.data(), handle.indices.size(),
                                true);
+            meshed.insert(result.coord);
         }
         readyMeshes.clear();
     }
@@ -136,6 +144,13 @@ class ChunkManager {
         for (auto& [coord, handle] : chunks)
             if (handle.state == ChunkState::Ready) fn(coord, *handle.data);
     }
+    // Chunks that currently own an uploaded, non-empty GPU mesh. Much smaller
+    // than the registered set, which covers every slab of resident regions.
+    template <typename F>
+    void forEachMeshed(F&& fn) {
+        for (const auto& coord : meshed) fn(coord);
+    }
+    size_t meshedCount() const { return meshed.size(); }
     template <typename F>
     bool withChunkLocked(const ChunkCoord& coord, F&& fn) {
         std::lock_guard<std::mutex> lock(tileAtMutex);
@@ -167,7 +182,16 @@ class ChunkManager {
         std::future<FinishedMesh> future;
     };
     bool canMesh(ChunkCoord coord) const;
+    // The greedy mesher would emit no geometry: the chunk is all air, or it
+    // is solid and every face neighbour covers it. Reads live tiles.
+    bool hasNoGeometry(ChunkCoord coord) const;
     void submitMesh(ChunkCoord coord);
+    // Publishes an empty mesh without a worker job.
+    void finishEmptyMesh(ChunkCoord coord);
+    void dispatchGeneration();
+    void dispatchMeshes();
+    void publishGenerated(ChunkCoord coord, uint64_t identity,
+                          GeneratedChunk data);
     void collect();
 
     struct ColumnCache {
@@ -189,6 +213,13 @@ class ChunkManager {
     CameraWorkQueue meshQueue;
     uint64_t generationDispatches = 0;
     uint64_t meshDispatches = 0;
+    // In-flight worker caps, derived from the pool size.
+    size_t maxGenerationJobs = 4;
+    size_t maxMeshJobs = 2;
+    // Main-thread time per update() spent choosing and submitting jobs.
+    static constexpr auto DispatchBudget = std::chrono::milliseconds(2);
+    // Air chunks published synchronously per update(), without a job.
+    static constexpr int AirChunksPerUpdate = 256;
     uint64_t nextIdentity = 0;
     std::unordered_map<Vec2u, std::vector<RegionLayer>> regionLayers;
     std::unordered_map<Vec2u, SoilProfile> regionSoils;
@@ -201,5 +232,6 @@ class ChunkManager {
     std::vector<GenerationJob> generationJobs;
     std::vector<MeshJob> meshJobs;
     std::vector<FinishedMesh> readyMeshes;
+    std::unordered_set<ChunkCoord> meshed;
     std::mutex tileAtMutex;
 };

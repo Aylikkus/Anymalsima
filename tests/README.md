@@ -122,10 +122,16 @@ Readiness notifications preserve existing valid light; changed direct sources
 invalidate their dependent halos. Missing sky slabs inherit nearby beneficiary
 priority, while a camera moving into the slab itself can raise its priority.
 
-Chunk requests enqueue demand. `ChunkManager::update()` collects results and
-submits at most four generation jobs and two mesh jobs. Workers share a
-priority-enabled pool: lighting, its generation prerequisites, and remeshing
-newly lit chunks use the high tier. Submitted jobs own snapshots, and identities
+Chunk requests enqueue demand. `ChunkManager::update()` collects results and,
+within a 2 ms main-thread budget, keeps up to `clamp(threads * 2, 4, 32)`
+generation and `clamp(threads, 2, 16)` mesh jobs in flight. Chunks that
+`LocationGenerator::isAirChunk` proves empty are published without a job, and
+chunks with no visible geometry (all air, or solid and covered by solid
+neighbour layers) finish meshing without one. Indirect sunlight is skipped
+when it cannot change the direct light (all 15, or an opaque shell) and waits
+while a neighbour is still queued for generation. Workers share a
+priority-enabled pool: direct sunlight sweeps, generation prerequisites, and
+urgent remeshes use the high tier; indirect spreads run at normal priority. Submitted jobs own snapshots, and identities
 and revisions reject obsolete generation/mesh results after edits or replacement.
 The existing uploaded mesh stays visible while its replacement is computed.
 
