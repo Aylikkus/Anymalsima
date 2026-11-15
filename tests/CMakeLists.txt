@@ -4,6 +4,8 @@ find_package(Threads REQUIRED)
 add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/location_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
@@ -23,6 +25,7 @@ add_executable(world_logic_tests
     unit/game/world/generation_tests.cpp
     unit/game/world/soil_tests.cpp
     unit/game/world/terrain_tests.cpp
+    unit/game/world/lod_tests.cpp
     unit/game/world/mesh_tests.cpp
     unit/game/world/world_tests.cpp
     unit/game/items/block_tests.cpp
@@ -167,3 +170,33 @@ foreach(case terrain_caps_repeatability terrain_shared_edges_corners
             ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
     endif()
 endforeach()
+
+foreach(case lod_surface_matches_chunks lod_geology_order_independent
+             lod_stepped_surface_and_bands lod_smooth_stitched_edges
+             lod_stepped_smooth_join lod_water_and_bounds
+             lod_selection_coverage_balance lod_frontier_delays_and_stale
+             lod_loaded_water_mesh lod_detail_survives_refresh
+             lod_detail_hysteresis lod_mesh_height_matches_triangles
+             lod_detail_coarse_joins)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;lod" TIMEOUT 30)
+    if(ANYMALSIMA_TEST_SANITIZERS)
+        set_tests_properties(game.world.${case} PROPERTIES
+            ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endif()
+endforeach()
+
+add_executable(lod_benchmark EXCLUDE_FROM_ALL benchmarks/lod_benchmark.cpp)
+target_link_libraries(lod_benchmark PRIVATE world_logic_cpu)
+target_include_directories(lod_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+if(ANYMALSIMA_TEST_SANITIZERS)
+    target_compile_options(lod_benchmark PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(lod_benchmark PRIVATE -fsanitize=address,undefined)
+endif()
+
+# Explicit opt-in: exercises real Vulkan resources and shader programs, without
+# a window or audio device. Kept out of the default headless logic suite.
+add_executable(lod_render_smoke EXCLUDE_FROM_ALL benchmarks/lod_render_smoke.cpp)
+target_link_libraries(lod_render_smoke PRIVATE render game)
+target_include_directories(lod_render_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)

@@ -14,7 +14,7 @@ cmake --build build --target world_logic_tests --parallel 4
 ctest --test-dir build -L gameplay --output-on-failure --no-tests=error
 ```
 
-There are 72 independently registered cases. Checks remain active in Release.
+There are 103 independently registered cases. Checks remain active in Release.
 Failures exit nonzero and report failed conditions or expected/actual values,
 including voxel coordinates for lighting. See [RESULTS.md](RESULTS.md) for the
 latest verification and the original failures that motivated these regressions.
@@ -160,3 +160,10 @@ The 2 ms dispatch budget makes counts hardware/load dependent. This benchmark is
 manual and has no timing pass/fail threshold in CTest. Source supports
 `LIGHTING_BASELINE` when compiled against saved pre-priority sources; it does not
 contain a duplicate lighting algorithm. See `RESULTS.md` for the comparison.
+
+## Distant terrain
+
+The default suite includes surface/material agreement, deterministic geology,
+stepped terrain, mixed-resolution seams, stepped-to-smooth joins, water,
+finite-world bounds, coverage transactions and stale completions. See
+[LOD.md](LOD.md) for architecture, tuning, benchmarks and optional Vulkan captures.

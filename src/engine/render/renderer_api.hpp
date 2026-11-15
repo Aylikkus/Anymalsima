@@ -1,6 +1,7 @@
 #pragma once
 #include <bgfx/bgfx.h>
 
+#include <cmath>
 #include <variant>
 
 #include "text_layout_state.hpp"
@@ -26,10 +27,17 @@ enum class CullingMode {
 };
 
 struct Camera {
-    Vec3 position;
-    float yaw;
-    float pitch;
-    float distance;
+    Vec3 position{};
+    float yaw = 0;
+    float pitch = -.5f;
+    float distance = 10;
+    float viewDistance = 4096.f;
+    bool terrainSky = false;
+    Vec3 eye() const {
+        return {position.x - std::cos(pitch) * std::sin(yaw) * distance,
+                position.y - std::sin(pitch) * distance,
+                position.z - std::cos(pitch) * std::cos(yaw) * distance};
+    }
 };
 
 struct StaticMesh {
@@ -152,7 +160,7 @@ class IRenderer {
     virtual const float* getProjMatrix() = 0;
 
    protected:
-    Camera camera;
+    Camera camera{};
 };
 
 class MeshHandle {
@@ -280,6 +288,8 @@ struct ShaderProperty {
         type = PropertyType::Vec4;
         data = values;
     }
+
+    void setVec4(const std::array<float, 4>& values) { data = values; }
 
     void initMat4(const char* name, const std::array<float, 16>& values) {
         if (bgfx::isValid(m_handle)) bgfx::destroy(m_handle);

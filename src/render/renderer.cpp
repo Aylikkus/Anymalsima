@@ -27,6 +27,7 @@ Renderer::Renderer(Platform &platform)
     u_color = bgfx::createUniform("u_color", bgfx::UniformType::Vec4);
     u_uvRect = bgfx::createUniform("u_uvRect", bgfx::UniformType::Vec4);
     u_tex = bgfx::createUniform("u_tex", bgfx::UniformType::Sampler);
+    u_sky_camera = bgfx::createUniform("u_sky_camera", bgfx::UniformType::Vec4);
 }
 
 void Renderer::draw(const RenderTarget &target) {
@@ -86,9 +87,10 @@ void Renderer::beginFrame() {
     bgfx::touch(1);
 
     // View 0 = world
-    bgfx::setViewClear(0, BGFX_CLEAR_COLOR | BGFX_CLEAR_DEPTH, 0x000000FF, 1.0f,
-                       0);
-                       
+    bgfx::setViewClear(
+        0, (camera.terrainSky ? 0 : BGFX_CLEAR_COLOR) | BGFX_CLEAR_DEPTH,
+        0x000000FF, 1.0f, 0);
+
     Vec3 target = camera.position;
 
     Vec3 offset;
@@ -103,12 +105,25 @@ void Renderer::beginFrame() {
 
     float aspect = float(res.x) / float(res.y);
 
-    bx::mtxProj(proj_g, 60.0f, aspect, 1.0f, 2500.0f,
+    bx::mtxProj(proj_g, 60.0f, aspect, 1.0f, camera.viewDistance + 512.f,
                 bgfx::getCaps()->homogeneousDepth);
 
     bgfx::setViewTransform(0, view_g, proj_g);
     bgfx::setViewRect(0, 0, 0, (uint16_t)res.x, (uint16_t)res.y);
     bgfx::touch(0);
+    const bgfx::ViewId order[] = {2, 0, 1};
+    bgfx::setViewOrder(0, 3, order);
+    if (camera.terrainSky) {
+        bgfx::setViewRect(2, 0, 0, uint16_t(res.x), uint16_t(res.y));
+        bgfx::setViewClear(2, BGFX_CLEAR_COLOR, 0xaec4d6ff, 1.f, 0);
+        const std::array<float, 4> sky{camera.yaw, camera.pitch, aspect, 0};
+        bgfx::setUniform(u_sky_camera, sky.data());
+        const auto mesh = std::get<StaticMesh>(rect.get());
+        bgfx::setVertexBuffer(0, mesh.vbh);
+        bgfx::setIndexBuffer(mesh.ibh);
+        bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
+        bgfx::submit(2, resources.getProgram("terrain_sky"));
+    }
 }
 
 void Renderer::endFrame() {
@@ -1432,6 +1447,7 @@ void Renderer::buildSelectionRects(TextLayoutState &state, size_t selStart,
 AudioSystem &Renderer::getAudioSystem() { return audio_system; }
 
 void Renderer::clear() {
+    if (bgfx::isValid(u_sky_camera)) bgfx::destroy(u_sky_camera);
     if (bgfx::isValid(u_tex)) bgfx::destroy(u_tex);
     if (bgfx::isValid(u_color)) bgfx::destroy(u_color);
     if (bgfx::isValid(u_uvRect)) bgfx::destroy(u_uvRect);
@@ -1493,7 +1509,7 @@ void Renderer::createRectMesh() {
 
     static uint16_t indices[] = {0, 1, 2, 2, 3, 0};
 
-    rect.initStatic(this, verts, sizeof(verts), indices, sizeof(indices));
+    rect.initStatic(this, verts, std::size(verts), indices, std::size(indices));
 }
 
 void Renderer::createRectUVMesh() {
@@ -1506,7 +1522,8 @@ void Renderer::createRectUVMesh() {
 
     static uint16_t indices[] = {0, 1, 2, 2, 3, 0};
 
-    uv_rect.initStatic(this, verts, sizeof(verts), indices, sizeof(indices));
+    uv_rect.initStatic(this, verts, std::size(verts), indices,
+                       std::size(indices));
 }
 
 void Renderer::applyClip() {

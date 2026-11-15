@@ -31,6 +31,14 @@ class Assets final : public IAssets {
         rocks->items.push_back(rock);
         dataStorages[Rock::TypeName] = std::move(rocks);
     }
+    template <typename T>
+    void setData(std::vector<T> values) {
+        auto storage = std::make_unique<DataStorage<T>>();
+        for (const auto& value : values)
+            storage->indexByName[value.name] = storage->indexByName.size();
+        storage->items = std::move(values);
+        dataStorages[T::TypeName] = std::move(storage);
+    }
     Vec2u getTextureSize(const std::string&) override { return {16, 16}; }
     uint16_t getMaterialAlbedoLayer(const std::string& key) const override {
         return key == "block1" ? 7 : 9;

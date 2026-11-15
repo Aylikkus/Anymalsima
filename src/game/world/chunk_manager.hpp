@@ -27,6 +27,8 @@ struct ChunkHandle {
     uint64_t meshRevision = 0;
     MeshHandle mesh;
     bool initialised = false;
+    bool uploaded = false;
+    uint64_t uploadedRevision = 0;
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
 };
@@ -57,6 +59,10 @@ class ChunkManager {
     Chunk* requestLighting(const ChunkCoord& coord, ChunkCoord beneficiary);
     bool isRegistered(const ChunkCoord& coord) const;
     bool isReady(const ChunkCoord& coord) const;
+    bool isMeshUploaded(const ChunkCoord& coord) const;
+    // An older uploaded revision remains drawable while its replacement is
+    // queued (for example, after sunlight changes).
+    bool hasUploadedMesh(const ChunkCoord& coord) const;
     Chunk* getChunk(const ChunkCoord& coord);
     std::shared_ptr<Chunk> getChunkShared(const ChunkCoord& coord);
     const Tile* tileAt(int tx, int ty, int tz);
@@ -74,6 +80,8 @@ class ChunkManager {
                 it->second.meshRevision != result.revision)
                 continue;
             auto& handle = it->second;
+            handle.uploaded = true;
+            handle.uploadedRevision = result.revision;
             handle.vertices = std::move(result.mesh.vertices);
             handle.indices = std::move(result.mesh.indices);
             if (handle.vertices.empty()) {
@@ -89,7 +97,7 @@ class ChunkManager {
             }
             handle.mesh.update(handle.vertices.data(), handle.vertices.size(),
                                handle.indices.data(), handle.indices.size(),
-                               false);
+                               true);
         }
         readyMeshes.clear();
     }

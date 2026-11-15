@@ -71,7 +71,7 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
         v.tz = fd.tz;
         v.u = c.u;
         v.v = c.v;
-        v.layer = key.texLayer;
+        v.layer = key.texLayer == UINT16_MAX ? -2.f : float(key.texLayer);
         v.tint = key.tint;
         mesh.vertices.push_back(v);
     }
@@ -190,7 +190,9 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         assets.getMaterialAlbedoLayer(block.material);
                     
                     // Set tint based on sun exposure (0-15 scale)
-                    uint8_t sunLevel = tile->lightLevel.sun_exposure;
+                    uint8_t sunLevel =
+                        std::max(tile->lightLevel.sun_exposure,
+                                 tile->lightLevel.artificial_light);
                     uint8_t brightness = (sunLevel * 255) / 15;  // Map 0-15 to 0-255
                     uint32_t tint = (0xFF << 24) | (brightness << 16) | (brightness << 8) | brightness;
 
@@ -314,6 +316,29 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
             std::fill(maskNeg.begin(), maskNeg.end(), FaceKey{});
         }
     }
+
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int y = 0; y < Chunk::SIZE_Y; ++y)
+            for (int x = 0; x < Chunk::SIZE_X; ++x) {
+                const auto& tile = chunk.tiles[z][y][x];
+                if (tile.liquid != LiquidType::Water || tile.block_id != 0)
+                    continue;
+                const Tile* above =
+                    y + 1 < Chunk::SIZE_Y
+                        ? &chunk.tiles[z][y + 1][x]
+                        : neighbour(originX + x, originY + y + 1, originZ + z);
+                if (!above || above->liquid != LiquidType::None ||
+                    above->block_id)
+                    continue;
+                const uint8_t brightness =
+                    std::max(tile.lightLevel.sun_exposure,
+                             tile.lightLevel.artificial_light) *
+                    17;
+                const uint32_t tint =
+                    0xff000000u | uint32_t(brightness) * 0x010101u;
+                emitQuad(mesh, originX + x, originY + y + 1, originZ + z, 0, 0,
+                         1, 1, 0, 0, Face::PosY, {nullptr, UINT16_MAX, tint});
+            }
 
     return mesh;
 }

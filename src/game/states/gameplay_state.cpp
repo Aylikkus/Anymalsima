@@ -16,6 +16,10 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     u_texture_array.initTexture("u_texture_array", 0,
                                 context.assets->getMaterialAlbedoArray());
     this->world = std::move(world);
+    uiContext = &context;
+    worldEye.initVec4("u_world_eye", {0, 0, 0, TerrainLod::ViewDistance});
+    terrainLod = std::make_unique<TerrainLodManager>(
+        *this->world, *context.assets, context.threadPool);
     ui_manager = std::make_unique<UIManager>(context);
 
     auto root = std::make_unique<Panel>();
@@ -66,6 +70,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     camera.pitch = -1.5f;
     camera.yaw = 0;
     camera.distance = 10.0f;
+    camera.terrainSky = true;
 
     requestChunksAroundCamera();
 }
@@ -153,6 +158,17 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
 }
 
 void GameplayState::update(Game& game, float dt) {
+    camera.position.x =
+        std::clamp(camera.position.x, 0.f, float(world->width * 128 - 1));
+    camera.position.z =
+        std::clamp(camera.position.z, 0.f, float(world->height * 128 - 1));
+    const Vec2u region{unsigned(camera.position.x) / 128,
+                       unsigned(camera.position.z) / 128};
+    if (!focusRegion || *focusRegion != region) {
+        locationMgr->onPlayerRegionChanged(region);
+        focusRegion = region;
+    }
+    terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
     requestChunksAroundCamera();
@@ -169,7 +185,12 @@ void GameplayState::update(Game& game, float dt) {
 
     if (tileDebugText) {
         if (!hit) {
-            tileDebugText->setText("No tile");
+            tileDebugText->setText(
+                "No tile\nLOD: " + std::to_string(terrainLod->patchCount()) +
+                " patches, " +
+                std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
+                std::to_string(terrainLod->jobCount()) + " jobs, " +
+                std::to_string(terrainLod->backlog()) + " pending");
         } else {
             const Tile& t = hit->tile;
             std::stringstream ss;
@@ -200,10 +221,18 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
 
     // Poll mesh futures and upload any that finished this frame.
     chunkManager->uploadReadyMeshes(*context.renderer);
+    terrainLod->render(target, *context.renderer, *chunkManager, camera,
+                       context.getWindowSize());
+    const Vec3 eye = camera.eye();
+    worldEye.setVec4({eye.x, eye.y, eye.z, camera.viewDistance});
 
-    float vp[16];
-    const float* view = context.renderer->getViewMatrix();
-    const float* proj = context.renderer->getProjMatrix();
+    float vp[16], view[16], proj[16];
+    bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
+                  {camera.position.x, camera.position.y, camera.position.z},
+                  {0, 1, 0});
+    const auto viewport = context.getWindowSize();
+    bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y), 1.f,
+                camera.viewDistance + 512.f, bgfx::getCaps()->homogeneousDepth);
     bx::mtxMul(vp, view, proj);
 
     Frustum frustum = Frustum::fromViewProj(vp);
@@ -217,7 +246,9 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         int dy = std::abs(int(coord.y) - camCY);
         int dz = std::abs(int(coord.z) - camCZ);
 
-        if (dx > CHUNK_RADIUS || dy > CHUNK_RADIUS || dz > CHUNK_RADIUS) return;
+        if (dx > CHUNK_RADIUS || dy > CHUNK_RADIUS || dz > CHUNK_RADIUS ||
+            !terrainLod->drawsColumn(coord.x, coord.z))
+            return;
 
         // Build the AABB for this chunk in world space.
         // X and Z are tile axes, Y is height (slab).
@@ -239,7 +270,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
 
         std::array<float, 16> transform;
         bx::mtxIdentity(transform.data());
-        std::vector<ShaderProperty*> uniforms{&u_texture_array};
+        std::vector<ShaderProperty*> uniforms{&u_texture_array, &worldEye};
         target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     });

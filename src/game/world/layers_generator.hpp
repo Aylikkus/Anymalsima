@@ -16,6 +16,10 @@ class LayersGenerator {
           rockNoise(settings.feature_seed + 1337) {}
 
     std::vector<RegionLayer> get(const Region &region, int y_limit = 0) {
+        // Coordinate-local state: independent of streaming and worker order.
+        std::seed_seq seed{uint32_t(settings.feature_seed), region.coord.x,
+                           region.coord.y, uint32_t{0x726f636b}};
+        std::mt19937 rng(seed);
         /* ROCKS */
 
         const auto &rocks = assets->getStorage<Rock>();
@@ -51,8 +55,6 @@ class LayersGenerator {
                 baseCandidates.push_back(rock);
         }
 
-        float nx = float(region.coord.x) / settings.width;
-        float ny = float(region.coord.y) / settings.height;
 
         // large-scale blobs
         float field = rockNoise.fbmTileable(
@@ -193,13 +195,12 @@ class LayersGenerator {
             layer.aquifer_saturation = saturation;
         }
 
-        return std::move(result);
+        return result;
     }
 
    private:
     const WorldGenSettings &settings;
     IAssets *assets;
-    std::mt19937 rng;
     std::uniform_real_distribution<float> dist{0.0f, 1.0f};
     PerlinNoise rockNoise;
 

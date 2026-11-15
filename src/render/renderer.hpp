@@ -83,6 +83,7 @@ class Renderer : public IRenderer {
     bgfx::UniformHandle u_color;
     bgfx::UniformHandle u_tex;
     bgfx::UniformHandle u_uvRect;
+    bgfx::UniformHandle u_sky_camera = BGFX_INVALID_HANDLE;
     MeshHandle rect;
     MeshHandle uv_rect;
 };

@@ -17,6 +17,7 @@
 #include "world/location_generator.hpp"
 #include "world/location_manager.hpp"
 #include "world/sunlight_propagator.hpp"
+#include "world/terrain_lod_manager.hpp"
 #include "world/tile_raycast.hpp"
 #include "world/world_generation_task.hpp"
 
@@ -42,7 +43,11 @@ class GameplayState : public IGameState {
     std::unique_ptr<ChunkMesher> mesher;
     std::unique_ptr<SunLightPropagator> sunLight;
 
+    std::unique_ptr<TerrainLodManager> terrainLod;
+    UIContext* uiContext = nullptr;
+    std::optional<Vec2u> focusRegion;
     ShaderProperty u_texture_array;
+    ShaderProperty worldEye;
 
     std::string blockShader = "block";
 

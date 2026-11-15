@@ -1,3 +1,79 @@
+# Region-boundary visibility regression — 2026-11-15
+
+Fixed two causes of detailed terrain briefly falling back to LOD while walking:
+coverage was rebuilt from the current distant LOD layout (which could temporarily
+be coarse), and a queued lighting remesh invalidated visibility of its still
+uploaded predecessor. Detailed-column ownership is now independent of both.
+Real unloading and leaving the hysteresis keep radius still retire coverage.
+Coarse LODs are masked beneath those columns and get explicit boundary joins.
+
+All 103 gameplay cases pass in Release and the ASan/UBSan logic configuration,
+including four new regressions for coverage retention, hysteresis, triangulated
+surface sampling and coarse-to-detail joins.
+
+The opt-in `handover_walk` Vulkan regression crossed one 128-tile region boundary
+and returned, forcing chunk remeshes at both moves. It performed 23,796 per-frame
+checks of previously visible, still drawable columns, with zero visibility
+regressions. It drew 42, 40 and 52 detailed chunk meshes at the three stops.
+Peak logical LOD residency, including the reserved join buffers, was 63.936 MiB;
+peak per-frame geometry uploads were 809.398 KiB. This run used the same fixed
+landscape and llvmpipe setup as the initial verification below.
+
+Reproduce with:
+
+```bash
+cmake --build build --target app world_logic_tests lod_render_smoke --parallel 4
+ctest --test-dir build -L gameplay --output-on-failure --no-tests=error
+build/tests/lod_render_smoke build/lod_boundary 2000 handover_walk
+```
+
+---
+
+# Distant terrain verification — 2026-11-15
+
+The application and shader stages build. All 99 gameplay cases pass in the
+Release/Clang build and in the GCC ASan + UBSan logic build, including nine LOD
+cases. LeakSanitizer execution requires running outside the restricted sandbox.
+No address, leak or undefined-behavior errors were reported by the logic suite.
+
+The optional headless Vulkan tool successfully rendered the fixed synthetic
+landscape using runtime material assets on llvmpipe (LLVM 22.1.8, Mesa 26.2.4),
+at 1280 by 720. The loaded-terrain scenario handed over to 42 detailed chunk
+draws. Coast and elevated views completed and were captured. A travel sequence
+completed its initial view, a 512-tile move and a further 4,096/2,048-tile X/Z
+teleport, with no remaining LOD jobs or patches at each stop. Immediate teardown
+with two outstanding LOD jobs completed successfully.
+
+| Travel stop | Patches | Visible LOD draws | Resident MiB |
+| --- | ---: | ---: | ---: |
+| Initial | 248 | 96 | 48.604 |
+| Nearby move | 194 | 84 | 42.821 |
+| Teleport | 186 | 70 | 32.012 |
+
+Across that run, peak logical LOD residency was 55.355 MiB and the largest
+per-frame patch upload was 809.398 KiB, within the 64 MiB / 2 MiB limits.
+Separate elevated and loaded-handover runs also stayed within those limits.
+The CPU-only benchmark generated 244 patches, about 688,000 indexed vertices
+and 866,000 triangles, totaling 46.839 MiB; its largest patch was 404.008 KiB.
+Full single-thread CPU generation took about 2–3 seconds across the observed
+runs. The Vulkan run refined three destinations in about 14 seconds total,
+including capture/readback and paced frames.
+
+Captured views were inspected for terrain/water continuity and the transition
+from voxel steps into coarse terrain. PPM/PNG captures are under `build/` and
+are intentionally not committed. Commands and architecture are documented in
+[LOD.md](LOD.md).
+
+These are software Vulkan measurements, with startup pipeline compilation,
+readback, concurrent builds and no physical GPU available. Full-frame maxima
+included 100–280 ms stalls, so these results establish bounded resources and
+functional rendering, not a low-end hardware FPS target. Interactive SDL/menu
+checks and hardware frame-time comparisons with LODs enabled/disabled remain
+manual validation work; the capture tool does not instantiate the application
+renderer or a window.
+
+---
+
 # Gameplay tests and camera-priority lighting results
 
 Verified on 2026-11-15. All original sunlight regressions remain fixed. The suite

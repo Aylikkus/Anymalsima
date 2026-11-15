@@ -64,6 +64,18 @@ bool ChunkManager::isReady(const ChunkCoord& coord) const {
     auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready;
 }
+bool ChunkManager::hasUploadedMesh(const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready &&
+           it->second.uploaded;
+}
+bool ChunkManager::isMeshUploaded(const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready &&
+           it->second.uploaded &&
+           it->second.uploadedRevision == it->second.meshRevision &&
+           !it->second.dirtyPending;
+}
 Chunk* ChunkManager::getChunk(const ChunkCoord& coord) {
     auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready
@@ -96,10 +108,14 @@ void ChunkManager::unregister(const ChunkCoord& coord) {
         if (--regionRegistrations.at(rc) == 0) {
             regionRegistrations.erase(rc);
             regionTerrain.erase(rc);
+            regionLayers.erase(rc);
+            regionSoils.erase(rc);
         }
         const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
-        if (--columnInputs.at(column).registrations == 0)
+        if (--columnInputs.at(column).registrations == 0) {
             columnInputs.erase(column);
+            columnTopY.erase(column);
+        }
     }
     pending.erase(coord);
     generationQueue.erase(coord);
@@ -140,8 +156,16 @@ bool ChunkManager::canMesh(ChunkCoord coord) const {
         {coord.x + 1, coord.y, coord.z}, {coord.x - 1, coord.y, coord.z},
         {coord.x, coord.y + 1, coord.z}, {coord.x, coord.y - 1, coord.z},
         {coord.x, coord.y, coord.z + 1}, {coord.x, coord.y, coord.z - 1}};
-    return std::all_of(std::begin(neighbors), std::end(neighbors),
-                       [&](auto neighbor) { return isReady(neighbor); });
+    return std::all_of(
+        std::begin(neighbors), std::end(neighbors), [&](auto neighbor) {
+            return (terrainWorld.width > 0 && terrainWorld.height > 0 &&
+                    (neighbor.x >=
+                         unsigned(terrainWorld.width * CHUNKS_PER_REGION) ||
+                     neighbor.z >=
+                         unsigned(terrainWorld.height * CHUNKS_PER_REGION) ||
+                     neighbor.y >= Y_CHUNKS)) ||
+                   isReady(neighbor);
+        });
 }
 
 void ChunkManager::submitMesh(ChunkCoord coord) {
@@ -164,9 +188,15 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
     const auto priority = handle.meshUrgent ? BS::pr::high : BS::pr::normal;
     auto future = pool.submit_task(
         [coord, data, neighbors = std::move(neighbors), builder = *mesher,
-         identity, revision]() {
+         identity, revision, width = terrainWorld.width * 128,
+         depth = terrainWorld.height * 128]() {
             auto mesh = builder.build(
                 *data, coord, [&](int x, int y, int z) -> const Tile* {
+                    static const Tile outside{};
+                    if (width > 0 && depth > 0 &&
+                        (x < 0 || z < 0 || y < 0 || x >= width || z >= depth ||
+                         y >= Y_CHUNKS * Chunk::SIZE_Y))
+                        return &outside;
                     if (x < 0 || y < 0 || z < 0) return nullptr;
                     ChunkCoord c{static_cast<unsigned>(x / Chunk::SIZE_X),
                                  static_cast<unsigned>(y / Chunk::SIZE_Y),
