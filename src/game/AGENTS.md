@@ -25,7 +25,7 @@ Every sub-seed derives from `WorldGenSettings::seed` through `WorldGenSettings::
 `LocationManager` owns region residency. With a `RegionStore` it opens a region asynchronously and registers its chunks with their saved blobs; `ChunkManager` decodes those chunks instead of generating them. Unloading snapshots chunks whose `persistDirty` flag is set and queues a write. `RegionStore` runs at most one job per region at a time and keeps recently released regions warm in RAM. Callers of `ChunkManager::request` never see where data came from.
 
 - Lighting is derived and never saved. `SunLightPropagator` writes must not set `persistDirty`.
-- Gameplay edits to tiles must go through `withChunkLocked` followed by `ChunkManager::markModified`, so the chunk is saved and remeshed.
+- Gameplay edits to tiles must go through `withChunkLocked` followed by `ChunkManager::markModified`, so the chunk is saved and remeshed. Prefer `WorldEditor` (`world/world_editor.hpp`) for block placement and removal: it also remeshes border neighbors, raises column tops and recomputes sunlight.
 - `GameplayState` autosaves one region per frame every 300 s. Its destructor saves every region, flushes the store and writes `world.json`. Keep `regionStore` declared before the chunk systems that use it.
 - New persistent data (units, factions, history) goes in a new fourcc section in the owning file. Use `world_map.dat` or a new root file for world-scope data, and region files for region-scope data. Older readers keep unknown sections untouched and write them back. Add round-trip and malformed-input tests under `tests/unit/game/world/save_codec_tests.cpp` or `tests/integration/region_persistence_tests.cpp`.
 

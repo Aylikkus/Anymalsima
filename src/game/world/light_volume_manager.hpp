@@ -34,7 +34,9 @@ class LightVolumeManager {
     LightVolumeManager& operator=(const LightVolumeManager&) = delete;
 
     // Refreshes dirty slots near the focus within a frame budget and evicts
-    // slots that have not been drawn recently.
+    // slots that have not been drawn recently. Call once per frame after
+    // ChunkManager::uploadReadyMeshes and before drawing, so a volume that
+    // waited for its chunk's new mesh changes in the same frame as it.
     void update(Vec3 focus);
     // Appends the light uniforms of a chunk about to be drawn, building its
     // volume immediately when it has none. Returns false when no slot is
@@ -84,6 +86,8 @@ class LightVolumeManager {
     std::unordered_map<ChunkCoord, Slot> slots;
     std::unordered_map<ChunkCoord, CachedCells> cache;
     CameraWorkQueue dirty;
+    // Frame at which a dirty slot started waiting for its chunk's remesh.
+    std::unordered_map<ChunkCoord, uint64_t> deferredSince;
     bgfx::TextureFormat::Enum format = bgfx::TextureFormat::RG8;
     int bytesPerTexel = 2;
     uint64_t frame = 1;

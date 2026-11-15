@@ -44,6 +44,10 @@ class SunLightPropagator {
         uint64_t revision = 0;
         bool directKnown = false;
         bool complete = false;
+        // Full (direct + indirect) light was published at least once. Later
+        // recomputations keep showing it instead of a darker direct-only
+        // lower bound, so edits never flash bounced light off.
+        bool lit = false;
     };
     struct Slab {
         ChunkCoord coord;

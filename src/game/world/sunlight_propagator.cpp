@@ -90,7 +90,8 @@ void SunLightPropagator::markColumnDirty(unsigned cx, unsigned cz) {
         auto& state = states.at(coord);
         state.direct.fill(0);
         state.directKnown = false;
-        chunks.markDirty(coord);
+        // No remesh: light reaches the GPU through light volumes, refreshed
+        // when the recomputed light is published.
         invalidateAround(coord);
     }
 }
@@ -267,9 +268,11 @@ void SunLightPropagator::collect() {
             it->second.directKnown = true;
             if (changed) {
                 invalidateAround(output.coord);
-                // Publish a correct lower bound immediately. Indirect light
-                // refines this result without waiting for distant columns.
-                publish(output.coord, it->second.direct);
+                // A chunk without any light yet gets a correct lower bound
+                // immediately; indirect light refines it without waiting
+                // for distant columns. A lit chunk keeps its previous full
+                // light until the refined result replaces it.
+                if (!it->second.lit) publish(output.coord, it->second.direct);
             }
         }
         for (const auto& coord : result.missing)
@@ -296,6 +299,7 @@ void SunLightPropagator::collect() {
             continue;
         publish(coord, result.light);
         it->second.complete = true;
+        it->second.lit = true;
     }
 }
 

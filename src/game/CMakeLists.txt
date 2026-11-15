@@ -18,6 +18,7 @@ add_library(game
     world/sunlight_propagator.cpp
     world/light_volume.cpp
     world/light_volume_manager.cpp
+    world/world_editor.cpp
     world/location_manager.cpp
     world/save/chunk_codec.cpp
     world/save/region_file.cpp

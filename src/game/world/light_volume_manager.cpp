@@ -10,6 +10,9 @@ namespace {
 constexpr uint64_t SlotIdleFrames = 1800;
 constexpr uint64_t CacheIdleFrames = 1800;
 constexpr int RebuildsPerFrame = 64;
+// Upper bound on waiting for a pending remesh, so light still updates when a
+// chunk keeps being remeshed.
+constexpr uint64_t MaxMeshWaitFrames = 30;
 constexpr auto RebuildBudget = std::chrono::microseconds(1500);
 
 bool offset(const ChunkCoord& coord, int dx, int dy, int dz, ChunkCoord& out) {
@@ -81,6 +84,7 @@ void LightVolumeManager::forget(const ChunkCoord& coord) {
     release(coord);
     cache.erase(coord);
     dirty.erase(coord);
+    deferredSince.erase(coord);
     // Neighbors fall back to clamping their own edge cells.
     forNeighborhood(coord, [&](const ChunkCoord& n, int, int, int) {
         if (slots.contains(n)) dirty.insert(n);
@@ -145,6 +149,7 @@ bool LightVolumeManager::allocate(const ChunkCoord& coord) {
     if (victim == slots.end()) return false;
     const auto reused = victim->second;
     dirty.erase(victim->first);
+    deferredSince.erase(victim->first);
     slots.erase(victim);
     slots[coord] = {reused.page, reused.index, frame};
     return true;
@@ -206,9 +211,21 @@ void LightVolumeManager::update(Vec3 focus) {
             (rebuilt &&
              std::chrono::steady_clock::now() - started >= RebuildBudget))
             break;
-        dirty.erase(coord);
         const auto it = slots.find(coord);
-        if (it == slots.end()) continue;
+        if (it == slots.end()) {
+            dirty.erase(coord);
+            deferredSince.erase(coord);
+            continue;
+        }
+        // An edit changes opacity before its new geometry is uploaded. The
+        // drawn (old) faces next to a placed block would sample that now
+        // opaque cell and turn black, so the volume waits for the mesh.
+        if (chunks.hasUploadedMesh(coord) && !chunks.isMeshUploaded(coord)) {
+            const auto since = deferredSince.try_emplace(coord, frame).first;
+            if (frame - since->second < MaxMeshWaitFrames) continue;
+        }
+        dirty.erase(coord);
+        deferredSince.erase(coord);
         rebuild(coord, it->second);
         ++rebuilt;
     }
@@ -216,6 +233,7 @@ void LightVolumeManager::update(Vec3 focus) {
         if (it->second.lastUsed + SlotIdleFrames < frame) {
             pages[it->second.page]->free.push_back(it->second.index);
             dirty.erase(it->first);
+            deferredSince.erase(it->first);
             it = slots.erase(it);
         } else {
             ++it;
@@ -237,6 +255,7 @@ bool LightVolumeManager::bind(const ChunkCoord& coord,
         it = slots.find(coord);
         rebuild(coord, it->second);
         dirty.erase(coord);
+        deferredSince.erase(coord);
     }
     it->second.lastUsed = frame;
     auto& page = *pages[it->second.page];

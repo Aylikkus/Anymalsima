@@ -22,6 +22,7 @@
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/tile_raycast.hpp"
+#include "world/world_editor.hpp"
 #include "world/world_generation_task.hpp"
 
 class GameplayState : public IGameState {
@@ -55,6 +56,7 @@ class GameplayState : public IGameState {
     // Listens to chunkManager signals; declared after it so it is destroyed
     // first.
     std::unique_ptr<LightVolumeManager> lightVolumes;
+    std::unique_ptr<WorldEditor> editor;
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     UIContext* uiContext = nullptr;
@@ -66,6 +68,16 @@ class GameplayState : public IGameState {
     std::string blockShader = "block";
 
     Text* tileDebugText = nullptr;
+
+    // HUD block editing: a tool is armed by its button and applied with LMB.
+    enum class EditTool { None, Place, Remove };
+    EditTool tool = EditTool::None;
+    TextButton* placeButton = nullptr;
+    TextButton* removeButton = nullptr;
+    void setTool(EditTool value);
+    void useTool(int mouseX, int mouseY);
+    // First solid block under the cursor.
+    std::optional<TileRaycastHit> pickTile(int mouseX, int mouseY);
 
     Camera camera;
     bool rotating = false;

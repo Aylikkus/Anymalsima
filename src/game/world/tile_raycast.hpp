@@ -13,6 +13,11 @@ struct TileRaycastHit {
 
     // A copy of the tile data at the hit position.
     Tile tile;
+
+    // Outward normal of the face the ray entered through; the adjacent
+    // tile (tx + nx, ty + ny, tz + nz) is where a block is placed against
+    // this one. All zero when the ray started inside the hit tile.
+    int nx = 0, ny = 0, nz = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -23,12 +28,14 @@ struct TileRaycastHit {
 //   tx = world X tile,  ty = world height tile,  tz = world Y tile
 //
 // Returns the first non-air tile hit, or std::nullopt if nothing was found.
+// With hitLiquids = false the ray passes through liquid tiles and stops only
+// at solid blocks (used for block editing).
 // ---------------------------------------------------------------------------
 inline std::optional<TileRaycastHit> castTileRay(
     ChunkManager& chunks, float originX, float originY,
     float originZ,                       // world-space position
     float dirX, float dirY, float dirZ,  // unit direction vector
-    float maxDistance = 64.0f) {
+    float maxDistance = 64.0f, bool hitLiquids = true) {
     // Current tile position (integer).
     int tx = (int)std::floor(originX);
     int ty = (int)std::floor(originY);  // height
@@ -59,27 +66,32 @@ inline std::optional<TileRaycastHit> castTileRay(
     float tDeltaZ = calcTDelta(dirZ);
 
     float tCurrent = 0.0f;
+    int nx = 0, ny = 0, nz = 0;
 
     while (tCurrent < maxDistance) {
         // Check current tile.
         const Tile* tile = chunks.tileAt(tx, ty, tz);
-        if (tile && !tile->isAir()) {
-            return TileRaycastHit{tx, ty, tz, *tile};
+        if (tile && (hitLiquids ? !tile->isAir() : tile->isSolid())) {
+            return TileRaycastHit{tx, ty, tz, *tile, nx, ny, nz};
         }
 
         // Advance to the nearest tile boundary.
+        nx = ny = nz = 0;
         if (tMaxX < tMaxY && tMaxX < tMaxZ) {
             tCurrent = tMaxX;
             tMaxX += tDeltaX;
             tx += stepX;
+            nx = -stepX;
         } else if (tMaxY < tMaxZ) {
             tCurrent = tMaxY;
             tMaxY += tDeltaY;
             ty += stepY;
+            ny = -stepY;
         } else {
             tCurrent = tMaxZ;
             tMaxZ += tDeltaZ;
             tz += stepZ;
+            nz = -stepZ;
         }
     }
 

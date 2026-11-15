@@ -4,6 +4,7 @@
 
 #include <iostream>
 
+#include "gettext_wrapper.hpp"
 #include "main_menu_state.hpp"
 #include "render/frustrum.hpp"
 
@@ -48,6 +49,25 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     tileDebugText->setGridPlacement({0, 0, 6, 8});
     tileDebugText->setText("No tile selected");
 
+    auto makeToolButton = [&](const std::string& label, int column,
+                              EditTool value) {
+        auto* button = ui_manager->createWidget(
+            std::make_unique<TextButton>(context, "ui.black.9slice",
+                                         "mouse_click"),
+            root_ptr);
+        button->setTextAlignment(TextAlign::Center, VerticalAlign::Middle);
+        button->setText(label);
+        button->setFontRole(FontRole::Bold);
+        button->setGridPlacement({float(column), 15, 3, 1});
+        // Clicking the armed tool again disarms it.
+        button->onClick.connect([this, value]() {
+            setTool(tool == value ? EditTool::None : value);
+        });
+        return button;
+    };
+    placeButton = makeToolButton(_("PLACE BLOCK"), 0, EditTool::Place);
+    removeButton = makeToolButton(_("REMOVE BLOCK"), 3, EditTool::Remove);
+
     generator = std::make_unique<LocationGenerator>();
     mesher = std::make_unique<ChunkMesher>(*context.assets);
     chunkManager = std::make_unique<ChunkManager>(
@@ -58,6 +78,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         context.threadPool);
     lightVolumes = std::make_unique<LightVolumeManager>(
         *chunkManager, context.assets->getStorage<Block>());
+    editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
+                                           context.assets->getStorage<Block>());
     locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
                                                     regionStore.get());
 
@@ -143,6 +165,9 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
                 break;
 
             case InputEvent::MouseClick:
+                if (e.button == InputEvent::LEFT_BUTTON && e.pressed &&
+                    tool != EditTool::None)
+                    useTool(e.x, e.y);
                 if (e.button == InputEvent::RIGHT_BUTTON) {
                     rotating = e.pressed;
                     lastMouseX = e.x;
@@ -220,6 +245,53 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
     }
 }
 
+void GameplayState::setTool(EditTool value) {
+    tool = value;
+    const Color armed{120, 200, 120, 255};
+    const Color idle{232, 232, 232, 255};
+    placeButton->getButton()->setNormalColor(tool == EditTool::Place ? armed
+                                                                     : idle);
+    removeButton->getButton()->setNormalColor(tool == EditTool::Remove ? armed
+                                                                       : idle);
+}
+
+std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
+    // Same view and projection as render(): bx::mtxLookAt from the orbit
+    // eye toward camera.position, 60 degree vertical field of view.
+    const Vec2 viewport = uiContext->getWindowSize();
+    if (viewport.x <= 0 || viewport.y <= 0) return std::nullopt;
+    const Vec3 eye = camera.eye();
+    bx::Vec3 forward = bx::normalize(bx::Vec3{camera.position.x - eye.x,
+                                              camera.position.y - eye.y,
+                                              camera.position.z - eye.z});
+    const bx::Vec3 right = bx::normalize(bx::cross(bx::Vec3{0, 1, 0}, forward));
+    const bx::Vec3 up = bx::cross(forward, right);
+    const float tanHalf = std::tan(bx::toRad(60.f) * 0.5f);
+    const float ndcX = 2.f * float(mouseX) / viewport.x - 1.f;
+    const float ndcY = 1.f - 2.f * float(mouseY) / viewport.y;
+    const float aspect = viewport.x / viewport.y;
+    const bx::Vec3 dir = bx::normalize(
+        bx::add(forward, bx::add(bx::mul(right, ndcX * aspect * tanHalf),
+                                 bx::mul(up, ndcY * tanHalf))));
+    return castTileRay(*chunkManager, eye.x, eye.y, eye.z, dir.x, dir.y, dir.z,
+                       camera.distance + 64.f, /*hitLiquids=*/false);
+}
+
+void GameplayState::useTool(int mouseX, int mouseY) {
+    const auto hit = pickTile(mouseX, mouseY);
+    if (!hit) return;
+    if (tool == EditTool::Remove) {
+        editor->removeBlock({hit->tx, hit->ty, hit->tz});
+        return;
+    }
+    const auto& blocks = uiContext->assets->getStorage<Block>();
+    if (blocks.items.empty() || (!hit->nx && !hit->ny && !hit->nz)) return;
+    // Against the face under the cursor, using the first defined block.
+    editor->placeBlock(
+        {hit->tx + hit->nx, hit->ty + hit->ny, hit->tz + hit->nz},
+        blocks.items.front().id);
+}
+
 void GameplayState::update(Game& game, float dt) {
     camera.position.x =
         std::clamp(camera.position.x, 0.f, float(world->width * 128 - 1));
@@ -240,7 +312,6 @@ void GameplayState::update(Game& game, float dt) {
     requestChunksAroundCamera();
     chunkManager->update();
     sunLight->update();
-    lightVolumes->update(camera.position);
 
     // --- Tile debug raycast -------------------------------------------------
     float dirX, dirY, dirZ;
@@ -288,6 +359,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
 
     // Poll mesh futures and upload any that finished this frame.
     chunkManager->uploadReadyMeshes(*context.renderer);
+    // After uploads: deferred light volumes switch with their new meshes.
+    lightVolumes->update(camera.position);
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize());
     const Vec3 eye = camera.eye();
