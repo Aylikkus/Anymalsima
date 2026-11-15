@@ -86,7 +86,7 @@ std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
         const bool exact = distance(p, detailFocus.value_or(eye)) < exactRadius;
         const float projected = (error ? error(p) : 0.f) * viewportHeight *
                                 .8660254f /
-                                std::hypot(range, std::max(0.f, eye.y - 512));
+                                std::hypot(range, std::max(0.f, eye.y - HeightProfile::PlainsTopY));
         if (!coarse && p.spacing > 1 && (exact || projected > pixelError))
             children(p, visit);
         else

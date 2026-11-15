@@ -1,4 +1,5 @@
 #include <chrono>
+#include <climits>
 
 #include "world/location_manager.hpp"
 #include "world/terrain_sampler.hpp"
@@ -385,4 +386,90 @@ TEST(terrain_column_inputs_seams) {
                      std::chrono::steady_clock::now() - start)
                      .count()
               << " ms\n";
+}
+
+TEST(terrain_height_profile) {
+    using namespace HeightProfile;
+    EQUAL(heightToY(0), OceanFloorY, "ocean floor");
+    EQUAL(heightToY(SeaHeight), SEA_LEVEL_Y, "sea level");
+    EQUAL(heightToY(MountainStart), PlainsTopY, "mountain foot");
+    EQUAL(heightToY(1), PeakY, "highest peak");
+    CHECK(PeakY <= WORLD_HEIGHT_Y - SkySpace);
+    int previous = heightToY(0);
+    for (int i = 1; i <= 1000; ++i) {
+        const int y = heightToY(i / 1000.f);
+        CHECK(y >= previous);
+        previous = y;
+    }
+    EQUAL(heightToY(MountainTop), PeakY, "noise maximum reaches the peak");
+    // Exponential: the last mountain step rises more than the plains band.
+    CHECK(heightToY(MountainTop) - heightToY(MountainTop - .05f) >
+          PlainsTopY - SEA_LEVEL_Y);
+}
+
+TEST(terrain_coast_organic) {
+    test::Assets assets;
+    auto world = terrainWorld(5, 5, 420);
+    for (auto& r : world.regions)
+        if (r.coord.x < 2) {
+            r.land_height_m = SEA_LEVEL_Y - 12;
+            r.land = LandType::WATER;
+        }
+    auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    TerrainSampler sampler(data);
+    int lowest = INT_MAX, highest = INT_MIN;
+    for (int z = 256; z < 384; ++z) {
+        int crossing = -1;
+        for (int x = 160; x < 352; ++x)
+            if (sampler.sample(x, z).surface_y >= SEA_LEVEL_Y) {
+                crossing = x;
+                break;
+            }
+        CHECK(crossing >= 0);
+        lowest = std::min(lowest, crossing);
+        highest = std::max(highest, crossing);
+        // Far from the region boundary the coast field is saturated.
+        CHECK(sampler.sample(352, z).surface_y > SEA_LEVEL_Y);
+        CHECK(sampler.sample(160, z).surface_y < SEA_LEVEL_Y);
+    }
+    // The shoreline wanders instead of following the region edge at x=256.
+    CHECK(highest - lowest >= 16);
+    CHECK(lowest != 256 || highest != 256);
+}
+
+TEST(terrain_surface_ceiling) {
+    test::Assets assets;
+    auto world = terrainWorld(5, 5, 700, LandType::MOUNTAINS);
+    for (auto& r : world.regions) {
+        r.land_height_m += int(r.coord.x) * 37 - int(r.coord.y) * 23;
+        if ((r.coord.x + r.coord.y) % 3 == 0) {
+            r.land_height_m = SEA_LEVEL_Y - 20;
+            r.land = LandType::WATER;
+        }
+    }
+    auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    TerrainSampler sampler(data);
+    for (int z = 256; z < 384; z += 3)
+        for (int x = 256; x < 384; x += 3) {
+            const auto& owner = world.regions[(z / 128) * 5 + x / 128];
+            CHECK(sampler.sample(x, z).surface_y <=
+                  TerrainTuning::surfaceCeiling(owner.land_height_m));
+        }
+}
+
+TEST(terrain_mountain_relief) {
+    test::Assets assets;
+    auto world = terrainWorld(5, 5, 820, LandType::MOUNTAINS);
+    auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    TerrainSampler sampler(data);
+    int lowest = INT_MAX, highest = INT_MIN;
+    for (int z = 256; z < 384; z += 2)
+        for (int x = 256; x < 384; x += 2) {
+            const int y = sampler.sample(x, z).surface_y;
+            lowest = std::min(lowest, y);
+            highest = std::max(highest, y);
+        }
+    CHECK(highest <= 820);
+    // Elevation-scaled ridges carve valleys of tens of metres into peaks.
+    CHECK(highest - lowest >= 60);
 }

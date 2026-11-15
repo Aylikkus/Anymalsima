@@ -23,7 +23,7 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
         if (tileY <= surfaceY) {
             int depth_m = surfaceY - tileY;
             const RegionLayer* layer =
-                layerAtDepth(layers, region.land_height_m - tileY);
+                layerAtDepth(layers, std::max(0, region.land_height_m - tileY));
             for (int i = 0; i < soil.count; ++i) {
                 const auto& horizon = soil.layers[i];
                 if (depth_m >= horizon.depth_from_surface_m &&

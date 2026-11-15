@@ -34,7 +34,8 @@ void ChunkManager::registerChunk(const ChunkCoord& coord,
         regionSoils[region->coord] =
             SoilGenerator::select(*region, *soilAssets, soilSeed);
     const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
-    columnTopY.try_emplace(column, region->land_height_m);
+    columnTopY.try_emplace(
+        column, TerrainTuning::surfaceCeiling(region->land_height_m));
     ++columnInputs[column].registrations;
     ++regionRegistrations[region->coord];
 }

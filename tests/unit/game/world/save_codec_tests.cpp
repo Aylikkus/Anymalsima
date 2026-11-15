@@ -246,3 +246,14 @@ TEST(save_catalog_slots) {
     EQUAL(loaded->regions.size(), size_t(6), "world map regions");
     std::filesystem::remove_all(root);
 }
+
+TEST(region_index_covers_world_height) {
+    // u16 local indices must address every slab of the tallest column.
+    static_assert(RegionData::ChunkCount <= 65536);
+    const Vec2u region{3, 5};
+    const ChunkCoord top{region.x * CHUNKS_PER_REGION + 7, Y_CHUNKS - 1,
+                         region.y * CHUNKS_PER_REGION + 7};
+    const auto index = RegionData::localIndex(top);
+    CHECK(index == RegionData::ChunkCount - 1);
+    CHECK(RegionData::worldCoord(region, index) == top);
+}

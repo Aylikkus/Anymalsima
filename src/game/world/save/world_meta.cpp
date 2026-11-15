@@ -35,7 +35,7 @@ Json WorldMeta::serialize() const {
 void WorldMeta::deserialize(const Json& j) {
     if (!j.is_object()) throw std::runtime_error("world.json is not an object");
     formatVersion = j.value("formatVersion", 0);
-    if (formatVersion < 1 || formatVersion > FormatVersion)
+    if (formatVersion < MinFormatVersion || formatVersion > FormatVersion)
         throw std::runtime_error("unsupported world format version " +
                                  std::to_string(formatVersion));
     generatorVersion = j.value("generatorVersion", 1);

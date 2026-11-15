@@ -37,10 +37,12 @@ TEST(chunk_unregister_lifetime) {
 TEST(chunk_top_bound) {
     test::WorldFixture f;
     f.registerSlab({0, 0, 0});
-    EQUAL(f.chunks.getColumnTopY(0, 0), 31, "initial surface");
-    f.chunks.raiseColumnTopY(0, 0, 45);
+    // Underwater regions reserve room for a warped beach crossing into them.
+    EQUAL(f.chunks.getColumnTopY(0, 0), TerrainTuning::surfaceCeiling(31),
+          "initial surface");
+    f.chunks.raiseColumnTopY(0, 0, 450);
     f.chunks.raiseColumnTopY(0, 0, 20);
-    EQUAL(f.chunks.getColumnTopY(0, 0), 45, "monotonic column bound");
+    EQUAL(f.chunks.getColumnTopY(0, 0), 450, "monotonic column bound");
 }
 
 TEST(ray_first_hit) {

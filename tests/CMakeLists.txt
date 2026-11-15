@@ -164,7 +164,7 @@ endforeach()
 foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
              chunk_codec_wide_palette chunk_codec_rejects_corrupt
              region_file_roundtrip world_seed_derivation world_map_roundtrip
-             save_catalog_slots)
+             save_catalog_slots region_index_covers_world_height)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "unit;gameplay;save" TIMEOUT 10)
@@ -202,7 +202,9 @@ foreach(case terrain_caps_repeatability terrain_shared_edges_corners
              terrain_relief_strength terrain_cliff_segments
              terrain_coast_dry_inland terrain_world_bounds
              terrain_geology_erosion terrain_soil_transition
-             terrain_streaming_cache terrain_column_inputs_seams)
+             terrain_streaming_cache terrain_column_inputs_seams
+             terrain_height_profile terrain_coast_organic
+             terrain_surface_ceiling terrain_mountain_relief)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;terrain" TIMEOUT 15)
@@ -241,3 +243,8 @@ endif()
 add_executable(lod_render_smoke EXCLUDE_FROM_ALL benchmarks/lod_render_smoke.cpp)
 target_link_libraries(lod_render_smoke PRIVATE render game)
 target_include_directories(lod_render_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+
+# Dev tool: PPM render of seeded terrain for inspecting coasts and mountains.
+add_executable(terrain_heightmap EXCLUDE_FROM_ALL benchmarks/terrain_heightmap.cpp)
+target_link_libraries(terrain_heightmap PRIVATE world_logic_cpu)
+target_include_directories(terrain_heightmap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)

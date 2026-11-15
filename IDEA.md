@@ -70,6 +70,18 @@ Generate a world map with terrain, climate, resources, settlements, and a histor
 
 Societies should differ because of geography, available resources, people, institutions, knowledge, and history, rather than being only entries in a fixed faction-type list. The common origin of life is now the primordial fox's dispersal, described below. Societies can emerge from different sapient species, including awakened wild creatures. Colonization, migration, and technological decline remain possible histories within that cosmology; their place in the setting is not settled.
 
+### Vertical layers: the overworld, the celestial heights, and the underworld
+
+**Author's lore premise:** the world is not limited to one surface. A celestial (sky) layer of floating islands lies far above the overworld, and an underworld of caverns lies beneath it. Both are compact compared with the overworld.
+
+- **Overworld (Y 0–1024):** the main generated world. Underground rock fills 0–256, the oceans span 256–384, sea level is 384, and mountains rise steeply to about 896. The rest is open sky up to the build limit.
+- **Celestial heights (from about Y 2048, roughly 256 blocks tall):** a mini-world of floating islands. Reaching it must not depend on building. Construction above about Y 1024 fails for a lore reason that is still undecided; in game it is a hard build limit. The player must find another way to climb the 1024–2048 gap: a skill, an ability, a creature, a structure, or a phenomenon.
+- **Underworld (below Y 0, roughly 256 blocks deep):** a separate subterranean layer. Large caverns alternate with narrow passages. Its floor is molten lava above an unbreakable bottom layer that ends the world.
+
+The layers should feel distinct in terrain, light, materials, and inhabitants, not just be relocated copies of the overworld. The underworld has no sunlight, so light comes mainly from lava and other sources. The celestial heights stay lit by the sun but should not shadow the overworld far below.
+
+**Proposed technical direction:** treat each layer as its own vertical band with separate save data, lighting, and generation. Leave the empty 1024–2048 gap unstored and only pass through it. Unlike the overworld's height-map terrain, islands and caverns need 3D generation. The underworld is enclosed and likely needs no distant-terrain rendering. Islands need their own. Systems built before these layers exist should avoid assuming a single Y range that starts at zero.
+
 ### Primordial fox and the origin of life
 
 **Author's lore premise:** an unnamed, large, white, fluffy fox is a primordial being. She disperses herself and spreads her energy through the world, after which life and societies develop. Humans are one expression of this shared origin, alongside elves, dwarves, goblins, slimes, and other creatures. Wild creatures can accumulate enough energy to become sapient and establish civilizations of their own.
@@ -241,6 +253,7 @@ Decide these when their first prototype requires an answer:
 - **Lore and progression:** the fox's name and fate; sources and transfer of energy; fixed versus conditional thresholds; humanoid transformation versus optional shapeshifting; aspect selection; the level-100 combat promise; and the undefined 1000–2000 band.
 - **Society and awakening:** how sapience develops into language, education, institutions, and recognition by other societies. Individual awakening need not instantly produce a functioning civilization.
 - **World form:** continuous versus linked local regions, how the fox-origin sequence is presented, technological range, and how far generated history must go initially.
+- **Vertical layers:** names for the celestial and underworld layers; the lore reason building fails above Y 1024; how the 1024–2048 gap is crossed and when in progression; how the underworld is entered; whether either layer has its own species, resources, or history; and whether layer connections occur everywhere or only at specific sites.
 - **Presentation:** final camera and art style; the original 2D readability goal must be reconciled with the current 3D voxel renderer.
 - **Performance targets:** minimum hardware and representative simulation workloads.
 

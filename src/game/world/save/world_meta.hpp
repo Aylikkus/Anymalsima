@@ -11,9 +11,12 @@
 // view. Unknown keys are preserved so newer saves round-trip through older
 // builds.
 struct WorldMeta : ISerializable {
-    static constexpr int FormatVersion = 1;
+    static constexpr int FormatVersion = 2;
+    // Format 2 changed the vertical layout (1024-tall world); older saves
+    // are not migrated.
+    static constexpr int MinFormatVersion = 2;
     // Bump when chunk generation output changes.
-    static constexpr int GeneratorVersion = 1;
+    static constexpr int GeneratorVersion = 2;
 
     struct CameraState {
         Vec3 position{0, 0, 0};

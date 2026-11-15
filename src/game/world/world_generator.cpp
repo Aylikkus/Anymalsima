@@ -4,6 +4,7 @@
 
 #include "core/geometry.hpp"
 #include "generation/perlin_noise.hpp"
+#include "height_profile.hpp"
 #include "layers_generator.hpp"
 #include "serialization/data_storage_api.hpp"
 
@@ -91,8 +92,8 @@ void WorldGenerator::generateHeight(const WorldGenSettings &settings,
                 r.crust = CrustType::TRANSITIONAL;
             }
 
-            r.land_height_m = 256 + (256 * r.height);
-            r.land_height_sea_m = (256 * r.height) - 128;
+            r.land_height_m = HeightProfile::heightToY(r.height);
+            r.land_height_sea_m = r.land_height_m - SEA_LEVEL_Y;
             r.energy = 0.0f;
 
             r.features = FeatureMask::None;

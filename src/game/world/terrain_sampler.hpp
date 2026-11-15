@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "chunk.hpp"
+#include "height_profile.hpp"
 #include "soil_generator.hpp"
 #include "world.hpp"
 
@@ -18,10 +19,44 @@ inline constexpr int BroadScale = 64;
 inline constexpr int FineScale = 16;
 inline constexpr double SoilSlopeStart = .25;
 inline constexpr double SoilSlopeEnd = 1;
-inline constexpr double CoastWidth = 32;
+// Coastline: a domain-warped, signed distance to the land/water boundary
+// between regions, so shores wander instead of following region edges.
+// Total warp must stay well below one region (see coastDistance).
+struct WarpOctave {
+    double amplitude;
+    int scale;  // avoid multiples of the region size: lattices would align
+};
+inline constexpr std::array<WarpOctave, 3> CoastWarp{
+    {{52, 112}, {22, 44}, {8, 16}}};
+inline constexpr double CoastWarpTotal = 52 + 22 + 8;
+inline constexpr double CoastJitter = 3;
+inline constexpr int CoastJitterScale = 8;
+inline constexpr double CoastCap = 40;
+inline constexpr double BeachWidth = 12;
+inline constexpr int BeachRise = 3;
+inline constexpr double ShelfWidth = 24;
+inline constexpr double ShelfDrop = 8;
+inline constexpr double BlendWidth = 4;
+// Relief grows with elevation above the plains so mountains get ridges and
+// valleys instead of smooth cones.
+inline constexpr double ReliefPerMetre = .35;
+// Ridged octaves; mutually non-aligned scales hide value-noise lattices.
+inline constexpr std::array<WarpOctave, 4> RidgeOctaves{
+    {{.45, 173}, {.3, 89}, {.17, 41}, {.08, 19}}};
+inline constexpr double RidgeBlend = 64;
 inline constexpr double SoilHalfWidth = 32;
 inline constexpr double CliffWidth = 8;
 inline constexpr int RavineDrop = 16;
+// coastDistance inspects only the 3x3 regions around the sample.
+static_assert(CoastWarpTotal + CoastCap + CoastJitter <= RegionX);
+
+// Upper bound of any generated surface column inside a region. A warped
+// beach may rise above the ceiling of a water region it intrudes into.
+inline int surfaceCeiling(int landHeight) {
+    return std::clamp(
+        landHeight >= SEA_LEVEL_Y ? landHeight : SEA_LEVEL_Y + 1 + BeachRise, 0,
+        WORLD_HEIGHT_Y - 1);
+}
 }  // namespace TerrainTuning
 
 struct TerrainSample {
@@ -79,4 +114,5 @@ class TerrainSampler {
     const TerrainNeighborhood& data;
     double control(int gx, int gz, bool amplitude) const;
     double cliffLift(int rx, int rz, double x, double z) const;
+    double coastDistance(int rx, int rz, double x, double z) const;
 };

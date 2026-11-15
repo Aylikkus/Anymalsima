@@ -20,6 +20,29 @@ double relief(LandType land) {
             return TerrainTuning::WaterRelief;
     }
 }
+// Stateless gradient (Perlin) noise in [0, 1] with hashed lattice gradients.
+// Unlike SoilGenerator::field its iso-lines are not aligned to the lattice,
+// which keeps ridges from looking blocky.
+double gradientField(double x, double z, int scale, uint32_t seed) {
+    x /= scale;
+    z /= scale;
+    const auto gx = int64_t(std::floor(x)), gz = int64_t(std::floor(z));
+    const double fx = x - gx, fz = z - gz;
+    const auto dot = [&](int64_t cx, int64_t cz) {
+        const double angle =
+            SoilGenerator::unit(cx, cz, seed) * 6.283185307179586;
+        return std::cos(angle) * (x - cx) + std::sin(angle) * (z - cz);
+    };
+    const auto fade = [](double t) {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+    };
+    const double u = fade(fx), v = fade(fz);
+    const double value =
+        std::lerp(std::lerp(dot(gx, gz), dot(gx + 1, gz), u),
+                  std::lerp(dot(gx, gz + 1), dot(gx + 1, gz + 1), u), v);
+    // 2D Perlin stays within about ±0.71.
+    return std::clamp(.5 + value * .7071, 0.0, 1.0);
+}
 }  // namespace
 
 TerrainNeighborhood TerrainNeighborhood::capture(const World& world,
@@ -130,6 +153,49 @@ double TerrainSampler::cliffLift(int rx, int rz, double x, double z) const {
     return lift;
 }
 
+// Signed distance from (x, z) to the nearest land/water region boundary,
+// positive on land, after warping the sample point. Only the 3x3 regions
+// around the caller's region (rx, rz) are inspected: the warp is bounded by
+// CoastWarpTotal, so any boundary outside them is farther than CoastCap.
+double TerrainSampler::coastDistance(int rx, int rz, double x, double z) const {
+    constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
+    const uint32_t seed = data.height_seed;
+    const auto warp = [&](uint32_t salt) {
+        double offset = 0;
+        for (const auto& octave : TerrainTuning::CoastWarp) {
+            offset +=
+                octave.amplitude *
+                (2 * SoilGenerator::field(x, z, octave.scale, seed ^ salt) - 1);
+            salt = salt * 0x9e3779b1u + 0x7f4au;
+        }
+        return offset;
+    };
+    const double qx =
+        std::clamp(x + warp(0x2c1bu), 0.0, double(data.width) * sx - 1e-3);
+    const double qz =
+        std::clamp(z + warp(0x58d3u), 0.0, double(data.height) * sz - 1e-3);
+    const bool land =
+        data.at(int(qx / sx), int(qz / sz)).region.land_height_m >= SEA_LEVEL_Y;
+    double distance = TerrainTuning::CoastCap;
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int nx = rx + dx, nz = rz + dz;
+            if (nx < 0 || nx >= data.width || nz < 0 || nz >= data.height)
+                continue;
+            if ((data.at(nx, nz).region.land_height_m >= SEA_LEVEL_Y) == land)
+                continue;
+            const double ax = std::max({nx * sx - qx, 0.0, qx - (nx + 1) * sx});
+            const double az = std::max({nz * sz - qz, 0.0, qz - (nz + 1) * sz});
+            distance = std::min(distance, std::hypot(ax, az));
+        }
+    // Jitter the signed value: it stays continuous across the boundary.
+    return (land ? distance : -distance) +
+           TerrainTuning::CoastJitter *
+               (2 * SoilGenerator::field(x, z, TerrainTuning::CoastJitterScale,
+                                         seed ^ 0x3ad7u) -
+                1);
+}
+
 double TerrainSampler::surface(double x, double z) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     x = std::clamp(x, 0.0, double(data.width) * sx - 1);
@@ -147,30 +213,46 @@ double TerrainSampler::surface(double x, double z) const {
     };
     const auto& owner = data.at(rx, rz).region;
     double base = interpolate(false);
+    const double elevation =
+        std::max(0.0, base - double(HeightProfile::PlainsTopY));
     base =
         std::lerp(base, double(owner.land_height_m), cliffLift(rx, rz, x, z));
+    const double broad = SoilGenerator::field(x, z, TerrainTuning::BroadScale,
+                                              data.height_seed ^ 0x1459u);
+    const double fine = SoilGenerator::field(x, z, TerrainTuning::FineScale,
+                                             data.height_seed ^ 0x43a1u);
+    // Ridged fBm: sharp crests where each octave crosses 0.5, wide valleys
+    // between them. 1 on a crest, 0 deep in a valley.
+    double ridge = 0;
+    uint32_t salt = 0x6c2fu;
+    for (const auto& octave : TerrainTuning::RidgeOctaves) {
+        const double crest =
+            1 - std::abs(2 * gradientField(x, z, octave.scale,
+                                           data.height_seed ^ salt) -
+                         1);
+        ridge += octave.amplitude * crest * crest;
+        salt = salt * 0x9e3779b1u + 0x51edu;
+    }
+    const double valleys = std::lerp(
+        broad, 1 - ridge, smooth(elevation / TerrainTuning::RidgeBlend));
     const double reduction =
-        interpolate(true) *
-        (.75 * SoilGenerator::field(x, z, TerrainTuning::BroadScale,
-                                    data.height_seed ^ 0x1459u) +
-         .25 * SoilGenerator::field(x, z, TerrainTuning::FineScale,
-                                    data.height_seed ^ 0x43a1u));
-    double waterDistance = TerrainTuning::CoastWidth;
-    for (int dz = -1; dz <= 1; ++dz)
-        for (int dx = -1; dx <= 1; ++dx) {
-            const int nx = rx + dx, nz = rz + dz;
-            if (nx < 0 || nx >= data.width || nz < 0 || nz >= data.height)
-                continue;
-            if (data.at(nx, nz).region.land_height_m >= SEA_LEVEL_Y) continue;
-            const double ax = std::max({nx * sx - x, 0.0, x - (nx + 1) * sx});
-            const double az = std::max({nz * sz - z, 0.0, z - (nz + 1) * sz});
-            waterDistance = std::min(waterDistance, std::hypot(ax, az));
-        }
-    const double inlandFloor =
-        (SEA_LEVEL_Y + 1) * smooth(waterDistance / TerrainTuning::CoastWidth);
-    return std::clamp(std::max(base - reduction, inlandFloor), 0.0,
-                      double(std::clamp(owner.land_height_m, 0,
-                                        Y_CHUNKS * Chunk::SIZE_Y - 1)));
+        interpolate(true) * (.75 * broad + .25 * fine) +
+        TerrainTuning::ReliefPerMetre * elevation * valleys;
+    const double terrain = base - reduction;
+
+    const double coast = coastDistance(rx, rz, x, z);
+    const double land =
+        std::max(terrain, SEA_LEVEL_Y + 1 +
+                              TerrainTuning::BeachRise *
+                                  smooth(coast / TerrainTuning::BeachWidth));
+    const double seabed =
+        std::min(terrain, SEA_LEVEL_Y - 1 -
+                              TerrainTuning::ShelfDrop *
+                                  smooth(-coast / TerrainTuning::ShelfWidth));
+    const double shore = std::lerp(
+        seabed, land, smooth(.5 + coast / (2 * TerrainTuning::BlendWidth)));
+    return std::clamp(
+        shore, 0.0, double(TerrainTuning::surfaceCeiling(owner.land_height_m)));
 }
 
 TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {

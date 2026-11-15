@@ -33,7 +33,8 @@ uint16_t SurfaceSampler::material(const RegionInput& data,
     const auto& region =
         data.terrain.at(data.terrain.center.x, data.terrain.center.y).region;
     const RegionLayer* selected = &data.rocks.back();
-    const int rockDepth = region.land_height_m - y;
+    // Beaches may rise above a water region's ceiling.
+    const int rockDepth = std::max(0, region.land_height_m - y);
     for (const auto& layer : data.rocks)
         if (rockDepth >= layer.depth_from_surface_m &&
             rockDepth < layer.depth_from_surface_m + layer.thickness_m) {
