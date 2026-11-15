@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 
+#include "light_volume.hpp"
 #include "render/ui_context.hpp"
 
 SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
@@ -39,10 +40,7 @@ bool SunLightPropagator::offset(ChunkCoord coord, int dx, int dy, int dz,
 }
 
 uint8_t SunLightPropagator::opacity(const Tile& tile) const {
-    const int block =
-        tile.block_id ? blocks.get(tile.block_id).properties.opacity : 0;
-    const int liquid = tile.isLiquid() ? 8 : 0;
-    return static_cast<uint8_t>(std::clamp(std::max(block, liquid), 0, 15));
+    return tileOpacity(tile, blocks);
 }
 
 void SunLightPropagator::invalidateAround(const ChunkCoord& coord) {
@@ -323,7 +321,9 @@ void SunLightPropagator::publish(ChunkCoord coord, const Light& values) {
                     light.sun_exposure = value;
                 }
     });
-    if (changed) chunks.markDirty(coord, true);
+    // Light lives in GPU volumes sampled by the block shader, so a light
+    // change refreshes those volumes without remeshing geometry.
+    if (changed) chunks.markLightChanged(coord);
 }
 
 std::vector<uint64_t> SunLightPropagator::dependencies(ChunkCoord coord) const {

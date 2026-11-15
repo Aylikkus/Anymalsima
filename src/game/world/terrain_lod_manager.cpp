@@ -28,6 +28,20 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
     detailUniform.initTexture("u_detail_map", 2, detailMap);
     detailOrigin.initVec4("u_detail_origin", {0, 0, DetailSize * 16, 0});
     fogUniform.initVec4("u_world_eye", {0, 0, 0, TerrainLod::ViewDistance});
+    patchNormals.initTexture("u_normal_array", 3,
+                             assets.getMaterialNormalArray());
+    joinNormals.initTexture("u_normal_array", 1,
+                            assets.getMaterialNormalArray());
+    const uint8_t fullSky[4] = {255, 0, 0, 255};
+    joinLightTexture = bgfx::createTexture3D(
+        1, 1, 1, false, bgfx::TextureFormat::RGBA8,
+        BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_W_CLAMP,
+        bgfx::copy(fullSky, sizeof(fullSky)));
+    if (!bgfx::isValid(joinLightTexture))
+        throw std::runtime_error("Cannot create LOD join light volume");
+    joinLightVolume.initTexture("u_light_volume", 2, joinLightTexture);
+    joinLightChunk.initVec4("u_light_chunk", {0, 0, 0, 0});
+    joinLightSlot.initVec4("u_light_slot", {0, 0, 0, 0});
 }
 TerrainLodManager::~TerrainLodManager() {
     for (auto& job : jobs) job.cancel->store(true, std::memory_order_relaxed);
@@ -39,6 +53,7 @@ TerrainLodManager::~TerrainLodManager() {
         }
     }
     if (bgfx::isValid(detailMap)) bgfx::destroy(detailMap);
+    if (bgfx::isValid(joinLightTexture)) bgfx::destroy(joinLightTexture);
 }
 
 void TerrainLodManager::choose(const Camera& camera, Vec2 viewport) {
@@ -393,16 +408,19 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         bx::mtxIdentity(transform.data());
         std::vector<ShaderProperty*> uniforms{
             &textureArray,  &entry.mapUniform, &entry.patchUniform,
-            &detailUniform, &detailOrigin,     &fogUniform};
+            &detailUniform, &detailOrigin,     &fogUniform,
+            &patchNormals};
         target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     }
     if (joinsDrawable) {
         std::array<float, 16> transform;
         bx::mtxIdentity(transform.data());
-        target.drawVertexBuffer(detailJoins.get(), &joinShader,
-                                {&textureArray, &fogUniform}, false,
-                                std::move(transform), DrawLayer::GAME);
+        target.drawVertexBuffer(
+            detailJoins.get(), &joinShader,
+            {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
+             &joinLightSlot, &joinLightVolume},
+            false, std::move(transform), DrawLayer::GAME);
     }
 }
 size_t TerrainLodManager::backlog() const {

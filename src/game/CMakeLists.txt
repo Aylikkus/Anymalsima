@@ -16,6 +16,8 @@ add_library(game
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp
+    world/light_volume.cpp
+    world/light_volume_manager.cpp
     world/location_manager.cpp
     world/save/chunk_codec.cpp
     world/save/region_file.cpp

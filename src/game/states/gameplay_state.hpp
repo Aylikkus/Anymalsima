@@ -14,6 +14,7 @@
 #include "widgets/text.hpp"
 #include "widgets/text_box.hpp"
 #include "world/chunk_manager.hpp"
+#include "world/light_volume_manager.hpp"
 #include "world/location_generator.hpp"
 #include "world/location_manager.hpp"
 #include "world/save/region_store.hpp"
@@ -51,11 +52,15 @@ class GameplayState : public IGameState {
     std::unique_ptr<LocationManager> locationMgr;
     std::unique_ptr<ChunkMesher> mesher;
     std::unique_ptr<SunLightPropagator> sunLight;
+    // Listens to chunkManager signals; declared after it so it is destroyed
+    // first.
+    std::unique_ptr<LightVolumeManager> lightVolumes;
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     UIContext* uiContext = nullptr;
     std::optional<Vec2u> focusRegion;
     ShaderProperty u_texture_array;
+    ShaderProperty u_normal_array;
     ShaderProperty worldEye;
 
     std::string blockShader = "block";

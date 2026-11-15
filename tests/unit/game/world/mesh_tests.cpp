@@ -79,8 +79,19 @@ TEST(mesh_material_light) {
     expectQuads(result, 6);
     for (const auto& vertex : result.vertices) {
         EQUAL(vertex.layer, 7.0f, "material array layer");
-        EQUAL(vertex.tint, 0xFF333333u, "sunlight 3/15 brightness");
+        // Light comes from the GPU light volume, never from vertex tint.
+        EQUAL(vertex.tint, 0xFFFFFFFFu, "neutral tint");
     }
+}
+
+TEST(mesh_merges_across_light) {
+    Chunk chunk;
+    chunk.tiles[8][8][8].block_id = 1;
+    chunk.tiles[8][8][9].block_id = 1;
+    chunk.tiles[8][8][8].lightLevel.sun_exposure = 15;
+    chunk.tiles[8][8][9].lightLevel.sun_exposure = 2;
+    // Different light levels no longer split greedy quads.
+    expectQuads(mesh(chunk), 6);
 }
 
 TEST(mesh_winding) {

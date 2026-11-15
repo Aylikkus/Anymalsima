@@ -4,6 +4,7 @@ $input v_position, v_normal, v_layer, v_color0
 SAMPLER2DARRAY(u_texture_array, 0);
 SAMPLER2D(u_surface_map, 1);
 SAMPLER2D(u_detail_map, 2);
+SAMPLER2DARRAY(u_normal_array, 3);
 uniform vec4 u_lod_patch;
 uniform vec4 u_detail_origin;
 #include "../world_surface.sh"
@@ -21,6 +22,7 @@ void main()
     }
     vec3 normal = normalize(v_normal);
     vec3 color;
+    vec3 surface = normal;
     if (v_layer < -1.5) {
         color = vec3(0.055, 0.24, 0.32);
     } else {
@@ -32,7 +34,9 @@ void main()
                                     : encoded.b + encoded.a * 256.0;
         }
         color = surfaceTexture(v_position, normal, layer).rgb;
+        surface = surfaceNormal(v_position, normal, layer);
     }
-    color = surfaceLight(normal, color, 1.0);
+    // Distant terrain is fully sky-lit and has no block light.
+    color = surfaceLight(surface, color, vec2(1.0, 0.0), normal, 0.0);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

@@ -24,7 +24,8 @@ enum class Face : uint8_t {
 
 class ChunkMesher {
    public:
-    explicit ChunkMesher(const IAssets& assets) : assets(assets), blocks(assets.getStorage<Block>()) {}
+    explicit ChunkMesher(const IAssets& assets)
+        : assets(assets), blocks(assets.getStorage<Block>()) {}
 
     using NeighbourFn = std::function<const Tile*(int tx, int ty, int tz)>;
 
@@ -44,6 +45,10 @@ class ChunkMesher {
 
     static const std::array<FaceDesc, 6> FACES;
 
+    // Vertex tint is a plain multiplier reserved for per-block coloring;
+    // lighting comes from the GPU light volume (see light_volume.hpp).
+    static constexpr uint32_t NeutralTint = 0xFFFFFFFFu;
+
     // Identifies a mergeable face: same block + texture + tint.
     // A zeroed FaceKey (block == nullptr) means "no face / air".
     struct FaceKey {
@@ -58,8 +63,8 @@ class ChunkMesher {
     };
 
     bool isFaceVisible(const Tile* nbr) const {
-        if (!nbr) return false;  // outside world = invisible
-        return nbr->block_id == 0;     // only air exposes a face
+        if (!nbr) return false;     // outside world = invisible
+        return nbr->block_id == 0;  // only air exposes a face
     }
 
     // Emit a single merged quad.

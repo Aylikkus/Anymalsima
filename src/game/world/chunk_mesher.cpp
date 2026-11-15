@@ -185,18 +185,13 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     const Tile* tile = localTile(local[0], local[1], local[2]);
                     if (!tile || tile->block_id == 0) continue;
 
-                    const Block &block = blocks.get(tile->block_id);
+                    const Block& block = blocks.get(tile->block_id);
                     uint16_t texLayer =
                         assets.getMaterialAlbedoLayer(block.material);
-                    
-                    // Set tint based on sun exposure (0-15 scale)
-                    uint8_t sunLevel =
-                        std::max(tile->lightLevel.sun_exposure,
-                                 tile->lightLevel.artificial_light);
-                    uint8_t brightness = (sunLevel * 255) / 15;  // Map 0-15 to 0-255
-                    uint32_t tint = (0xFF << 24) | (brightness << 16) | (brightness << 8) | brightness;
 
-                    FaceKey key{&block, texLayer, tint};
+                    // Light is sampled from the chunk's light volume in the
+                    // shader, so faces merge regardless of light levels.
+                    FaceKey key{&block, texLayer, NeutralTint};
 
                     // +d neighbour
                     {
@@ -330,14 +325,9 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                 if (!above || above->liquid != LiquidType::None ||
                     above->block_id)
                     continue;
-                const uint8_t brightness =
-                    std::max(tile.lightLevel.sun_exposure,
-                             tile.lightLevel.artificial_light) *
-                    17;
-                const uint32_t tint =
-                    0xff000000u | uint32_t(brightness) * 0x010101u;
                 emitQuad(mesh, originX + x, originY + y + 1, originZ + z, 0, 0,
-                         1, 1, 0, 0, Face::PosY, {nullptr, UINT16_MAX, tint});
+                         1, 1, 0, 0, Face::PosY,
+                         {nullptr, UINT16_MAX, NeutralTint});
             }
 
     return mesh;

@@ -80,5 +80,11 @@ class TerrainLodManager {
     std::array<uint8_t, DetailSize * DetailSize * 4> coverage{};
     bgfx::TextureHandle detailMap = BGFX_INVALID_HANDLE;
     ShaderProperty detailUniform, detailOrigin, textureArray, fogUniform;
+    // Normal maps: stage 3 in terrain_lod, stage 1 in the block program.
+    ShaderProperty patchNormals, joinNormals;
+    // Joins use the block program but have no voxel light volume. A 1^3
+    // dummy volume plus u_light_chunk.w = 0 selects full sky light.
+    bgfx::TextureHandle joinLightTexture = BGFX_INVALID_HANDLE;
+    ShaderProperty joinLightVolume, joinLightChunk, joinLightSlot;
     std::string shader = "terrain_lod";
 };

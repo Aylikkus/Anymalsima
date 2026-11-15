@@ -9,6 +9,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/location_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/chunk_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/region_file.cpp
@@ -38,6 +39,7 @@ add_executable(world_logic_tests
     unit/game/world/terrain_tests.cpp
     unit/game/world/lod_tests.cpp
     unit/game/world/mesh_tests.cpp
+    unit/game/world/light_volume_tests.cpp
     unit/game/world/world_tests.cpp
     unit/game/items/block_tests.cpp
     integration/world_lighting_tests.cpp
@@ -92,7 +94,13 @@ set(world_cases
     mesh_greedy_prism
     mesh_chunk_seam
     mesh_material_light
+    mesh_merges_across_light
     mesh_winding
+    light_volume_encoding
+    light_volume_neighbor_borders
+    light_volume_missing_neighbor
+    light_volume_shared_face
+    light_volume_signals
     sunlight_open_column
     sunlight_opaque_roof
     sunlight_partial_opacity

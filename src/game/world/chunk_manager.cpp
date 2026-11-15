@@ -143,6 +143,13 @@ void ChunkManager::markModified(const ChunkCoord& coord) {
     if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
     it->second.persistDirty = true;
     markDirty(coord, true);
+    // Edited cells change opacity, which the light volumes encode.
+    lightChanged.emit(coord);
+}
+void ChunkManager::markLightChanged(const ChunkCoord& coord) {
+    auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
+    lightChanged.emit(coord);
 }
 bool ChunkManager::isPersistDirty(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);

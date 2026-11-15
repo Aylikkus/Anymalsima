@@ -16,6 +16,9 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     // name, stage, texture_handle
     u_texture_array.initTexture("u_texture_array", 0,
                                 context.assets->getMaterialAlbedoArray());
+    // Normal maps share the albedo array's layer indices.
+    u_normal_array.initTexture("u_normal_array", 1,
+                               context.assets->getMaterialNormalArray());
     this->world = std::move(world);
     regionStore =
         std::make_unique<RegionStore>(slot.directory, context.threadPool);
@@ -53,6 +56,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
         context.threadPool);
+    lightVolumes = std::make_unique<LightVolumeManager>(
+        *chunkManager, context.assets->getStorage<Block>());
     locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
                                                     regionStore.get());
 
@@ -235,6 +240,7 @@ void GameplayState::update(Game& game, float dt) {
     requestChunksAroundCamera();
     chunkManager->update();
     sunLight->update();
+    lightVolumes->update(camera.position);
 
     // --- Tile debug raycast -------------------------------------------------
     float dirX, dirY, dirZ;
@@ -331,7 +337,10 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
 
         std::array<float, 16> transform;
         bx::mtxIdentity(transform.data());
-        std::vector<ShaderProperty*> uniforms{&u_texture_array, &worldEye};
+        std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
+                                              &worldEye};
+        // Without a light volume the chunk would render unlit; skip it.
+        if (!lightVolumes->bind(coord, uniforms)) return;
         target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     });

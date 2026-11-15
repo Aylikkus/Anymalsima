@@ -55,6 +55,9 @@ class ChunkManager {
 
     Signal<const ChunkCoord&> becameReady;
     Signal<const ChunkCoord&> removed;
+    // Tile light or opacity of a Ready chunk changed. Geometry may be
+    // unchanged; listeners refresh light volumes around the chunk.
+    Signal<const ChunkCoord&> lightChanged;
     void setFocus(Vec3 value) { focus = value; }
     void update();
     // stored: saved chunk payload; the chunk is decoded instead of generated.
@@ -74,6 +77,8 @@ class ChunkManager {
     void unregister(const ChunkCoord& coord);
     void markDirty(const ChunkCoord& coord, bool urgent = false);
     void markAllDirty();
+    // Announces new light values without remeshing.
+    void markLightChanged(const ChunkCoord& coord);
     // Records a gameplay edit of a Ready chunk: it will be saved and remeshed.
     void markModified(const ChunkCoord& coord);
     bool isPersistDirty(const ChunkCoord& coord) const;
