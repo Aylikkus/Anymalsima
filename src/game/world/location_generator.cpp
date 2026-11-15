@@ -7,12 +7,14 @@ const RegionLayer* LocationGenerator::layerAtDepth(
         int bottom = top + layer.thickness_m;
         if (depth_m >= top && depth_m < bottom) return &layer;
     }
-    return &layers[layers.size() - 1];
+    if (layers.empty()) throw std::runtime_error("Empty rock layer stack");
+    return &layers.back();
 }
 
-void LocationGenerator::generateColumn(
-    Chunk& chunk, int localX, int localZ, int chunkBaseY, const Region& region,
-    const std::vector<RegionLayer>& layers) const {
+void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
+                                       int chunkBaseY, const Region& region,
+                                       const std::vector<RegionLayer>& layers,
+                                       const SoilColumn& soil) const {
     const int surfaceY = surfaceTileY(region);
 
     for (int localY = 0; localY < Chunk::SIZE_Y; ++localY) {
@@ -22,6 +24,15 @@ void LocationGenerator::generateColumn(
         if (tileY <= surfaceY) {
             int depth_m = surfaceY - tileY;
             const RegionLayer* layer = layerAtDepth(layers, depth_m);
+            for (int i = 0; i < soil.count; ++i) {
+                const auto& horizon = soil.layers[i];
+                if (depth_m >= horizon.depth_from_surface_m &&
+                    depth_m <
+                        horizon.depth_from_surface_m + horizon.thickness_m) {
+                    layer = &horizon;
+                    break;
+                }
+            }
             tile.block_id = layer->block_id;
             tile.liquid = LiquidType::None;
             tile.liquidLevel = 0;
@@ -40,19 +51,20 @@ void LocationGenerator::generateColumn(
     }
 }
 
-void LocationGenerator::generateChunk(
-    Chunk& chunk, const ChunkCoord& coord, const ChunkCoord& regionOriginChunk,
-    const Region& region, const std::vector<RegionLayer>& layers) const {
+void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
+                                      const ChunkCoord& regionOriginChunk,
+                                      const Region& region,
+                                      const std::vector<RegionLayer>& layers,
+                                      const SoilProfile& soil) const {
     const int chunkBaseY = coord.y * Chunk::SIZE_Y;
 
-    // Local XY within region — useful later for per-column noise offset
-    // (not used yet, but passed through so the signature is stable)
-    const int regionLocalChunkX = coord.x - regionOriginChunk.x;
-    const int regionLocalChunkY = coord.y - regionOriginChunk.y;
-    (void)regionLocalChunkX;
-    (void)regionLocalChunkY;
-
+    (void)regionOriginChunk;
     for (int localZ = 0; localZ < Chunk::SIZE_Z; ++localZ)
-        for (int localX = 0; localX < Chunk::SIZE_X; ++localX)
-            generateColumn(chunk, localX, localZ, chunkBaseY, region, layers);
+        for (int localX = 0; localX < Chunk::SIZE_X; ++localX) {
+            const auto cover = SoilGenerator::sample(
+                soil, region, int64_t(coord.x) * Chunk::SIZE_X + localX,
+                int64_t(coord.z) * Chunk::SIZE_Z + localZ);
+            generateColumn(chunk, localX, localZ, chunkBaseY, region, layers,
+                           cover);
+        }
 }

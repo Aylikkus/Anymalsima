@@ -1,0 +1,777 @@
+[
+    {
+        "name": "soils.sand",
+        "block_name": "blocks.sand",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.4,
+            "permeability": 0.95,
+            "water_retention": 0.1,
+            "fertility": 0.1,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1,
+                "humidity_range": [
+                    0,
+                    0.45
+                ]
+            },
+            {
+                "required_features": [
+                    "Desert Dunes"
+                ],
+                "allow_underwater": true,
+                "priority": 20,
+                "weight": 3
+            },
+            {
+                "required_features": [
+                    "Beach"
+                ],
+                "allow_underwater": true,
+                "priority": 20,
+                "weight": 3
+            },
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Water"
+                ],
+                "allow_underwater": true,
+                "priority": 0,
+                "weight": 4
+            }
+        ],
+        "topsoil_block_name": "blocks.sand_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.45,
+            "permeability": 0.95,
+            "water_retention": 0.2,
+            "fertility": 0.25,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.loamy_sand",
+        "block_name": "blocks.loamy_sand",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.42,
+            "permeability": 0.8,
+            "water_retention": 0.2,
+            "fertility": 0.25,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            }
+        ],
+        "topsoil_block_name": "blocks.loamy_sand_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.47,
+            "permeability": 0.8,
+            "water_retention": 0.30000000000000004,
+            "fertility": 0.4,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.sandy_loam",
+        "block_name": "blocks.sandy_loam",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.45,
+            "permeability": 0.65,
+            "water_retention": 0.4,
+            "fertility": 0.5,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.sandy_loam_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.5,
+            "permeability": 0.65,
+            "water_retention": 0.5,
+            "fertility": 0.65,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.loam",
+        "block_name": "blocks.loam",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.48,
+            "permeability": 0.5,
+            "water_retention": 0.6,
+            "fertility": 0.7,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.loam_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.53,
+            "permeability": 0.5,
+            "water_retention": 0.7,
+            "fertility": 0.85,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.silt_loam",
+        "block_name": "blocks.silt_loam",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.48,
+            "permeability": 0.35,
+            "water_retention": 0.65,
+            "fertility": 0.65,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            },
+            {
+                "required_features": [
+                    "Floodplain"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Delta"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Lake"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.silt_loam_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.53,
+            "permeability": 0.35,
+            "water_retention": 0.75,
+            "fertility": 0.8,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.silt",
+        "block_name": "blocks.silt",
+        "depth_m": [
+            2,
+            6
+        ],
+        "properties": {
+            "porosity": 0.45,
+            "permeability": 0.3,
+            "water_retention": 0.6,
+            "fertility": 0.4,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            },
+            {
+                "required_features": [
+                    "Floodplain"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Delta"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Lake"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "allowed_land": [
+                    "Water",
+                    "Deep Water"
+                ],
+                "allow_underwater": true,
+                "priority": 0,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.silt_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.5,
+            "permeability": 0.3,
+            "water_retention": 0.7,
+            "fertility": 0.55,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.sandy_clay_loam",
+        "block_name": "blocks.sandy_clay_loam",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.44,
+            "permeability": 0.4,
+            "water_retention": 0.5,
+            "fertility": 0.5,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            }
+        ],
+        "topsoil_block_name": "blocks.sandy_clay_loam_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.49,
+            "permeability": 0.4,
+            "water_retention": 0.6,
+            "fertility": 0.65,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.clay_loam",
+        "block_name": "blocks.clay_loam",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.46,
+            "permeability": 0.25,
+            "water_retention": 0.7,
+            "fertility": 0.6,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.clay_loam_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.51,
+            "permeability": 0.25,
+            "water_retention": 0.7999999999999999,
+            "fertility": 0.75,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.silty_clay_loam",
+        "block_name": "blocks.silty_clay_loam",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.48,
+            "permeability": 0.2,
+            "water_retention": 0.75,
+            "fertility": 0.6,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            },
+            {
+                "required_features": [
+                    "Floodplain"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Delta"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Lake"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.silty_clay_loam_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.53,
+            "permeability": 0.2,
+            "water_retention": 0.85,
+            "fertility": 0.75,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.sandy_clay",
+        "block_name": "blocks.sandy_clay",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.43,
+            "permeability": 0.18,
+            "water_retention": 0.65,
+            "fertility": 0.4,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            }
+        ],
+        "topsoil_block_name": "blocks.sandy_clay_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.48,
+            "permeability": 0.18,
+            "water_retention": 0.75,
+            "fertility": 0.55,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.silty_clay",
+        "block_name": "blocks.silty_clay",
+        "depth_m": [
+            2,
+            6
+        ],
+        "properties": {
+            "porosity": 0.48,
+            "permeability": 0.12,
+            "water_retention": 0.8,
+            "fertility": 0.45,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            },
+            {
+                "required_features": [
+                    "Floodplain"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Delta"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Lake"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "allowed_land": [
+                    "Water",
+                    "Deep Water"
+                ],
+                "allow_underwater": true,
+                "priority": 0,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.silty_clay_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.53,
+            "permeability": 0.12,
+            "water_retention": 0.9,
+            "fertility": 0.6,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.clay",
+        "block_name": "blocks.clay",
+        "depth_m": [
+            2,
+            6
+        ],
+        "properties": {
+            "porosity": 0.5,
+            "permeability": 0.08,
+            "water_retention": 0.85,
+            "fertility": 0.35,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 1
+            },
+            {
+                "required_features": [
+                    "Floodplain"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Delta"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Lake"
+                ],
+                "allow_underwater": true,
+                "priority": 10,
+                "weight": 2
+            },
+            {
+                "allowed_land": [
+                    "Water",
+                    "Deep Water"
+                ],
+                "allow_underwater": true,
+                "priority": 0,
+                "weight": 2
+            }
+        ],
+        "topsoil_block_name": "blocks.clay_topsoil",
+        "topsoil_depth_m": [
+            1,
+            1
+        ],
+        "topsoil_properties": {
+            "porosity": 0.55,
+            "permeability": 0.08,
+            "water_retention": 0.95,
+            "fertility": 0.5,
+            "organic_content": 0.06
+        }
+    },
+    {
+        "name": "soils.gravel",
+        "block_name": "blocks.gravel",
+        "depth_m": [
+            1,
+            4
+        ],
+        "properties": {
+            "porosity": 0.35,
+            "permeability": 1,
+            "water_retention": 0.05,
+            "fertility": 0.02,
+            "organic_content": 0.01
+        },
+        "placement": [
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "allow_underwater": false,
+                "priority": 0,
+                "weight": 0.3
+            },
+            {
+                "required_features": [
+                    "Rocky Shore"
+                ],
+                "allow_underwater": true,
+                "priority": 20,
+                "weight": 4
+            },
+            {
+                "allowed_land": [
+                    "Shore",
+                    "Water"
+                ],
+                "allow_underwater": true,
+                "priority": 0,
+                "weight": 1
+            }
+        ]
+    },
+    {
+        "name": "soils.peat",
+        "block_name": "blocks.peat",
+        "depth_m": [
+            2,
+            6
+        ],
+        "properties": {
+            "porosity": 0.85,
+            "permeability": 0.2,
+            "water_retention": 0.95,
+            "fertility": 0.3,
+            "organic_content": 0.65
+        },
+        "placement": [
+            {
+                "required_features": [
+                    "Swamp"
+                ],
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "humidity_range": [
+                    0.6,
+                    1
+                ],
+                "temperature_range_c": [
+                    -5,
+                    22
+                ],
+                "priority": 30,
+                "weight": 2
+            },
+            {
+                "required_features": [
+                    "Marsh"
+                ],
+                "allowed_land": [
+                    "Shore",
+                    "Plains",
+                    "Hills",
+                    "Mountains",
+                    "Peak"
+                ],
+                "humidity_range": [
+                    0.6,
+                    1
+                ],
+                "temperature_range_c": [
+                    -5,
+                    22
+                ],
+                "priority": 30,
+                "weight": 2
+            }
+        ]
+    }
+]

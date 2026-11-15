@@ -1,0 +1,262 @@
+[
+    {
+        "name": "blocks.sand",
+        "material": "materials.sand",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sand_topsoil",
+        "material": "materials.sand_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.loamy_sand",
+        "material": "materials.loamy_sand",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.loamy_sand_topsoil",
+        "material": "materials.loamy_sand_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sandy_loam",
+        "material": "materials.sandy_loam",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sandy_loam_topsoil",
+        "material": "materials.sandy_loam_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.loam",
+        "material": "materials.loam",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.loam_topsoil",
+        "material": "materials.loam_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silt_loam",
+        "material": "materials.silt_loam",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silt_loam_topsoil",
+        "material": "materials.silt_loam_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silt",
+        "material": "materials.silt",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silt_topsoil",
+        "material": "materials.silt_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sandy_clay_loam",
+        "material": "materials.sandy_clay_loam",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sandy_clay_loam_topsoil",
+        "material": "materials.sandy_clay_loam_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.clay_loam",
+        "material": "materials.clay_loam",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.clay_loam_topsoil",
+        "material": "materials.clay_loam_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silty_clay_loam",
+        "material": "materials.silty_clay_loam",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silty_clay_loam_topsoil",
+        "material": "materials.silty_clay_loam_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sandy_clay",
+        "material": "materials.sandy_clay",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.sandy_clay_topsoil",
+        "material": "materials.sandy_clay_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silty_clay",
+        "material": "materials.silty_clay",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.silty_clay_topsoil",
+        "material": "materials.silty_clay_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.clay",
+        "material": "materials.clay",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.clay_topsoil",
+        "material": "materials.clay_topsoil",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.gravel",
+        "material": "materials.gravel",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
+    },
+    {
+        "name": "blocks.peat",
+        "material": "materials.peat",
+        "render_category": "Terrain Soil",
+        "properties": {
+            "hardness": 1,
+            "flammable": true,
+            "opacity": 15
+        }
+    }
+]

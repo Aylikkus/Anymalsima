@@ -20,6 +20,7 @@ target_link_libraries(world_logic_cpu PUBLIC
 add_executable(world_logic_tests
     support/test_main.cpp
     unit/game/world/generation_tests.cpp
+    unit/game/world/soil_tests.cpp
     unit/game/world/mesh_tests.cpp
     unit/game/world/world_tests.cpp
     unit/game/items/block_tests.cpp
@@ -135,3 +136,18 @@ if(ANYMALSIMA_TEST_SANITIZERS)
     set_tests_properties(${logic_tests} PROPERTIES
         ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
 endif()
+
+target_compile_definitions(world_logic_tests PRIVATE
+    SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")
+foreach(case soil_data_validation soil_loading_references_capacity
+             soil_placement_priority soil_selection_order_topsoil
+             soil_horizons_exposure soil_generation_seams_geology
+             soil_runtime_content soil_streaming_profile)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;data" TIMEOUT 15)
+    if(ANYMALSIMA_TEST_SANITIZERS)
+        set_tests_properties(game.world.${case} PROPERTIES
+            ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endif()
+endforeach()

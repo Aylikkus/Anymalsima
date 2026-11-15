@@ -1,0 +1,132 @@
+[
+    {
+        "name": "materials.sand",
+        "texture_albedo": "blocks.soils.sand",
+        "texture_normal": "blocks.soils.sand_normal"
+    },
+    {
+        "name": "materials.sand_topsoil",
+        "texture_albedo": "blocks.soils.sand_topsoil",
+        "texture_normal": "blocks.soils.sand_topsoil_normal"
+    },
+    {
+        "name": "materials.loamy_sand",
+        "texture_albedo": "blocks.soils.loamy_sand",
+        "texture_normal": "blocks.soils.loamy_sand_normal"
+    },
+    {
+        "name": "materials.loamy_sand_topsoil",
+        "texture_albedo": "blocks.soils.loamy_sand_topsoil",
+        "texture_normal": "blocks.soils.loamy_sand_topsoil_normal"
+    },
+    {
+        "name": "materials.sandy_loam",
+        "texture_albedo": "blocks.soils.sandy_loam",
+        "texture_normal": "blocks.soils.sandy_loam_normal"
+    },
+    {
+        "name": "materials.sandy_loam_topsoil",
+        "texture_albedo": "blocks.soils.sandy_loam_topsoil",
+        "texture_normal": "blocks.soils.sandy_loam_topsoil_normal"
+    },
+    {
+        "name": "materials.loam",
+        "texture_albedo": "blocks.soils.loam",
+        "texture_normal": "blocks.soils.loam_normal"
+    },
+    {
+        "name": "materials.loam_topsoil",
+        "texture_albedo": "blocks.soils.loam_topsoil",
+        "texture_normal": "blocks.soils.loam_topsoil_normal"
+    },
+    {
+        "name": "materials.silt_loam",
+        "texture_albedo": "blocks.soils.silt_loam",
+        "texture_normal": "blocks.soils.silt_loam_normal"
+    },
+    {
+        "name": "materials.silt_loam_topsoil",
+        "texture_albedo": "blocks.soils.silt_loam_topsoil",
+        "texture_normal": "blocks.soils.silt_loam_topsoil_normal"
+    },
+    {
+        "name": "materials.silt",
+        "texture_albedo": "blocks.soils.silt",
+        "texture_normal": "blocks.soils.silt_normal"
+    },
+    {
+        "name": "materials.silt_topsoil",
+        "texture_albedo": "blocks.soils.silt_topsoil",
+        "texture_normal": "blocks.soils.silt_topsoil_normal"
+    },
+    {
+        "name": "materials.sandy_clay_loam",
+        "texture_albedo": "blocks.soils.sandy_clay_loam",
+        "texture_normal": "blocks.soils.sandy_clay_loam_normal"
+    },
+    {
+        "name": "materials.sandy_clay_loam_topsoil",
+        "texture_albedo": "blocks.soils.sandy_clay_loam_topsoil",
+        "texture_normal": "blocks.soils.sandy_clay_loam_topsoil_normal"
+    },
+    {
+        "name": "materials.clay_loam",
+        "texture_albedo": "blocks.soils.clay_loam",
+        "texture_normal": "blocks.soils.clay_loam_normal"
+    },
+    {
+        "name": "materials.clay_loam_topsoil",
+        "texture_albedo": "blocks.soils.clay_loam_topsoil",
+        "texture_normal": "blocks.soils.clay_loam_topsoil_normal"
+    },
+    {
+        "name": "materials.silty_clay_loam",
+        "texture_albedo": "blocks.soils.silty_clay_loam",
+        "texture_normal": "blocks.soils.silty_clay_loam_normal"
+    },
+    {
+        "name": "materials.silty_clay_loam_topsoil",
+        "texture_albedo": "blocks.soils.silty_clay_loam_topsoil",
+        "texture_normal": "blocks.soils.silty_clay_loam_topsoil_normal"
+    },
+    {
+        "name": "materials.sandy_clay",
+        "texture_albedo": "blocks.soils.sandy_clay",
+        "texture_normal": "blocks.soils.sandy_clay_normal"
+    },
+    {
+        "name": "materials.sandy_clay_topsoil",
+        "texture_albedo": "blocks.soils.sandy_clay_topsoil",
+        "texture_normal": "blocks.soils.sandy_clay_topsoil_normal"
+    },
+    {
+        "name": "materials.silty_clay",
+        "texture_albedo": "blocks.soils.silty_clay",
+        "texture_normal": "blocks.soils.silty_clay_normal"
+    },
+    {
+        "name": "materials.silty_clay_topsoil",
+        "texture_albedo": "blocks.soils.silty_clay_topsoil",
+        "texture_normal": "blocks.soils.silty_clay_topsoil_normal"
+    },
+    {
+        "name": "materials.clay",
+        "texture_albedo": "blocks.soils.clay",
+        "texture_normal": "blocks.soils.clay_normal"
+    },
+    {
+        "name": "materials.clay_topsoil",
+        "texture_albedo": "blocks.soils.clay_topsoil",
+        "texture_normal": "blocks.soils.clay_topsoil_normal"
+    },
+    {
+        "name": "materials.gravel",
+        "texture_albedo": "blocks.soils.gravel",
+        "texture_normal": "blocks.soils.gravel_normal"
+    },
+    {
+        "name": "materials.peat",
+        "texture_albedo": "blocks.soils.peat",
+        "texture_normal": "blocks.soils.peat_normal"
+    }
+]

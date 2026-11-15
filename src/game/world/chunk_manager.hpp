@@ -141,6 +141,8 @@ class ChunkManager {
     ThreadPool& pool;
     const ChunkMesher* mesher;
     LayersGenerator layersGenerator;
+    const IAssets* soilAssets;
+    uint32_t soilSeed;
     Vec3 focus{0, 0, 0};
     CameraWorkQueue generationQueue;
     CameraWorkQueue meshQueue;
@@ -148,6 +150,7 @@ class ChunkManager {
     uint64_t meshDispatches = 0;
     uint64_t nextIdentity = 0;
     std::unordered_map<Vec2u, std::vector<RegionLayer>> regionLayers;
+    std::unordered_map<Vec2u, SoilProfile> regionSoils;
     std::unordered_map<ChunkCoord, ChunkHandle> chunks;
     std::unordered_map<ChunkCoord, PendingInfo> pending;
     std::unordered_map<uint64_t, int> columnTopY;

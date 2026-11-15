@@ -6,7 +6,9 @@ ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
     : generator(gen),
       pool(pool),
       mesher(mesher),
-      layersGenerator(world.genSettings, assets) {}
+      layersGenerator(world.genSettings, assets),
+      soilAssets(assets),
+      soilSeed(world.genSettings.feature_seed) {}
 
 ChunkManager::~ChunkManager() {
     for (auto& job : generationJobs) job.future.wait();
@@ -22,6 +24,9 @@ void ChunkManager::registerChunk(const ChunkCoord& coord,
     pending[coord] = {origin, region, std::nullopt};
     if (!regionLayers.contains(region->coord))
         regionLayers[region->coord] = layersGenerator.get(*region);
+    if (!regionSoils.contains(region->coord))
+        regionSoils[region->coord] =
+            SoilGenerator::select(*region, *soilAssets, soilSeed);
     const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
     columnTopY.try_emplace(column, region->land_height_m);
 }
@@ -251,9 +256,11 @@ void ChunkManager::update() {
         auto future = pool.submit_task(
             [generator = generator, coord, origin = info.regionOrigin,
              region = *info.region,
-             layers = regionLayers.at(info.region->coord)] {
+             layers = regionLayers.at(info.region->coord),
+             soil = regionSoils.at(info.region->coord)] {
                 auto result = std::make_shared<Chunk>();
-                generator.generateChunk(*result, coord, origin, region, layers);
+                generator.generateChunk(*result, coord, origin, region, layers,
+                                        soil);
                 return result;
             },
             info.beneficiary ? BS::pr::high : BS::pr::normal);

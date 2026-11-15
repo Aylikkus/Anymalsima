@@ -11,6 +11,9 @@ add_library(game
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp
+    items/soil.hpp
+    items/soil_validation.hpp
+    world/soil_generator.hpp
     world/layers_generator.hpp
 )
 

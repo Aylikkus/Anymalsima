@@ -15,7 +15,7 @@ struct RiverInfo {
     float strength = 0.0f;
 };
 
-enum class RegionLayerType { Rock };
+enum class RegionLayerType { Rock, Soil };
 
 struct RegionLayer {
     RegionLayerType type;
@@ -24,6 +24,7 @@ struct RegionLayer {
     int depth_from_surface_m;
     float aquifer_saturation = 0.0f;
     uint8_t data_id;
+    bool topsoil = false;
 };
 
 struct Region {

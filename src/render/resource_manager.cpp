@@ -7,6 +7,7 @@
 #include "items/block.hpp"
 #include "items/material.hpp"
 #include "items/rock.hpp"
+#include "items/soil_validation.hpp"
 #include "utils/utf8.hpp"
 
 const bgfx::Memory* ResourceManager::loadMemory(const std::string& path) {
@@ -50,6 +51,7 @@ ResourceManager::ResourceManager() {
     registerDataType<Material>();
     registerDataType<Rock>();
     registerDataType<Block>();
+    registerDataType<Soil>();
 }
 
 inline FontRole matchRole(std::string key) {
@@ -124,9 +126,26 @@ void ResourceManager::loadFromJson(const Json& j) {
                     throw std::runtime_error("Unknown data type: " + type);
                 }
 
-                it->second(*this, data);
+                try {
+                    it->second(*this, data);
+                } catch (const std::exception& error) {
+                    throw std::runtime_error(file.get<std::string>() + ": " +
+                                             error.what());
+                }
             }
         }
+    }
+    validateSoilReferences(*this);
+    for (const auto& material : getStorage<Material>().items) {
+        if (!materialsTextures.contains(material.texture_albedo) ||
+            !materialsTextures.contains(material.texture_normal))
+            throw std::runtime_error(material.name +
+                                     ": missing material texture");
+    }
+    for (const auto& block : getStorage<Block>().items) {
+        if (!getStorage<Material>().indexByName.contains(block.material))
+            throw std::runtime_error(block.name + ": missing material " +
+                                     block.material);
     }
 }
 

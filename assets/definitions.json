@@ -26,6 +26,58 @@
     "ui.white.track_vertical_no_sides": "assets/textures/ui/white/track_vertical_no_sides.png"
   },
   "materials": {
+    "blocks.soils.clay": "assets/materials/blocks/soils/clay.png",
+    "blocks.soils.clay_loam": "assets/materials/blocks/soils/clay_loam.png",
+    "blocks.soils.clay_loam_normal": "assets/materials/blocks/soils/clay_loam_normal.png",
+    "blocks.soils.clay_loam_topsoil": "assets/materials/blocks/soils/clay_loam_topsoil.png",
+    "blocks.soils.clay_loam_topsoil_normal": "assets/materials/blocks/soils/clay_loam_topsoil_normal.png",
+    "blocks.soils.clay_normal": "assets/materials/blocks/soils/clay_normal.png",
+    "blocks.soils.clay_topsoil": "assets/materials/blocks/soils/clay_topsoil.png",
+    "blocks.soils.clay_topsoil_normal": "assets/materials/blocks/soils/clay_topsoil_normal.png",
+    "blocks.soils.gravel": "assets/materials/blocks/soils/gravel.png",
+    "blocks.soils.gravel_normal": "assets/materials/blocks/soils/gravel_normal.png",
+    "blocks.soils.loam": "assets/materials/blocks/soils/loam.png",
+    "blocks.soils.loam_normal": "assets/materials/blocks/soils/loam_normal.png",
+    "blocks.soils.loam_topsoil": "assets/materials/blocks/soils/loam_topsoil.png",
+    "blocks.soils.loam_topsoil_normal": "assets/materials/blocks/soils/loam_topsoil_normal.png",
+    "blocks.soils.loamy_sand": "assets/materials/blocks/soils/loamy_sand.png",
+    "blocks.soils.loamy_sand_normal": "assets/materials/blocks/soils/loamy_sand_normal.png",
+    "blocks.soils.loamy_sand_topsoil": "assets/materials/blocks/soils/loamy_sand_topsoil.png",
+    "blocks.soils.loamy_sand_topsoil_normal": "assets/materials/blocks/soils/loamy_sand_topsoil_normal.png",
+    "blocks.soils.peat": "assets/materials/blocks/soils/peat.png",
+    "blocks.soils.peat_normal": "assets/materials/blocks/soils/peat_normal.png",
+    "blocks.soils.sand": "assets/materials/blocks/soils/sand.png",
+    "blocks.soils.sand_normal": "assets/materials/blocks/soils/sand_normal.png",
+    "blocks.soils.sand_topsoil": "assets/materials/blocks/soils/sand_topsoil.png",
+    "blocks.soils.sand_topsoil_normal": "assets/materials/blocks/soils/sand_topsoil_normal.png",
+    "blocks.soils.sandy_clay": "assets/materials/blocks/soils/sandy_clay.png",
+    "blocks.soils.sandy_clay_loam": "assets/materials/blocks/soils/sandy_clay_loam.png",
+    "blocks.soils.sandy_clay_loam_normal": "assets/materials/blocks/soils/sandy_clay_loam_normal.png",
+    "blocks.soils.sandy_clay_loam_topsoil": "assets/materials/blocks/soils/sandy_clay_loam_topsoil.png",
+    "blocks.soils.sandy_clay_loam_topsoil_normal": "assets/materials/blocks/soils/sandy_clay_loam_topsoil_normal.png",
+    "blocks.soils.sandy_clay_normal": "assets/materials/blocks/soils/sandy_clay_normal.png",
+    "blocks.soils.sandy_clay_topsoil": "assets/materials/blocks/soils/sandy_clay_topsoil.png",
+    "blocks.soils.sandy_clay_topsoil_normal": "assets/materials/blocks/soils/sandy_clay_topsoil_normal.png",
+    "blocks.soils.sandy_loam": "assets/materials/blocks/soils/sandy_loam.png",
+    "blocks.soils.sandy_loam_normal": "assets/materials/blocks/soils/sandy_loam_normal.png",
+    "blocks.soils.sandy_loam_topsoil": "assets/materials/blocks/soils/sandy_loam_topsoil.png",
+    "blocks.soils.sandy_loam_topsoil_normal": "assets/materials/blocks/soils/sandy_loam_topsoil_normal.png",
+    "blocks.soils.silt": "assets/materials/blocks/soils/silt.png",
+    "blocks.soils.silt_loam": "assets/materials/blocks/soils/silt_loam.png",
+    "blocks.soils.silt_loam_normal": "assets/materials/blocks/soils/silt_loam_normal.png",
+    "blocks.soils.silt_loam_topsoil": "assets/materials/blocks/soils/silt_loam_topsoil.png",
+    "blocks.soils.silt_loam_topsoil_normal": "assets/materials/blocks/soils/silt_loam_topsoil_normal.png",
+    "blocks.soils.silt_normal": "assets/materials/blocks/soils/silt_normal.png",
+    "blocks.soils.silt_topsoil": "assets/materials/blocks/soils/silt_topsoil.png",
+    "blocks.soils.silt_topsoil_normal": "assets/materials/blocks/soils/silt_topsoil_normal.png",
+    "blocks.soils.silty_clay": "assets/materials/blocks/soils/silty_clay.png",
+    "blocks.soils.silty_clay_loam": "assets/materials/blocks/soils/silty_clay_loam.png",
+    "blocks.soils.silty_clay_loam_normal": "assets/materials/blocks/soils/silty_clay_loam_normal.png",
+    "blocks.soils.silty_clay_loam_topsoil": "assets/materials/blocks/soils/silty_clay_loam_topsoil.png",
+    "blocks.soils.silty_clay_loam_topsoil_normal": "assets/materials/blocks/soils/silty_clay_loam_topsoil_normal.png",
+    "blocks.soils.silty_clay_normal": "assets/materials/blocks/soils/silty_clay_normal.png",
+    "blocks.soils.silty_clay_topsoil": "assets/materials/blocks/soils/silty_clay_topsoil.png",
+    "blocks.soils.silty_clay_topsoil_normal": "assets/materials/blocks/soils/silty_clay_topsoil_normal.png",
     "blocks.stones.andesite": "assets/materials/blocks/stones/andesite.png",
     "blocks.stones.andesite_normal": "assets/materials/blocks/stones/andesite_normal.png",
     "blocks.stones.basalt": "assets/materials/blocks/stones/basalt.png",
@@ -96,13 +148,8 @@
     {
       "type": "materials",
       "files": [
-        "assets/data/materials/rocks.json"
-      ]
-    },
-    {
-      "type": "blocks",
-      "files": [
-        "assets/data/blocks/rocks.json"
+        "assets/data/materials/rocks.json",
+        "assets/data/materials/soils.json"
       ]
     },
     {
@@ -112,6 +159,19 @@
         "assets/data/rocks/igneous_intrusive.json",
         "assets/data/rocks/metamorphic.json",
         "assets/data/rocks/sedimentary.json"
+      ]
+    },
+    {
+      "type": "blocks",
+      "files": [
+        "assets/data/blocks/rocks.json",
+        "assets/data/blocks/soils.json"
+      ]
+    },
+    {
+      "type": "soils",
+      "files": [
+        "assets/data/soils/soils.json"
       ]
     }
   ]
