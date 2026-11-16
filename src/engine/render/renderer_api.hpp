@@ -1,9 +1,11 @@
 #pragma once
 #include <bgfx/bgfx.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <variant>
+#include <vector>
 
 #include "text_layout_state.hpp"
 
@@ -249,7 +251,7 @@ class MeshHandle {
     bool isDynamic = false;
 };
 
-enum class PropertyType { Invalid, Sampler, Vec4, Mat4 };
+enum class PropertyType { Invalid, Sampler, Vec4, Vec4Array, Mat4 };
 
 struct ShaderProperty {
     ~ShaderProperty() {
@@ -312,6 +314,23 @@ struct ShaderProperty {
 
     void setVec4(const std::array<float, 4>& values) { data = values; }
 
+    // A uniform array of `count` vec4 values, all zero initially.
+    void initVec4Array(const char* name, uint16_t count) {
+        if (bgfx::isValid(m_handle)) bgfx::destroy(m_handle);
+
+        m_handle = bgfx::createUniform(name, bgfx::UniformType::Vec4, count);
+        type = PropertyType::Vec4Array;
+        data = std::vector<float>(size_t(count) * 4, 0.0f);
+    }
+
+    // Copies up to the declared count of vec4 values (4 floats each); the
+    // rest keep their previous contents.
+    void setVec4Array(const float* values, size_t vec4Count) {
+        auto& array = std::get<std::vector<float>>(data);
+        const size_t n = std::min(array.size(), vec4Count * 4);
+        std::copy(values, values + n, array.begin());
+    }
+
     void initMat4(const char* name, const std::array<float, 16>& values) {
         if (bgfx::isValid(m_handle)) bgfx::destroy(m_handle);
 
@@ -330,6 +349,12 @@ struct ShaderProperty {
                 bgfx::setUniform(
                     m_handle, std::get<std::array<float, 4>>(data).data(), 1);
                 break;
+            case PropertyType::Vec4Array: {
+                const auto& array = std::get<std::vector<float>>(data);
+                bgfx::setUniform(m_handle, array.data(),
+                                 uint16_t(array.size() / 4));
+                break;
+            }
             case PropertyType::Mat4:
                 bgfx::setUniform(
                     m_handle, std::get<std::array<float, 16>>(data).data(), 1);
@@ -345,6 +370,6 @@ struct ShaderProperty {
     bgfx::UniformHandle m_handle = BGFX_INVALID_HANDLE;
     uint8_t stage;  // Only for Samplers
     std::variant<bgfx::TextureHandle, float, std::array<float, 4>,
-                 std::array<float, 16>>
+                 std::array<float, 16>, std::vector<float>>
         data;
 };

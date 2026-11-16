@@ -55,7 +55,7 @@ TEST(light_volume_encoding) {
     EQUAL(int(tileOpacity(water, blocks)), 8, "water");
 
     Cells cells{};
-    LightVolume::encode(chunk, blocks, cells);
+    LightVolume::encode(chunk, blocks, nullptr, cells);
     expectSame(cell(cells, 3, 2, 1), {85, 51}, "air scales 0-15 to 0-255");
     // Opaque cells hold no light: trilinear filtering darkens corners.
     expectSame(cell(cells, 4, 4, 4), {0, 0}, "opaque cell");

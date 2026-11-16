@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 
+#include "light_sources_codec.hpp"
 #include "terrain_edits_codec.hpp"
 #include "world/world.hpp"
 #include "world_meta.hpp"
@@ -36,6 +37,12 @@ std::unique_ptr<World> readWorldMap(const SaveSlot& slot);
 // corrupt data.
 terrain_edits_codec::File readTerrainEdits(const SaveSlot& slot);
 void writeTerrainEdits(const SaveSlot& slot, const EditMap& columns,
+                       const SectionContainer& extra = {});
+// light_sources.dat: empty when the file does not exist yet. Throws on
+// corrupt data.
+light_sources_codec::File readLightSources(const SaveSlot& slot);
+void writeLightSources(const SaveSlot& slot,
+                       std::vector<light_sources_codec::Record> lights,
                        const SectionContainer& extra = {});
 
 }  // namespace save_catalog

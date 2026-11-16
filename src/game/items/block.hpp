@@ -1,8 +1,10 @@
 #pragma once
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 #include "enums.hpp"
+#include "light_emission.hpp"
 #include "render/renderer_api.hpp"
 #include "serialization/serializable_api.hpp"
 #include "utils/enum_parser.hpp"
@@ -23,6 +25,8 @@ struct Block {
     std::string material;
     BlockRenderCategory renderCategory = BlockRenderCategory::TERRAIN_ROCK;
     BlockProperties properties;
+    // Present when the block emits light (see light_emission.hpp).
+    std::optional<LightEmission> light;
 };
 
 inline void from_json(const Json& j, BlockProperties& p) {
@@ -35,6 +39,14 @@ inline void from_json(const Json& j, Block& b) {
     j.at("name").get_to(b.name);
     j.at("material").get_to(b.material);
     if (j.contains("properties")) j.at("properties").get_to(b.properties);
+    if (j.contains("light")) {
+        try {
+            b.light = j.at("light").get<LightEmission>();
+        } catch (const std::exception& e) {
+            throw std::runtime_error(b.name + ": " + e.what());
+        }
+        if (!b.light->emits()) b.light.reset();
+    }
     if (j.contains("render_category")) {
         b.renderCategory = EnumParser<BlockRenderCategory>::parse(
             ItemsEnumMaps::blockRenderCategories(), j["render_category"]);

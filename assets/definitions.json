@@ -139,6 +139,7 @@
   "shaders": {
     "block": "assets/shaders/block",
     "color": "assets/shaders/color",
+    "light_glare": "assets/shaders/light_glare",
     "map_preview": "assets/shaders/map_preview",
     "river_preview": "assets/shaders/river_preview",
     "sprite": "assets/shaders/sprite",
@@ -167,7 +168,8 @@
       "type": "blocks",
       "files": [
         "assets/data/blocks/rocks.json",
-        "assets/data/blocks/soils.json"
+        "assets/data/blocks/soils.json",
+        "assets/data/blocks/test_light.json"
       ]
     },
     {

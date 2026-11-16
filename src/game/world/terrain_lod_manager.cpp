@@ -641,17 +641,22 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
             &textureArray,  &entry.mapUniform,  &entry.patchUniform,
             &detailUniform, &detailOrigin,      &fogUniform,
             &patchNormals,  &entry.shiftUniform};
+        uniforms.insert(uniforms.end(), extraUniforms.begin(),
+                        extraUniforms.end());
         target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     }
     if (joinsDrawable) {
         // World-space vertices, placed relative to the eye.
         auto transform = relativeTransform(camera, 0, 0, 0);
-        target.drawVertexBuffer(
-            detailJoins.get(), &joinShader,
-            {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
-             &joinLightSlot, &joinLightVolume},
-            false, std::move(transform), DrawLayer::GAME);
+        std::vector<ShaderProperty*> uniforms{&textureArray,  &joinNormals,
+                                              &fogUniform,    &joinLightChunk,
+                                              &joinLightSlot, &joinLightVolume};
+        uniforms.insert(uniforms.end(), extraUniforms.begin(),
+                        extraUniforms.end());
+        target.drawVertexBuffer(detailJoins.get(), &joinShader,
+                                std::move(uniforms), false,
+                                std::move(transform), DrawLayer::GAME);
     }
     if (structures) {
         // A structure slab hands over to its real chunk exactly when
@@ -660,10 +665,13 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         const int cx = int(camera.position.x) / Chunk::SIZE_X,
                   cy = int(camera.position.y) / Chunk::SIZE_Y,
                   cz = int(camera.position.z) / Chunk::SIZE_Z;
+        std::vector<ShaderProperty*> uniforms{&textureArray,  &joinNormals,
+                                              &fogUniform,    &joinLightChunk,
+                                              &joinLightSlot, &joinLightVolume};
+        uniforms.insert(uniforms.end(), extraUniforms.begin(),
+                        extraUniforms.end());
         structures->draw(
-            target, frustum, camera, &joinShader,
-            {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
-             &joinLightSlot, &joinLightVolume},
+            target, frustum, camera, &joinShader, std::move(uniforms),
             [&](const ChunkCoord& c) {
                 return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
                            DETAIL_CHUNK_RADIUS &&

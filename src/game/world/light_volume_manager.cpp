@@ -40,21 +40,17 @@ void forNeighborhood(const WorldWrap& wrap, const ChunkCoord& coord, F&& fn) {
 }  // namespace
 
 LightVolumeManager::LightVolumeManager(ChunkManager& chunks,
-                                       const DataStorage<Block>& blocks)
-    : chunks(chunks), blocks(blocks) {
+                                       const DataStorage<Block>& blocks,
+                                       const BlockLightPropagator* blockLight)
+    : chunks(chunks), blocks(blocks), blockLight(blockLight) {
     const auto* caps = bgfx::getCaps();
     if (!(caps->supported & BGFX_CAPS_TEXTURE_3D))
         throw std::runtime_error("Light volumes require 3D texture support");
     auto supports = [&](bgfx::TextureFormat::Enum f) {
         return (caps->formats[f] & BGFX_CAPS_FORMAT_TEXTURE_3D) != 0;
     };
-    if (!supports(bgfx::TextureFormat::RG8)) {
-        if (!supports(bgfx::TextureFormat::RGBA8))
-            throw std::runtime_error(
-                "Light volumes require RG8 or RGBA8 3D textures");
-        format = bgfx::TextureFormat::RGBA8;
-        bytesPerTexel = 4;
-    }
+    if (!supports(format))
+        throw std::runtime_error("Light volumes require RGBA8 3D textures");
     readyConnection = chunks.becameReady.connect(
         [this](const ChunkCoord& coord) { changed(coord); });
     lightConnection = chunks.lightChanged.connect(
@@ -104,7 +100,10 @@ const LightVolume::Cells* LightVolumeManager::cells(const ChunkCoord& coord) {
     if (!chunks.isReady(coord)) return nullptr;
     auto& entry = it != cache.end() ? it->second : cache[coord];
     if (!chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
-            LightVolume::encode(chunk, blocks, entry.cells);
+            const auto* chroma =
+                blockLight ? blockLight->chroma(coord) : nullptr;
+            LightVolume::encode(chunk, blocks,
+                                chroma ? chroma->data() : nullptr, entry.cells);
         }))
         return nullptr;
     entry.valid = true;
@@ -180,17 +179,8 @@ void LightVolumeManager::rebuild(const ChunkCoord& coord, const Slot& slot) {
     const int sz = slot.index / (SlotsX * SlotsY);
     const auto texels =
         LightVolume::SizeX * LightVolume::SizeY * LightVolume::SizeZ;
-    const bgfx::Memory* memory = bgfx::alloc(texels * bytesPerTexel);
-    if (bytesPerTexel == LightVolume::Channels) {
-        std::memcpy(memory->data, scratch.data(), scratch.size());
-    } else {
-        for (int i = 0; i < texels; ++i) {
-            memory->data[i * 4] = scratch[i * 2];
-            memory->data[i * 4 + 1] = scratch[i * 2 + 1];
-            memory->data[i * 4 + 2] = 0;
-            memory->data[i * 4 + 3] = 255;
-        }
-    }
+    const bgfx::Memory* memory = bgfx::alloc(texels * LightVolume::Channels);
+    std::memcpy(memory->data, scratch.data(), scratch.size());
     auto& page = *pages[slot.page];
     bgfx::updateTexture3D(page.texture, 0, uint16_t(sx * LightVolume::SizeX),
                           uint16_t(sy * LightVolume::SizeY),

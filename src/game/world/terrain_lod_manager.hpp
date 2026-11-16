@@ -30,6 +30,11 @@ class TerrainLodManager {
     void update(const Camera& camera, Vec2 viewport);
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
                 const Camera& camera, Vec2 viewport);
+    // Uniforms appended to every distant terrain draw (far lights). They
+    // must outlive the manager's draws.
+    void setExtraUniforms(std::vector<ShaderProperty*> uniforms) {
+        extraUniforms = std::move(uniforms);
+    }
     bool drawsColumn(unsigned x, unsigned z) const;
     size_t residentBytes() const {
         return resident + (joinsInitialised ? JoinBudget : 0) +
@@ -162,4 +167,5 @@ class TerrainLodManager {
     bgfx::TextureHandle joinLightTexture = BGFX_INVALID_HANDLE;
     ShaderProperty joinLightVolume, joinLightChunk, joinLightSlot;
     std::string shader = "terrain_lod";
+    std::vector<ShaderProperty*> extraUniforms;
 };

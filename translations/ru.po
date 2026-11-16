@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-16 01:48+0300\n"
+"POT-Creation-Date: 2026-11-16 19:11+0300\n"
 "PO-Revision-Date: 2026-04-27 23:59+0300\n"
 "Last-Translator: Automatically generated\n"
 "Language-Team: none\n"
@@ -39,63 +39,67 @@ msgstr "ОБРАТНО"
 msgid "GENERATE"
 msgstr "СГЕНЕРИРОВАТЬ"
 
-#: src/game/states/create_world_state.cpp:62
+#: src/game/states/create_world_state.cpp:65
 msgid "CHOOSE"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:82
+#: src/game/states/create_world_state.cpp:85
 msgid "Height"
 msgstr "Высота"
 
-#: src/game/states/create_world_state.cpp:84
+#: src/game/states/create_world_state.cpp:87
 msgid "Temperature C"
 msgstr "Температура C"
 
-#: src/game/states/create_world_state.cpp:86
+#: src/game/states/create_world_state.cpp:89
 msgid "Humidity"
 msgstr "Влажность"
 
-#: src/game/states/create_world_state.cpp:88
+#: src/game/states/create_world_state.cpp:91
 msgid "Biome"
 msgstr "Биом"
 
-#: src/game/states/create_world_state.cpp:92
+#: src/game/states/create_world_state.cpp:95
 msgid "Land"
 msgstr "Земля"
 
-#: src/game/states/create_world_state.cpp:96
+#: src/game/states/create_world_state.cpp:99
 #: src/game/utils/items_enum_maps.hpp:26
 msgid "Vegetation"
 msgstr "Растительность"
 
-#: src/game/states/create_world_state.cpp:102
+#: src/game/states/create_world_state.cpp:105
 msgid "River"
 msgstr "Река"
 
-#: src/game/states/create_world_state.cpp:103
+#: src/game/states/create_world_state.cpp:106
 msgid "Direction"
 msgstr "Направление"
 
-#: src/game/states/create_world_state.cpp:108
+#: src/game/states/create_world_state.cpp:111
 msgid "Flow Strength"
 msgstr "Сила потока"
 
-#: src/game/states/create_world_state.cpp:112
+#: src/game/states/create_world_state.cpp:115
 msgid "Features"
 msgstr "Особенности"
 
-#: src/game/states/create_world_state.cpp:126
+#: src/game/states/create_world_state.cpp:129
 #: src/game/utils/region_enum_maps.hpp:148
 #: src/game/utils/region_enum_maps.hpp:178
 msgid "None"
 msgstr "Нет"
 
-#: src/game/states/gameplay_state.cpp:76
+#: src/game/states/gameplay_state.cpp:95
 msgid "PLACE BLOCK"
 msgstr ""
 
-#: src/game/states/gameplay_state.cpp:77
+#: src/game/states/gameplay_state.cpp:96
 msgid "REMOVE BLOCK"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:97
+msgid "PLACE LIGHT"
 msgstr ""
 
 #: src/game/states/load_world_state.cpp:61

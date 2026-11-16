@@ -114,8 +114,13 @@ void Renderer::beginFrame() {
     bgfx::setViewTransform(0, view_g, proj_g);
     bgfx::setViewRect(0, 0, 0, (uint16_t)res.x, (uint16_t)res.y);
     bgfx::touch(0);
-    const bgfx::ViewId order[] = {2, 0, 1};
-    bgfx::setViewOrder(0, 3, order);
+    // Glow shares view 0's camera and depth buffer and runs after it, so
+    // additive sprites are hidden by the terrain in front of them.
+    bgfx::setViewClear(GlowView, BGFX_CLEAR_NONE);
+    bgfx::setViewTransform(GlowView, view_g, proj_g);
+    bgfx::setViewRect(GlowView, 0, 0, (uint16_t)res.x, (uint16_t)res.y);
+    const bgfx::ViewId order[] = {2, 0, GlowView, 1};
+    bgfx::setViewOrder(0, 4, order);
     if (camera.terrainSky) {
         bgfx::setViewRect(2, 0, 0, uint16_t(res.x), uint16_t(res.y));
         bgfx::setViewClear(2, BGFX_CLEAR_COLOR, 0xaec4d6ff, 1.f, 0);
@@ -312,6 +317,11 @@ void Renderer::drawVB(const DrawVertexBufferCmd &cmd) {
             view = 0;
             state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
                     BGFX_STATE_WRITE_Z | BGFX_STATE_DEPTH_TEST_LESS;
+            break;
+        case DrawLayer::GAME_GLOW:
+            view = GlowView;
+            state = BGFX_STATE_WRITE_RGB | BGFX_STATE_DEPTH_TEST_LESS |
+                    BGFX_STATE_BLEND_ADD;
             break;
     }
 

@@ -27,6 +27,8 @@ struct Line {
 
 class Renderer : public IRenderer {
    public:
+    // View of DrawLayer::GAME_GLOW, ordered right after the world view 0.
+    static constexpr bgfx::ViewId GlowView = 3;
     Renderer(Platform& platform);
     bool isOpen();
 

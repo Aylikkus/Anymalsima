@@ -40,8 +40,9 @@ struct EditFixture {
     ChunkManager chunks{generator, pool, nullptr, world, &assets};
     LocationManager locations{chunks, world};
     TerrainEdits edits;
-    TerrainEditTracker tracker{chunks, edits};
     WorldEditor editor{chunks, nullptr, assets.getStorage<Block>()};
+    // Disconnects from the editor when destroyed: declared after it.
+    TerrainEditTracker tracker{chunks, edits};
 
     EditFixture() {
         locations.loadRegion({0, 0}, 1);

@@ -14,12 +14,16 @@ uint8_t tileOpacity(const Tile& tile, const DataStorage<Block>& blocks) {
 
 namespace LightVolume {
 
-void encode(const Chunk& chunk, const DataStorage<Block>& blocks, Cells& out) {
+void encode(const Chunk& chunk, const DataStorage<Block>& blocks,
+            const uint8_t* chroma, Cells& out) {
     for (int z = 0; z < CellsZ; ++z)
         for (int y = 0; y < CellsY; ++y)
             for (int x = 0; x < CellsX; ++x) {
                 const auto& tile = chunk.tiles[z][y][x];
                 const int i = cellIndex(x, y, z);
+                const int c = ((z * CellsY + y) * CellsX + x) * 2;
+                out[i + 2] = chroma ? chroma[c] : 128;
+                out[i + 3] = chroma ? chroma[c + 1] : 128;
                 if (tileOpacity(tile, blocks) >= 15) {
                     out[i] = out[i + 1] = 0;
                     continue;
@@ -55,8 +59,8 @@ void build(const std::array<const Cells*, 27>& chunks, Volume& out) {
                 }
                 const int s = cellIndex(cx, cy, cz);
                 const int d = texelIndex(tx, ty, tz);
-                out[d] = (*source)[s];
-                out[d + 1] = (*source)[s + 1];
+                for (int c = 0; c < Channels; ++c)
+                    out[d + c] = (*source)[s + c];
             }
 }
 

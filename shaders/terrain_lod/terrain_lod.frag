@@ -36,7 +36,8 @@ void main()
         color = surfaceTexture(v_position, normal, layer).rgb;
         surface = surfaceNormal(v_position, normal, layer);
     }
-    // Distant terrain is fully sky-lit and has no block light.
-    color = surfaceLight(surface, color, vec2(1.0, 0.0), normal, 0.0);
+    // Distant terrain is fully sky-lit; only far lights add block light.
+    color = surfaceLight(surface, color, vec2(1.0, 0.0), vec3_splat(1.0),
+                         normal, 0.0, surfaceFarLight(v_position, surface));
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

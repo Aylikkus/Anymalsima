@@ -18,6 +18,28 @@ class Assets final : public IAssets {
             blocks->indexByName[block.name] = blocks->items.size();
             blocks->items.push_back(block);
         }
+        // Light sources: 4 white lamp, 5 red lamp, 6 far beacon, 7 spotlight
+        // pointing down. All opaque, like a lamp block.
+        auto lamp = [&](int id, const std::string& name, LightEmission light) {
+            Block block;
+            block.id = id;
+            block.name = name;
+            block.material = name;
+            block.properties.opacity = 15;
+            block.light = light;
+            blocks->indexByName[block.name] = blocks->items.size();
+            blocks->items.push_back(block);
+        };
+        lamp(4, "lamp", LightEmission{});
+        LightEmission red;
+        red.color = {1, 0, 0};
+        lamp(5, "red_lamp", red);
+        LightEmission beacon;
+        beacon.radius = 64;
+        lamp(6, "beacon", beacon);
+        LightEmission spot;
+        spot.cone = LightCone{{0, -1, 0}, 20, 30};
+        lamp(7, "spot", spot);
         dataStorages[Block::TypeName] = std::move(blocks);
         auto rocks = std::make_unique<DataStorage<Rock>>();
         Rock rock{};

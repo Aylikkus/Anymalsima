@@ -11,11 +11,13 @@
 uint8_t tileOpacity(const Tile& tile, const DataStorage<Block>& blocks);
 
 // The light field of one chunk, encoded for the GPU. Texel layout is X
-// fastest, then Y (height), then Z, two channels per cell: R = sun exposure,
-// G = artificial light, both scaled 0-15 -> 0-255. Fully opaque cells store
-// zero so trilinear filtering darkens concave corners (soft occlusion).
+// fastest, then Y (height), then Z, four channels per cell: R = sun
+// exposure, G = artificial light intensity, both scaled 0-15 -> 0-255, and
+// BA = artificial light chroma (BlockLightPropagator::encodeChroma, 128 =
+// white). Fully opaque cells store zero light so trilinear filtering darkens
+// concave corners (soft occlusion).
 namespace LightVolume {
-static constexpr int Channels = 2;
+static constexpr int Channels = 4;
 static constexpr int CellsX = Chunk::SIZE_X;
 static constexpr int CellsY = Chunk::SIZE_Y;
 static constexpr int CellsZ = Chunk::SIZE_Z;
@@ -40,7 +42,9 @@ constexpr int neighbor(int dx, int dy, int dz) {
     return ((dz + 1) * 3 + (dy + 1)) * 3 + (dx + 1);
 }
 
-void encode(const Chunk& chunk, const DataStorage<Block>& blocks, Cells& out);
+// chroma: two bytes per cell in chunk cell order, or null for white light.
+void encode(const Chunk& chunk, const DataStorage<Block>& blocks,
+            const uint8_t* chroma, Cells& out);
 
 // Assembles the bordered volume of chunks[13]. A missing neighbor (nullptr)
 // repeats the center chunk's nearest edge cell, which neither invents sky

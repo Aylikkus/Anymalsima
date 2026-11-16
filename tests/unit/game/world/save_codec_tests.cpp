@@ -326,3 +326,69 @@ TEST(terrain_edits_rejects_corrupt) {
           "written file");
     std::filesystem::remove_all(root);
 }
+
+TEST(light_sources_roundtrip) {
+    using light_sources_codec::Record;
+    const std::vector<Record> lights{{{300, 900, 12}, 6}, {{5, 400, 70000}, 9}};
+    SectionContainer extra;
+    extra.put("FUTR", 3, Bytes{std::byte{1}, std::byte{2}});
+    const auto file =
+        light_sources_codec::decode(light_sources_codec::encode(lights, extra));
+    EQUAL(file.lights.size(), size_t(2), "lights");
+    // Sorted by x, then z, then y.
+    CHECK(file.lights[0] == lights[1]);
+    CHECK(file.lights[1] == lights[0]);
+    CHECK(file.extra.find("FUTR") != nullptr);
+    CHECK(file.extra.find("LITE") == nullptr);
+    // A missing file is an empty index.
+    const auto root = scratch("lights");
+    std::filesystem::create_directories(root);
+    CHECK(save_catalog::readLightSources({root, {}}).lights.empty());
+    save_catalog::writeLightSources({root, {}}, lights);
+    EQUAL(save_catalog::readLightSources({root, {}}).lights.size(), size_t(2),
+          "written file");
+    std::filesystem::remove_all(root);
+}
+
+TEST(light_sources_rejects_corrupt) {
+    const auto bytes =
+        light_sources_codec::encode({{{1, 2, 3}, 6}, {{4, 5, 6}, 6}});
+    CHECK(throwsSerialization([&] {
+        light_sources_codec::decode(ByteView(bytes).first(bytes.size() - 3));
+    }));
+    auto section = [](auto&& fill) {
+        BinaryWriter out;
+        fill(out);
+        SectionContainer container;
+        container.put("LITE", 1, out.take());
+        return container.encode();
+    };
+    auto record = [](BinaryWriter& out, uint32_t x, uint16_t y, uint8_t b) {
+        out.write(x);
+        out.write(y);
+        out.write(uint32_t(0));
+        out.write(b);
+    };
+    const auto duplicate = section([&](BinaryWriter& out) {
+        out.write(uint32_t(2));
+        record(out, 1, 1, 6);
+        record(out, 1, 1, 6);
+    });
+    CHECK(throwsSerialization([&] { light_sources_codec::decode(duplicate); }));
+    const auto high = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        record(out, 1, uint16_t(WORLD_HEIGHT_Y), 6);
+    });
+    CHECK(throwsSerialization([&] { light_sources_codec::decode(high); }));
+    const auto trailing = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        record(out, 1, 1, 6);
+        out.write(uint8_t(0));
+    });
+    CHECK(throwsSerialization([&] { light_sources_codec::decode(trailing); }));
+    const auto noBlock = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        record(out, 1, 1, 0);
+    });
+    CHECK(throwsSerialization([&] { light_sources_codec::decode(noBlock); }));
+}

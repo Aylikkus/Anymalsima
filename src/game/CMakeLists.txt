@@ -17,6 +17,9 @@ add_library(game
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp
+    world/block_light_propagator.cpp
+    world/light_sources.cpp
+    world/light_renderer.cpp
     world/light_volume.cpp
     world/light_volume_manager.cpp
     world/world_editor.cpp
@@ -30,6 +33,7 @@ add_library(game
     world/save/world_meta.cpp
     world/save/save_catalog.cpp
     world/save/terrain_edits_codec.cpp
+    world/save/light_sources_codec.cpp
     items/soil.hpp
     items/soil_validation.hpp
     world/soil_generator.hpp

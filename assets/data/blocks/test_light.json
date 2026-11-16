@@ -1,0 +1,20 @@
+[
+    {
+        "name": "blocks.test_light",
+        "material": "materials.limestone",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        },
+        "light": {
+            "enabled": true,
+            "radius": 32,
+            "falloff": 1.5,
+            "intensity": 1.0,
+            "color": [1.0, 1.0, 1.0],
+            "cone": { "direction": [0,0,1], "inner_angle": 0, "outer_angle": 10 }
+        }
+    }
+]

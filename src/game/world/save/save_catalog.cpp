@@ -12,6 +12,7 @@ namespace {
 constexpr const char* MetaFile = "world.json";
 constexpr const char* MapFile = "world_map.dat";
 constexpr const char* EditsFile = "terrain_edits.dat";
+constexpr const char* LightsFile = "light_sources.dat";
 
 std::string folderName(uint64_t seed, const std::string& createdAt) {
     std::string stamp = createdAt;  // YYYY-MM-DDTHH:MM:SS
@@ -99,6 +100,21 @@ void writeTerrainEdits(const SaveSlot& slot, const EditMap& columns,
                        const SectionContainer& extra) {
     FileIO::writeBytesAtomic(slot.directory / EditsFile,
                              terrain_edits_codec::encode(columns, extra));
+}
+
+light_sources_codec::File readLightSources(const SaveSlot& slot) {
+    const auto path = slot.directory / LightsFile;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return {};
+    return light_sources_codec::decode(FileIO::readBytes(path));
+}
+
+void writeLightSources(const SaveSlot& slot,
+                       std::vector<light_sources_codec::Record> lights,
+                       const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(
+        slot.directory / LightsFile,
+        light_sources_codec::encode(std::move(lights), extra));
 }
 
 }  // namespace save_catalog

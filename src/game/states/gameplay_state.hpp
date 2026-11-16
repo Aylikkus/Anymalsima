@@ -13,7 +13,10 @@
 #include "widgets/slider.hpp"
 #include "widgets/text.hpp"
 #include "widgets/text_box.hpp"
+#include "world/block_light_propagator.hpp"
 #include "world/chunk_manager.hpp"
+#include "world/light_renderer.hpp"
+#include "world/light_sources.hpp"
 #include "world/light_volume_manager.hpp"
 #include "world/location_generator.hpp"
 #include "world/location_manager.hpp"
@@ -49,15 +52,24 @@ class GameplayState : public IGameState {
     // Declared before chunk users so it outlives them during destruction.
     std::unique_ptr<RegionStore> regionStore;
 
+    // Far block lights (light_sources.dat) and future entity lights.
+    // Declared before every system that holds a reference to it.
+    std::unique_ptr<LightSourceRegistry> lightSources;
+    SectionContainer lightsExtra;
+    std::future<void> lightsWrite;
+
     std::unique_ptr<LocationGenerator> generator;
     std::unique_ptr<ChunkManager> chunkManager;
     std::unique_ptr<LocationManager> locationMgr;
     std::unique_ptr<ChunkMesher> mesher;
     std::unique_ptr<SunLightPropagator> sunLight;
-    // Listens to chunkManager signals; declared after it so it is destroyed
-    // first.
-    std::unique_ptr<LightVolumeManager> lightVolumes;
     std::unique_ptr<WorldEditor> editor;
+    // Artificial light. Listens to chunkManager, editor and lightSources;
+    // declared after them so it is destroyed first.
+    std::unique_ptr<BlockLightPropagator> blockLight;
+    // Listens to chunkManager signals and reads blockLight; declared after
+    // both so it is destroyed first.
+    std::unique_ptr<LightVolumeManager> lightVolumes;
     // Edits shown at distance (terrain_edits.dat). Declared before the LOD
     // manager and tracker that hold references to it.
     std::unique_ptr<TerrainEdits> edits;
@@ -67,6 +79,7 @@ class GameplayState : public IGameState {
     std::unique_ptr<TerrainEditTracker> editTracker;
 
     std::unique_ptr<TerrainLodManager> terrainLod;
+    std::unique_ptr<LightRenderer> lightRenderer;
     UIContext* uiContext = nullptr;
     std::optional<Vec2u> focusRegion;
     ShaderProperty u_texture_array;
@@ -78,10 +91,17 @@ class GameplayState : public IGameState {
     Text* tileDebugText = nullptr;
 
     // HUD block editing: a tool is armed by its button and applied with LMB.
-    enum class EditTool { None, Place, Remove };
+    enum class EditTool { None, Place, Remove, PlaceLight };
     EditTool tool = EditTool::None;
     TextButton* placeButton = nullptr;
     TextButton* removeButton = nullptr;
+    // Debug light source (assets/data/blocks/test_light.json).
+    TextButton* lightButton = nullptr;
+    static constexpr const char* TestLightBlock = "blocks.test_light";
+    std::optional<uint8_t> testLightId;
+    // Debug sky dimmer (not saved): 0 = day, 1 = no sky light.
+    Text* skyText = nullptr;
+    Slider* skySlider = nullptr;
     void setTool(EditTool value);
     void useTool(int mouseX, int mouseY);
     // First solid block under the cursor.
@@ -99,5 +119,8 @@ class GameplayState : public IGameState {
     void updateAutosave(float dt);
     // Writes terrain_edits.dat when it changed; wait=false runs on the pool.
     void saveTerrainEdits(bool wait);
+    // Writes light_sources.dat when far block lights changed.
+    void saveLightSources(bool wait);
+    void loadLightSources(const DataStorage<Block>& blocks);
     void writeMeta();
 };

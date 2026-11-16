@@ -1,6 +1,7 @@
 #include <bx/math.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <set>
@@ -9,6 +10,9 @@
 #include "lod_capture_renderer.hpp"
 #include "lod_scene.hpp"
 #include "resource_manager.hpp"
+#include "world/block_light_propagator.hpp"
+#include "world/light_renderer.hpp"
+#include "world/light_volume_manager.hpp"
 #include "world/location_manager.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
@@ -35,8 +39,12 @@ int main(int argc, char** argv) {
     // Stand next to the X seam of a wrapping world and look across it, then
     // from the other side back: terrain must continue with no gap.
     const bool wrapScene = scenario == "wrap";
-    const bool handover =
-        scenario == "handover" || walking || structure || seams || wrapScene;
+    // Day view, then debug lamps at night (block light, far light and
+    // glare), then the same lamps from 350 tiles away and high above (far
+    // light on distant terrain and glare).
+    const bool lights = scenario == "lights";
+    const bool handover = scenario == "handover" || walking || structure ||
+                          seams || wrapScene || lights;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -61,6 +69,14 @@ int main(int argc, char** argv) {
         TerrainEditTracker tracker(chunks, edits);
         WorldEditor editor(chunks, &sunlight, assets.getStorage<Block>());
         tracker.watch(editor);
+        LightSourceRegistry registry;
+        BlockLightPropagator blockLight(chunks, assets.getStorage<Block>(),
+                                        pool, &registry);
+        blockLight.watch(editor);
+        LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
+                                   &blockLight);
+        LightRenderer lightRenderer(renderer);
+        std::vector<TilePos> lamps;
         const auto color = bgfx::createTexture2D(
             1280, 720, false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_RT);
         const auto depth = bgfx::createTexture2D(
@@ -76,9 +92,12 @@ int main(int argc, char** argv) {
         const auto readback = bgfx::createTexture2D(
             1280, 720, false, 1, bgfx::TextureFormat::RGBA8,
             BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
-        const bgfx::ViewId order[] = {2, 0, 3};
-        bgfx::setViewOrder(0, 3, order);
-        for (bgfx::ViewId view : {0, 2}) {
+        // View 1: additive glow after the world (Renderer::GlowView). Its id
+        // must stay below the readback blit's view 3: blits run in view-id
+        // order regardless of setViewOrder.
+        const bgfx::ViewId order[] = {2, 0, 1, 3};
+        bgfx::setViewOrder(0, 4, order);
+        for (bgfx::ViewId view : {0, 1, 2}) {
             bgfx::setViewFrameBuffer(view, framebuffer);
             bgfx::setViewRect(view, 0, 0, 1280, 720);
         }
@@ -124,6 +143,11 @@ int main(int argc, char** argv) {
         {
             TerrainLodManager lod(world, assets, pool, TerrainLod::Qualities[0],
                                   structure ? &edits : nullptr);
+            if (lights) {
+                std::vector<ShaderProperty*> lightUniforms;
+                lightRenderer.appendUniforms(lightUniforms);
+                lod.setExtraUniforms(std::move(lightUniforms));
+            }
             size_t maxResident = 0, maxUpload = 0;
             double maxFrame = 0;
             int frame = 0, settled = 0, phase = 0;
@@ -145,6 +169,7 @@ int main(int argc, char** argv) {
                         {unsigned(cx) / 8, unsigned(cz) / 8});
                     chunks.setFocus(camera.position);
                     sunlight.setFocus(camera.position);
+                    blockLight.setFocus(camera.position);
                     for (int z = cz - 3; z <= cz + 3; ++z)
                         for (int x = cx - 3; x <= cx + 3; ++x)
                             for (int y = cy - 3; y <= cy + 3; ++y)
@@ -153,8 +178,13 @@ int main(int argc, char** argv) {
                                      unsigned(y), unsigned(z)});
                     chunks.update();
                     sunlight.update();
+                    blockLight.update();
                     chunks.uploadReadyMeshes(renderer);
+                    if (lights) volumes.update(camera.position);
                 }
+                if (lights)
+                    lightRenderer.update(registry, camera, world.wrap(),
+                                         {1280, 720});
                 lod.update(camera, {1280, 720});
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720});
@@ -195,6 +225,8 @@ int main(int argc, char** argv) {
                 maxUpload = std::max(maxUpload, lod.uploadedBytes());
                 const auto eye = camera.eye();
                 size_t detailed = 0;
+                // Lights scenario, last view: high above distant terrain.
+                const bool farLights = lights && phase == 2;
                 if (handover) {
                     blockEye.setVec4({eye.x, eye.y, eye.z, 4096});
                     chunks.forEachReady([&](const ChunkCoord& coord, Chunk&) {
@@ -203,17 +235,22 @@ int main(int argc, char** argv) {
                         if (!mesh) return;
                         // The copy nearest the camera (X wraps).
                         const int camCX = int(camera.position.x) / 16;
-                        auto transform = relativeTransform(
-                            camera,
+                        const double wx =
                             double(camCX +
                                    world.wrap().deltaChunk(coord.x, camCX)) *
-                                Chunk::SIZE_X,
-                            double(coord.y) * Chunk::SIZE_Y,
+                            Chunk::SIZE_X;
+                        auto transform = relativeTransform(
+                            camera, wx, double(coord.y) * Chunk::SIZE_Y,
                             double(coord.z) * Chunk::SIZE_Z);
-                        target.drawVertexBuffer(mesh->get(), &blockShader,
-                                                {&blockTexture, &blockEye},
-                                                false, std::move(transform),
-                                                DrawLayer::GAME);
+                        std::vector<ShaderProperty*> uniforms{&blockTexture,
+                                                              &blockEye};
+                        if (lights) {
+                            if (!volumes.bind(coord, uniforms, wx)) return;
+                            lightRenderer.appendUniforms(uniforms);
+                        }
+                        target.drawVertexBuffer(
+                            mesh->get(), &blockShader, std::move(uniforms),
+                            false, std::move(transform), DrawLayer::GAME);
                         ++detailed;
                     });
                 }
@@ -228,6 +265,10 @@ int main(int argc, char** argv) {
                 bx::mtxProj(projection, 60.f, 1280.f / 720, 1.f, 4608.f,
                             bgfx::getCaps()->homogeneousDepth);
                 bgfx::setViewTransform(0, view, projection);
+                bgfx::setViewTransform(1, view, projection);
+                // NO_GLARE=1 renders without glare, for image diffs.
+                if (lights && !std::getenv("NO_GLARE"))
+                    lightRenderer.drawGlare(target, camera);
                 skyCamera.setVec4({camera.yaw, camera.pitch, 1280.f / 720, 0});
                 skyCamera.bind();
                 bgfx::setVertexBuffer(0, sky.vbh);
@@ -240,23 +281,35 @@ int main(int argc, char** argv) {
                 size_t draws = 0;
                 for (const auto& cmd : target.commands) {
                     const auto& draw = std::get<DrawVertexBufferCmd>(cmd.data);
-                    const auto mesh = std::get<DynamicMesh>(draw.mesh);
                     bgfx::setTransform(draw.transform.data());
-                    bgfx::setVertexBuffer(0, mesh.vbh, 0, mesh.activeVertices);
-                    bgfx::setIndexBuffer(mesh.ibh, 0, mesh.activeIndices);
+                    if (draw.isStaticMesh) {
+                        const auto mesh = std::get<StaticMesh>(draw.mesh);
+                        bgfx::setVertexBuffer(0, mesh.vbh);
+                        bgfx::setIndexBuffer(mesh.ibh);
+                    } else {
+                        const auto mesh = std::get<DynamicMesh>(draw.mesh);
+                        bgfx::setVertexBuffer(0, mesh.vbh, 0,
+                                              mesh.activeVertices);
+                        bgfx::setIndexBuffer(mesh.ibh, 0, mesh.activeIndices);
+                    }
                     for (auto* uniform : draw.uniforms) uniform->bind();
-                    bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
-                                   BGFX_STATE_WRITE_Z |
-                                   BGFX_STATE_DEPTH_TEST_LESS);
-                    bgfx::submit(0, assets.getProgram(*draw.shader));
+                    const bool glow = draw.layer == DrawLayer::GAME_GLOW;
+                    bgfx::setState(glow ? BGFX_STATE_WRITE_RGB |
+                                              BGFX_STATE_DEPTH_TEST_LESS |
+                                              BGFX_STATE_BLEND_ADD
+                                        : BGFX_STATE_WRITE_RGB |
+                                              BGFX_STATE_WRITE_A |
+                                              BGFX_STATE_WRITE_Z |
+                                              BGFX_STATE_DEPTH_TEST_LESS);
+                    bgfx::submit(glow ? 1 : 0, assets.getProgram(*draw.shader));
                     ++draws;
                 }
                 // Keep frames bounded, while allowing background generators to
                 // progress without busy spinning the headless renderer.
                 if (lod.backlog() == 0 && lod.jobCount() == 0 &&
-                    (!handover ||
-                     (sunlight.isIdle() && !chunks.hasGenerationWork() &&
-                      detailed > 0)))
+                    (!handover || (sunlight.isIdle() && blockLight.isIdle() &&
+                                   !chunks.hasGenerationWork() &&
+                                   (detailed > 0 || farLights))))
                     ++settled;
                 else
                     settled = 0;
@@ -273,7 +326,7 @@ int main(int argc, char** argv) {
                     while (rendered < readyFrame) rendered = bgfx::frame();
                     std::ofstream image(
                         output +
-                            (travel || structure || seams || wrapScene
+                            (travel || structure || seams || wrapScene || lights
                                  ? "_" + std::to_string(phase)
                                  : "") +
                             (transition ? "_transition" : "") + ".ppm",
@@ -328,7 +381,7 @@ int main(int argc, char** argv) {
                         << " edited_columns=" << edits.size()
                         << " structure_slabs=" << lod.structureCount() << '\n';
                     if ((!transition && lod.backlog() != 0) || draws == 0 ||
-                        (handover && detailed == 0) ||
+                        (handover && detailed == 0 && !farLights) ||
                         // Structure proxies have their own 1/8 cap.
                         maxResident > TerrainLod::GpuBudget * 9 / 8 ||
                         maxUpload > TerrainLod::UploadBudget)
@@ -378,6 +431,66 @@ int main(int argc, char** argv) {
                     camera.yaw = -.5f;
                     camera.pitch = .1f;
                     camera.distance = .5f;
+                }
+                if (settled >= 10 && lights) {
+                    if (phase == 1) {
+                        int lit = 0;
+                        for (const auto& p : lamps)
+                            if (const auto* t =
+                                    chunks.tileAt(p.x, p.y + 1, p.z))
+                                lit += t->lightLevel.artificial_light;
+                        std::cout
+                            << "lamps=" << lamps.size()
+                            << " light_above_lamps=" << lit
+                            << " far_lights=" << lightRenderer.lightCount()
+                            << " glares=" << lightRenderer.glareCount() << '\n';
+                        if (lamps.empty() || lit == 0 ||
+                            lightRenderer.lightCount() == 0)
+                            result = 1;
+                    }
+                    if (phase == 2) {
+                        std::cout << "far_glares=" << lightRenderer.glareCount()
+                                  << " registry=" << registry.size() << '\n';
+                        if (lightRenderer.glareCount() == 0) result = 1;
+                        break;
+                    }
+                    ++phase;
+                    settled = 0;
+                    const float fx = std::sin(camera.yaw),
+                                fz = std::cos(camera.yaw);
+                    if (phase == 1) {
+                        const auto& blocks = assets.getStorage<Block>();
+                        const auto it =
+                            blocks.indexByName.find("blocks.test_light");
+                        if (it == blocks.indexByName.end()) {
+                            std::cerr << "blocks.test_light missing\n";
+                            result = 1;
+                            break;
+                        }
+                        const uint8_t id = blocks.items[it->second].id;
+                        for (int along : {-12, 0, 12})
+                            for (int side : {-8, 8}) {
+                                const int x = int(camera.position.x +
+                                                  fx * along + fz * side);
+                                const int z = int(camera.position.z +
+                                                  fz * along - fx * side);
+                                const TilePos p{x, surface.height(x, z) + 1, z};
+                                if (editor.placeBlock(p, id) ==
+                                    EditStatus::Applied)
+                                    lamps.push_back(p);
+                            }
+                        lightRenderer.setSkyDarkness(.9f);
+                    } else {
+                        // High above, looking down at the lamps: their
+                        // glare must show over the lit LOD terrain.
+                        camera.position.x -= fx * 350;
+                        camera.position.z -= fz * 350;
+                        camera.position.y =
+                            surface.height(int(camera.position.x),
+                                           int(camera.position.z)) +
+                            160;
+                        camera.pitch = -.4f;
+                    }
                 }
                 if (settled >= 10 && wrapScene) {
                     if (phase >= 1) break;

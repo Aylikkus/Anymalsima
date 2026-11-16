@@ -6,12 +6,7 @@
 
 #include "chunk_manager.hpp"
 #include "sunlight_propagator.hpp"
-
-// World tile coordinates: x, y = height, z.
-struct TilePos {
-    int x = 0, y = 0, z = 0;
-    bool operator==(const TilePos&) const = default;
-};
+#include "tile_pos.hpp"
 
 enum class EditStatus : uint8_t {
     Applied,       // the tile changed

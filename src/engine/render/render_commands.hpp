@@ -15,7 +15,10 @@ using FontId = uint32_t;
 
 enum class DrawLayer {
     UI,
-    GAME
+    GAME,
+    // World-space additive glow (light glare): drawn after GAME in its own
+    // view, depth-tested against the world but never writing depth.
+    GAME_GLOW
 };
 
 struct DrawRectCmd {

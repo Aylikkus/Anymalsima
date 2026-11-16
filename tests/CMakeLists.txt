@@ -9,6 +9,8 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/block_light_propagator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/light_sources.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/world_editor.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edits.cpp
@@ -21,6 +23,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/save/world_meta.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/save_catalog.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/terrain_edits_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/light_sources_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/binary_stream.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/compression.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/section_container.cpp
@@ -53,6 +56,8 @@ add_executable(world_logic_tests
     integration/sunlight_boundary_tests.cpp
     integration/lighting_priority_tests.cpp
     integration/region_persistence_tests.cpp
+    integration/block_light_tests.cpp
+    unit/game/items/light_emission_tests.cpp
     unit/engine/serialization/binary_stream_tests.cpp
     unit/game/world/save_codec_tests.cpp
 )
@@ -160,7 +165,22 @@ foreach(case IN LISTS boundary_cases)
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "integration;gameplay;world;threading" TIMEOUT 15)
 endforeach()
-foreach(case block_default_opacity block_explicit_opacity)
+set(block_light_cases
+    block_light_round_falloff block_light_wall_shadow
+    block_light_soft_shadow_and_translucency block_light_chunk_seam
+    block_light_late_neighbor block_light_removal_clears block_light_color
+    block_light_spotlight block_light_far_registry
+    block_light_far_registry_removed_with_block block_light_entity_source
+    block_light_wraps_x far_light_selection
+)
+foreach(case IN LISTS block_light_cases)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "integration;gameplay;world;threading;lighting" TIMEOUT 15)
+endforeach()
+foreach(case block_default_opacity block_explicit_opacity
+             light_emission_defaults light_emission_rejects_invalid
+             light_emission_curve light_chroma_encoding)
     add_test(NAME game.items.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.items.${case} PROPERTIES
         LABELS "unit;gameplay;data" TIMEOUT 10)
@@ -195,7 +215,8 @@ foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
              chunk_codec_wide_palette chunk_codec_rejects_corrupt
              region_file_roundtrip world_seed_derivation world_map_roundtrip
              save_catalog_slots region_index_covers_world_height
-             terrain_edits_roundtrip terrain_edits_rejects_corrupt)
+             terrain_edits_roundtrip terrain_edits_rejects_corrupt
+             light_sources_roundtrip light_sources_rejects_corrupt)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "unit;gameplay;save" TIMEOUT 10)

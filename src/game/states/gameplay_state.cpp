@@ -46,6 +46,14 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     terrainLod = std::make_unique<TerrainLodManager>(
         *this->world, *context.assets, context.threadPool, quality,
         edits.get());
+    lightRenderer = std::make_unique<LightRenderer>(*context.renderer);
+    {
+        std::vector<ShaderProperty*> lightUniforms;
+        lightRenderer->appendUniforms(lightUniforms);
+        terrainLod->setExtraUniforms(std::move(lightUniforms));
+    }
+    lightSources = std::make_unique<LightSourceRegistry>();
+    loadLightSources(context.assets->getStorage<Block>());
     ui_manager = std::make_unique<UIManager>(context);
 
     auto root = std::make_unique<Panel>();
@@ -86,6 +94,37 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     };
     placeButton = makeToolButton(_("PLACE BLOCK"), 0, EditTool::Place);
     removeButton = makeToolButton(_("REMOVE BLOCK"), 3, EditTool::Remove);
+    lightButton = makeToolButton(_("PLACE LIGHT"), 6, EditTool::PlaceLight);
+    {
+        const auto& blocks = context.assets->getStorage<Block>();
+        const auto it = blocks.indexByName.find(TestLightBlock);
+        if (it != blocks.indexByName.end())
+            testLightId = blocks.items[it->second].id;
+        else
+            std::cerr << TestLightBlock
+                      << " is not defined; PLACE LIGHT is disabled\n";
+    }
+
+    // Debug sky dimmer: there is no day/night cycle yet, and sky light
+    // outshines block light outdoors.
+    skyText = ui_manager->createWidget(std::make_unique<Text>(), root_ptr);
+    skyText->setGridPlacement({9.5f, 15, 3, 1});
+    skyText->setFontRole(FontRole::Bold);
+    skyText->setVerticalAlign(VerticalAlign::Middle);
+    skyText->setText(_F("SKY {0}%", 100));
+    skySlider = ui_manager->createWidget(
+        std::make_unique<Slider>(context, "ui.white.track_horizontal",
+                                 "ui.white.thumb_circle"),
+        root_ptr);
+    skySlider->setRange(0.0f, 100.0f);
+    skySlider->setStep(1.0f);
+    skySlider->setAxis(ScrollAxis::Horizontal);
+    skySlider->setGridPlacement({12, 15, 5, 1});
+    skySlider->setValue(100.0f);
+    skySlider->onValueChanged.connect([this](float value) {
+        skyText->setText(_F("SKY {0}%", int(value)));
+        lightRenderer->setSkyDarkness(1.f - value / 100.f);
+    });
 
     generator = std::make_unique<LocationGenerator>();
     mesher = std::make_unique<ChunkMesher>(*context.assets);
@@ -95,10 +134,14 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
         context.threadPool);
+    blockLight = std::make_unique<BlockLightPropagator>(
+        *chunkManager, context.assets->getStorage<Block>(), context.threadPool,
+        lightSources.get());
     lightVolumes = std::make_unique<LightVolumeManager>(
-        *chunkManager, context.assets->getStorage<Block>());
+        *chunkManager, context.assets->getStorage<Block>(), blockLight.get());
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
+    blockLight->watch(*editor);
     // Comparing saved chunks with generated terrain is only meaningful when
     // the save's generator produced the same surface heights.
     const bool sameGenerator =
@@ -154,6 +197,7 @@ GameplayState::~GameplayState() {
         locationMgr->saveAll(true);
         regionStore->flush();
         saveTerrainEdits(true);
+        saveLightSources(true);
         writeMeta();
     } catch (const std::exception& e) {
         std::cerr << "Saving world failed: " << e.what() << '\n';
@@ -201,6 +245,63 @@ void GameplayState::saveTerrainEdits(bool wait) {
     }
 }
 
+void GameplayState::loadLightSources(const DataStorage<Block>& blocks) {
+    try {
+        auto file = save_catalog::readLightSources(slot);
+        lightsExtra = std::move(file.extra);
+        for (const auto& record : file.lights) {
+            // Emission comes from today's definitions; lights whose block
+            // no longer reaches far are dropped.
+            if (record.block == 0 || record.block > blocks.items.size())
+                continue;
+            const auto& block = blocks.get(record.block);
+            if (block.light && block.light->isFar())
+                lightSources->setBlockLight(record.tile, record.block,
+                                            *block.light);
+        }
+    } catch (const std::exception& e) {
+        // Derived from chunks: visited areas are rebuilt.
+        std::cerr << "Light sources unreadable (" << e.what()
+                  << "); starting empty\n";
+    }
+    lightSources->dirty = false;
+}
+
+void GameplayState::saveLightSources(bool wait) {
+    using namespace std::chrono_literals;
+    if (lightsWrite.valid()) {
+        if (!wait && lightsWrite.wait_for(0s) != std::future_status::ready)
+            return;
+        try {
+            lightsWrite.get();
+        } catch (const std::exception& e) {
+            std::cerr << "Saving light sources failed: " << e.what() << '\n';
+            lightSources->dirty = true;
+        }
+    }
+    if (!lightSources->dirty) return;
+    lightSources->dirty = false;
+    std::vector<light_sources_codec::Record> records;
+    lightSources->forEach([&](LightSourceRegistry::Id, const LightSource& s) {
+        if (s.owner == LightSource::Owner::Block)
+            records.push_back({s.tile, s.block});
+    });
+    auto write = [target = slot, records = std::move(records),
+                  extra = lightsExtra]() mutable {
+        save_catalog::writeLightSources(target, std::move(records), extra);
+    };
+    if (!wait) {
+        lightsWrite = uiContext->threadPool.submit_task(std::move(write));
+        return;
+    }
+    try {
+        write();
+    } catch (const std::exception& e) {
+        std::cerr << "Saving light sources failed: " << e.what() << '\n';
+        lightSources->dirty = true;
+    }
+}
+
 void GameplayState::updateAutosave(float dt) {
     // Rolling checkpoint: one region per frame keeps copies off the frame
     // budget; regions unloaded meanwhile were already saved on unload.
@@ -209,6 +310,7 @@ void GameplayState::updateAutosave(float dt) {
         autosaveQueue.pop_back();
         if (autosaveQueue.empty()) {
             saveTerrainEdits(false);
+            saveLightSources(false);
             writeMeta();
         }
         return;
@@ -219,6 +321,7 @@ void GameplayState::updateAutosave(float dt) {
     autosaveQueue = locationMgr->loaded();
     if (autosaveQueue.empty()) {
         saveTerrainEdits(false);
+        saveLightSources(false);
         writeMeta();
     }
 }
@@ -322,6 +425,8 @@ void GameplayState::setTool(EditTool value) {
                                                                      : idle);
     removeButton->getButton()->setNormalColor(tool == EditTool::Remove ? armed
                                                                        : idle);
+    lightButton->getButton()->setNormalColor(
+        tool == EditTool::PlaceLight ? armed : idle);
 }
 
 std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
@@ -355,10 +460,13 @@ void GameplayState::useTool(int mouseX, int mouseY) {
     }
     const auto& blocks = uiContext->assets->getStorage<Block>();
     if (blocks.items.empty() || (!hit->nx && !hit->ny && !hit->nz)) return;
-    // Against the face under the cursor, using the first defined block.
+    // Against the face under the cursor: the debug light, or else the first
+    // defined block.
+    if (tool == EditTool::PlaceLight && !testLightId) return;
+    const uint8_t block =
+        tool == EditTool::PlaceLight ? *testLightId : blocks.items.front().id;
     editor->placeBlock(
-        {hit->tx + hit->nx, hit->ty + hit->ny, hit->tz + hit->nz},
-        blocks.items.front().id);
+        {hit->tx + hit->nx, hit->ty + hit->ny, hit->tz + hit->nz}, block);
 }
 
 void GameplayState::update(Game& game, float dt) {
@@ -382,9 +490,11 @@ void GameplayState::update(Game& game, float dt) {
     terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
+    blockLight->setFocus(camera.position);
     requestChunksAroundCamera();
     chunkManager->update();
     sunLight->update();
+    blockLight->update();
 
     // --- Tile debug raycast -------------------------------------------------
     float dirX, dirY, dirZ;
@@ -424,6 +534,11 @@ void GameplayState::update(Game& game, float dt) {
                << "\n";
             ss << "artificial_light: " << (int)t.lightLevel.artificial_light
                << "\n";
+            if (const auto* e = blockLight->emission(t.block_id))
+                ss << "emits: radius " << e->radius << ", falloff "
+                   << e->falloff << "\n";
+            ss << "far lights: " << lightRenderer->lightCount() << " lit, "
+               << lightRenderer->glareCount() << " glare\n";
 
             tileDebugText->setText(ss.str());
         }
@@ -437,6 +552,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     chunkManager->uploadReadyMeshes(*context.renderer);
     // After uploads: deferred light volumes switch with their new meshes.
     lightVolumes->update(camera.position);
+    lightRenderer->update(*lightSources, camera, world->wrap(),
+                          context.getWindowSize());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize());
     const Vec3 eye = camera.eye();
@@ -492,11 +609,13 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         auto transform = relativeTransform(camera, wx, wy, wz);
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
                                               &worldEye};
+        lightRenderer->appendUniforms(uniforms);
         // Without a light volume the chunk would render unlit; skip it.
         if (!lightVolumes->bind(coord, uniforms, wx)) return;
         target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     });
+    lightRenderer->drawGlare(target, camera);
 
     ui_manager->render(target, context);
 }

@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "block_light_propagator.hpp"
 #include "camera_work_queue.hpp"
 #include "chunk_manager.hpp"
 #include "light_volume.hpp"
@@ -29,7 +30,10 @@ class LightVolumeManager {
     // Sampler stage of u_light_volume in the block program.
     static constexpr uint8_t VolumeStage = 2;
 
-    LightVolumeManager(ChunkManager& chunks, const DataStorage<Block>& blocks);
+    // blockLight: optional source of artificial light chroma; must outlive
+    // the manager.
+    LightVolumeManager(ChunkManager& chunks, const DataStorage<Block>& blocks,
+                       const BlockLightPropagator* blockLight = nullptr);
     ~LightVolumeManager();
     LightVolumeManager(const LightVolumeManager&) = delete;
     LightVolumeManager& operator=(const LightVolumeManager&) = delete;
@@ -83,6 +87,7 @@ class LightVolumeManager {
 
     ChunkManager& chunks;
     const DataStorage<Block>& blocks;
+    const BlockLightPropagator* blockLight;
     Signal<const ChunkCoord&>::Connection readyConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     Signal<const ChunkCoord&>::Connection lightConnection;
@@ -92,8 +97,8 @@ class LightVolumeManager {
     CameraWorkQueue dirty;
     // Frame at which a dirty slot started waiting for its chunk's remesh.
     std::unordered_map<ChunkCoord, uint64_t> deferredSince;
-    bgfx::TextureFormat::Enum format = bgfx::TextureFormat::RG8;
-    int bytesPerTexel = 2;
+    // R sun, G block light, BA block light chroma.
+    bgfx::TextureFormat::Enum format = bgfx::TextureFormat::RGBA8;
     uint64_t frame = 1;
     LightVolume::Volume scratch;
 };
