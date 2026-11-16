@@ -583,8 +583,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     for (const auto& p : drawn) {
         auto& entry = *entries.at(p);
         if (!frustum.intersects(entry.bounds)) continue;
-        std::array<float, 16> transform;
-        bx::mtxIdentity(transform.data());
+        // World-space vertices, placed relative to the eye.
+        auto transform = relativeTransform(camera, 0, 0, 0);
         std::vector<ShaderProperty*> uniforms{
             &textureArray,  &entry.mapUniform, &entry.patchUniform,
             &detailUniform, &detailOrigin,     &fogUniform,
@@ -593,8 +593,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                                 false, std::move(transform), DrawLayer::GAME);
     }
     if (joinsDrawable) {
-        std::array<float, 16> transform;
-        bx::mtxIdentity(transform.data());
+        // World-space vertices, placed relative to the eye.
+        auto transform = relativeTransform(camera, 0, 0, 0);
         target.drawVertexBuffer(
             detailJoins.get(), &joinShader,
             {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
@@ -609,7 +609,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                   cy = int(camera.position.y) / Chunk::SIZE_Y,
                   cz = int(camera.position.z) / Chunk::SIZE_Z;
         structures->draw(
-            target, frustum, &joinShader,
+            target, frustum, camera, &joinShader,
             {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
              &joinLightSlot, &joinLightVolume},
             [&](const ChunkCoord& c) {

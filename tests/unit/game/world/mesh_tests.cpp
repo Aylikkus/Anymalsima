@@ -43,7 +43,8 @@ TEST(mesh_greedy_prism) {
         const float cz = ux * vy - uy * vx;
         area += std::sqrt(cx * cx + cy * cy + cz * cz);
     }
-    EQUAL(area, 10.0f, "2x1x1 prism exposed area");
+    // 10 exposed unit faces, each grown by the seam overlap on every side.
+    CHECK(area > 10.0f && area < 10.1f);
 }
 
 TEST(mesh_chunk_seam) {
@@ -64,10 +65,12 @@ TEST(mesh_chunk_seam) {
         });
     CHECK(sawNeighbour);
     expectQuads(result, 5);
+    // Positions are chunk-local (chunk {2,3,4} starts at 32,48,64).
+    constexpr float e = ChunkMesher::SeamOverlap * 1.01f;
     for (const auto& vertex : result.vertices) {
-        CHECK(vertex.x >= 47 && vertex.x <= 48);
-        CHECK(vertex.y >= 54 && vertex.y <= 55);
-        CHECK(vertex.z >= 71 && vertex.z <= 72);
+        CHECK(vertex.x >= 15 - e && vertex.x <= 16 + e);
+        CHECK(vertex.y >= 6 - e && vertex.y <= 7 + e);
+        CHECK(vertex.z >= 7 - e && vertex.z <= 8 + e);
     }
 }
 
@@ -132,4 +135,39 @@ TEST(mesh_skips_hidden_chunks) {
     f.chunks.update();
     CHECK(f.chunks.meshInFlight(center));
     f.wait();
+}
+
+TEST(mesh_local_positions_overlap) {
+    // An L of blocks: on the +Z plane a 3-wide quad meets a 1-wide quad in
+    // a T-junction at (1, 1).
+    Chunk chunk;
+    for (int x = 0; x < 3; ++x) chunk.tiles[5][0][x].block_id = 1;
+    chunk.tiles[5][1][0].block_id = 1;
+    const auto result = mesh(chunk, {40, 30, 20});
+    constexpr float e = ChunkMesher::SeamOverlap;
+    for (const auto& v : result.vertices) {
+        CHECK(v.x >= -e * 1.01f && v.x <= 16 + e * 1.01f);
+        CHECK(v.y >= -e * 1.01f && v.y <= 16 + e * 1.01f);
+        CHECK(v.z >= -e * 1.01f && v.z <= 16 + e * 1.01f);
+    }
+    float lowerTop = -1, upperBottom = 99, lowerLeft = 99;
+    for (size_t i = 0; i < result.vertices.size(); i += 4) {
+        if (result.vertices[i].nz < .5f) continue;  // +Z faces only
+        float minY = 99, maxY = -99, minX = 99, maxX = -99;
+        for (size_t k = i; k < i + 4; ++k) {
+            minY = std::min(minY, result.vertices[k].y);
+            maxY = std::max(maxY, result.vertices[k].y);
+            minX = std::min(minX, result.vertices[k].x);
+            maxX = std::max(maxX, result.vertices[k].x);
+        }
+        if (maxX > 2) {  // the 3-wide quad
+            lowerTop = maxY;
+            lowerLeft = minX;
+        } else {
+            upperBottom = minY;
+        }
+    }
+    // The quads overlap across the shared edge instead of just touching.
+    CHECK(lowerTop > 1 && upperBottom < 1 && lowerTop > upperBottom);
+    CHECK(lowerLeft < 0);
 }

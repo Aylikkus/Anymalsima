@@ -270,8 +270,6 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
                                 const TerrainSample& terrain) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     const int rx = int(x / sx), rz = int(z / sz);
-    Region local = data.at(rx, rz).region;
-    local.land_height_m = terrain.surface_y;
     const double lx = double(x) - rx * sx, lz = double(z) - rz * sz;
     const auto axis = [](double pos, int size) {
         if (pos < TerrainTuning::SoilHalfWidth)
@@ -288,10 +286,8 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     struct Choice {
         const TerrainRegion* region;
         double weight;
-        int priority;
     };
     std::array<Choice, 4> choices{};
-    int bestPriority = std::numeric_limits<int>::lowest();
     double total = 0;
     int count = 0;
     for (int iz = 0; iz < 2; ++iz)
@@ -301,19 +297,22 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
             const auto& candidate =
                 data.at(rx + (ix ? dx : 0), rz + (iz ? dz : 0));
             if (!candidate.soil.block_id) continue;
-            int priority = std::numeric_limits<int>::lowest();
-            bool eligible = false;
-            for (const auto& rule : candidate.soil_rules)
-                if (SoilGenerator::allowed(rule, local)) {
-                    priority = std::max(priority, rule.priority);
-                    eligible = true;
-                }
+            // Each region already chose its soil (SoilGenerator::select, by
+            // priority). Its rules are checked against that region's own
+            // features and climate, at this column's height, so a soil
+            // blends across the border instead of stopping at it, while the
+            // underwater rule still follows the actual shoreline.
+            Region source = candidate.region;
+            source.land_height_m = terrain.surface_y;
+            const bool eligible =
+                std::any_of(candidate.soil_rules.begin(),
+                            candidate.soil_rules.end(), [&](const auto& rule) {
+                                return SoilGenerator::allowed(rule, source);
+                            });
             if (!eligible) continue;
-            choices[count++] = {&candidate, weight, priority};
-            bestPriority = std::max(bestPriority, priority);
+            choices[count++] = {&candidate, weight};
+            total += weight;
         }
-    for (int i = 0; i < count; ++i)
-        if (choices[i].priority == bestPriority) total += choices[i].weight;
     if (total <= 0) return {};
     // Canonical spatial ordering prevents a coin flip at the owning-region
     // boundary, where the same candidates would otherwise swap order.
@@ -323,20 +322,32 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
                              cb = b.region->region.coord;
                   return ca.y == cb.y ? ca.x < cb.x : ca.y < cb.y;
               });
+    // Value noise (uniform-ish weights) sampled in a domain rotated by 30
+    // degrees at a scale coprime with the chunk size, so the mixed pattern
+    // follows neither the axes nor chunk borders.
+    const double u = double(x) * 0.8660254037844386 + double(z) * 0.5;
+    const double v = double(z) * 0.8660254037844386 - double(x) * 0.5;
     double choice =
-        SoilGenerator::field(x, z, 16, data.feature_seed ^ 0x6187u) * total;
-    const TerrainRegion* selected = nullptr;
+        SoilGenerator::field(u, v, 21, data.feature_seed ^ 0x6187u) * total;
+    const TerrainRegion* selected = choices[count - 1].region;
     for (int i = 0; i < count; ++i) {
-        if (choices[i].priority != bestPriority) continue;
-        selected = choices[i].region;
         choice -= choices[i].weight;
-        if (choice < 0) break;
+        if (choice < 0) {
+            selected = choices[i].region;
+            break;
+        }
     }
+    // Topsoil (vegetation), bare-rock exposure and depth rules come from the
+    // region the soil was taken from, not from the column's own region:
+    // otherwise they switch along the region border even when both sides
+    // use the same soil (e.g. a bare beach next to a vegetated one).
+    Region source = selected->region;
+    source.land_height_m = terrain.surface_y;
     auto profile = selected->soil;
     if (terrain.surface_y < SEA_LEVEL_Y ||
-        local.vegetation == VegetationType::NONE)
+        source.vegetation == VegetationType::NONE)
         profile.topsoil_block_id = 0;
-    auto cover = SoilGenerator::sample(profile, local, x, z);
+    auto cover = SoilGenerator::sample(profile, source, x, z);
     const double retention =
         1 -
         smooth((terrain.slope - TerrainTuning::SoilSlopeStart) /

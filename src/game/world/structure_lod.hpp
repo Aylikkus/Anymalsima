@@ -39,14 +39,17 @@ class StructureLod {
     // hidden(coord): the real chunk is drawn instead.
     template <typename Hidden>
     void draw(RenderTarget& target, const Frustum& frustum,
-              const std::string* shader,
+              const Camera& camera, const std::string* shader,
               const std::vector<ShaderProperty*>& uniforms, Hidden&& hidden) {
         for (auto& [coord, proxy] : proxies) {
             if (!proxy->drawable || !proxy->hasMesh || hidden(coord) ||
                 !frustum.intersects(proxy->bounds))
                 continue;
-            std::array<float, 16> transform;
-            bx::mtxIdentity(transform.data());
+            // Meshes are slab-local (ChunkMesher); place them by the eye.
+            auto transform =
+                relativeTransform(camera, double(coord.x) * Chunk::SIZE_X,
+                                  double(coord.y) * Chunk::SIZE_Y,
+                                  double(coord.z) * Chunk::SIZE_Z);
             auto bound = uniforms;
             target.drawVertexBuffer(proxy->mesh.get(), shader, std::move(bound),
                                     false, std::move(transform),

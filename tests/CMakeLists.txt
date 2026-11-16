@@ -103,6 +103,7 @@ set(world_cases
     mesh_merges_across_light
     mesh_winding
     mesh_skips_hidden_chunks
+    mesh_local_positions_overlap
     light_volume_encoding
     light_volume_neighbor_borders
     light_volume_missing_neighbor

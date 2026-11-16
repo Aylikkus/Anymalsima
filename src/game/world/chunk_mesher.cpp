@@ -46,6 +46,22 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
     float uMax = std::sqrt(dux * dux + duy * duy + duz * duz);
     float vMax = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
 
+    // Grow the quad by SeamOverlap on every side (unit edge directions).
+    {
+        const float e = SeamOverlap;
+        const float ux = dux / uMax, uy = duy / uMax, uz = duz / uMax;
+        const float vx = dvx / vMax, vy = dvy / vMax, vz = dvz / vMax;
+        ox -= e * (ux + vx);
+        oy -= e * (uy + vy);
+        oz -= e * (uz + vz);
+        dux += 2 * e * ux;
+        duy += 2 * e * uy;
+        duz += 2 * e * uz;
+        dvx += 2 * e * vx;
+        dvy += 2 * e * vy;
+        dvz += 2 * e * vz;
+    }
+
     struct Corner {
         float x, y, z, u, v;
     };
@@ -168,11 +184,6 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
             return &chunk.tiles[z][y][x];
         };
 
-        // World origin offsets per axis:
-        // axis 0 → world X (originX), axis 1 → world Y (originY), axis 2 →
-        // world Z (originZ)
-        const int origins[3] = {originX, originY, originZ};
-
         for (int s = 0; s < slabCount; ++s) {
             // Build the face masks for this slab
             for (int vi = 0; vi < vCount; ++vi) {
@@ -267,9 +278,10 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         {
                             int cell[3];
                             worldPos(s, ui, vi, cell);
-                            qOrigin[0] = (float)(origins[0] + cell[0]);
-                            qOrigin[1] = (float)(origins[1] + cell[1]);
-                            qOrigin[2] = (float)(origins[2] + cell[2]);
+                            // Chunk-local: the draw transform adds the origin.
+                            qOrigin[0] = (float)cell[0];
+                            qOrigin[1] = (float)cell[1];
+                            qOrigin[2] = (float)cell[2];
 
                             // For the +d face, push the surface out by 1 tile
                             if (posDir) qOrigin[d] += 1.0f;
@@ -325,8 +337,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                 if (!above || above->liquid != LiquidType::None ||
                     above->block_id)
                     continue;
-                emitQuad(mesh, originX + x, originY + y + 1, originZ + z, 0, 0,
-                         1, 1, 0, 0, Face::PosY,
+                emitQuad(mesh, x, y + 1, z, 0, 0, 1, 1, 0, 0, Face::PosY,
                          {nullptr, UINT16_MAX, NeutralTint});
             }
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <bgfx/bgfx.h>
 
+#include <array>
 #include <cmath>
 #include <variant>
 
@@ -39,6 +40,26 @@ struct Camera {
                 position.z - std::cos(pitch) * std::cos(yaw) * distance};
     }
 };
+
+// The world view (view 0) is camera-relative: its eye sits at the origin.
+// Every world draw passes this model matrix, which places a mesh whose
+// vertex (0,0,0) is at world `origin` relative to the eye. It is computed in
+// double, so meshes near the camera stay precise at any world coordinate
+// (float world positions near x = 60000 are only exact to ~0.004 tiles,
+// which opens gaps between greedy-meshed quads).
+inline std::array<float, 16> relativeTransform(const Camera& camera, double ox,
+                                               double oy, double oz) {
+    const double pitch = camera.pitch, yaw = camera.yaw, d = camera.distance;
+    const double ex = camera.position.x - std::cos(pitch) * std::sin(yaw) * d;
+    const double ey = camera.position.y - std::sin(pitch) * d;
+    const double ez = camera.position.z - std::cos(pitch) * std::cos(yaw) * d;
+    std::array<float, 16> m{};
+    m[0] = m[5] = m[10] = m[15] = 1;
+    m[12] = float(ox - ex);
+    m[13] = float(oy - ey);
+    m[14] = float(oz - ez);
+    return m;
+}
 
 struct StaticMesh {
     bgfx::VertexBufferHandle vbh;

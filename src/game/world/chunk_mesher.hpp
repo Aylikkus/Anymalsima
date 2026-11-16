@@ -29,6 +29,14 @@ class ChunkMesher {
 
     using NeighbourFn = std::function<const Tile*(int tx, int ty, int tz)>;
 
+    // Every quad grows by this much on all four sides within its plane. The
+    // overlap closes sub-pixel cracks where greedy quads meet in T-junctions
+    // (and at wall/floor corners); coplanar overlap is invisible.
+    static constexpr float SeamOverlap = 1.f / 512;
+
+    // Vertex positions are chunk-local (0..16, plus SeamOverlap); draw with
+    // relativeTransform(camera, chunk origin). Neighbour lookups use world
+    // tile coordinates.
     ChunkMesh build(const Chunk& chunk, const ChunkCoord& coord,
                     const NeighbourFn& neighbour) const;
 

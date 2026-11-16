@@ -28,7 +28,12 @@ int main(int argc, char** argv) {
     // Edit terrain near the camera, then look back at it from 400 tiles away
     // after its regions unloaded: the pit and structure must remain in LOD.
     const bool structure = scenario == "structure";
-    const bool handover = scenario == "handover" || walking || structure;
+    // A patterned wall (many greedy-mesh T-junctions) close to the camera
+    // far from the world origin, in front of the sky: any background pixel
+    // inside it is a seam gap.
+    const bool seams = scenario == "seams";
+    const bool handover =
+        scenario == "handover" || walking || structure || seams;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -39,7 +44,8 @@ int main(int argc, char** argv) {
         definitions.erase("music");
         assets.loadFromJson(definitions);
         assets.buildMaterialTextureArrays();
-        const auto world = lodScene();
+        // Seams need coordinates as large as a full-size world (~64k tiles).
+        const auto world = lodScene(seams ? 480 : 96);
         LodCaptureRenderer renderer;
         LocationGenerator generator;
         ThreadPool pool(4);
@@ -72,7 +78,9 @@ int main(int argc, char** argv) {
             bgfx::setViewFrameBuffer(view, framebuffer);
             bgfx::setViewRect(view, 0, 0, 1280, 720);
         }
-        bgfx::setViewClear(2, BGFX_CLEAR_COLOR, 0xaec4d6ff);
+        // Seams: no sky; a magenta background makes every gap pixel obvious.
+        bgfx::setViewClear(2, BGFX_CLEAR_COLOR,
+                           seams ? 0xff00ffff : 0xaec4d6ff);
         bgfx::setViewClear(0, BGFX_CLEAR_DEPTH, uint32_t(0), 1.f);
         Camera camera{{6144, 420, 6144}, 1.1f, -.18f, 40};
         if (argc > 3) {
@@ -82,6 +90,15 @@ int main(int argc, char** argv) {
                 camera = {{6144, 700, 6144}, .7f, -.55f, 40};
         }
         SurfaceSampler surface(world, assets);
+        if (seams) {
+            // Dry land as far from the origin as the scene allows.
+            int x = surface.width() - 1500;
+            while (x > 0 && surface.height(x, 6144) < SEA_LEVEL_Y + 8) x -= 32;
+            camera = {{float(x), float(surface.height(x, 6144) + 20), 6144},
+                      0,
+                      -.1f,
+                      10};
+        }
         camera.position.y = std::max(
             camera.position.y, float(surface.height(int(camera.position.x),
                                                     int(camera.position.z)) +
@@ -102,7 +119,7 @@ int main(int argc, char** argv) {
             size_t maxResident = 0, maxUpload = 0;
             double maxFrame = 0;
             int frame = 0, settled = 0, phase = 0;
-            size_t preservedChecks = 0, detailRegressions = 0;
+            size_t preservedChecks = 0, detailRegressions = 0, seamPixels = 0;
             bool capturedTransition = false;
             std::set<std::pair<int, int>> previousVisible;
             if (scenario == "cancel") {
@@ -175,8 +192,10 @@ int main(int argc, char** argv) {
                         if (!lod.drawsColumn(coord.x, coord.z)) return;
                         auto* mesh = chunks.getMesh(coord);
                         if (!mesh) return;
-                        std::array<float, 16> transform;
-                        bx::mtxIdentity(transform.data());
+                        auto transform = relativeTransform(
+                            camera, double(coord.x) * Chunk::SIZE_X,
+                            double(coord.y) * Chunk::SIZE_Y,
+                            double(coord.z) * Chunk::SIZE_Z);
                         target.drawVertexBuffer(mesh->get(), &blockShader,
                                                 {&blockTexture, &blockEye},
                                                 false, std::move(transform),
@@ -185,9 +204,12 @@ int main(int argc, char** argv) {
                     });
                 }
                 float view[16], projection[16];
+                // Camera-relative world view, as in Renderer: the eye is the
+                // origin and draws carry relativeTransform().
                 bx::mtxLookAt(
-                    view, {eye.x, eye.y, eye.z},
-                    {camera.position.x, camera.position.y, camera.position.z},
+                    view, {0, 0, 0},
+                    {camera.position.x - eye.x, camera.position.y - eye.y,
+                     camera.position.z - eye.z},
                     {0, 1, 0});
                 bx::mtxProj(projection, 60.f, 1280.f / 720, 1.f, 4608.f,
                             bgfx::getCaps()->homogeneousDepth);
@@ -197,7 +219,10 @@ int main(int argc, char** argv) {
                 bgfx::setVertexBuffer(0, sky.vbh);
                 bgfx::setIndexBuffer(sky.ibh);
                 bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
-                bgfx::submit(2, assets.getProgram("terrain_sky"));
+                if (!seams)
+                    bgfx::submit(2, assets.getProgram("terrain_sky"));
+                else
+                    bgfx::touch(2);
                 size_t draws = 0;
                 for (const auto& cmd : target.commands) {
                     const auto& draw = std::get<DrawVertexBufferCmd>(cmd.data);
@@ -232,12 +257,25 @@ int main(int argc, char** argv) {
                         bgfx::readTexture(readback, pixels.data());
                     auto rendered = bgfx::frame();
                     while (rendered < readyFrame) rendered = bgfx::frame();
-                    std::ofstream image(
-                        output +
-                            (travel || structure ? "_" + std::to_string(phase)
+                    std::ofstream image(output +
+                                            (travel || structure || seams
+                                                 ? "_" + std::to_string(phase)
                                                  : "") +
-                            (transition ? "_transition" : "") + ".ppm",
-                        std::ios::binary);
+                                            (transition ? "_transition" : "") +
+                                            ".ppm",
+                                        std::ios::binary);
+                    if (seams && phase >= 1) {
+                        size_t gaps = 0;
+                        for (int y = 144; y < 576; ++y)
+                            for (int x = 256; x < 1024; ++x) {
+                                const auto* p = &pixels[(y * 1280 + x) * 4];
+                                if (p[0] > 200 && p[1] < 60 && p[2] > 200)
+                                    ++gaps;
+                            }
+                        seamPixels += gaps;
+                        std::cout << "pose=" << phase << " seam_pixels=" << gaps
+                                  << '\n';
+                    }
                     image << "P6\n1280 720\n255\n";
                     for (int y = 0; y < 720; ++y)
                         for (int x = 0; x < 1280; ++x)
@@ -275,6 +313,45 @@ int main(int argc, char** argv) {
                     maxFrame, std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - frameStart)
                                   .count());
+                if (settled >= 10 && seams && phase >= 1) {
+                    // Sweep oblique views with sub-tile offsets: T-junction
+                    // gaps depend on the projected position of each seam.
+                    if (phase >= 12) break;
+                    ++phase;
+                    settled = 0;
+                    camera.yaw = -.5f + (phase - 1) / 11.f;
+                    camera.position.x += .37f;
+                    camera.position.y += .23f;
+                    camera.pitch = .1f + .02f * (phase % 3);
+                }
+                if (settled >= 10 && seams && phase == 0) {
+                    ++phase;
+                    settled = 0;
+                    const int px = int(camera.position.x),
+                              pz = int(camera.position.z);
+                    int top = 0;
+                    for (int z = pz + 6; z <= pz + 12; ++z)
+                        for (int x = px - 20; x <= px + 20; ++x)
+                            top = std::max(top, surface.height(x, z));
+                    const int base = top + 1;
+                    std::vector<EditRequest> wall;
+                    for (int z = pz + 8; z <= pz + 9; ++z)
+                        for (int y = base; y < base + 24; ++y)
+                            for (int x = px - 20; x <= px + 20; ++x) {
+                                // Rectangles of different sizes: greedy quads
+                                // meet in T-junctions everywhere.
+                                const bool second =
+                                    ((x / 3) + (y / 2) + (x * y) % 5) % 3 == 0;
+                                wall.push_back({{x, y, z},
+                                                EditMode::Replace,
+                                                uint8_t(second ? 2 : 1)});
+                            }
+                    editor.apply(wall);
+                    camera.position = {px + .5f, float(base + 12), pz + 2.f};
+                    camera.yaw = -.5f;
+                    camera.pitch = .1f;
+                    camera.distance = .5f;
+                }
                 if (settled >= 10 && structure) {
                     if (phase >= 2) break;
                     ++phase;
@@ -343,6 +420,10 @@ int main(int argc, char** argv) {
             if (structure &&
                 (phase < 2 || edits.size() == 0 || lod.structureCount() == 0))
                 result = 1;
+            if (seams) {
+                std::cout << "seam_pixels_total=" << seamPixels << '\n';
+                if (phase < 12 || seamPixels) result = 1;
+            }
             if (walking && (preservedChecks == 0 || detailRegressions != 0))
                 result = 1;
         }

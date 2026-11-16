@@ -243,11 +243,16 @@ TEST(terrain_soil_transition) {
     addProfiles(left);
     addProfiles(right);
     TerrainSampler a(left), b(right);
-    int first = 0, second = 0;
+    int first = 0, second = 0, offGrid = 0;
     const TerrainSample flat{420, 0};
     for (int z = 256; z < 384; z += 2)
         for (int x = 240; x < 272; ++x) {
             const auto cover = a.soil(x, z, flat);
+            // Switches between soils must not follow the 16-tile chunk grid.
+            if (x > 240 && x % 16 &&
+                a.soil(x - 1, z, flat).layers[0].data_id !=
+                    cover.layers[0].data_id)
+                ++offGrid;
             const auto again = b.soil(x, z, flat);
             EQUAL(cover.count, 2, "whole profile");
             EQUAL(cover.layers[0].data_id, again.layers[0].data_id,
@@ -260,6 +265,7 @@ TEST(terrain_soil_transition) {
                 ++second;
         }
     CHECK(first > 0 && second > 0);
+    CHECK(offGrid > 0);
     EQUAL(int(a.soil(200, 300, flat).layers[0].data_id), 1, "interior profile");
     EQUAL(int(b.soil(310, 300, flat).layers[0].data_id), 2, "interior profile");
     CHECK(a.soil(256, 300, {420, 1}).count == 0);
@@ -267,7 +273,48 @@ TEST(terrain_soil_transition) {
     addProfiles(left, true);
     for (int z = 256; z < 384; z += 3)
         EQUAL(int(TerrainSampler(left).soil(255, z, flat).layers[0].data_id), 1,
-              "wetland soil excluded from ordinary land");
+              "wetland soil needs its own region to qualify");
+    // A qualifying wetland soil (its region has the feature, and a higher
+    // priority) still blends across the border instead of stopping at it.
+    for (auto& value : left.regions)
+        if (value.region.coord.x >= 2)
+            value.region.addFeature(FeatureMask::SWAMP);
+    const TerrainSampler wetland(left);
+    int dry = 0, wetBand = 0;
+    for (int z = 256; z < 384; z += 2) {
+        for (int x = 256 - int(TerrainTuning::SoilHalfWidth); x < 256; ++x)
+            (wetland.soil(x, z, flat).layers[0].data_id == 2 ? wetBand : dry)++;
+        for (int x = 130; x < 256 - int(TerrainTuning::SoilHalfWidth); x += 3)
+            EQUAL(int(wetland.soil(x, z, flat).layers[0].data_id), 1,
+                  "beyond the blend band");
+    }
+    CHECK(wetBand > 0 && dry > 0);
+    // Same soil on both sides, but the second regions are bare (no
+    // vegetation, so no topsoil): topsoil fades out across the border band
+    // instead of stopping at it.
+    addProfiles(left);
+    for (auto& value : left.regions)
+        if (value.region.coord.x >= 2) {
+            value.soil = left.regions[0].soil;
+            value.region.vegetation = VegetationType::NONE;
+        }
+    const TerrainSampler bare(left);
+    int covered = 0, uncovered = 0;
+    for (int z = 256; z < 384; z += 2) {
+        for (int x = 256 - int(TerrainTuning::SoilHalfWidth);
+             x < 256 + int(TerrainTuning::SoilHalfWidth); ++x)
+            (bare.soil(x, z, flat).layers[0].topsoil ? covered : uncovered)++;
+        CHECK(bare.soil(200, z, flat).layers[0].topsoil);
+        CHECK(!bare.soil(320, z, flat).layers[0].topsoil);
+    }
+    CHECK(covered > 0 && uncovered > 0);
+    // Both sides of the border line itself mix as well.
+    int leftBare = 0, rightCovered = 0;
+    for (int z = 256; z < 384; ++z) {
+        leftBare += !bare.soil(250, z, flat).layers[0].topsoil;
+        rightCovered += bare.soil(261, z, flat).layers[0].topsoil;
+    }
+    CHECK(leftBare > 0 && rightCovered > 0);
     auto wet = TerrainSampler(right).soil(256, 300, {SEA_LEVEL_Y - 1, 0});
     CHECK(wet.count ==
           0);  // Both profiles initially forbid underwater placement.

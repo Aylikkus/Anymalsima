@@ -124,6 +124,7 @@ build/tests/lod_render_smoke build/lod_travel 2400 travel
 build/tests/lod_render_smoke build/lod_boundary 2000 handover_walk
 build/tests/lod_render_smoke build/lod_cancel 1 cancel
 build/tests/lod_render_smoke build/lod_structure 3000 structure
+build/tests/lod_render_smoke build/lod_seams 4000 seams
 ```
 
 The render tool is opt-in and requires Vulkan with texture readback. It opens
@@ -136,7 +137,12 @@ meshes. The boundary scenario walks across a region boundary and back, forces
 mesh revisions, and checks every frame that drawable columns remain visible;
 it also captures a coarse-to-fine transition. The structure scenario digs a
 pit and builds a pillar with an overhanging platform through `WorldEditor`,
-then moves 400 tiles away (its regions unload) and captures them from there. Cancel exits immediately with
+then moves 400 tiles away (its regions unload) and captures them from there.
+The seams scenario uses a 480-region landscape (x near 60000), builds a
+patterned wall full of greedy-mesh T-junctions in front of a magenta
+background and sweeps 12 oblique views; any magenta pixel inside the wall is a
+crack (`seam_pixels_total` must be 0). llvmpipe did not show cracks even
+before the camera-relative fix, so in-game checks on real GPUs still matter. Cancel exits immediately with
 LOD jobs outstanding. Rendering submits
 the production command payloads through a minimal capture renderer; interactive
 SDL/window/menu behavior still needs an application run.

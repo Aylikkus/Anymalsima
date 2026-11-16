@@ -18,7 +18,7 @@ Use snake_case names and globally unique stage basenames: the compiler flattens 
 
 Use bgfx shader syntax: declare `$input` and vertex `$output` as needed, then include `<bgfx_shader.sh>`. Define attribute and varying types and semantics in `varying.def.sc`; match vertex outputs to fragment inputs. Follow existing four-space indentation and keep helper functions focused.
 
-Match attributes to the actual vertex layout in `src/engine/render/vertex.hpp`, including component counts and normalized colors. Document packed channels: preview terrain data and block texture-array layers use different layouts. Use bgfx helpers such as `mul(u_modelViewProj, vec4(a_position, 1.0))`, `SAMPLER2D`, and `SAMPLER2DARRAY` as appropriate.
+Match attributes to the actual vertex layout in `src/engine/render/vertex.hpp`, including component counts and normalized colors. Document packed channels: preview terrain data and block texture-array layers use different layouts. Use bgfx helpers such as `mul(u_modelViewProj, vec4(a_position, 1.0))`, `SAMPLER2D`, and `SAMPLER2DARRAY` as appropriate. World programs run in a camera-relative view (see the rendering guide): `a_position` may be mesh-local, so derive world space as `mul(u_model[0], vec4(a_position, 1.0)).xyz + u_world_eye.xyz`, as `block.vert` does, and bind `u_world_eye` for such programs.
 
 Use `u_` names for uniforms. Match names, types, sampler slots, and uploaded values with CPU bindings. Connect new programs through the existing renderer or mesh-command shader key; bind required uniforms before submission. Review blend, depth, culling, and clipping state in the draw path.
 

@@ -100,7 +100,10 @@ void Renderer::beginFrame() {
 
     Vec3 eye = target - offset * camera.distance;
 
-    bx::mtxLookAt(view_g, {eye.x, eye.y, eye.z}, {target.x, target.y, target.z},
+    // Camera-relative: the eye is the origin and every world draw supplies
+    // relativeTransform(), so large world coordinates never reach the GPU.
+    (void)eye;
+    bx::mtxLookAt(view_g, {0.0f, 0.0f, 0.0f}, {offset.x, offset.y, offset.z},
                   {0.0f, 1.0f, 0.0f});
 
     float aspect = float(res.x) / float(res.y);

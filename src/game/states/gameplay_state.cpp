@@ -100,12 +100,12 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
     // Comparing saved chunks with generated terrain is only meaningful when
-    // the save was made by the current generator.
+    // the save's generator produced the same surface heights.
     const bool sameGenerator =
-        slot.meta.generatorVersion == WorldMeta::GeneratorVersion;
+        slot.meta.generatorVersion >= WorldMeta::SurfaceVersion;
     if (!sameGenerator)
         std::cerr << "World generator " << slot.meta.generatorVersion
-                  << " differs from " << WorldMeta::GeneratorVersion
+                  << " predates surface version " << WorldMeta::SurfaceVersion
                   << "; earlier edits are not detected for distant terrain\n";
     editTracker = std::make_unique<TerrainEditTracker>(*chunkManager, *edits,
                                                        sameGenerator);
@@ -482,8 +482,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         MeshHandle* mesh = chunkManager->getMesh(coord);
         if (!mesh) return;  // still building, skip this frame
 
-        std::array<float, 16> transform;
-        bx::mtxIdentity(transform.data());
+        // Chunk meshes are chunk-local; place them relative to the eye.
+        auto transform = relativeTransform(camera, wx, wy, wz);
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
                                               &worldEye};
         // Without a light volume the chunk would render unlit; skip it.

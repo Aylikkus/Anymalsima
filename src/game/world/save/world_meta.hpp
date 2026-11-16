@@ -16,7 +16,10 @@ struct WorldMeta : ISerializable {
     // are not migrated.
     static constexpr int MinFormatVersion = 2;
     // Bump when chunk generation output changes.
-    static constexpr int GeneratorVersion = 2;
+    static constexpr int GeneratorVersion = 4;
+    // Oldest generator version whose surface heights match the current one.
+    // Bump it whenever surface heights change (not for material changes).
+    static constexpr int SurfaceVersion = 2;
 
     struct CameraState {
         Vec3 position{0, 0, 0};
