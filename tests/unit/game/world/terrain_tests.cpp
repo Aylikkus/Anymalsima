@@ -192,8 +192,13 @@ TEST(terrain_world_bounds) {
         CHECK(sampler.sample(x, z).surface_y <= 420);
         CHECK(sampler.sample(x, z).surface_y > SEA_LEVEL_Y);
     }
-    close(sampler.surface(-1, 64), sampler.surface(0, 64));
-    close(sampler.surface(128, 64), sampler.surface(127, 64));
+    // X wraps around the world: the seam joins column 127 to column 0.
+    CHECK(sampler.surface(-1, 64) == sampler.surface(127, 64));
+    CHECK(sampler.surface(128, 64) == sampler.surface(0, 64));
+    close(sampler.surface(127, 64), sampler.surface(0, 64), 1);
+    // Z stays bounded and clamps to the edge row.
+    close(sampler.surface(64, -1), sampler.surface(64, 0));
+    close(sampler.surface(64, 128), sampler.surface(64, 127));
     LocationGenerator generator;
     ThreadPool pool(1);
     ChunkManager chunks(generator, pool, nullptr, world, &assets);

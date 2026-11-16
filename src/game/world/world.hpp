@@ -7,6 +7,7 @@
 #include "enums.hpp"
 #include "region.hpp"
 #include "render/vertex.hpp"
+#include "world_wrap.hpp"
 
 struct MeshChunk {
     std::vector<TerrainVertex> lod0;
@@ -106,12 +107,17 @@ class World {
     RiverMesh riverMesh;
     WorldGenSettings genSettings;
     void update();
+    // X wraps around the world map; disabled for map-less fixtures.
+    WorldWrap wrap() const {
+        return width > 0 && height > 0 ? WorldWrap::fromRegions(width)
+                                       : WorldWrap{};
+    }
 
     // Location& loadLocation(const RegionCoord& coord);
     // void unloadLocation(const RegionCoord& coord);
 
-    int width;
-    int height;
+    int width = 0;
+    int height = 0;
     float min_temp_c;
     float max_temp_c;
 

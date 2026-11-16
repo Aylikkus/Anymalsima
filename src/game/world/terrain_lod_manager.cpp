@@ -3,14 +3,26 @@
 #include <bx/math.h>
 
 #include <iostream>
+#include <ranges>
 
 namespace {
 std::array<int, 3> errorKey(const TerrainLod::Patch& p) {
     return {p.x, p.z, p.spacing};
 }
-float horizontalDistance(const TerrainLod::Patch& p, Vec3 eye) {
+// Offset (0 or a multiple of periodX) that moves a canonical patch to its
+// copy nearest refX.
+float patchShift(const TerrainLod::Patch& p, float refX, int periodX) {
+    if (periodX <= 0) return 0;
+    const double center = p.x + p.size() * .5;
+    const double shift =
+        WorldWrap::deltaf(center, refX, periodX) + refX - center;
+    return float(std::round(shift / periodX) * periodX);
+}
+float horizontalDistance(const TerrainLod::Patch& p, Vec3 eye,
+                         int periodX = 0) {
+    const float x = p.x + patchShift(p, eye.x, periodX);
     return std::hypot(
-        std::max({float(p.x) - eye.x, 0.f, eye.x - p.x - p.size()}),
+        std::max({x - eye.x, 0.f, eye.x - x - p.size()}),
         std::max({float(p.z) - eye.z, 0.f, eye.z - p.z - p.size()}));
 }
 }  // namespace
@@ -23,6 +35,9 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
                                      const TerrainLod::Quality& quality,
                                      TerrainEdits* edits)
     : world(world),
+      periodX(TerrainLod::wrapsExactly(world.wrap().tiles, quality.viewDistance)
+                  ? world.wrap().tiles
+                  : 0),
       assets(assets),
       pool(pool),
       quality(quality),
@@ -91,7 +106,7 @@ bool TerrainLodManager::inView(const TerrainLod::Patch& p) const {
     // Same visibility rule as TerrainLod::select, at the selection eye, so
     // patches select() dropped never block their parent's replacement.
     return p.x < world.width * 128 && p.z < world.height * 128 &&
-           horizontalDistance(p, selectionEye) < quality.viewDistance;
+           horizontalDistance(p, selectionEye, periodX) < quality.viewDistance;
 }
 
 void TerrainLodManager::choose(const Camera& camera, Vec2 viewport) {
@@ -120,7 +135,7 @@ void TerrainLodManager::choose(const Camera& camera, Vec2 viewport) {
         layout = TerrainLod::select(world.width * 128, world.height * 128, eye,
                                     viewport.y, estimate, false, threshold,
                                     quality.exactRadius, camera.position,
-                                    quality.viewDistance);
+                                    quality.viewDistance, periodX);
         size_t expected = 0;
         for (const auto& p : layout) {
             const auto it = entries.find(p);
@@ -148,9 +163,11 @@ void TerrainLodManager::choose(const Camera& camera, Vec2 viewport) {
             }
     }
     const auto near = [&](const auto& a, const auto& b) {
-        return std::hypot(a.x + a.size() * .5f - eye.x,
+        const float ax = a.x + patchShift(a, eye.x, periodX),
+                    bx = b.x + patchShift(b, eye.x, periodX);
+        return std::hypot(ax + a.size() * .5f - eye.x,
                           a.z + a.size() * .5f - eye.z) <
-               std::hypot(b.x + b.size() * .5f - eye.x,
+               std::hypot(bx + b.size() * .5f - eye.x,
                           b.z + b.size() * .5f - eye.z);
     };
     queue.assign(roots.begin(), roots.end());
@@ -283,10 +300,10 @@ void TerrainLodManager::request() {
         auto cancel = std::make_shared<std::atomic_bool>(false);
         auto future = pool.submit_task(
             [source = &world, definitions = &assets, shared = inputs, cancel, p,
-             map = quality.materialMap,
+             map = quality.materialMap, wrapX = periodX > 0,
              changes = edits ? edits->snapshot() : nullptr] {
                 SurfaceSampler sampler(*source, *definitions, shared, changes);
-                return TerrainLod::build(p, sampler, *cancel, map);
+                return TerrainLod::build(p, sampler, *cancel, map, wrapX);
             },
             // Roots are the fallback for everything else in view; edited
             // terrain should update promptly.
@@ -357,6 +374,7 @@ bool TerrainLodManager::createGpu(Entry& entry, const TerrainLod::Patch& p,
     entry.patchUniform.initVec4(
         "u_lod_patch",
         {float(p.x), float(p.z), float(p.size()), float(p.spacing)});
+    entry.shiftUniform.initVec4("u_lod_shift", {0, 0, 0, 0});
     return true;
 }
 
@@ -401,10 +419,16 @@ void TerrainLodManager::editChanged(uint64_t column) {
     const auto revision = edits->revision();
     for (auto it = entries.begin(); it != entries.end();) {
         const auto& p = it->first;
-        // Normals and skirts sample up to one spacing outside the patch.
+        // Normals and skirts sample up to one spacing outside the patch,
+        // which may reach across the X seam.
+        const auto touchesAt = [&](int shift) {
+            return p.x - p.spacing < x1 + shift &&
+                   p.x + p.size() + p.spacing > x0 + shift &&
+                   p.z - p.spacing < z1 && p.z + p.size() + p.spacing > z0;
+        };
         const bool touches =
-            p.x - p.spacing < x1 && p.x + p.size() + p.spacing > x0 &&
-            p.z - p.spacing < z1 && p.z + p.size() + p.spacing > z0;
+            touchesAt(0) ||
+            (periodX > 0 && (touchesAt(periodX) || touchesAt(-periodX)));
         if (!touches) {
             ++it;
             continue;
@@ -443,8 +467,13 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
               cy = int(camera.position.y) / 16,
               cz = int(camera.position.z) / 16;
     constexpr int keep = TerrainLod::DetailCoverage::KeepRadius;
+    const WorldWrap wrap{periodX};
+    // Chunk-column distance in X, across the seam when the world wraps.
+    const auto distX = [&](int x) {
+        return int(std::abs(wrap.deltaChunk(x, cx)));
+    };
     for (auto it = surfaceBands.begin(); it != surfaceBands.end();)
-        if (std::abs(it->first.first - cx) > keep + 1 ||
+        if (distX(it->first.first) > keep + 1 ||
             std::abs(it->first.second - cz) > keep + 1)
             it = surfaceBands.erase(it);
         else
@@ -455,15 +484,14 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         const auto it = entries.find(p);
         if (p.spacing != 1 || it == entries.end()) continue;
         for (const auto& band : it->second->bands)
-            if (std::abs(band.x - cx) <= keep + 1 &&
-                std::abs(band.z - cz) <= keep + 1)
+            if (distX(band.x) <= keep + 1 && std::abs(band.z - cz) <= keep + 1)
                 surfaceBands[{band.x, band.z}] = band;
     }
     int newBands = 0;
     chunks.forEachMeshed([&](const ChunkCoord& coord) {
         const int x = int(coord.x), z = int(coord.z);
         if (newBands >= 4 ||
-            std::abs(x - cx) > TerrainLod::DetailCoverage::EnterRadius ||
+            distX(x) > TerrainLod::DetailCoverage::EnterRadius ||
             std::abs(z - cz) > TerrainLod::DetailCoverage::EnterRadius ||
             surfaceBands.contains({x, z}) || !chunks.isMeshUploaded(coord))
             return;
@@ -484,8 +512,8 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         const int dx[6] = {-1, 1, 0, 0, 0, 0}, dy[6] = {0, 0, -1, 1, 0, 0},
                   dz[6] = {0, 0, 0, 0, -1, 1};
         for (int i = 0; i < 6; ++i) {
-            const int x = int(coord.x) + dx[i], y = int(coord.y) + dy[i],
-                      z = int(coord.z) + dz[i];
+            const int x = int(wrap.wrapChunk(int(coord.x) + dx[i])),
+                      y = int(coord.y) + dy[i], z = int(coord.z) + dz[i];
             if (x < 0 || z < 0 || y < 0 || x >= world.width * 8 ||
                 z >= world.height * 8 || y >= Y_CHUNKS)
                 continue;
@@ -496,14 +524,19 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
     };
     detailCoverage.update(
         {unsigned(cx), unsigned(cy), unsigned(cz)}, candidates, current,
-        [&](ChunkCoord coord) { return chunks.hasUploadedMesh(coord); });
+        [&](ChunkCoord coord) { return chunks.hasUploadedMesh(coord); },
+        wrap.chunks());
     detailX = cx - DetailSize / 2;
     detailZ = cz - DetailSize / 2;
 }
 void TerrainLodManager::uploadCoverage() {
     coverage.fill(0);
+    // The window is in the camera's frame; columns are canonical.
+    const WorldWrap wrap{periodX};
+    const int cx = detailX + DetailSize / 2;
     for (const auto& [key, band] : detailCoverage.columns()) {
-        const int ix = band.x - detailX, iz = band.z - detailZ;
+        const int ix = cx + int(wrap.deltaChunk(band.x, cx)) - detailX,
+                  iz = band.z - detailZ;
         if (ix >= 0 && iz >= 0 && ix < DetailSize && iz < DetailSize)
             coverage[(iz * DetailSize + ix) * 4] = 255;
     }
@@ -530,19 +563,30 @@ void TerrainLodManager::uploadJoins(IRenderer& renderer) {
     // distant uploads do not rebuild the joins.
     const int x0 = detailX * 16, z0 = detailZ * 16, x1 = x0 + DetailSize * 16,
               z1 = z0 + DetailSize * 16;
+    const WorldWrap wrap{periodX};
+    const int cx = detailX + DetailSize / 2;
     std::vector<TerrainLod::Patch> layout;
-    for (const auto& p : drawn)
-        if (p.x < x1 && p.x + p.size() > x0 && p.z < z1 && p.z + p.size() > z0)
+    for (const auto& p : drawn) {
+        const float px = p.x + patchShift(p, cx * 16.f + 8, periodX);
+        if (px < x1 && px + p.size() > x0 && p.z < z1 && p.z + p.size() > z0)
             layout.push_back(p);
+    }
     if (joinedCoverageVersion == detailCoverage.version() &&
         layout == joinedLayout)
         return;
     std::vector<TerrainLod::SurfaceBand> columns;
-    for (const auto& [key, band] : detailCoverage.columns())
+    // Joins are built in the camera's frame, so columns across the seam
+    // sit next to the camera.
+    for (auto band : detailCoverage.columns() | std::views::values) {
+        band.x = cx + int(wrap.deltaChunk(band.x, cx));
         columns.push_back(band);
+    }
     const auto mesh = TerrainLod::joinDetails(
         layout, columns, detailSampler,
-        [&](int x, int z) { return detailCoverage.contains(x, z); });
+        [&](int x, int z) {
+            return detailCoverage.contains(int(wrap.wrapChunk(x)), z);
+        },
+        periodX);
     if (mesh.bytes() > JoinBudget)
         throw std::runtime_error("Terrain detail joins exceed bounded window");
     // Joins always follow this frame's patches; their bounded size is not
@@ -582,13 +626,21 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     const auto frustum = Frustum::fromViewProj(vp);
     for (const auto& p : drawn) {
         auto& entry = *entries.at(p);
-        if (!frustum.intersects(entry.bounds)) continue;
+        // Each patch is drawn at its copy nearest the eye (X wraps).
+        const float shift = patchShift(p, eye.x, periodX);
+        AABB bounds = entry.bounds;
+        bounds.minX += shift;
+        bounds.maxX += shift;
+        if (!frustum.intersects(bounds)) continue;
         // World-space vertices, placed relative to the eye.
-        auto transform = relativeTransform(camera, 0, 0, 0);
+        auto transform = relativeTransform(camera, shift, 0, 0);
+        entry.patchUniform.setVec4({float(p.x) + shift, float(p.z),
+                                    float(p.size()), float(p.spacing)});
+        entry.shiftUniform.setVec4({shift, 0, 0, 0});
         std::vector<ShaderProperty*> uniforms{
-            &textureArray,  &entry.mapUniform, &entry.patchUniform,
-            &detailUniform, &detailOrigin,     &fogUniform,
-            &patchNormals};
+            &textureArray,  &entry.mapUniform,  &entry.patchUniform,
+            &detailUniform, &detailOrigin,      &fogUniform,
+            &patchNormals,  &entry.shiftUniform};
         target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     }
@@ -613,7 +665,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
             {&textureArray, &joinNormals, &fogUniform, &joinLightChunk,
              &joinLightSlot, &joinLightVolume},
             [&](const ChunkCoord& c) {
-                return std::abs(int(c.x) - cx) <= DETAIL_CHUNK_RADIUS &&
+                return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
+                           DETAIL_CHUNK_RADIUS &&
                        std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
                        std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
                        detailCoverage.contains(int(c.x), int(c.z)) &&

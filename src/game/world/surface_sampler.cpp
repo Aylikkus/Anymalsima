@@ -1,7 +1,7 @@
 #include "surface_sampler.hpp"
 
 const SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
-    const unsigned rx = std::clamp(x, 0, width() - 1) / TerrainTuning::RegionX;
+    const unsigned rx = wrapX(x) / TerrainTuning::RegionX;
     const unsigned rz = std::clamp(z, 0, depth() - 1) / TerrainTuning::RegionZ;
     const uint64_t key = (uint64_t(rx) << 32) | rz;
     if (auto it = regions.find(key); it != regions.end()) return *it->second;
@@ -19,7 +19,7 @@ const SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
 }
 
 int SurfaceSampler::height(int x, int z) {
-    x = std::clamp(x, 0, width() - 1);
+    x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
     if (auto it = heights.find(key); it != heights.end()) return it->second;
@@ -36,7 +36,7 @@ int SurfaceSampler::height(int x, int z) {
 
 const ColumnEdit* SurfaceSampler::editAt(int x, int z) {
     if (!edits || edits->empty()) return nullptr;
-    x = std::clamp(x, 0, width() - 1);
+    x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const uint64_t key =
         editKey(unsigned(x / Chunk::SIZE_X), unsigned(z / Chunk::SIZE_Z));
@@ -91,7 +91,7 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
     auto result = generatedColumn(x, z);
     const auto* edit = editAt(x, z);
     if (!edit) return result;
-    x = std::clamp(x, 0, width() - 1);
+    x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
     result.waterY = edit->waterY[i];
@@ -108,7 +108,7 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
 }
 
 SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
-    x = std::clamp(x, 0, width() - 1);
+    x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
     if (auto it = columns.find(key); it != columns.end()) return it->second;

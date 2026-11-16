@@ -118,6 +118,7 @@ std::shared_ptr<Chunk> ChunkManager::getChunkShared(const ChunkCoord& coord) {
                : nullptr;
 }
 const Tile* ChunkManager::tileAt(int x, int y, int z) {
+    x = int(wrap().wrapTile(x));
     if (x < 0 || y < 0 || z < 0) return nullptr;
     std::lock_guard<std::mutex> lock(tileAtMutex);
     auto* chunk = getChunk({static_cast<unsigned>(x / Chunk::SIZE_X),
@@ -220,16 +221,18 @@ bool ChunkManager::canMesh(ChunkCoord coord) const {
         it->second.meshState == MeshState::Queued)
         return false;
     if (it->second.meshState == MeshState::Built) return true;
+    const auto wrapX = wrap();
+    const auto east = unsigned(wrapX.wrapChunk(int64_t{coord.x} + 1));
+    const auto west = unsigned(wrapX.wrapChunk(int64_t{coord.x} - 1));
     const ChunkCoord neighbors[6] = {
-        {coord.x + 1, coord.y, coord.z}, {coord.x - 1, coord.y, coord.z},
+        {east, coord.y, coord.z},        {west, coord.y, coord.z},
         {coord.x, coord.y + 1, coord.z}, {coord.x, coord.y - 1, coord.z},
         {coord.x, coord.y, coord.z + 1}, {coord.x, coord.y, coord.z - 1}};
     return std::all_of(
         std::begin(neighbors), std::end(neighbors), [&](auto neighbor) {
+            // X wraps, so only Z and Y have world edges.
             return (terrainWorld.width > 0 && terrainWorld.height > 0 &&
-                    (neighbor.x >=
-                         unsigned(terrainWorld.width * CHUNKS_PER_REGION) ||
-                     neighbor.z >=
+                    (neighbor.z >=
                          unsigned(terrainWorld.height * CHUNKS_PER_REGION) ||
                      neighbor.y >= Y_CHUNKS)) ||
                    isReady(neighbor);
@@ -242,8 +245,9 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
     std::unordered_map<ChunkCoord, std::shared_ptr<Chunk>> neighbors;
     const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
                                {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    const auto wrapX = wrap();
     for (const auto& offset : offsets) {
-        const int64_t x = int64_t{coord.x} + offset[0];
+        const int64_t x = wrapX.wrapChunk(int64_t{coord.x} + offset[0]);
         const int64_t y = int64_t{coord.y} + offset[1];
         const int64_t z = int64_t{coord.z} + offset[2];
         if (x < 0 || y < 0 || z < 0) continue;
@@ -256,14 +260,14 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
     const auto priority = handle.meshUrgent ? BS::pr::high : BS::pr::normal;
     auto future = pool.submit_task(
         [coord, data, neighbors = std::move(neighbors), builder = *mesher,
-         identity, revision, width = terrainWorld.width * 128,
-         depth = terrainWorld.height * 128]() {
+         identity, revision, wrapX, depth = terrainWorld.height * 128]() {
             auto mesh = builder.build(
                 *data, coord, [&](int x, int y, int z) -> const Tile* {
                     static const Tile outside{};
-                    if (width > 0 && depth > 0 &&
-                        (x < 0 || z < 0 || y < 0 || x >= width || z >= depth ||
-                         y >= Y_CHUNKS * Chunk::SIZE_Y))
+                    // X wraps; Z and Y end at the world edge.
+                    x = int(wrapX.wrapTile(x));
+                    if (wrapX.enabled() && (z < 0 || y < 0 || z >= depth ||
+                                            y >= Y_CHUNKS * Chunk::SIZE_Y))
                         return &outside;
                     if (x < 0 || y < 0 || z < 0) return nullptr;
                     ChunkCoord c{static_cast<unsigned>(x / Chunk::SIZE_X),
@@ -362,8 +366,8 @@ void ChunkManager::dispatchGeneration() {
         const auto target = pending.at(coord).beneficiary.value_or(coord);
         // A camera moving into a former sky prerequisite must not demote
         // that chunk to the old beneficiary's distant height.
-        return CameraWorkQueue::distance(coord, focus) <
-                       CameraWorkQueue::distance(target, focus)
+        return generationQueue.distance(coord, focus) <
+                       generationQueue.distance(target, focus)
                    ? coord
                    : target;
     };
@@ -465,8 +469,9 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
     // neighbours take the regular mesher path.
     const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
                                {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    const auto wrapX = wrap();
     for (const auto& o : offsets) {
-        const int64_t x = int64_t{coord.x} + o[0];
+        const int64_t x = wrapX.wrapChunk(int64_t{coord.x} + o[0]);
         const int64_t y = int64_t{coord.y} + o[1];
         const int64_t z = int64_t{coord.z} + o[2];
         if (x < 0 || y < 0 || z < 0) return false;
@@ -528,6 +533,8 @@ void ChunkManager::dispatchMeshes() {
 }
 
 void ChunkManager::update() {
+    generationQueue.setPeriodX(wrap().tiles);
+    meshQueue.setPeriodX(wrap().tiles);
     collect();
     dispatchGeneration();
     dispatchMeshes();
@@ -564,6 +571,7 @@ std::shared_ptr<const ChunkColumnInputs> ChunkManager::prepareColumns(
 }
 
 int ChunkManager::generatedSurfaceY(unsigned tileX, unsigned tileZ) {
+    tileX = unsigned(wrap().wrapTile(tileX));
     const Vec2u rc{tileX / TerrainTuning::RegionX,
                    tileZ / TerrainTuning::RegionZ};
     return TerrainSampler(terrainNeighborhood(rc))

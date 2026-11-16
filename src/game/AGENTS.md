@@ -12,6 +12,15 @@ Implement screen behavior through `IGameState` and the existing `Game::changeSta
 
 World generation and chunk processing run asynchronously. Review cancellation, synchronization, captured object lifetimes, and result ownership before changing worker tasks. Keep GPU submission and resource disposal coordinated with the renderer. For voxel changes, check coordinate conversions, chunk dimensions in `world/consts.hpp`, neighbor boundaries, mesh visibility, and sunlight propagation together.
 
+### X wrapping
+
+The world wraps on X (the world map is generated tileable): tile `x` and `x + W` are the same column, where `W = world.width * 128`. Z ends at the map edges. Use `WorldWrap` (`world/world_wrap.hpp`, from `World::wrap()` or `ChunkManager::wrap()`). Never clamp or skip X at `0`/`W`.
+
+- Stored coordinates (`ChunkCoord`, regions, edit keys, saved camera) are canonical, in `[0, W)`. Wrap X before any lookup or neighbor step (`wrapTile`/`wrapChunk`/`wrapRegion`). Map-less fixtures (`width == 0`) disable wrapping.
+- Distances and draws use the copy nearest the camera (`deltaChunk`, `imageX`). Chunks are drawn at `camCX + deltaChunk(coord.x, camCX)`, and `LightVolumeManager::bind` gets that draw origin, so `block.vert` light lookups match. LOD patches stay canonical and are drawn shifted by 0 or ±W through `u_lod_shift` and `u_lod_patch`.
+- Terrain noise must repeat every `W` tiles: pass `TerrainNeighborhood::periodX()` to `SoilGenerator::field`/`sample` and to `gradientField`. A lattice that cannot be periodic (the rotated soil-choice field) blends across the seam.
+- Distant terrain wraps only when `TerrainLod::wrapsExactly(W, viewDistance)` holds: the width is a multiple of 16 regions (one LOD root), and the view distance plus two roots is at most half of `W`. New worlds are 512 regions wide. Other widths keep distant terrain bounded on X; their voxels still wrap.
+
 ## Persistence
 
 Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/save_catalog.hpp`):

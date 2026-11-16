@@ -61,11 +61,20 @@ struct Mesh {
     }
 };
 using ErrorFn = std::function<float(const Patch&)>;
+// periodX > 0: the world wraps on X with this period (tiles). Selection then
+// runs around the eye across the seam and returns canonical patches
+// (x in [0, periodX)). Requires wrapsExactly(periodX, viewDistance).
 std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
                           const ErrorFn& error, bool coarse = false,
                           float pixelError = 2, float exactRadius = 128,
                           std::optional<Vec3> detailFocus = std::nullopt,
-                          float viewDistance = ViewDistance);
+                          float viewDistance = ViewDistance, int periodX = 0);
+// The root lattice tiles the period and no patch is selected twice.
+inline bool wrapsExactly(int periodX, float viewDistance) {
+    constexpr int root = Cells * RootSpacing;
+    return periodX > 0 && periodX % root == 0 &&
+           2 * viewDistance + 2 * root <= periodX;
+}
 // The four quadrants of a patch, and the patch that contains it.
 std::array<Patch, 4> children(const Patch& patch);
 Patch parent(const Patch& patch);
@@ -75,13 +84,18 @@ float skirtDepth(const Patch& patch, float error);
 inline constexpr int SteppedSkirt = 8;
 // materialMap: texels per side of a smooth patch's material map. Sampling it
 // is the largest part of a smooth patch's build cost.
+// wrapX: the world wraps on X, so X edges get skirts toward the patch
+// across the seam instead of walls down to the floor.
 Mesh build(const Patch& patch, SurfaceSampler& sampler,
-           const std::atomic_bool& cancelled, int materialMap = Cells * 2);
+           const std::atomic_bool& cancelled, int materialMap = Cells * 2,
+           bool wrapX = false);
 // Height of the actual triangulated LOD surface, for joining it to loaded
 // column boundaries independently of the current LOD resolution.
 float meshHeight(const Patch& patch, SurfaceSampler& sampler, float x, float z);
 using DetailedFn = std::function<bool(int, int)>;
+// periodX > 0: layout is canonical while columns may lie in the camera's
+// frame (outside [0, periodX)); joins are emitted in the columns' frame.
 Mesh joinDetails(std::span<const Patch> layout,
                  std::span<const SurfaceBand> columns, SurfaceSampler& sampler,
-                 const DetailedFn& detailed);
+                 const DetailedFn& detailed, int periodX = 0);
 }  // namespace TerrainLod

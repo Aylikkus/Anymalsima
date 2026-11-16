@@ -65,10 +65,18 @@ Patch parent(const Patch& p) {
 std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
                           const ErrorFn& error, bool coarse, float pixelError,
                           float exactRadius, std::optional<Vec3> detailFocus,
-                          float viewDistance) {
+                          float viewDistance, int periodX) {
     std::vector<Patch> result;
+    // A wrapping world is selected in the eye's frame, where patches may lie
+    // past either X end; they are made canonical at the end.
+    const bool wrap = periodX > 0;
+    if (wrap && !wrapsExactly(periodX, viewDistance))
+        throw std::invalid_argument("LOD wrap period does not fit the lattice");
+    if (wrap && detailFocus)
+        detailFocus->x =
+            float(WorldWrap::deltaf(detailFocus->x, eye.x, periodX) + eye.x);
     const auto visible = [&](const Patch& p) {
-        return p.x < width && p.z < depth && p.x + p.size() > 0 &&
+        return (wrap || (p.x < width && p.x + p.size() > 0)) && p.z < depth &&
                p.z + p.size() > 0 && distance(p, eye) < viewDistance;
     };
     std::function<void(Patch)> visit = [&](Patch p) {
@@ -84,15 +92,16 @@ std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
             result.push_back(p);
     };
     constexpr int root = Cells * RootSpacing;
-    const int x0 =
-        std::max(0, int(std::floor((eye.x - viewDistance) / root)) * root);
+    const int x0Unbounded =
+        int(std::floor((eye.x - viewDistance) / root)) * root;
+    const int x0 = wrap ? x0Unbounded : std::max(0, x0Unbounded);
+    const float x1 = wrap ? eye.x + viewDistance
+                          : std::min(float(width), eye.x + viewDistance);
     const int z0 =
         std::max(0, int(std::floor((eye.z - viewDistance) / root)) * root);
     for (int z = z0; z < std::min(float(depth), eye.z + viewDistance);
          z += root)
-        for (int x = x0; x < std::min(float(width), eye.x + viewDistance);
-             x += root)
-            visit(Patch{x, z, RootSpacing});
+        for (int x = x0; x < x1; x += root) visit(Patch{x, z, RootSpacing});
     // A small spatial ownership grid avoids quadratic neighbor scans on the
     // main thread. Its cells represent minimum-size patches, not voxels.
     struct Grid {
@@ -162,6 +171,9 @@ std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
                 balanced.push_back(result[i]);
         result = std::move(balanced);
     }
+    // The period is a whole number of roots, so every patch stays aligned.
+    if (wrap)
+        for (auto& p : result) p.x = int(WorldWrap::mod(p.x, periodX));
     std::sort(result.begin(), result.end());
     return result;
 }
@@ -213,16 +225,18 @@ float meshHeight(const Patch& p, SurfaceSampler& sampler, float x, float z) {
 
 Mesh joinDetails(std::span<const Patch> layout,
                  std::span<const SurfaceBand> columns, SurfaceSampler& sampler,
-                 const DetailedFn& detailed) {
+                 const DetailedFn& detailed, int periodX) {
     Mesh result;
     const int dx[4] = {-1, 1, 0, 0}, dz[4] = {0, 0, -1, 1};
     for (const auto& band : columns)
         for (int edge = 0; edge < 4; ++edge) {
             const int outsideX = band.x + dx[edge],
                       outsideZ = band.z + dz[edge];
-            if (detailed(outsideX, outsideZ) || outsideX < 0 || outsideZ < 0 ||
-                outsideX * 16 >= sampler.width() ||
-                outsideZ * 16 >= sampler.depth())
+            // X has no edge in a wrapping world.
+            if (detailed(outsideX, outsideZ) || outsideZ < 0 ||
+                outsideZ * 16 >= sampler.depth() ||
+                (periodX <= 0 &&
+                 (outsideX < 0 || outsideX * 16 >= sampler.width())))
                 continue;
             for (int at = 0; at < 16; ++at) {
                 const int ix = band.x * 16 + (edge == 1  ? 15
@@ -235,8 +249,12 @@ Mesh joinDetails(std::span<const Patch> layout,
                             z = iz + (edge == 3 ? 1 : 0);
                 const float x1 = x + (edge >= 2 ? 1 : 0),
                             z1 = z + (edge < 2 ? 1 : 0);
-                const float ox = (x + x1) * .5f + dx[edge] * .5f;
+                const float oxFrame = (x + x1) * .5f + dx[edge] * .5f;
                 const float oz = (z + z1) * .5f + dz[edge] * .5f;
+                // Canonical layout: find the patch at the wrapped point and
+                // query its surface in its own frame.
+                const float ox = float(WorldWrap::modf(oxFrame, periodX));
+                const float shift = oxFrame - ox;
                 const auto patch = std::find_if(
                     layout.begin(), layout.end(), [&](const Patch& p) {
                         return ox >= p.x && ox < p.x + p.size() && oz >= p.z &&
@@ -246,10 +264,12 @@ Mesh joinDetails(std::span<const Patch> layout,
                 const auto inside = sampler.column(ix, iz);
                 const float top =
                     std::max(inside.surfaceY + 1, SEA_LEVEL_Y + 1);
-                const float y0 = std::max(meshHeight(*patch, sampler, x, z),
-                                          float(SEA_LEVEL_Y + 1));
-                const float y1 = std::max(meshHeight(*patch, sampler, x1, z1),
-                                          float(SEA_LEVEL_Y + 1));
+                const float y0 =
+                    std::max(meshHeight(*patch, sampler, x - shift, z),
+                             float(SEA_LEVEL_Y + 1));
+                const float y1 =
+                    std::max(meshHeight(*patch, sampler, x1 - shift, z1),
+                             float(SEA_LEVEL_Y + 1));
                 if (std::abs(top - y0) < .0001f && std::abs(top - y1) < .0001f)
                     continue;
                 const float sign = top >= (y0 + y1) * .5f ? 1 : -1;
@@ -275,7 +295,7 @@ Mesh joinDetails(std::span<const Patch> layout,
 }
 
 Mesh build(const Patch& p, SurfaceSampler& sampler,
-           const std::atomic_bool& cancelled, int materialMap) {
+           const std::atomic_bool& cancelled, int materialMap, bool wrapX) {
     Mesh mesh;
     const int endX = std::min(p.x + p.size(), sampler.width());
     const int endZ = std::min(p.z + p.size(), sampler.depth());
@@ -306,9 +326,9 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                                           : edge == 2 ? z == p.z
                                                       : z1 == endZ;
                     const int nx = x + dx[edge], nz = z + dz[edge];
-                    const bool outside = nx < 0 || nz < 0 ||
-                                         nx >= sampler.width() ||
-                                         nz >= sampler.depth();
+                    const bool outside =
+                        nz < 0 || nz >= sampler.depth() ||
+                        (!wrapX && (nx < 0 || nx >= sampler.width()));
                     // Boundary walls reach below the lower column so they
                     // overlap any neighbour patch's surface or skirt.
                     const int neighbour = sampler.height(nx, nz) + 1;
@@ -394,8 +414,8 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     // Smooth patches: skirts on inner edges hide cracks against neighbours of
     // any resolution; walls down to the floor close finite-world edges.
     for (int edge = 0; edge < 4; ++edge) {
-        const bool outer = edge == 0   ? p.x == 0
-                           : edge == 1 ? endX == sampler.width()
+        const bool outer = edge == 0   ? !wrapX && p.x == 0
+                           : edge == 1 ? !wrapX && endX == sampler.width()
                            : edge == 2 ? p.z == 0
                                        : endZ == sampler.depth();
         if (stepped) continue;

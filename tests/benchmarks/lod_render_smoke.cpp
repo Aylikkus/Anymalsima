@@ -32,8 +32,11 @@ int main(int argc, char** argv) {
     // far from the world origin, in front of the sky: any background pixel
     // inside it is a seam gap.
     const bool seams = scenario == "seams";
+    // Stand next to the X seam of a wrapping world and look across it, then
+    // from the other side back: terrain must continue with no gap.
+    const bool wrapScene = scenario == "wrap";
     const bool handover =
-        scenario == "handover" || walking || structure || seams;
+        scenario == "handover" || walking || structure || seams || wrapScene;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -45,7 +48,8 @@ int main(int argc, char** argv) {
         assets.loadFromJson(definitions);
         assets.buildMaterialTextureArrays();
         // Seams need coordinates as large as a full-size world (~64k tiles).
-        const auto world = lodScene(seams ? 480 : 96);
+        // Wrap: 128 regions = 16384 tiles, a whole number of LOD roots.
+        const auto world = lodScene(wrapScene ? 128 : seams ? 480 : 96);
         LodCaptureRenderer renderer;
         LocationGenerator generator;
         ThreadPool pool(4);
@@ -79,8 +83,9 @@ int main(int argc, char** argv) {
             bgfx::setViewRect(view, 0, 0, 1280, 720);
         }
         // Seams: no sky; a magenta background makes every gap pixel obvious.
+        const bool magenta = seams || wrapScene;
         bgfx::setViewClear(2, BGFX_CLEAR_COLOR,
-                           seams ? 0xff00ffff : 0xaec4d6ff);
+                           magenta ? 0xff00ffff : 0xaec4d6ff);
         bgfx::setViewClear(0, BGFX_CLEAR_DEPTH, uint32_t(0), 1.f);
         Camera camera{{6144, 420, 6144}, 1.1f, -.18f, 40};
         if (argc > 3) {
@@ -99,6 +104,9 @@ int main(int argc, char** argv) {
                       -.1f,
                       10};
         }
+        if (wrapScene)
+            camera = {
+                {float(surface.width() - 24), 0, 6144}, bx::kPiHalf, -.3f, 40};
         camera.position.y = std::max(
             camera.position.y, float(surface.height(int(camera.position.x),
                                                     int(camera.position.z)) +
@@ -141,7 +149,8 @@ int main(int argc, char** argv) {
                         for (int x = cx - 3; x <= cx + 3; ++x)
                             for (int y = cy - 3; y <= cy + 3; ++y)
                                 chunks.request(
-                                    {unsigned(x), unsigned(y), unsigned(z)});
+                                    {unsigned(world.wrap().wrapChunk(x)),
+                                     unsigned(y), unsigned(z)});
                     chunks.update();
                     sunlight.update();
                     chunks.uploadReadyMeshes(renderer);
@@ -192,8 +201,13 @@ int main(int argc, char** argv) {
                         if (!lod.drawsColumn(coord.x, coord.z)) return;
                         auto* mesh = chunks.getMesh(coord);
                         if (!mesh) return;
+                        // The copy nearest the camera (X wraps).
+                        const int camCX = int(camera.position.x) / 16;
                         auto transform = relativeTransform(
-                            camera, double(coord.x) * Chunk::SIZE_X,
+                            camera,
+                            double(camCX +
+                                   world.wrap().deltaChunk(coord.x, camCX)) *
+                                Chunk::SIZE_X,
                             double(coord.y) * Chunk::SIZE_Y,
                             double(coord.z) * Chunk::SIZE_Z);
                         target.drawVertexBuffer(mesh->get(), &blockShader,
@@ -219,7 +233,7 @@ int main(int argc, char** argv) {
                 bgfx::setVertexBuffer(0, sky.vbh);
                 bgfx::setIndexBuffer(sky.ibh);
                 bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
-                if (!seams)
+                if (!magenta)
                     bgfx::submit(2, assets.getProgram("terrain_sky"));
                 else
                     bgfx::touch(2);
@@ -257,13 +271,13 @@ int main(int argc, char** argv) {
                         bgfx::readTexture(readback, pixels.data());
                     auto rendered = bgfx::frame();
                     while (rendered < readyFrame) rendered = bgfx::frame();
-                    std::ofstream image(output +
-                                            (travel || structure || seams
-                                                 ? "_" + std::to_string(phase)
-                                                 : "") +
-                                            (transition ? "_transition" : "") +
-                                            ".ppm",
-                                        std::ios::binary);
+                    std::ofstream image(
+                        output +
+                            (travel || structure || seams || wrapScene
+                                 ? "_" + std::to_string(phase)
+                                 : "") +
+                            (transition ? "_transition" : "") + ".ppm",
+                        std::ios::binary);
                     if (seams && phase >= 1) {
                         size_t gaps = 0;
                         for (int y = 144; y < 576; ++y)
@@ -275,6 +289,19 @@ int main(int argc, char** argv) {
                         seamPixels += gaps;
                         std::cout << "pose=" << phase << " seam_pixels=" << gaps
                                   << '\n';
+                    }
+                    if (wrapScene) {
+                        // Below the horizon only terrain may show.
+                        size_t gaps = 0;
+                        for (int y = 480; y < 720; ++y)
+                            for (int x = 0; x < 1280; ++x) {
+                                const auto* p = &pixels[(y * 1280 + x) * 4];
+                                if (p[0] > 200 && p[1] < 60 && p[2] > 200)
+                                    ++gaps;
+                            }
+                        std::cout << "wrap_view=" << phase
+                                  << " gap_pixels=" << gaps << '\n';
+                        if (gaps) result = 1;
                     }
                     image << "P6\n1280 720\n255\n";
                     for (int y = 0; y < 720; ++y)
@@ -351,6 +378,17 @@ int main(int argc, char** argv) {
                     camera.yaw = -.5f;
                     camera.pitch = .1f;
                     camera.distance = .5f;
+                }
+                if (settled >= 10 && wrapScene) {
+                    if (phase >= 1) break;
+                    ++phase;
+                    settled = 0;
+                    // Past the seam (canonical x near 0), looking back.
+                    camera.position.x = 24;
+                    camera.yaw = -bx::kPiHalf;
+                    camera.position.y = surface.height(int(camera.position.x),
+                                                       int(camera.position.z)) +
+                                        20;
                 }
                 if (settled >= 10 && structure) {
                     if (phase >= 2) break;

@@ -64,6 +64,8 @@ class ChunkManager {
     // unchanged; listeners refresh light volumes around the chunk.
     Signal<const ChunkCoord&> lightChanged;
     void setFocus(Vec3 value) { focus = value; }
+    // X wrapping of the world this manager streams (disabled without a map).
+    WorldWrap wrap() const { return terrainWorld.wrap(); }
     void update();
     // stored: saved chunk payload; the chunk is decoded instead of generated.
     void registerChunk(const ChunkCoord& coord, const ChunkCoord& regionOrigin,

@@ -50,6 +50,9 @@ class TerrainLodManager {
         bgfx::TextureHandle materialMap = BGFX_INVALID_HANDLE;
         ShaderProperty mapUniform;
         ShaderProperty patchUniform;
+        // x: offset (0 or ±period) placing the patch at its copy nearest
+        // the eye when the world wraps on X.
+        ShaderProperty shiftUniform;
         std::optional<TerrainLod::Mesh> cpu;
         std::vector<TerrainLod::SurfaceBand> bands;
         AABB bounds{};
@@ -106,6 +109,10 @@ class TerrainLodManager {
     size_t budget() const { return quality.gpuBudget - JoinBudget; }
 
     const World& world;
+    // World width in tiles when distant terrain wraps on X, else 0 (worlds
+    // whose width is not a whole number of LOD roots stay bounded at
+    // distance).
+    int periodX = 0;
     IAssets& assets;
     ThreadPool& pool;
     const TerrainLod::Quality quality;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -98,11 +99,12 @@ class SoilGenerator {
         return result;
     }
 
+    // periodX: world width in tiles when X wraps (0: no wrapping).
     static SoilColumn sample(const SoilProfile& p, const Region& r, int64_t x,
-                             int64_t z) {
+                             int64_t z, int periodX = 0) {
         SoilColumn out;
         if (!p.block_id) return out;
-        const double exposure = field(x, z, 16, p.seed ^ 0x93a70u);
+        const double exposure = field(x, z, 16, p.seed ^ 0x93a70u, periodX);
         double threshold = 0.04;
         if (r.land == LandType::MOUNTAINS) threshold = 0.55;
         if (r.land == LandType::PEAK) threshold = 0.75;
@@ -111,7 +113,7 @@ class SoilGenerator {
             threshold = 0.82;
         if (r.hasFeature(FeatureMask::DESERT_DUNES)) threshold = 0;
         if (exposure < threshold) return out;
-        const double variation = field(x, z, 48, p.seed ^ 0x471b9u);
+        const double variation = field(x, z, 48, p.seed ^ 0x471b9u, periodX);
         const auto interpolate = [](const std::array<int, 2>& range, double t) {
             return static_cast<int>(std::min<double>(
                 range[1],
@@ -160,16 +162,38 @@ class SoilGenerator {
         h ^= h >> 31;
         return (h >> 11) * 0x1.0p-53;
     }
-    static double field(double x, double z, int scale, uint32_t seed) {
-        const auto gx = static_cast<int64_t>(std::floor(double(x) / scale));
+    // Lattice along X that repeats every periodX tiles: periodX / scale
+    // rounded to whole cells, each slightly resized to fit. periodX <= 0
+    // keeps the plain lattice of the given scale.
+    struct PeriodicAxis {
+        double cell;
+        int64_t cells;  // 0: not periodic
+        static PeriodicAxis of(int scale, int periodX) {
+            if (periodX <= 0) return {double(scale), 0};
+            const int64_t cells =
+                std::max<int64_t>(1, std::llround(double(periodX) / scale));
+            return {double(periodX) / double(cells), cells};
+        }
+        int64_t wrap(int64_t index) const {
+            if (!cells) return index;
+            const int64_t r = index % cells;
+            return r < 0 ? r + cells : r;
+        }
+    };
+    // Smooth value noise in [0, 1]; periodic in X when periodX > 0.
+    static double field(double x, double z, int scale, uint32_t seed,
+                        int periodX = 0) {
+        const auto axis = PeriodicAxis::of(scale, periodX);
+        const double ux = double(x) / axis.cell;
+        const auto gx = static_cast<int64_t>(std::floor(ux));
         const auto gz = static_cast<int64_t>(std::floor(double(z) / scale));
-        double tx = double(x) / scale - gx;
+        double tx = ux - gx;
         double tz = double(z) / scale - gz;
         tx = tx * tx * (3 - 2 * tx);
         tz = tz * tz * (3 - 2 * tz);
+        const int64_t x0 = axis.wrap(gx), x1 = axis.wrap(gx + 1);
         return std::lerp(
-            std::lerp(unit(gx, gz, seed), unit(gx + 1, gz, seed), tx),
-            std::lerp(unit(gx, gz + 1, seed), unit(gx + 1, gz + 1, seed), tx),
-            tz);
+            std::lerp(unit(x0, gz, seed), unit(x1, gz, seed), tx),
+            std::lerp(unit(x0, gz + 1, seed), unit(x1, gz + 1, seed), tx), tz);
     }
 };

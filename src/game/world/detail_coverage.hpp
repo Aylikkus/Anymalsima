@@ -5,6 +5,7 @@
 
 #include "chunk_coord.hpp"
 #include "terrain_lod.hpp"
+#include "world_wrap.hpp"
 
 namespace TerrainLod {
 // Detailed chunks own their visibility after handover. Neither a new LOD
@@ -16,12 +17,14 @@ class DetailCoverage {
     using Key = std::pair<int, int>;
     using Columns = std::map<Key, SurfaceBand>;
 
+    // periodChunks > 0: X wraps with this many chunk columns.
     template <typename Current, typename Drawable>
     void update(ChunkCoord focus, std::span<const SurfaceBand> candidates,
-                Current&& current, Drawable&& drawable) {
+                Current&& current, Drawable&& drawable, int periodChunks = 0) {
         auto next = visible;
         const auto inRange = [&](const SurfaceBand& band, int radius) {
-            return std::abs(band.x - int(focus.x)) <= radius &&
+            return std::abs(WorldWrap::delta(band.x, int(focus.x),
+                                             periodChunks)) <= radius &&
                    std::abs(band.z - int(focus.z)) <= radius &&
                    band.minY >= int(focus.y) - KeepRadius &&
                    band.maxY <= int(focus.y) + KeepRadius;

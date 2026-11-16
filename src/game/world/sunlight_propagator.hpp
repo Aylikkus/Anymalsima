@@ -94,8 +94,9 @@ class SunLightPropagator {
     static uint64_t columnKey(unsigned x, unsigned z) {
         return (uint64_t{x} << 32) | z;
     }
-    static bool offset(ChunkCoord coord, int dx, int dy, int dz,
-                       ChunkCoord& out);
+    // Neighbor chunk coordinate; X wraps around the world.
+    bool offset(ChunkCoord coord, int dx, int dy, int dz,
+                ChunkCoord& out) const;
     static DirectResult sweep(DirectInput input);
     static IndirectResult spread(IndirectInput input);
     uint8_t opacity(const Tile& tile) const;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -41,7 +42,10 @@ class LightVolumeManager {
     // Appends the light uniforms of a chunk about to be drawn, building its
     // volume immediately when it has none. Returns false when no slot is
     // available; the chunk must then be skipped this frame.
-    bool bind(const ChunkCoord& coord, std::vector<ShaderProperty*>& uniforms);
+    // originX: world X the chunk is drawn at (its copy nearest the eye when
+    // X wraps); defaults to the canonical chunk origin.
+    bool bind(const ChunkCoord& coord, std::vector<ShaderProperty*>& uniforms,
+              std::optional<double> originX = std::nullopt);
     size_t pageCount() const { return pages.size(); }
     size_t slotCount() const { return slots.size(); }
 

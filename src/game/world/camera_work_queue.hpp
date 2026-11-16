@@ -9,6 +9,7 @@
 #include "chunk.hpp"
 #include "chunk_coord.hpp"
 #include "core/geometry.hpp"
+#include "world_wrap.hpp"
 
 // Pending work stays outside the worker pool so a new focus changes its order
 // immediately. Sequence numbers survive duplicate requests and
@@ -23,13 +24,25 @@ class CameraWorkQueue {
     bool empty() const { return ages.empty(); }
     size_t size() const { return ages.size(); }
 
-    static double distance(ChunkCoord coord, Vec3 focus) {
-        auto axis = [](unsigned c, int size, float p) {
+    // periodX: world width in tiles when X wraps (0: no wrapping). The X
+    // distance is measured to the chunk copy nearest to the focus.
+    void setPeriodX(int value) { periodX = value; }
+    double distance(ChunkCoord coord, Vec3 focus) const {
+        return distance(coord, focus, periodX);
+    }
+    static double distance(ChunkCoord coord, Vec3 focus, int periodX) {
+        auto axis = [](unsigned c, int size, double p) {
             const double lo = double(c) * size;
-            const double d = std::max({lo - p, double(p) - (lo + size), 0.0});
+            const double d = std::max({lo - p, p - (lo + size), 0.0});
             return d * d;
         };
-        return axis(coord.x, Chunk::SIZE_X, focus.x) +
+        const double lo = double(coord.x) * Chunk::SIZE_X;
+        const double fx =
+            periodX > 0 ? lo + Chunk::SIZE_X / 2.0 +
+                              WorldWrap::deltaf(
+                                  focus.x, lo + Chunk::SIZE_X / 2.0, periodX)
+                        : focus.x;
+        return axis(coord.x, Chunk::SIZE_X, fx) +
                axis(coord.y, Chunk::SIZE_Y, focus.y) +
                axis(coord.z, Chunk::SIZE_Z, focus.z);
     }
@@ -85,4 +98,5 @@ class CameraWorkQueue {
    private:
     std::unordered_map<ChunkCoord, uint64_t> ages;
     uint64_t sequence = 0;
+    int periodX = 0;
 };

@@ -364,8 +364,10 @@ void GameplayState::useTool(int mouseX, int mouseY) {
 void GameplayState::update(Game& game, float dt) {
     // Before any region can unload this frame.
     editTracker->update();
-    camera.position.x =
-        std::clamp(camera.position.x, 0.f, float(world->width * 128 - 1));
+    // X wraps around the world (stored canonically in [0, W)); Z is bounded.
+    camera.position.x = float(world->wrap().wrapX(camera.position.x));
+    if (camera.position.x >= float(world->wrap().tiles))
+        camera.position.x = 0;  // float rounding of a value just below W
     camera.position.z =
         std::clamp(camera.position.z, 0.f, float(world->height * 128 - 1));
     const Vec2u region{unsigned(camera.position.x) / 128,
@@ -454,9 +456,13 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     int camCX = int(camera.position.x) / Chunk::SIZE_X;
     int camCY = int(camera.position.y) / Chunk::SIZE_Y;
     int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
+    const WorldWrap wrap = world->wrap();
 
     chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
-        int dx = std::abs(int(coord.x) - camCX);
+        // Chunks are drawn at their copy nearest the camera, so the X seam
+        // is invisible.
+        const int64_t deltaX = wrap.deltaChunk(coord.x, camCX);
+        int dx = int(std::abs(deltaX));
         int dy = std::abs(int(coord.y) - camCY);
         int dz = std::abs(int(coord.z) - camCZ);
 
@@ -466,7 +472,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
 
         // Build the AABB for this chunk in world space.
         // X and Z are tile axes, Y is height (slab).
-        float wx = float(coord.x) * Chunk::SIZE_X;
+        float wx = float(camCX + deltaX) * Chunk::SIZE_X;
         float wy = float(coord.y) * Chunk::SIZE_Y;
         float wz = float(coord.z) * Chunk::SIZE_Z;
 
@@ -487,7 +493,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
                                               &worldEye};
         // Without a light volume the chunk would render unlit; skip it.
-        if (!lightVolumes->bind(coord, uniforms)) return;
+        if (!lightVolumes->bind(coord, uniforms, wx)) return;
         target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     });
@@ -520,7 +526,8 @@ void GameplayState::requestChunksAroundCamera() {
                         std::abs(dz) > CHUNK_RADIUS)
                         continue;
 
-                    int cx = camCX + dx;
+                    // X wraps around the world.
+                    int cx = int(world->wrap().wrapChunk(camCX + dx));
                     int cy = camCY + dy;
                     int cz = camCZ + dz;
 

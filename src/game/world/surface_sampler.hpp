@@ -80,11 +80,13 @@ class SurfaceSampler {
     void setEdits(std::shared_ptr<const EditMap> value);
     int width() const { return world.width * TerrainTuning::RegionX; }
     int depth() const { return world.height * TerrainTuning::RegionZ; }
+    // X wraps around the world; Z clamps (see the clamps in the .cpp).
+    int wrapX(int x) const { return int(WorldWrap::mod(x, width())); }
 
    private:
     using RegionInput = SurfaceRegionInput;
     const RegionInput& input(int x, int z);
-    // Edit of the chunk column containing the clamped tile, or null.
+    // Edit of the chunk column containing the wrapped/clamped tile, or null.
     const ColumnEdit* editAt(int x, int z);
     SurfaceColumn generatedColumn(int x, int z);
     const World& world;

@@ -23,14 +23,18 @@ double relief(LandType land) {
 // Stateless gradient (Perlin) noise in [0, 1] with hashed lattice gradients.
 // Unlike SoilGenerator::field its iso-lines are not aligned to the lattice,
 // which keeps ridges from looking blocky.
-double gradientField(double x, double z, int scale, uint32_t seed) {
-    x /= scale;
+// periodX > 0 makes it repeat along X every periodX tiles (see
+// SoilGenerator::PeriodicAxis).
+double gradientField(double x, double z, int scale, uint32_t seed,
+                     int periodX) {
+    const auto axis = SoilGenerator::PeriodicAxis::of(scale, periodX);
+    x /= axis.cell;
     z /= scale;
     const auto gx = int64_t(std::floor(x)), gz = int64_t(std::floor(z));
     const double fx = x - gx, fz = z - gz;
     const auto dot = [&](int64_t cx, int64_t cz) {
         const double angle =
-            SoilGenerator::unit(cx, cz, seed) * 6.283185307179586;
+            SoilGenerator::unit(axis.wrap(cx), cz, seed) * 6.283185307179586;
         return std::cos(angle) * (x - cx) + std::sin(angle) * (z - cz);
     };
     const auto fade = [](double t) {
@@ -60,7 +64,8 @@ TerrainNeighborhood TerrainNeighborhood::capture(const World& world,
     result.feature_seed = world.genSettings.feature_seed;
     for (int dz = -2; dz <= 2; ++dz) {
         for (int dx = -2; dx <= 2; ++dx) {
-            const int x = std::clamp(int(center.x) + dx, 0, world.width - 1);
+            // X wraps around the world; Z clamps to its edge rows.
+            const int x = int(world.wrap().wrapRegion(int64_t(center.x) + dx));
             const int z = std::clamp(int(center.y) + dz, 0, world.height - 1);
             const auto& source = world.regions[z * world.width + x];
             auto& target = result.regions[(dz + 2) * 5 + dx + 2];
@@ -118,9 +123,7 @@ double TerrainSampler::cliffLift(int rx, int rz, double x, double z) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     for (const auto& [dx, dz] : std::array<std::pair<int, int>, 4>{
              {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-        if (rx + dx < 0 || rx + dx >= data.width || rz + dz < 0 ||
-            rz + dz >= data.height)
-            continue;
+        if (rz + dz < 0 || rz + dz >= data.height) continue;
         const auto& other = data.at(rx + dx, rz + dz).region;
         const int drop = owner.land_height_m - other.land_height_m;
         if (drop <= 0) continue;
@@ -144,7 +147,7 @@ double TerrainSampler::cliffLift(int rx, int rz, double x, double z) const {
         const int edgeZ = dz ? rz + (dz > 0) : rz;
         const uint32_t salt = data.feature_seed ^ (dx ? 0x6791u : 0x9b23u);
         const double segment = SoilGenerator::field(
-            dx ? edgeX * sx : x, dz ? edgeZ * sz : z, 32, salt);
+            dx ? edgeX * sx : x, dz ? edgeZ * sz : z, 32, salt, data.periodX());
         const double mask = smooth((segment - .25) / .35);
         lift = std::max(
             lift,
@@ -163,25 +166,26 @@ double TerrainSampler::coastDistance(int rx, int rz, double x, double z) const {
     const auto warp = [&](uint32_t salt) {
         double offset = 0;
         for (const auto& octave : TerrainTuning::CoastWarp) {
-            offset +=
-                octave.amplitude *
-                (2 * SoilGenerator::field(x, z, octave.scale, seed ^ salt) - 1);
+            offset += octave.amplitude *
+                      (2 * SoilGenerator::field(x, z, octave.scale, seed ^ salt,
+                                                data.periodX()) -
+                       1);
             salt = salt * 0x9e3779b1u + 0x7f4au;
         }
         return offset;
     };
-    const double qx =
-        std::clamp(x + warp(0x2c1bu), 0.0, double(data.width) * sx - 1e-3);
+    // X stays unwrapped so distances below share one frame; at() wraps.
+    const double qx = x + warp(0x2c1bu);
     const double qz =
         std::clamp(z + warp(0x58d3u), 0.0, double(data.height) * sz - 1e-3);
     const bool land =
-        data.at(int(qx / sx), int(qz / sz)).region.land_height_m >= SEA_LEVEL_Y;
+        data.at(int(std::floor(qx / sx)), int(qz / sz)).region.land_height_m >=
+        SEA_LEVEL_Y;
     double distance = TerrainTuning::CoastCap;
     for (int dz = -1; dz <= 1; ++dz)
         for (int dx = -1; dx <= 1; ++dx) {
             const int nx = rx + dx, nz = rz + dz;
-            if (nx < 0 || nx >= data.width || nz < 0 || nz >= data.height)
-                continue;
+            if (nz < 0 || nz >= data.height) continue;
             if ((data.at(nx, nz).region.land_height_m >= SEA_LEVEL_Y) == land)
                 continue;
             const double ax = std::max({nx * sx - qx, 0.0, qx - (nx + 1) * sx});
@@ -192,13 +196,15 @@ double TerrainSampler::coastDistance(int rx, int rz, double x, double z) const {
     return (land ? distance : -distance) +
            TerrainTuning::CoastJitter *
                (2 * SoilGenerator::field(x, z, TerrainTuning::CoastJitterScale,
-                                         seed ^ 0x3ad7u) -
+                                         seed ^ 0x3ad7u, data.periodX()) -
                 1);
 }
 
 double TerrainSampler::surface(double x, double z) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
-    x = std::clamp(x, 0.0, double(data.width) * sx - 1);
+    // X wraps around the world; Z clamps to its edges.
+    x = data.periodX() > 0 ? WorldWrap::modf(x, data.periodX())
+                           : std::max(x, 0.0);
     z = std::clamp(z, 0.0, double(data.height) * sz - 1);
     const int rx = int(x / sx), rz = int(z / sz);
     const int gx = int(x / (sx / 2)), gz = int(z / (sz / 2));
@@ -217,10 +223,11 @@ double TerrainSampler::surface(double x, double z) const {
         std::max(0.0, base - double(HeightProfile::PlainsTopY));
     base =
         std::lerp(base, double(owner.land_height_m), cliffLift(rx, rz, x, z));
-    const double broad = SoilGenerator::field(x, z, TerrainTuning::BroadScale,
-                                              data.height_seed ^ 0x1459u);
-    const double fine = SoilGenerator::field(x, z, TerrainTuning::FineScale,
-                                             data.height_seed ^ 0x43a1u);
+    const int period = data.periodX();
+    const double broad = SoilGenerator::field(
+        x, z, TerrainTuning::BroadScale, data.height_seed ^ 0x1459u, period);
+    const double fine = SoilGenerator::field(
+        x, z, TerrainTuning::FineScale, data.height_seed ^ 0x43a1u, period);
     // Ridged fBm: sharp crests where each octave crosses 0.5, wide valleys
     // between them. 1 on a crest, 0 deep in a valley.
     double ridge = 0;
@@ -228,7 +235,7 @@ double TerrainSampler::surface(double x, double z) const {
     for (const auto& octave : TerrainTuning::RidgeOctaves) {
         const double crest =
             1 - std::abs(2 * gradientField(x, z, octave.scale,
-                                           data.height_seed ^ salt) -
+                                           data.height_seed ^ salt, period) -
                          1);
         ridge += octave.amplitude * crest * crest;
         salt = salt * 0x9e3779b1u + 0x51edu;
@@ -325,10 +332,22 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     // Value noise (uniform-ish weights) sampled in a domain rotated by 30
     // degrees at a scale coprime with the chunk size, so the mixed pattern
     // follows neither the axes nor chunk borders.
-    const double u = double(x) * 0.8660254037844386 + double(z) * 0.5;
-    const double v = double(z) * 0.8660254037844386 - double(x) * 0.5;
-    double choice =
-        SoilGenerator::field(u, v, 21, data.feature_seed ^ 0x6187u) * total;
+    const auto rotated = [&](double px) {
+        const double u = px * 0.8660254037844386 + double(z) * 0.5;
+        const double v = double(z) * 0.8660254037844386 - px * 0.5;
+        return SoilGenerator::field(u, v, 21, data.feature_seed ^ 0x6187u);
+    };
+    // A rotated lattice cannot repeat along X, so the last tiles before the
+    // seam blend into the pattern continuing from x = 0.
+    double pattern = rotated(double(x));
+    if (const int period = data.periodX(); period > 0) {
+        constexpr double SeamBlend = 64;
+        const double into = double(x) - (period - SeamBlend);
+        if (into > 0)
+            pattern = std::lerp(pattern, rotated(double(x) - period),
+                                smooth(into / SeamBlend));
+    }
+    double choice = pattern * total;
     const TerrainRegion* selected = choices[count - 1].region;
     for (int i = 0; i < count; ++i) {
         choice -= choices[i].weight;
@@ -347,7 +366,7 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     if (terrain.surface_y < SEA_LEVEL_Y ||
         source.vegetation == VegetationType::NONE)
         profile.topsoil_block_id = 0;
-    auto cover = SoilGenerator::sample(profile, source, x, z);
+    auto cover = SoilGenerator::sample(profile, source, x, z, data.periodX());
     const double retention =
         1 -
         smooth((terrain.slope - TerrainTuning::SoilSlopeStart) /

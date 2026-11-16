@@ -72,7 +72,9 @@ inline std::optional<TileRaycastHit> castTileRay(
         // Check current tile.
         const Tile* tile = chunks.tileAt(tx, ty, tz);
         if (tile && (hitLiquids ? !tile->isAir() : tile->isSolid())) {
-            return TileRaycastHit{tx, ty, tz, *tile, nx, ny, nz};
+            // Report canonical X: the ray may have crossed the seam.
+            return TileRaycastHit{
+                int(chunks.wrap().wrapTile(tx)), ty, tz, *tile, nx, ny, nz};
         }
 
         // Advance to the nearest tile boundary.

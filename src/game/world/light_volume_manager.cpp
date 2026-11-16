@@ -15,8 +15,10 @@ constexpr int RebuildsPerFrame = 64;
 constexpr uint64_t MaxMeshWaitFrames = 30;
 constexpr auto RebuildBudget = std::chrono::microseconds(1500);
 
-bool offset(const ChunkCoord& coord, int dx, int dy, int dz, ChunkCoord& out) {
-    const int64_t x = int64_t{coord.x} + dx;
+// X wraps around the world (wrap disabled: plain offsets).
+bool offset(const WorldWrap& wrap, const ChunkCoord& coord, int dx, int dy,
+            int dz, ChunkCoord& out) {
+    const int64_t x = wrap.wrapChunk(int64_t{coord.x} + dx);
     const int64_t y = int64_t{coord.y} + dy;
     const int64_t z = int64_t{coord.z} + dz;
     if (x < 0 || y < 0 || z < 0 || x > UINT32_MAX || y > UINT32_MAX ||
@@ -27,12 +29,12 @@ bool offset(const ChunkCoord& coord, int dx, int dy, int dz, ChunkCoord& out) {
 }
 
 template <typename F>
-void forNeighborhood(const ChunkCoord& coord, F&& fn) {
+void forNeighborhood(const WorldWrap& wrap, const ChunkCoord& coord, F&& fn) {
     for (int dz = -1; dz <= 1; ++dz)
         for (int dy = -1; dy <= 1; ++dy)
             for (int dx = -1; dx <= 1; ++dx) {
                 ChunkCoord n;
-                if (offset(coord, dx, dy, dz, n)) fn(n, dx, dy, dz);
+                if (offset(wrap, coord, dx, dy, dz, n)) fn(n, dx, dy, dz);
             }
 }
 }  // namespace
@@ -75,9 +77,10 @@ void LightVolumeManager::changed(const ChunkCoord& coord) {
         it->second.valid = false;
     // The chunk's cells appear in its own slot and in the border of every
     // neighbor (faces, edges and corners).
-    forNeighborhood(coord, [&](const ChunkCoord& n, int, int, int) {
-        if (slots.contains(n)) dirty.insert(n);
-    });
+    forNeighborhood(chunks.wrap(), coord,
+                    [&](const ChunkCoord& n, int, int, int) {
+                        if (slots.contains(n)) dirty.insert(n);
+                    });
 }
 
 void LightVolumeManager::forget(const ChunkCoord& coord) {
@@ -86,9 +89,10 @@ void LightVolumeManager::forget(const ChunkCoord& coord) {
     dirty.erase(coord);
     deferredSince.erase(coord);
     // Neighbors fall back to clamping their own edge cells.
-    forNeighborhood(coord, [&](const ChunkCoord& n, int, int, int) {
-        if (slots.contains(n)) dirty.insert(n);
-    });
+    forNeighborhood(chunks.wrap(), coord,
+                    [&](const ChunkCoord& n, int, int, int) {
+                        if (slots.contains(n)) dirty.insert(n);
+                    });
 }
 
 const LightVolume::Cells* LightVolumeManager::cells(const ChunkCoord& coord) {
@@ -164,9 +168,10 @@ void LightVolumeManager::release(const ChunkCoord& coord) {
 
 void LightVolumeManager::rebuild(const ChunkCoord& coord, const Slot& slot) {
     std::array<const LightVolume::Cells*, 27> neighborhood{};
-    forNeighborhood(coord, [&](const ChunkCoord& n, int dx, int dy, int dz) {
-        neighborhood[LightVolume::neighbor(dx, dy, dz)] = cells(n);
-    });
+    forNeighborhood(
+        chunks.wrap(), coord, [&](const ChunkCoord& n, int dx, int dy, int dz) {
+            neighborhood[LightVolume::neighbor(dx, dy, dz)] = cells(n);
+        });
     if (!neighborhood[LightVolume::neighbor(0, 0, 0)]) return;
     LightVolume::build(neighborhood, scratch);
 
@@ -204,6 +209,7 @@ void LightVolumeManager::rebuild(const ChunkCoord& coord, const Slot& slot) {
 
 void LightVolumeManager::update(Vec3 focus) {
     ++frame;
+    dirty.setPeriodX(chunks.wrap().tiles);
     const auto started = std::chrono::steady_clock::now();
     int rebuilt = 0;
     for (const auto& coord : dirty.ordered(focus, false)) {
@@ -248,7 +254,8 @@ void LightVolumeManager::update(Vec3 focus) {
 }
 
 bool LightVolumeManager::bind(const ChunkCoord& coord,
-                              std::vector<ShaderProperty*>& uniforms) {
+                              std::vector<ShaderProperty*>& uniforms,
+                              std::optional<double> originX) {
     auto it = slots.find(coord);
     if (it == slots.end()) {
         if (!chunks.isReady(coord) || !allocate(coord)) return false;
@@ -260,6 +267,12 @@ bool LightVolumeManager::bind(const ChunkCoord& coord,
     it->second.lastUsed = frame;
     auto& page = *pages[it->second.page];
     auto& binding = page.bindings[it->second.index];
+    // block.vert rebuilds world positions from the drawn transform, so the
+    // volume origin must be in the same X frame as the draw.
+    binding.chunk.setVec4(
+        {float(originX.value_or(double(coord.x) * Chunk::SIZE_X)) - 1.f,
+         float(coord.y) * Chunk::SIZE_Y - 1.f,
+         float(coord.z) * Chunk::SIZE_Z - 1.f, 1.f});
     uniforms.push_back(&binding.chunk);
     uniforms.push_back(&binding.slot);
     uniforms.push_back(&page.sampler);

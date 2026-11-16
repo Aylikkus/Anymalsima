@@ -122,6 +122,7 @@ build/tests/lod_render_smoke build/lod_coast 1600 coast
 build/tests/lod_render_smoke build/lod_elevated 1600 elevated
 build/tests/lod_render_smoke build/lod_travel 2400 travel
 build/tests/lod_render_smoke build/lod_boundary 2000 handover_walk
+build/tests/lod_render_smoke build/lod_wrap 1500 wrap
 build/tests/lod_render_smoke build/lod_cancel 1 cancel
 build/tests/lod_render_smoke build/lod_structure 3000 structure
 build/tests/lod_render_smoke build/lod_seams 4000 seams

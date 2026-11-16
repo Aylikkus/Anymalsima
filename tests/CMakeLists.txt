@@ -47,6 +47,7 @@ add_executable(world_logic_tests
     unit/game/world/light_volume_tests.cpp
     unit/game/world/world_editor_tests.cpp
     unit/game/world/world_tests.cpp
+    unit/game/world/world_wrap_tests.cpp
     unit/game/items/block_tests.cpp
     integration/world_lighting_tests.cpp
     integration/sunlight_boundary_tests.cpp
@@ -279,3 +280,15 @@ target_include_directories(lod_render_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 add_executable(terrain_heightmap EXCLUDE_FROM_ALL benchmarks/terrain_heightmap.cpp)
 target_link_libraries(terrain_heightmap PRIVATE world_logic_cpu)
 target_include_directories(terrain_heightmap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+
+foreach(case wrap_helper_math wrap_noise_periodic wrap_terrain_seam
+             wrap_chunks_tiles_ray_editor wrap_sunlight_crosses_seam
+             wrap_lod_selection_across_seam wrap_lod_build_has_no_seam_walls)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;wrap" TIMEOUT 30)
+    if(ANYMALSIMA_TEST_SANITIZERS)
+        set_tests_properties(game.world.${case} PROPERTIES
+            ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endif()
+endforeach()

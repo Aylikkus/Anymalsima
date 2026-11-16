@@ -41,14 +41,19 @@ class StructureLod {
     void draw(RenderTarget& target, const Frustum& frustum,
               const Camera& camera, const std::string* shader,
               const std::vector<ShaderProperty*>& uniforms, Hidden&& hidden) {
+        const float eyeX = camera.eye().x;
         for (auto& [coord, proxy] : proxies) {
+            // Drawn at the copy nearest the eye (X wraps).
+            const float x = drawX(coord.x, eyeX);
+            AABB bounds = proxy->bounds;
+            bounds.maxX += x - bounds.minX;
+            bounds.minX = x;
             if (!proxy->drawable || !proxy->hasMesh || hidden(coord) ||
-                !frustum.intersects(proxy->bounds))
+                !frustum.intersects(bounds))
                 continue;
             // Meshes are slab-local (ChunkMesher); place them by the eye.
             auto transform =
-                relativeTransform(camera, double(coord.x) * Chunk::SIZE_X,
-                                  double(coord.y) * Chunk::SIZE_Y,
+                relativeTransform(camera, x, double(coord.y) * Chunk::SIZE_Y,
                                   double(coord.z) * Chunk::SIZE_Z);
             auto bound = uniforms;
             target.drawVertexBuffer(proxy->mesh.get(), shader, std::move(bound),
@@ -57,6 +62,15 @@ class StructureLod {
         }
     }
     size_t residentBytes() const { return resident; }
+    // World X of chunk column cx at its copy nearest refX.
+    float drawX(unsigned cx, float refX) const {
+        const double x = double(cx) * Chunk::SIZE_X;
+        const int period = world.wrap().tiles;
+        if (period <= 0) return float(x);
+        // A whole number of periods, so neighbouring slabs stay aligned.
+        const double image = world.wrap().imageX(x + 8, refX) - 8;
+        return float(x + std::round((image - x) / period) * period);
+    }
     size_t count() const { return proxies.size(); }
     // Wanted slabs without a current mesh.
     size_t backlog() const;

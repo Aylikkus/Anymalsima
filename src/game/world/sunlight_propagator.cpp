@@ -26,8 +26,8 @@ SunLightPropagator::~SunLightPropagator() {
 }
 
 bool SunLightPropagator::offset(ChunkCoord coord, int dx, int dy, int dz,
-                                ChunkCoord& out) {
-    const int64_t x = int64_t{coord.x} + dx;
+                                ChunkCoord& out) const {
+    const int64_t x = chunks.wrap().wrapChunk(int64_t{coord.x} + dx);
     const int64_t y = int64_t{coord.y} + dy;
     const int64_t z = int64_t{coord.z} + dz;
     if (x < 0 || z < 0 || y < 0 || y >= Y_CHUNKS ||
@@ -419,7 +419,7 @@ ChunkCoord SunLightPropagator::beneficiary(ChunkCoord slab) const {
             auto it = columnChunks.find(columnKey(n.x, n.z));
             if (it == columnChunks.end()) continue;
             for (const auto& coord : it->second) {
-                const auto d = CameraWorkQueue::distance(coord, focus);
+                const auto d = pendingIndirect.distance(coord, focus);
                 if (d < distance ||
                     (d == distance && std::tie(coord.x, coord.y, coord.z) <
                                           std::tie(best.x, best.y, best.z))) {
@@ -432,6 +432,7 @@ ChunkCoord SunLightPropagator::beneficiary(ChunkCoord slab) const {
 }
 
 void SunLightPropagator::update() {
+    pendingIndirect.setPeriodX(chunks.wrap().tiles);
     collect();
     const auto requests = requested;
     for (const auto& coord : requests) {
@@ -477,7 +478,7 @@ void SunLightPropagator::update() {
                 if (active || !pendingDirect.contains(column)) continue;
                 ChunkCoord anchor{static_cast<unsigned>(column >> 32), coord.y,
                                   static_cast<unsigned>(column)};
-                const auto distance = CameraWorkQueue::distance(anchor, focus);
+                const auto distance = pendingIndirect.distance(anchor, focus);
                 if (!nextColumn || distance < nextDistance ||
                     (distance == nextDistance && column < *nextColumn)) {
                     nextColumn = column;

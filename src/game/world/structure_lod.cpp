@@ -33,7 +33,9 @@ void StructureLod::edited(uint64_t column) {
     ++revision;
     const int cx = int(column >> 32), cz = int(uint32_t(column));
     for (auto& [coord, proxy] : proxies)
-        if (std::abs(int(coord.x) - cx) + std::abs(int(coord.z) - cz) <= 1)
+        if (std::abs(world.wrap().deltaChunk(coord.x, cx)) +
+                std::abs(int(coord.z) - cz) <=
+            1)
             proxy->staleRevision = revision;
     // Force a new selection: the slab set of this column may have changed.
     chosenFor = nullptr;
@@ -58,7 +60,8 @@ void StructureLod::choose(Vec3 eye) {
     };
     std::vector<Candidate> candidates;
     for (const auto& [key, edit] : *snapshot) {
-        const float x0 = float(key >> 32) * Chunk::SIZE_X,
+        // The column copy nearest the eye (X wraps).
+        const float x0 = drawX(unsigned(key >> 32), eye.x),
                     z0 = float(uint32_t(key)) * Chunk::SIZE_Z;
         const float dx = std::max({x0 - eye.x, 0.f, eye.x - x0 - 16});
         const float dz = std::max({z0 - eye.z, 0.f, eye.z - z0 - 16});
@@ -158,8 +161,9 @@ void StructureLod::request() {
                 if (!self) return ChunkMesh{};
                 return mesher.build(
                     *self, coord, [&](int x, int y, int z) -> const Tile* {
-                        if (x < 0 || z < 0 || y < 0 || x >= width ||
-                            z >= depth || y >= WORLD_HEIGHT_Y)
+                        x = int(WorldWrap::mod(x, width));
+                        if (x < 0 || z < 0 || y < 0 || z >= depth ||
+                            y >= WORLD_HEIGHT_Y)
                             return &air;
                         const ChunkCoord c{unsigned(x / Chunk::SIZE_X),
                                            unsigned(y / Chunk::SIZE_Y),

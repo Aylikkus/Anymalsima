@@ -42,7 +42,10 @@ std::vector<EditStatus> WorldEditor::apply(
 }
 
 EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
-    const auto [x, y, z] = request.pos;
+    // X wraps: a position just past the seam edits the canonical tile.
+    auto pos = request.pos;
+    pos.x = decltype(pos.x)(chunks.wrap().wrapTile(pos.x));
+    const auto [x, y, z] = pos;
     if (x < 0 || y < 0 || z < 0) return EditStatus::NotLoaded;
     const bool placing = request.mode != EditMode::Remove && request.block;
     if (placing && request.block > blocks.items.size())
@@ -54,7 +57,7 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     const int lx = x % Chunk::SIZE_X, ly = y % Chunk::SIZE_Y,
               lz = z % Chunk::SIZE_Z;
     auto status = EditStatus::NotLoaded;
-    BlockChange change{request.pos, {}, {}};
+    BlockChange change{pos, {}, {}};
     chunks.withChunkLocked(coord, [&](Chunk& chunk) {
         Tile& tile = chunk.tiles[lz][ly][lx];
         change.before = tile;
@@ -100,6 +103,7 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         if (!delta) return;
         int64_t c[3] = {coord.x, coord.y, coord.z};
         c[axis] += delta;
+        if (axis == 0) c[0] = chunks.wrap().wrapChunk(c[0]);
         if (c[axis] < 0) return;
         pending.remesh.insert({unsigned(c[0]), unsigned(c[1]), unsigned(c[2])});
     };

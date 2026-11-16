@@ -50,7 +50,10 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
         std::random_device rd;
         std::mt19937_64 gen((uint64_t(rd()) << 32) ^ rd());
         auto gen_settigs = WorldGenSettings::fromSeed(gen());
-        gen_settigs.width = 500;
+        // X wraps: 512 regions (65536 tiles) is a whole number of distant
+        // width here can be changed freely, it doesn't incur any errors
+        // terrain roots (16 regions), so LOD wraps exactly too.
+        gen_settigs.width = 512;
         gen_settigs.height = 300;
         world_gen.start(gen_settigs, context.assets);
     });

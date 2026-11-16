@@ -7,7 +7,9 @@ LocationManager::LocationManager(ChunkManager& chunks, const World& world,
 void LocationManager::loadRegion(const Vec2u& regionCoord, int radius) {
     for (int dy = -radius; dy <= radius; ++dy) {
         for (int dx = -radius; dx <= radius; ++dx) {
-            const int x = int(regionCoord.x) + dx;
+            // X wraps around the world; Z ends at its edges.
+            const int x =
+                int(world.wrap().wrapRegion(int64_t(regionCoord.x) + dx));
             const int z = int(regionCoord.y) + dy;
             if (x < 0 || z < 0 || x >= world.width || z >= world.height)
                 continue;
@@ -44,7 +46,7 @@ void LocationManager::update() {
 
 void LocationManager::unloadDistant(const Vec2u& centre, int keepRadius) {
     auto distant = [&](const Vec2u& rc) {
-        const int dx = std::abs(int(rc.x) - int(centre.x));
+        const int dx = int(std::abs(world.wrap().deltaRegion(rc.x, centre.x)));
         const int dy = std::abs(int(rc.y) - int(centre.y));
         return dx > keepRadius || dy > keepRadius;
     };

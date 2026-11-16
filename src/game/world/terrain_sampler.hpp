@@ -82,10 +82,14 @@ struct TerrainNeighborhood {
 
     static TerrainNeighborhood capture(const World& world, Vec2u center,
                                        const IAssets& assets);
+    // World width in tiles: the X period of every sampled field.
+    int periodX() const {
+        return width > 0 ? width * TerrainTuning::RegionX : 0;
+    }
+    // X wraps around the world; Z clamps to its edge rows.
     const TerrainRegion& at(int x, int z) const {
-        x = std::clamp(x, 0, width - 1);
         z = std::clamp(z, 0, height - 1);
-        const int lx = x - static_cast<int>(center.x) + 2;
+        const int lx = int(WorldWrap::delta(x, int64_t(center.x), width)) + 2;
         const int lz = z - static_cast<int>(center.y) + 2;
         if (lx < 0 || lx >= 5 || lz < 0 || lz >= 5)
             throw std::out_of_range("Terrain sample outside neighborhood halo");
