@@ -8,6 +8,7 @@
 #include "audio_system.hpp"
 #include "platform.hpp"
 #include "render/render_target.hpp"
+#include "render/render_views.hpp"
 #include "render/renderer_api.hpp"
 #include "render/ui_context.hpp"
 #include "render_cache.hpp"
@@ -27,8 +28,6 @@ struct Line {
 
 class Renderer : public IRenderer {
    public:
-    // View of DrawLayer::GAME_GLOW, ordered right after the world view 0.
-    static constexpr bgfx::ViewId GlowView = 3;
     Renderer(Platform& platform);
     bool isOpen();
 

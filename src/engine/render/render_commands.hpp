@@ -18,7 +18,9 @@ enum class DrawLayer {
     GAME,
     // World-space additive glow (light glare): drawn after GAME in its own
     // view, depth-tested against the world but never writing depth.
-    GAME_GLOW
+    GAME_GLOW,
+    // Shadow caster pass into an offscreen atlas; the command names its view.
+    SHADOW
 };
 
 struct DrawRectCmd {
@@ -66,6 +68,10 @@ struct DrawVertexBufferCmd {
     bool isStaticMesh;
     std::array<float, 16> transform;
     DrawLayer layer = DrawLayer::UI;
+    // DrawLayer::SHADOW: the bgfx view to submit to.
+    uint16_t view = 0;
+    // Optional per-instance data; must stay valid until the frame is drawn.
+    const bgfx::InstanceDataBuffer* instances = nullptr;
 };
 
 struct SetCameraCmd {

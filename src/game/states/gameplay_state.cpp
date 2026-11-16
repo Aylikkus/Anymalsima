@@ -46,11 +46,15 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     terrainLod = std::make_unique<TerrainLodManager>(
         *this->world, *context.assets, context.threadPool, quality,
         edits.get());
-    lightRenderer = std::make_unique<LightRenderer>(*context.renderer);
+    // The shadowed-light budget follows the terrain detail setting.
+    lightRenderer = std::make_unique<LightRenderer>(*context.renderer, detail);
     {
-        std::vector<ShaderProperty*> lightUniforms;
-        lightRenderer->appendUniforms(lightUniforms);
-        terrainLod->setExtraUniforms(std::move(lightUniforms));
+        std::vector<ShaderProperty*> patchLights, blockLights;
+        lightRenderer->appendUniforms(patchLights, LightRenderer::Program::Lod);
+        lightRenderer->appendUniforms(blockLights,
+                                      LightRenderer::Program::Block);
+        terrainLod->setExtraUniforms(std::move(patchLights),
+                                     std::move(blockLights));
     }
     lightSources = std::make_unique<LightSourceRegistry>();
     loadLightSources(context.assets->getStorage<Block>());
@@ -182,6 +186,20 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         camera.distance = 10.0f;
     }
 
+    // Voxel geometry changes re-render the shadow faces that can see it.
+    auto chunkChanged = [this](const ChunkCoord& c) {
+        const std::array<double, 3> min{double(c.x) * Chunk::SIZE_X,
+                                        double(c.y) * Chunk::SIZE_Y,
+                                        double(c.z) * Chunk::SIZE_Z};
+        lightRenderer->shadows().geometryChanged(
+            min,
+            {min[0] + Chunk::SIZE_X, min[1] + Chunk::SIZE_Y,
+             min[2] + Chunk::SIZE_Z},
+            this->world->wrap().tiles);
+    };
+    meshConnection = chunkManager->meshUploaded.connect(chunkChanged);
+    removedConnection = chunkManager->removed.connect(chunkChanged);
+
     const Vec2u startRegion{unsigned(camera.position.x) / 128,
                             unsigned(camera.position.z) / 128};
     locationMgr->loadRegion(startRegion, 2);
@@ -191,6 +209,9 @@ GameplayState::GameplayState(Game& game, UIContext& context,
 }
 
 GameplayState::~GameplayState() {
+    // Chunk systems outlive the light renderer these listeners use.
+    chunkManager->meshUploaded.disconnect(meshConnection);
+    chunkManager->removed.disconnect(removedConnection);
     try {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();
@@ -251,13 +272,13 @@ void GameplayState::loadLightSources(const DataStorage<Block>& blocks) {
         lightsExtra = std::move(file.extra);
         for (const auto& record : file.lights) {
             // Emission comes from today's definitions; lights whose block
-            // no longer reaches far are dropped.
+            // no longer emits are dropped.
             if (record.block == 0 || record.block > blocks.items.size())
                 continue;
             const auto& block = blocks.get(record.block);
-            if (block.light && block.light->isFar())
+            if (block.light)
                 lightSources->setBlockLight(record.tile, record.block,
-                                            *block.light);
+                                            *block.light, record.openFaces);
         }
     } catch (const std::exception& e) {
         // Derived from chunks: visited areas are rebuilt.
@@ -284,7 +305,7 @@ void GameplayState::saveLightSources(bool wait) {
     std::vector<light_sources_codec::Record> records;
     lightSources->forEach([&](LightSourceRegistry::Id, const LightSource& s) {
         if (s.owner == LightSource::Owner::Block)
-            records.push_back({s.tile, s.block});
+            records.push_back({s.tile, s.block, s.openFaces});
     });
     auto write = [target = slot, records = std::move(records),
                   extra = lightsExtra]() mutable {
@@ -538,7 +559,9 @@ void GameplayState::update(Game& game, float dt) {
                 ss << "emits: radius " << e->radius << ", falloff "
                    << e->falloff << "\n";
             ss << "far lights: " << lightRenderer->lightCount() << " lit, "
-               << lightRenderer->glareCount() << " glare\n";
+               << lightRenderer->shadowedCount() << " shadowed\n";
+            ss << "glare: " << lightRenderer->glareCount()
+               << ", distant glow: " << lightRenderer->glowLights() << "\n";
 
             tileDebugText->setText(ss.str());
         }
@@ -552,10 +575,17 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     chunkManager->uploadReadyMeshes(*context.renderer);
     // After uploads: deferred light volumes switch with their new meshes.
     lightVolumes->update(camera.position);
-    lightRenderer->update(*lightSources, camera, world->wrap(),
-                          context.getWindowSize());
+    const double now = std::chrono::duration<double>(
+                           std::chrono::steady_clock::now() - started)
+                           .count();
+    lightRenderer->update(*lightSources, camera, world->wrap(), now);
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize());
+    if (terrainLod->drawnVersion() != shadowLodVersion) {
+        shadowLodVersion = terrainLod->drawnVersion();
+        lightRenderer->shadows().lodChanged();
+    }
+    renderShadowCasters(target, now);
     const Vec3 eye = camera.eye();
     worldEye.setVec4({eye.x, eye.y, eye.z, camera.viewDistance});
 
@@ -609,15 +639,57 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         auto transform = relativeTransform(camera, wx, wy, wz);
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
                                               &worldEye};
-        lightRenderer->appendUniforms(uniforms);
+        lightRenderer->appendUniforms(uniforms, LightRenderer::Program::Block);
         // Without a light volume the chunk would render unlit; skip it.
         if (!lightVolumes->bind(coord, uniforms, wx)) return;
         target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     });
-    lightRenderer->drawGlare(target, camera);
+    lightRenderer->drawGlare(target, camera, viewport);
 
     ui_manager->render(target, context);
+}
+
+void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
+    const int camCX = int(camera.position.x) / Chunk::SIZE_X;
+    const int camCY = int(camera.position.y) / Chunk::SIZE_Y;
+    const int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
+    const WorldWrap wrap = world->wrap();
+    lightRenderer->renderShadows(
+        target,
+        [&](RenderTarget& t, const LightShadows::Face& face) {
+            const auto& l = face.light;
+            // The detailed chunks drawn this frame (render()'s selection),
+            // placed at their copy nearest the light.
+            chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
+                if (std::abs(wrap.deltaChunk(coord.x, camCX)) > CHUNK_RADIUS ||
+                    std::abs(int(coord.y) - camCY) > CHUNK_RADIUS ||
+                    std::abs(int(coord.z) - camCZ) > CHUNK_RADIUS ||
+                    !terrainLod->drawsColumn(coord.x, coord.z))
+                    return;
+                const double ox = double(coord.x) * Chunk::SIZE_X;
+                const double wx = l[0] + wrap.deltaX(ox + 8, l[0]) - 8;
+                const double lx = wx - l[0];
+                const double ly = double(coord.y) * Chunk::SIZE_Y - l[1];
+                const double lz = double(coord.z) * Chunk::SIZE_Z - l[2];
+                if (!LightShadowMath::reaches(lx, ly, lz, lx + Chunk::SIZE_X,
+                                              ly + Chunk::SIZE_Y,
+                                              lz + Chunk::SIZE_Z, face.radius))
+                    return;
+                if (!face.frustum.intersects(AABB{
+                        float(lx), float(ly), float(lz),
+                        float(lx + Chunk::SIZE_X), float(ly + Chunk::SIZE_Y),
+                        float(lz + Chunk::SIZE_Z)}))
+                    return;
+                MeshHandle* mesh = chunkManager->getMesh(coord);
+                if (!mesh) return;
+                t.drawShadowCaster(
+                    mesh->get(), face.shader, std::vector(face.chunkUniforms),
+                    false, LightShadowMath::translation(lx, ly, lz), face.view);
+            });
+            terrainLod->submitShadowCasters(t, face, *chunkManager, camera);
+        },
+        now);
 }
 
 void GameplayState::requestChunksAroundCamera() {

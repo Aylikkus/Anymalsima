@@ -20,6 +20,8 @@ add_library(game
     world/block_light_propagator.cpp
     world/light_sources.cpp
     world/light_renderer.cpp
+    world/light_shadows.cpp
+    world/lod_light_map.cpp
     world/light_volume.cpp
     world/light_volume_manager.cpp
     world/world_editor.cpp

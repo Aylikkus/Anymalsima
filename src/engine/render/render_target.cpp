@@ -74,3 +74,23 @@ void RenderTarget::drawVertexBuffer(MeshVariant mesh, const std::string* shader,
     cmd.data = DrawVertexBufferCmd(mesh, shader, std::move(uniforms), isStatic, std::move(transform), layer);
     commands.push_back(std::move(cmd));
 }
+
+void RenderTarget::drawShadowCaster(MeshVariant mesh, const std::string* shader, std::vector<ShaderProperty*>&& uniforms, bool isStatic, std::array<float, 16>&& transform, uint16_t view)
+{
+    Command cmd;
+    cmd.type = CommandType::DrawVertexBuffer;
+    DrawVertexBufferCmd draw(mesh, shader, std::move(uniforms), isStatic, std::move(transform), DrawLayer::SHADOW);
+    draw.view = view;
+    cmd.data = std::move(draw);
+    commands.push_back(std::move(cmd));
+}
+
+void RenderTarget::drawInstanced(MeshVariant mesh, const std::string* shader, std::vector<ShaderProperty*>&& uniforms, bool isStatic, std::array<float, 16>&& transform, DrawLayer layer, const bgfx::InstanceDataBuffer* instances)
+{
+    Command cmd;
+    cmd.type = CommandType::DrawVertexBuffer;
+    DrawVertexBufferCmd draw(mesh, shader, std::move(uniforms), isStatic, std::move(transform), layer);
+    draw.instances = instances;
+    cmd.data = std::move(draw);
+    commands.push_back(std::move(cmd));
+}

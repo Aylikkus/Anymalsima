@@ -29,6 +29,12 @@ public:
 
     void drawVertexBuffer(MeshVariant mesh, const std::string* shader, std::vector<ShaderProperty*>&& uniforms, bool isStatic, std::array<float, 16>&& transform, DrawLayer layer = DrawLayer::UI);
 
+    // A shadow caster draw into the given bgfx view (DrawLayer::SHADOW).
+    void drawShadowCaster(MeshVariant mesh, const std::string* shader, std::vector<ShaderProperty*>&& uniforms, bool isStatic, std::array<float, 16>&& transform, uint16_t view);
+
+    // An instanced draw; `instances` must outlive the frame's submission.
+    void drawInstanced(MeshVariant mesh, const std::string* shader, std::vector<ShaderProperty*>&& uniforms, bool isStatic, std::array<float, 16>&& transform, DrawLayer layer, const bgfx::InstanceDataBuffer* instances);
+
     void pushClip(const Rect &r);
 
     void popClip();

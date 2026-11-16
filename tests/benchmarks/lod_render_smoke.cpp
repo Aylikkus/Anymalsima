@@ -9,6 +9,7 @@
 
 #include "lod_capture_renderer.hpp"
 #include "lod_scene.hpp"
+#include "render/render_views.hpp"
 #include "resource_manager.hpp"
 #include "world/block_light_propagator.hpp"
 #include "world/light_renderer.hpp"
@@ -75,8 +76,50 @@ int main(int argc, char** argv) {
         blockLight.watch(editor);
         LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
                                    &blockLight);
-        LightRenderer lightRenderer(renderer);
+        // SMOKE_QUALITY=0..2 picks the light (shadow) budget preset.
+        const int lightQuality = std::getenv("SMOKE_QUALITY")
+                                     ? std::atoi(std::getenv("SMOKE_QUALITY"))
+                                     : 0;
+        LightRenderer lightRenderer(renderer, lightQuality);
         std::vector<TilePos> lamps;
+        Camera home{};
+        TilePos boxLamp{};
+        std::vector<uint8_t> boxBaseline, lastPixels;
+        LightSourceRegistry::Id beaconId = 0;
+        // As in GameplayState: voxel geometry changes re-render shadows.
+        auto chunkChanged = [&](const ChunkCoord& c) {
+            const std::array<double, 3> min{c.x * 16.0, c.y * 16.0, c.z * 16.0};
+            lightRenderer.shadows().geometryChanged(
+                min, {min[0] + 16, min[1] + 16, min[2] + 16},
+                world.wrap().tiles);
+        };
+        chunks.meshUploaded.connect(chunkChanged);
+        chunks.removed.connect(chunkChanged);
+        // An 8 km omnidirectional entity light in the box, independent of
+        // test_light.json.
+        auto addBeacon = [&] {
+            LightSource beacon;
+            beacon.owner = LightSource::Owner::Entity;
+            beacon.emission.radius = 8000;
+            beacon.position = {boxLamp.x + 0.5, boxLamp.y + 0.5,
+                               boxLamp.z + 0.5};
+            beaconId = registry.add(beacon);
+            // Inside an opaque block, like a lamp: its own cube must not
+            // shadow it.
+            editor.setBlock(boxLamp, 1);
+        };
+        // Smoke view order: shadow passes, sky, world, glow (view 1), then
+        // the readback blit (view 3); see the capture below.
+        auto applyOrder = [](uint16_t shadowViews) {
+            bgfx::ViewId order[RenderViews::ShadowBase + 16];
+            uint16_t n = 0;
+            for (uint16_t i = 0; i < shadowViews; ++i)
+                order[n++] = bgfx::ViewId(RenderViews::ShadowBase + i);
+            for (bgfx::ViewId id : {2, 0, 1, 3}) order[n++] = id;
+            for (bgfx::ViewId id = 4; id < RenderViews::ShadowBase; ++id)
+                order[n++] = id;
+            bgfx::setViewOrder(0, n, order);
+        };
         const auto color = bgfx::createTexture2D(
             1280, 720, false, 1, bgfx::TextureFormat::RGBA8, BGFX_TEXTURE_RT);
         const auto depth = bgfx::createTexture2D(
@@ -92,11 +135,9 @@ int main(int argc, char** argv) {
         const auto readback = bgfx::createTexture2D(
             1280, 720, false, 1, bgfx::TextureFormat::RGBA8,
             BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
-        // View 1: additive glow after the world (Renderer::GlowView). Its id
-        // must stay below the readback blit's view 3: blits run in view-id
-        // order regardless of setViewOrder.
-        const bgfx::ViewId order[] = {2, 0, 1, 3};
-        bgfx::setViewOrder(0, 4, order);
+        // View 1: additive glow after the world (RenderViews::Glow in the
+        // game). Captures blit in a frame of their own (view 3).
+        applyOrder(0);
         for (bgfx::ViewId view : {0, 1, 2}) {
             bgfx::setViewFrameBuffer(view, framebuffer);
             bgfx::setViewRect(view, 0, 0, 1280, 720);
@@ -144,9 +185,13 @@ int main(int argc, char** argv) {
             TerrainLodManager lod(world, assets, pool, TerrainLod::Qualities[0],
                                   structure ? &edits : nullptr);
             if (lights) {
-                std::vector<ShaderProperty*> lightUniforms;
-                lightRenderer.appendUniforms(lightUniforms);
-                lod.setExtraUniforms(std::move(lightUniforms));
+                std::vector<ShaderProperty*> patchLights, blockLights;
+                lightRenderer.appendUniforms(patchLights,
+                                             LightRenderer::Program::Lod);
+                lightRenderer.appendUniforms(blockLights,
+                                             LightRenderer::Program::Block);
+                lod.setExtraUniforms(std::move(patchLights),
+                                     std::move(blockLights));
             }
             size_t maxResident = 0, maxUpload = 0;
             double maxFrame = 0;
@@ -182,12 +227,58 @@ int main(int argc, char** argv) {
                     chunks.uploadReadyMeshes(renderer);
                     if (lights) volumes.update(camera.position);
                 }
+                const double now = std::chrono::duration<double>(
+                                       std::chrono::steady_clock::now() - begin)
+                                       .count();
                 if (lights)
-                    lightRenderer.update(registry, camera, world.wrap(),
-                                         {1280, 720});
+                    lightRenderer.update(registry, camera, world.wrap(), now);
                 lod.update(camera, {1280, 720});
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720});
+                if (lights) {
+                    static uint64_t lodVersion = 0;
+                    if (lod.drawnVersion() != lodVersion) {
+                        lodVersion = lod.drawnVersion();
+                        lightRenderer.shadows().lodChanged();
+                    }
+                    const int ccx = int(camera.position.x) / 16;
+                    lightRenderer.renderShadows(
+                        target,
+                        [&](RenderTarget& t, const LightShadows::Face& face) {
+                            const auto& l = face.light;
+                            chunks.forEachReady([&](const ChunkCoord& coord,
+                                                    Chunk&) {
+                                if (!lod.drawsColumn(coord.x, coord.z) ||
+                                    std::abs(world.wrap().deltaChunk(coord.x,
+                                                                     ccx)) > 3)
+                                    return;
+                                auto* mesh = chunks.getMesh(coord);
+                                if (!mesh) return;
+                                const double wx =
+                                    l[0] +
+                                    world.wrap().deltaX(coord.x * 16.0 + 8,
+                                                        l[0]) -
+                                    8;
+                                const double lx = wx - l[0],
+                                             ly = coord.y * 16.0 - l[1],
+                                             lz = coord.z * 16.0 - l[2];
+                                if (!LightShadowMath::reaches(
+                                        lx, ly, lz, lx + 16, ly + 16, lz + 16,
+                                        face.radius))
+                                    return;
+                                t.drawShadowCaster(
+                                    mesh->get(), face.shader,
+                                    std::vector(face.chunkUniforms), false,
+                                    LightShadowMath::translation(lx, ly, lz),
+                                    face.view);
+                            });
+                            lod.submitShadowCasters(t, face, chunks, camera);
+                        },
+                        now);
+                    // renderShadows applied the game's order; the smoke
+                    // tool's glow view differs.
+                    applyOrder(RenderViews::MaxShadowViews);
+                }
                 if (walking) {
                     const int cx = int(camera.position.x) / 16,
                               cy = int(camera.position.y) / 16,
@@ -246,7 +337,8 @@ int main(int argc, char** argv) {
                                                               &blockEye};
                         if (lights) {
                             if (!volumes.bind(coord, uniforms, wx)) return;
-                            lightRenderer.appendUniforms(uniforms);
+                            lightRenderer.appendUniforms(
+                                uniforms, LightRenderer::Program::Block);
                         }
                         target.drawVertexBuffer(
                             mesh->get(), &blockShader, std::move(uniforms),
@@ -268,7 +360,7 @@ int main(int argc, char** argv) {
                 bgfx::setViewTransform(1, view, projection);
                 // NO_GLARE=1 renders without glare, for image diffs.
                 if (lights && !std::getenv("NO_GLARE"))
-                    lightRenderer.drawGlare(target, camera);
+                    lightRenderer.drawGlare(target, camera, {1280, 720});
                 skyCamera.setVec4({camera.yaw, camera.pitch, 1280.f / 720, 0});
                 skyCamera.bind();
                 bgfx::setVertexBuffer(0, sky.vbh);
@@ -293,15 +385,23 @@ int main(int argc, char** argv) {
                         bgfx::setIndexBuffer(mesh.ibh, 0, mesh.activeIndices);
                     }
                     for (auto* uniform : draw.uniforms) uniform->bind();
+                    if (draw.instances)
+                        bgfx::setInstanceDataBuffer(draw.instances);
                     const bool glow = draw.layer == DrawLayer::GAME_GLOW;
-                    bgfx::setState(glow ? BGFX_STATE_WRITE_RGB |
-                                              BGFX_STATE_DEPTH_TEST_LESS |
-                                              BGFX_STATE_BLEND_ADD
-                                        : BGFX_STATE_WRITE_RGB |
-                                              BGFX_STATE_WRITE_A |
-                                              BGFX_STATE_WRITE_Z |
-                                              BGFX_STATE_DEPTH_TEST_LESS);
-                    bgfx::submit(glow ? 1 : 0, assets.getProgram(*draw.shader));
+                    const bool shadow = draw.layer == DrawLayer::SHADOW;
+                    bgfx::setState(
+                        glow     ? BGFX_STATE_WRITE_RGB |
+                                       BGFX_STATE_DEPTH_TEST_LESS |
+                                       BGFX_STATE_BLEND_ADD
+                        : shadow ? BGFX_STATE_WRITE_R | BGFX_STATE_WRITE_Z |
+                                       BGFX_STATE_DEPTH_TEST_LESS
+                                 : BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
+                                       BGFX_STATE_WRITE_Z |
+                                       BGFX_STATE_DEPTH_TEST_LESS);
+                    bgfx::submit(glow     ? 1
+                                 : shadow ? draw.view
+                                          : 0,
+                                 assets.getProgram(*draw.shader));
                     ++draws;
                 }
                 // Keep frames bounded, while allowing background generators to
@@ -319,6 +419,9 @@ int main(int argc, char** argv) {
                 if (settled == 10 || frame + 1 == maxFrames || transition) {
                     if (transition) capturedTransition = true;
                     std::vector<uint8_t> pixels(1280 * 720 * 4);
+                    // Finish this frame first: the blit then runs alone and
+                    // sees every view of it, whatever the view order.
+                    bgfx::frame();
                     bgfx::blit(3, readback, 0, 0, color);
                     const auto readyFrame =
                         bgfx::readTexture(readback, pixels.data());
@@ -355,6 +458,80 @@ int main(int argc, char** argv) {
                         std::cout << "wrap_view=" << phase
                                   << " gap_pixels=" << gaps << '\n';
                         if (gaps) result = 1;
+                    }
+                    lastPixels = pixels;
+                    if (lights && (phase == 5 || phase == 1) &&
+                        std::getenv("SHADOW_DUMP")) {
+                        // Slot 0's six faces, log-scaled distance.
+                        const int w = LightShadowMath::Columns *
+                                      LightShadows::TileSize,
+                                  h = lightRenderer.shadows().atlasRows() *
+                                      LightShadows::TileSize;
+                        const auto back = bgfx::createTexture2D(
+                            uint16_t(w), uint16_t(h), false, 1,
+                            bgfx::TextureFormat::R32F,
+                            BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
+                        std::vector<float> texels(size_t(w) * h);
+                        bgfx::blit(
+                            3, back, 0, 0,
+                            lightRenderer.shadows().atlasTextureHandle());
+                        const auto ready =
+                            bgfx::readTexture(back, texels.data());
+                        auto f = bgfx::frame();
+                        while (f < ready) f = bgfx::frame();
+                        std::ofstream dump(
+                            output + "_shadow" + std::to_string(phase) + ".pgm",
+                            std::ios::binary);
+                        dump << "P5\n" << 6 * 256 << " 256\n255\n";
+                        for (int y = 0; y < 256; ++y)
+                            for (int face = 0; face < 6; ++face)
+                                for (int x = 0; x < 256; ++x) {
+                                    const float v =
+                                        texels[size_t(y * 2) * w +
+                                               face * LightShadows::TileSize +
+                                               x * 2];
+                                    const float d = std::max(v * 8000.f, 0.01f);
+                                    dump.put(char(std::clamp(
+                                        int(std::log2(d) * 18 + 40), 0, 255)));
+                                }
+                        {
+                            // The whole atlas as raw floats (distance /
+                            // radius), for offline analysis.
+                            std::ofstream raw(output + "_atlas" +
+                                                  std::to_string(phase) +
+                                                  ".f32",
+                                              std::ios::binary);
+                            raw.write(
+                                reinterpret_cast<const char*>(texels.data()),
+                                std::streamsize(texels.size() * sizeof(float)));
+                        }
+                        {
+                            // Face 0 at full resolution: far texels white.
+                            std::ofstream full(output + "_face0_" +
+                                                   std::to_string(phase) +
+                                                   ".pgm",
+                                               std::ios::binary);
+                            full << "P5\n512 512\n255\n";
+                            for (int y = 0; y < 512; ++y)
+                                for (int x = 0; x < 512; ++x)
+                                    full.put(char(
+                                        texels[size_t(y) * w + x] > 0.05f ? 255
+                                                                          : 0));
+                        }
+                        float lo = 1e9, hi = -1e9;
+                        for (int face = 0; face < 6; ++face)
+                            for (int y = 0; y < 512; ++y)
+                                for (int x = 0; x < 512; ++x) {
+                                    const float v =
+                                        texels[size_t(y) * w +
+                                               face * LightShadows::TileSize +
+                                               x];
+                                    lo = std::min(lo, v);
+                                    hi = std::max(hi, v);
+                                }
+                        std::cout << "shadow_tile_range=" << lo * 8000 << ".."
+                                  << hi * 8000 << '\n';
+                        bgfx::destroy(back);
                     }
                     image << "P6\n1280 720\n255\n";
                     for (int y = 0; y < 720; ++y)
@@ -433,31 +610,94 @@ int main(int argc, char** argv) {
                     camera.distance = .5f;
                 }
                 if (settled >= 10 && lights) {
+                    // Pixels differing from the baseline capture.
+                    auto changedPixels = [&] {
+                        size_t changed = 0;
+                        for (size_t i = 0; i < lastPixels.size(); i += 4)
+                            for (int c = 0; c < 3; ++c)
+                                if (std::abs(int(lastPixels[i + c]) -
+                                             int(boxBaseline[i + c])) > 6) {
+                                    ++changed;
+                                    break;
+                                }
+                        return changed;
+                    };
                     if (phase == 1) {
+                        // The brightest face neighbor: test_light.json may
+                        // be a spotlight pointing any way.
                         int lit = 0;
-                        for (const auto& p : lamps)
-                            if (const auto* t =
-                                    chunks.tileAt(p.x, p.y + 1, p.z))
-                                lit += t->lightLevel.artificial_light;
+                        for (const auto& p : lamps) {
+                            int best = 0;
+                            for (const auto& d :
+                                 {std::array{1, 0, 0}, std::array{-1, 0, 0},
+                                  std::array{0, 1, 0}, std::array{0, -1, 0},
+                                  std::array{0, 0, 1}, std::array{0, 0, -1}})
+                                if (const auto* t = chunks.tileAt(
+                                        p.x + d[0], p.y + d[1], p.z + d[2]))
+                                    best = std::max(
+                                        best,
+                                        int(t->lightLevel.artificial_light));
+                            lit += best;
+                        }
                         std::cout
                             << "lamps=" << lamps.size()
-                            << " light_above_lamps=" << lit
+                            << " lamp_neighbor_light=" << lit
                             << " far_lights=" << lightRenderer.lightCount()
                             << " glares=" << lightRenderer.glareCount() << '\n';
                         if (lamps.empty() || lit == 0 ||
                             lightRenderer.lightCount() == 0)
                             result = 1;
                     }
+                    if (phase == 1)
+                        std::cout
+                            << "glow_lights=" << lightRenderer.glowLights()
+                            << '\n';
+                    if (phase == 1 && lightRenderer.glowLights() < 40)
+                        result = 1;
                     if (phase == 2) {
                         std::cout << "far_glares=" << lightRenderer.glareCount()
                                   << " registry=" << registry.size() << '\n';
                         if (lightRenderer.glareCount() == 0) result = 1;
+                    }
+                    if (phase == 4 || phase == 6) boxBaseline = lastPixels;
+                    if (phase == 5) {
+                        // An 8 km light walled in by a hollow box: shadows
+                        // keep everything outside exactly as dark as without
+                        // it, and hide its glare.
+                        const size_t changed = changedPixels();
+                        std::cout
+                            << "boxed_light_changed_pixels=" << changed
+                            << " shadowed=" << lightRenderer.shadowedCount()
+                            << " shadow_faces="
+                            << lightRenderer.shadows().facesRendered() << '\n';
+                        if (changed > 200 || lightRenderer.shadowedCount() == 0)
+                            result = 1;
+                    }
+                    if (phase == 7) {
+                        // Control: without its walls the same light must
+                        // visibly light the scene.
+                        const size_t changed = changedPixels();
+                        std::cout << "open_light_changed_pixels=" << changed
+                                  << '\n';
+                        // Far beyond the 15-block voxel light: a light
+                        // shadowed by its own block changed ~59k pixels, the
+                        // working light ~277k.
+                        if (changed < 150000) result = 1;
                         break;
                     }
                     ++phase;
                     settled = 0;
                     const float fx = std::sin(camera.yaw),
                                 fz = std::cos(camera.yaw);
+                    auto expectApplied = [&](const auto& statuses) {
+                        for (const auto status : statuses)
+                            if (status != EditStatus::Applied &&
+                                status != EditStatus::Unchanged) {
+                                std::cerr << "lights: edit not applied\n";
+                                result = 1;
+                                return;
+                            }
+                    };
                     if (phase == 1) {
                         const auto& blocks = assets.getStorage<Block>();
                         const auto it =
@@ -468,19 +708,64 @@ int main(int argc, char** argv) {
                             break;
                         }
                         const uint8_t id = blocks.items[it->second].id;
+                        // SINGLE_LAMP=1: one lamp, so it is always shadowed.
+                        const bool single = std::getenv("SINGLE_LAMP");
                         for (int along : {-12, 0, 12})
                             for (int side : {-8, 8}) {
+                                if (single && (along != 0 || side != 8))
+                                    continue;
                                 const int x = int(camera.position.x +
                                                   fx * along + fz * side);
                                 const int z = int(camera.position.z +
                                                   fz * along - fx * side);
-                                const TilePos p{x, surface.height(x, z) + 1, z};
+                                const char* lift = std::getenv("LAMP_HEIGHT");
+                                const TilePos p{
+                                    x,
+                                    surface.height(x, z) + 1 +
+                                        (lift ? std::atoi(lift) : 0),
+                                    z};
                                 if (editor.placeBlock(p, id) ==
-                                    EditStatus::Applied)
+                                    EditStatus::Applied) {
                                     lamps.push_back(p);
+                                    // LAMP_BOX=1: wall the lamp in on five
+                                    // faces, open toward -z.
+                                    if (std::getenv("LAMP_BOX"))
+                                        for (const auto& d :
+                                             {std::array{1, 0, 0},
+                                              std::array{-1, 0, 0},
+                                              std::array{0, 1, 0},
+                                              std::array{0, -1, 0},
+                                              std::array{0, 0, 1},
+                                              // LAMP_BOX=2: closed.
+                                              std::string(std::getenv(
+                                                  "LAMP_BOX")) == "2"
+                                                  ? std::array{0, 0, -1}
+                                                  : std::array{0, 0, 1}})
+                                            editor.setBlock(
+                                                {p.x + d[0], p.y + d[1],
+                                                 p.z + d[2]},
+                                                1);
+                                }
                             }
                         lightRenderer.setSkyDarkness(.9f);
-                    } else {
+                        home = camera;
+                        // A "town": small warm entity lights beyond the voxel
+                        // range, shown by the distant glow map and glare.
+                        for (int i = 0; i < 40; ++i) {
+                            const int tx = int(camera.position.x + fx * 150 +
+                                               fz * ((i % 8) * 6 - 21));
+                            const int tz = int(camera.position.z + fz * 150 -
+                                               fx * ((i % 8) * 6 - 21)) +
+                                           (i / 8) * 6;
+                            LightSource torch;
+                            torch.owner = LightSource::Owner::Entity;
+                            torch.emission.radius = 12;
+                            torch.emission.color = {1.f, .7f, .4f};
+                            torch.position = {
+                                tx + .5, surface.height(tx, tz) + 2.5, tz + .5};
+                            registry.add(torch);
+                        }
+                    } else if (phase == 2) {
                         // High above, looking down at the lamps: their
                         // glare must show over the lit LOD terrain.
                         camera.position.x -= fx * 350;
@@ -490,6 +775,48 @@ int main(int argc, char** argv) {
                                            int(camera.position.z)) +
                             160;
                         camera.pitch = -.4f;
+                    } else if (phase == 3) {
+                        // Back home; its chunks reload before any edit.
+                        camera = home;
+                    } else if (phase == 4) {
+                        // Remove the lamps, build a hollow limestone box
+                        // (block 1) and capture it without a light.
+                        std::vector<EditRequest> edits;
+                        for (const auto& p : lamps)
+                            edits.push_back({p, EditMode::Replace, 0});
+                        const int x = int(home.position.x),
+                                  z = int(home.position.z);
+                        const int y = surface.height(x, z) + 1;
+                        for (int dy = 0; dy < 5; ++dy)
+                            for (int dz = -2; dz <= 2; ++dz)
+                                for (int dx = -2; dx <= 2; ++dx) {
+                                    const bool shell = std::abs(dx) == 2 ||
+                                                       std::abs(dz) == 2 ||
+                                                       dy == 0 || dy == 4;
+                                    edits.push_back({{x + dx, y + dy, z + dz},
+                                                     EditMode::Replace,
+                                                     uint8_t(shell ? 1 : 0)});
+                                }
+                        expectApplied(editor.apply(edits));
+                        boxLamp = {x, y + 2, z};
+                    } else if (phase == 5) {
+                        addBeacon();
+                    } else if (phase == 6) {
+                        // Remove the light, the walls and the roof (keep the
+                        // floor) and capture the open scene without it.
+                        registry.remove(beaconId);
+                        std::vector<EditRequest> open;
+                        for (int dy = 1; dy < 5; ++dy)
+                            for (int dz = -2; dz <= 2; ++dz)
+                                for (int dx = -2; dx <= 2; ++dx)
+                                    open.push_back(
+                                        {{boxLamp.x + dx, boxLamp.y - 2 + dy,
+                                          boxLamp.z + dz},
+                                         EditMode::Replace,
+                                         0});
+                        expectApplied(editor.apply(open));
+                    } else if (phase == 7) {
+                        addBeacon();
                     }
                 }
                 if (settled >= 10 && wrapScene) {

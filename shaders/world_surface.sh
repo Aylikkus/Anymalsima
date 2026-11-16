@@ -2,8 +2,10 @@
 // and the same light/fog response keep the two representations consistent.
 //
 // Including programs declare u_texture_array and u_normal_array (the normal
-// array uses the same layer index as the albedo array).
+// array uses the same layer index as the albedo array), u_shadow_atlas
+// (shadow_sampling.sh) and u_lod_light_map.
 uniform vec4 u_world_eye;
+#include "shadow_sampling.sh"
 
 // Light response: ambient + diffuse * N.L, both scaled by the light level.
 #define SURFACE_AMBIENT 0.6
@@ -60,15 +62,40 @@ vec3 surfaceNormal(vec3 position, vec3 normal, float layer)
 //   [1] rgb = color * intensity, w = falloff exponent
 //   [2] xyz = world forward, w = cos(outer angle), or -2 without a cone
 //   [3] x = cos(inner angle), y = 1 when the voxel near field covers the
-//       first SURFACE_NEAR_RANGE blocks (the term fades in over that band)
+//       first SURFACE_NEAR_RANGE blocks (the term fades in over that band),
+//       z = shadow slot in the atlas, or -1 without a shadow map
 #define SURFACE_MAX_FAR_LIGHTS 32
 #define SURFACE_NEAR_RANGE 15.0
 uniform vec4 u_lights[128];
 // x = far light count, y = sky darkening (0 = full daylight, 1 = no sky
 // light). Zero when unbound, so programs without lights stay sky-lit.
 uniform vec4 u_light_info;
+// Distant glow of small lights (LodLightMap): xy = world XZ of the map's
+// minimum corner, z = 1 / world extent, w = 1 when the map is valid.
+uniform vec4 u_lod_light_origin;
 
-vec3 surfaceFarLight(vec3 position, vec3 normal)
+// Small lights on distant terrain: rgb light from the coarse map, faded by
+// the height difference to the strongest light there (alpha).
+vec3 surfaceLodLight(vec3 position)
+{
+    if (u_lod_light_origin.w < 0.5) return vec3_splat(0.0);
+    vec2 uv = (position.xz - u_lod_light_origin.xy) * u_lod_light_origin.z;
+    if (any(lessThan(uv, vec2_splat(0.0))) || any(greaterThan(uv, vec2_splat(1.0))))
+        return vec3_splat(0.0);
+    vec4 texel = texture2DLod(u_lod_light_map, uv, 0.0);
+    float vertical = clamp(1.0 - abs(position.y - texel.a)
+                                     / SURFACE_NEAR_RANGE, 0.0, 1.0);
+    return texel.rgb * vertical;
+}
+
+// skyGate: how much sky the point sees. Lights without a shadow map use it
+// so caves stay dark; shadowed lights are occluded exactly instead.
+// nearField: 1 where the voxel light volume covers the first
+// SURFACE_NEAR_RANGE blocks (detailed chunks), so the far term fades in
+// beyond it; 0 on surfaces without voxel light (distant terrain, joins,
+// structures), which take the far term all the way to the light.
+vec3 surfaceFarLight(vec3 position, vec3 normal, vec3 geometric, float skyGate,
+                     float nearField)
 {
     vec3 sum = vec3_splat(0.0);
     int count = int(u_light_info.x + 0.5);
@@ -85,9 +112,15 @@ vec3 surfaceFarLight(vec3 position, vec3 normal)
         float strength = pow(max(1.0 - d / placement.w, 0.0), color.w);
         if (cone.w > -1.5)
             strength *= smoothstep(cone.w, extra.x, dot(-l, cone.xyz));
-        if (extra.y > 0.5)
+        if (extra.y > 0.5 && nearField > 0.5)
             strength *= smoothstep(SURFACE_NEAR_RANGE - 4.0,
                                    SURFACE_NEAR_RANGE, d);
+        if (strength <= 0.0) continue;
+        if (extra.z > -0.5)
+            strength *= shadowVisibility(extra.z, -toLight, geometric,
+                                         placement.w);
+        else
+            strength *= skyGate;
         float facing = SURFACE_AMBIENT
                      + SURFACE_DIFFUSE * max(dot(normal, l), 0.0);
         sum += color.rgb * (strength * facing);
@@ -110,7 +143,8 @@ vec3 surfaceLightTint(vec2 chroma)
 // blockTint colors the block light. Sky light comes from the sun direction.
 // Block light comes from blockDir (toward brighter space); blockDirStrength
 // fades that to non-directional where the light field is flat. far is
-// surfaceFarLight(), already scaled by how much sky the point sees.
+// surfaceFarLight() plus surfaceLodLight(). Block light saturates at 1 per
+// channel, like the voxel field, so near and far light hand over smoothly.
 vec3 surfaceLight(vec3 normal, vec3 albedo, vec2 light, vec3 blockTint,
                   vec3 blockDir, float blockDirStrength, vec3 far)
 {
@@ -121,7 +155,7 @@ vec3 surfaceLight(vec3 normal, vec3 albedo, vec2 light, vec3 blockTint,
     vec3 block = blockTint * (light.y
                               * (SURFACE_AMBIENT + SURFACE_DIFFUSE * toward))
                + far;
-    vec3 lit = max(vec3_splat(sky), block);
+    vec3 lit = max(vec3_splat(sky), min(block, vec3_splat(1.0)));
     return albedo * max(lit, vec3_splat(SURFACE_MIN_LIGHT));
 }
 vec3 surfaceFog(vec3 position, vec3 color)

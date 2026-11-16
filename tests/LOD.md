@@ -143,11 +143,21 @@ The seams scenario uses a 480-region landscape (x near 60000), builds a
 patterned wall full of greedy-mesh T-junctions in front of a magenta
 background and sweeps 12 oblique views; any magenta pixel inside the wall is a
 crack (`seam_pixels_total` must be 0). The lights scenario captures a day
-view, then places six `blocks.test_light` lamps and dims the sky (block light,
-far light and glare), then views them from 350 tiles away and high above (far
-light on distant terrain and glare). It fails without block light under the
-lamps, without far lights or without glare. `NO_GLARE=1` renders without glare,
-so captures can be diffed. llvmpipe did not show cracks even
+view; places six `blocks.test_light` lamps and a "town" of 40 small entity
+lights 150 tiles ahead and dims the sky (block light, far light, distant glow,
+glare); views them from 350 tiles away and high above; then, back home, builds
+a hollow stone box and puts an 8 km entity light inside, in an opaque block
+like a lamp. With its shadow map the capture must match the box without the
+light (`boxed_light_changed_pixels` at most 200), and the same light with the
+walls removed must change at least 150000 pixels (the control; a light
+shadowed by its own block changes about 59000). `SINGLE_LAMP=1` places one
+test lamp instead of six, so it is always within the shadow budget;
+`LAMP_HEIGHT=n` raises it n tiles; `LAMP_BOX=1` walls it in on five faces
+(open toward -z), `LAMP_BOX=2` on all six; `SMOKE_QUALITY=0..2` picks the
+shadow budget preset. With `SHADOW_DUMP=1` and `LAMP_BOX` the lamp's cube
+faces are dumped too, plus face 0 at full resolution (`<prefix>_face0_<phase>.pgm`,
+white = no caster within 5% of the radius). `NO_GLARE=1` renders without glare and
+`SHADOW_DUMP=1` writes the boxed light's six cube faces to `<prefix>_shadow.pgm`. llvmpipe did not show cracks even
 before the camera-relative fix, so in-game checks on real GPUs still matter. Cancel exits immediately with
 LOD jobs outstanding. Rendering submits
 the production command payloads through a minimal capture renderer; interactive

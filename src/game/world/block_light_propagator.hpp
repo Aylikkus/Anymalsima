@@ -107,6 +107,11 @@ class BlockLightPropagator {
         return (z * Chunk::SIZE_Y + y) * Chunk::SIZE_X + x;
     }
     static Result compute(Input input);
+    // Near field of a far light: direct line of sight from the emitter to
+    // every cell of the target chunk within `limit`.
+    template <typename Opacity, typename Contribute>
+    static void directLight(const Emitter& e, float limit,
+                            const Opacity& opacity, Contribute&& contribute);
     bool offset(ChunkCoord coord, int dx, int dy, int dz,
                 ChunkCoord& out) const;
     std::shared_ptr<const Inputs> scan(const ChunkCoord& coord);
@@ -119,7 +124,12 @@ class BlockLightPropagator {
     void ready(const ChunkCoord& coord);
     void removed(const ChunkCoord& coord);
     void entityChanged(const LightSource& source);
+    // Mirrors the chunk's emissive tiles into the registry.
     void reconcileRegistry(const ChunkCoord& coord, const Inputs& inputs);
+    // The chunk and its six face neighbors (their border emitters' faces).
+    void reconcileAround(const ChunkCoord& coord);
+    // LightSource::openFaces of the emitter at a chunk-local cell.
+    uint8_t openFaces(const ChunkCoord& coord, int x, int y, int z) const;
     Input snapshot(const ChunkCoord& coord);
     void collect();
     void publish(const ChunkCoord& coord,

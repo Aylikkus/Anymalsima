@@ -32,6 +32,7 @@ class ChunkMesher {
     // Every quad grows by this much on all four sides within its plane. The
     // overlap closes sub-pixel cracks where greedy quads meet in T-junctions
     // (and at wall/floor corners); coplanar overlap is invisible.
+    // shaders/light_shadow/light_shadow.frag relies on this value.
     static constexpr float SeamOverlap = 1.f / 512;
 
     // Vertex positions are chunk-local (0..16, plus SeamOverlap); draw with

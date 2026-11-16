@@ -10,11 +10,10 @@
         },
         "light": {
             "enabled": true,
-            "radius": 32,
-            "falloff": 1.5,
+            "radius": 13,
+            "falloff": 1.0,
             "intensity": 1.0,
-            "color": [1.0, 1.0, 1.0],
-            "cone": { "direction": [0,0,1], "inner_angle": 0, "outer_angle": 10 }
+            "color": [1.0, 1.0, 1.0]
         }
     }
 ]

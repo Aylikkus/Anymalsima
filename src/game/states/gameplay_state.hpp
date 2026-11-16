@@ -80,6 +80,13 @@ class GameplayState : public IGameState {
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     std::unique_ptr<LightRenderer> lightRenderer;
+    Signal<const ChunkCoord&>::Connection meshConnection;
+    Signal<const ChunkCoord&>::Connection removedConnection;
+    uint64_t shadowLodVersion = 0;
+    std::chrono::steady_clock::time_point started =
+        std::chrono::steady_clock::now();
+    // Shadow caster passes of the far lights due this frame.
+    void renderShadowCasters(RenderTarget& target, double now);
     UIContext* uiContext = nullptr;
     std::optional<Vec2u> focusRegion;
     ShaderProperty u_texture_array;

@@ -360,7 +360,7 @@ TEST(light_sources_rejects_corrupt) {
         BinaryWriter out;
         fill(out);
         SectionContainer container;
-        container.put("LITE", 1, out.take());
+        container.put("LITE", 2, out.take());
         return container.encode();
     };
     auto record = [](BinaryWriter& out, uint32_t x, uint16_t y, uint8_t b) {
@@ -368,6 +368,7 @@ TEST(light_sources_rejects_corrupt) {
         out.write(y);
         out.write(uint32_t(0));
         out.write(b);
+        out.write(uint8_t(0x3f));
     };
     const auto duplicate = section([&](BinaryWriter& out) {
         out.write(uint32_t(2));
@@ -391,4 +392,36 @@ TEST(light_sources_rejects_corrupt) {
         record(out, 1, 1, 0);
     });
     CHECK(throwsSerialization([&] { light_sources_codec::decode(noBlock); }));
+}
+
+TEST(light_sources_versions) {
+    using light_sources_codec::Record;
+    // v2 keeps the open faces.
+    const auto v2 = light_sources_codec::decode(
+        light_sources_codec::encode({{{7, 8, 9}, 6, 0x05}}));
+    EQUAL(int(v2.lights.at(0).openFaces), 5, "v2 faces");
+    // v1 files (far lights only, no faces) read as all faces open.
+    BinaryWriter out;
+    out.write(uint32_t(1));
+    out.write(uint32_t(7));
+    out.write(uint16_t(8));
+    out.write(uint32_t(9));
+    out.write(uint8_t(6));
+    SectionContainer container;
+    container.put("LITE", 1, out.take());
+    const auto v1 = light_sources_codec::decode(container.encode());
+    EQUAL(int(v1.lights.at(0).openFaces), 0x3f, "v1 faces open");
+    EQUAL(int(v1.lights.at(0).block), 6, "v1 block");
+    // Invalid face bits are rejected.
+    BinaryWriter bad;
+    bad.write(uint32_t(1));
+    bad.write(uint32_t(7));
+    bad.write(uint16_t(8));
+    bad.write(uint32_t(9));
+    bad.write(uint8_t(6));
+    bad.write(uint8_t(0x40));
+    SectionContainer badContainer;
+    badContainer.put("LITE", 2, bad.take());
+    const auto encoded = badContainer.encode();
+    CHECK(throwsSerialization([&] { light_sources_codec::decode(encoded); }));
 }

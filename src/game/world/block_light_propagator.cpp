@@ -125,10 +125,8 @@ bool BlockLightPropagator::entityLightsNear(const ChunkCoord& coord) const {
     if (!registry) return false;
     bool near = false;
     const auto wrap = chunks.wrap();
-    registry->forEach([&](LightSourceRegistry::Id, const LightSource& s) {
-        if (near || s.owner != LightSource::Owner::Entity ||
-            !s.emission.emits())
-            return;
+    registry->forEachEntity([&](LightSourceRegistry::Id, const LightSource& s) {
+        if (near || !s.emission.emits()) return;
         const double ox = coord.x * double(Chunk::SIZE_X);
         const double dx = wrap.deltaX(s.position[0], ox + 8) + 8;
         const double dy = s.position[1] - coord.y * double(Chunk::SIZE_Y);
@@ -189,12 +187,13 @@ void BlockLightPropagator::reconcileRegistry(const ChunkCoord& coord,
     std::unordered_set<TilePos> present;
     for (const auto& e : inputs.emitters) {
         const auto& emission = *emissions[e.block];
-        if (!emission.isFar()) continue;
-        const TilePos tile{origin.x + e.cell % Chunk::SIZE_X,
-                           origin.y + (e.cell / Chunk::SIZE_X) % Chunk::SIZE_Y,
-                           origin.z + e.cell / (Chunk::SIZE_X * Chunk::SIZE_Y)};
+        const int x = e.cell % Chunk::SIZE_X,
+                  y = (e.cell / Chunk::SIZE_X) % Chunk::SIZE_Y,
+                  z = e.cell / (Chunk::SIZE_X * Chunk::SIZE_Y);
+        const TilePos tile{origin.x + x, origin.y + y, origin.z + z};
         present.insert(tile);
-        registry->setBlockLight(tile, e.block, emission);
+        registry->setBlockLight(tile, e.block, emission,
+                                openFaces(coord, x, y, z));
     }
     const TilePos end{origin.x + Chunk::SIZE_X, origin.y + Chunk::SIZE_Y,
                       origin.z + Chunk::SIZE_Z};
@@ -202,10 +201,53 @@ void BlockLightPropagator::reconcileRegistry(const ChunkCoord& coord,
         if (!present.contains(tile)) registry->removeBlockLight(tile);
 }
 
+uint8_t BlockLightPropagator::openFaces(const ChunkCoord& coord, int x, int y,
+                                        int z) const {
+    constexpr int Steps[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                 {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    uint8_t mask = 0;
+    for (int i = 0; i < 6; ++i) {
+        int nx = x + Steps[i][0], ny = y + Steps[i][1], nz = z + Steps[i][2];
+        const int ox = nx < 0 ? -1 : nx >= Chunk::SIZE_X ? 1 : 0;
+        const int oy = ny < 0 ? -1 : ny >= Chunk::SIZE_Y ? 1 : 0;
+        const int oz = nz < 0 ? -1 : nz >= Chunk::SIZE_Z ? 1 : 0;
+        ChunkCoord n = coord;
+        if ((ox || oy || oz) && !offset(coord, ox, oy, oz, n)) continue;
+        const auto it = states.find(n);
+        // Not loaded: assume open until it arrives and reconciles.
+        if (it == states.end() || !it->second.inputs) {
+            mask |= uint8_t(1u << i);
+            continue;
+        }
+        const auto& inputs = *it->second.inputs;
+        nx -= ox * Chunk::SIZE_X;
+        ny -= oy * Chunk::SIZE_Y;
+        nz -= oz * Chunk::SIZE_Z;
+        const uint8_t opacity = inputs.opacity.empty()
+                                    ? inputs.uniform
+                                    : inputs.opacity[index(nx, ny, nz)];
+        if (opacity < 15) mask |= uint8_t(1u << i);
+    }
+    return mask;
+}
+
+void BlockLightPropagator::reconcileAround(const ChunkCoord& coord) {
+    // Border emitters of the face neighbors see this chunk's tiles too.
+    constexpr int Faces[7][3] = {{0, 0, 0},  {1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+                                 {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (const auto& f : Faces) {
+        ChunkCoord n;
+        if (!offset(coord, f[0], f[1], f[2], n)) continue;
+        const auto it = states.find(n);
+        if (it != states.end() && it->second.inputs)
+            reconcileRegistry(n, *it->second.inputs);
+    }
+}
+
 void BlockLightPropagator::ready(const ChunkCoord& coord) {
     auto& state = states[coord];
     state.inputs = scan(coord);
-    if (state.inputs) reconcileRegistry(coord, *state.inputs);
+    reconcileAround(coord);
     invalidateAround(coord, hasEmitters(coord));
 }
 
@@ -293,9 +335,9 @@ BlockLightPropagator::Input BlockLightPropagator::snapshot(
     if (registry) {
         const auto wrap = chunks.wrap();
         const double ox = coord.x * double(Chunk::SIZE_X);
-        registry->forEach([&](LightSourceRegistry::Id, const LightSource& s) {
-            if (s.owner != LightSource::Owner::Entity || !s.emission.emits())
-                return;
+        registry->forEachEntity([&](LightSourceRegistry::Id,
+                                    const LightSource& s) {
+            if (!s.emission.emits()) return;
             Emitter emitter;
             emitter.x = int(std::floor(wrap.deltaX(s.position[0], ox + 8) + 8));
             emitter.y =
@@ -313,6 +355,91 @@ BlockLightPropagator::Input BlockLightPropagator::snapshot(
         });
     }
     return input;
+}
+
+namespace {
+// Line of sight from the centre of the emitter cell to the centre of a
+// target cell through the opacity grid (Amanatides-Woo traversal). Returns
+// false when an opaque or unknown cell blocks it; otherwise adds the
+// translucent penalty (opacity - 1 per cell crossed, as the flood fill
+// charges) to `penalty`. Where the line passes exactly through an edge or a
+// corner it is blocked only if every cell around that crossing blocks, so
+// light does not leak through diagonal cracks of a wall but passes beside a
+// single block.
+template <typename Opacity>
+bool lineOfSight(int ex, int ey, int ez, int dx, int dy, int dz,
+                 const Opacity& opacity, int& penalty) {
+    const int target[3] = {ex + dx, ey + dy, ez + dz};
+    int cell[3] = {ex, ey, ez};
+    const int d[3] = {dx, dy, dz};
+    int step[3];
+    double tMax[3], tDelta[3];
+    for (int a = 0; a < 3; ++a) {
+        step[a] = d[a] > 0 ? 1 : (d[a] < 0 ? -1 : 0);
+        // From the cell centre, the first boundary is half a cell away.
+        tDelta[a] = d[a] ? 1.0 / std::abs(d[a]) : 1e30;
+        tMax[a] = d[a] ? 0.5 * tDelta[a] : 1e30;
+    }
+    while (true) {
+        const double t = std::min({tMax[0], tMax[1], tMax[2]});
+        if (t >= 1.0 - 1e-9) return true;  // reached the target cell
+        bool tied[3];
+        int ties = 0;
+        for (int a = 0; a < 3; ++a) {
+            tied[a] = std::abs(tMax[a] - t) < 1e-9;
+            ties += tied[a];
+        }
+        if (ties > 1) {
+            // Crossing an edge or a corner: blocked only when every cell the
+            // line grazes (one step along each tied axis) blocks.
+            bool all = true;
+            for (int a = 0; a < 3 && all; ++a) {
+                if (!tied[a]) continue;
+                int n[3] = {cell[0], cell[1], cell[2]};
+                n[a] += step[a];
+                all = opacity(n[0], n[1], n[2]) >= 15;
+            }
+            if (all) return false;
+        }
+        for (int a = 0; a < 3; ++a)
+            if (tied[a]) {
+                cell[a] += step[a];
+                tMax[a] += tDelta[a];
+            }
+        if (cell[0] == target[0] && cell[1] == target[1] &&
+            cell[2] == target[2])
+            return true;
+        const uint8_t o = opacity(cell[0], cell[1], cell[2]);
+        if (o >= 15) return false;
+        penalty += std::max(0, int(o) - 1);
+    }
+}
+}  // namespace
+
+template <typename Opacity, typename Contribute>
+void BlockLightPropagator::directLight(const Emitter& e, float limit,
+                                       const Opacity& opacity,
+                                       Contribute&& contribute) {
+    // Only cells of the target chunk are written.
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int y = 0; y < Chunk::SIZE_Y; ++y)
+            for (int x = 0; x < Chunk::SIZE_X; ++x) {
+                const int dx = x - e.x, dy = y - e.y, dz = z - e.z;
+                const float straight =
+                    std::sqrt(float(dx * dx + dy * dy + dz * dz));
+                if (straight >= limit) continue;
+                const bool origin = dx == 0 && dy == 0 && dz == 0;
+                // Opaque cells hold no light (LightVolume stores zero); a
+                // lamp block's own cell stays dark too.
+                if (opacity(x, y, z) >= 15) continue;
+                int penalty = 0;
+                if (!origin &&
+                    !lineOfSight(e.x, e.y, e.z, dx, dy, dz, opacity, penalty))
+                    continue;
+                const float d = straight + float(penalty);
+                if (d >= limit) continue;
+                contribute(dx, dy, dz, d, origin);
+            }
 }
 
 BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
@@ -334,6 +461,9 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
     const bool colored =
         std::any_of(input.emitters.begin(), input.emitters.end(),
                     [](const Emitter& e) { return !e.emission.isWhite(); });
+    // Light adds up across emitters, like the per-pixel far term, so the
+    // hand-over between the two never jumps.
+    std::vector<float> total(Cells, 0.f);
     std::vector<float> weight, co, cg;
     if (colored) {
         weight.assign(Cells, 0.f);
@@ -353,6 +483,32 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
         const auto& emission = e.emission;
         const float limit = std::min<float>(emission.radius, float(R));
         const bool far = emission.isFar();
+        // Adds this emitter's light at distance d to a target cell.
+        auto contribute = [&](int dx, int dy, int dz, float d, bool origin) {
+            float value = emission.attenuation(d);
+            if (emission.cone && !origin) {
+                const float len = std::sqrt(float(dx * dx + dy * dy + dz * dz));
+                value *= emission.coneFactor({dx / len, dy / len, dz / len},
+                                             e.forward);
+            }
+            // Far lights hand over to the per-pixel term (which fades in
+            // over the same band) at the near-field edge.
+            if (far) value *= 1.f - smoothstep(R - 4.f, float(R), d);
+            const int cell = index(e.x + dx, e.y + dy, e.z + dz);
+            total[cell] += value;
+            if (colored && value > 0) {
+                weight[cell] += value;
+                co[cell] += value * (e.chroma[0] - 128);
+                cg[cell] += value * (e.chroma[1] - 128);
+            }
+        };
+        if (far) {
+            // Far lights are direct light, like their shadow maps: a cell is
+            // lit when the straight line from the light reaches it, so the
+            // near field and the per-pixel term agree where they hand over.
+            directLight(e, limit, opacity, contribute);
+            continue;
+        }
         std::fill(cost.begin(), cost.end(), uint8_t(255));
         // Effective distance: straight line plus the path's excess over the
         // Manhattan distance (detours and translucent penalties). It never
@@ -380,27 +536,7 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
                 if ((!origin || own < 15) && x >= 0 && y >= 0 && z >= 0 &&
                     x < Chunk::SIZE_X && y < Chunk::SIZE_Y &&
                     z < Chunk::SIZE_Z) {
-                    const float d = effective(dx, dy, dz, k);
-                    float value = emission.attenuation(d);
-                    if (emission.cone && !origin) {
-                        const float len =
-                            std::sqrt(float(dx * dx + dy * dy + dz * dz));
-                        value *= emission.coneFactor(
-                            {dx / len, dy / len, dz / len}, e.forward);
-                    }
-                    // Far lights hand over to the per-pixel term (which
-                    // fades in over the same band) at the near-field edge.
-                    if (far) value *= 1.f - smoothstep(R - 4.f, float(R), d);
-                    const int level =
-                        std::clamp(int(std::lround(value * 15.f)), 0, 15);
-                    const int cell = index(x, y, z);
-                    if (level > result.light[cell])
-                        result.light[cell] = uint8_t(level);
-                    if (colored && level > 0) {
-                        weight[cell] += float(level);
-                        co[cell] += float(level) * (e.chroma[0] - 128);
-                        cg[cell] += float(level) * (e.chroma[1] - 128);
-                    }
+                    contribute(dx, dy, dz, effective(dx, dy, dz, k), origin);
                 }
                 // Opaque tiles receive light on their faces but pass none on.
                 if (!origin && own >= 15) continue;
@@ -408,6 +544,13 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
                 const int next = k + leave;
                 if (next > MaxCost) continue;
                 for (const auto& s : Steps) {
+                    // A spotlight leaves its tile only through faces of its
+                    // front hemisphere: one facing a wall lights nothing.
+                    if (origin && emission.cone &&
+                        s[0] * e.forward[0] + s[1] * e.forward[1] +
+                                s[2] * e.forward[2] <=
+                            1e-4f)
+                        continue;
                     const int nx = dx + s[0], ny = dy + s[1], nz = dz + s[2];
                     if (std::abs(nx) > R || std::abs(ny) > R ||
                         std::abs(nz) > R)
@@ -424,6 +567,10 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
             bucket.clear();
         }
     }
+
+    for (int i = 0; i < Cells; ++i)
+        result.light[i] =
+            uint8_t(std::clamp(int(std::lround(total[i] * 15.f)), 0, 15));
 
     if (colored) {
         bool any = false;
@@ -505,7 +652,7 @@ void BlockLightPropagator::update() {
         if (it == states.end()) continue;
         const bool had = hasEmitters(coord);
         it->second.inputs = scan(coord);
-        if (it->second.inputs) reconcileRegistry(coord, *it->second.inputs);
+        reconcileAround(coord);
         invalidateAround(coord, had || hasEmitters(coord));
     }
     rescans.clear();

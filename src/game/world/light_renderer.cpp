@@ -1,27 +1,44 @@
 #include "light_renderer.hpp"
 
+#include <bx/math.h>
+
 #include <algorithm>
 #include <cmath>
 
+#include "render/render_views.hpp"
 #include "render/vertex.hpp"
 
 namespace {
+// Sampler stages; keep in sync with block.frag, terrain_lod.frag and
+// light_glare.vert.
+constexpr uint8_t BlockAtlasStage = 3, BlockGlowStage = 4;
+constexpr uint8_t LodAtlasStage = 4, LodGlowStage = 5;
+constexpr uint8_t GlareAtlasStage = 0;
 // Glare fades in from here so it does not cover the lamp block up close.
 constexpr double GlareNear = 24;
 constexpr double GlareFull = 48;
-// Smallest glare on screen, in pixels, so distant lights stay visible.
+// Smallest glare on screen, in pixels, so distant lights stay visible; small
+// lights get smaller dots.
 constexpr double GlareMinPixels = 6;
+constexpr double SmallGlareMinPixels = 3;
 // World half size of the glare when the camera is close.
 constexpr double GlareWorldSize = 1.5;
+// The distant glow map is rebuilt at most this often.
+constexpr double GlowRebuildSeconds = 0.5;
+constexpr uint16_t InstanceStride = 48;
 }  // namespace
 
-LightRenderer::LightRenderer(IRenderer& renderer) {
+LightRenderer::LightRenderer(IRenderer& renderer, int quality)
+    : shadowMaps(std::make_unique<LightShadows>(quality)) {
     lights.initVec4Array("u_lights", MaxLights * 4);
     info.initVec4("u_light_info", {0, 0, 0, 0});
-    for (auto& glare : glares) {
-        glare.center.initVec4("u_glare_center", {0, 0, 0, 0});
-        glare.color.initVec4("u_glare_color", {0, 0, 0, 0});
-    }
+    glowOrigin.initVec4("u_lod_light_origin", {0, 0, 0, 0});
+    glowTexture =
+        bgfx::createTexture2D(LodLightMap::Size, LodLightMap::Size, false, 1,
+                              bgfx::TextureFormat::RGBA16F,
+                              BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
+    glowBlock.initTexture("u_lod_light_map", BlockGlowStage, glowTexture);
+    glowLod.initTexture("u_lod_light_map", LodGlowStage, glowTexture);
     // createStaticMesh references (does not copy) the data: keep it static.
     static const PosUvColorVertex vertices[4] = {{-1, -1, 0, 0, 0, 0xffffffff},
                                                  {1, -1, 0, 1, 0, 0xffffffff},
@@ -32,12 +49,51 @@ LightRenderer::LightRenderer(IRenderer& renderer) {
     quad.initStatic(&renderer, vertices, 4, indices, 12);
 }
 
-void LightRenderer::update(const LightSourceRegistry& registry,
-                           const Camera& camera, WorldWrap wrap,
-                           Vec2 viewport) {
+LightRenderer::~LightRenderer() {
+    // bgfx defers destruction until frames referencing it finish.
+    if (bgfx::isValid(glowTexture)) bgfx::destroy(glowTexture);
+}
+
+void LightRenderer::update(const LightSourceRegistry& sources,
+                           const Camera& camera, WorldWrap worldWrap,
+                           double now) {
+    registry = &sources;
+    wrap = worldWrap;
     const Vec3 eye = camera.eye();
-    const auto visible = visibleFarLights(registry, {eye.x, eye.y, eye.z},
-                                          camera.viewDistance, wrap.tiles);
+    visible = visibleFarLights(sources, {eye.x, eye.y, eye.z},
+                               camera.viewDistance, wrap.tiles);
+    shadowMaps->assign(visible);
+    if (glow.stale(camera.position.x, camera.position.z, sources.version()) &&
+        now - lastGlowBuild >= GlowRebuildSeconds) {
+        glow.build(sources, camera.position.x, camera.position.z, wrap.tiles);
+        uploadGlow();
+        lastGlowBuild = now;
+    }
+    fillLightUniforms();
+}
+
+void LightRenderer::uploadGlow() {
+    const auto& texels = glow.texels();
+    const bgfx::Memory* memory =
+        bgfx::alloc(uint32_t(texels.size() * sizeof(uint16_t)));
+    auto* half = reinterpret_cast<uint16_t*>(memory->data);
+    for (size_t i = 0; i < texels.size(); ++i)
+        half[i] = bx::halfFromFloat(std::min(texels[i], 60000.f));
+    bgfx::updateTexture2D(glowTexture, 0, 0, 0, 0, LodLightMap::Size,
+                          LodLightMap::Size, memory);
+    glowOrigin.setVec4({float(glow.originX()), float(glow.originZ()),
+                        1.f / LodLightMap::Extent, 1});
+}
+
+void LightRenderer::renderShadows(RenderTarget& target,
+                                  const LightShadows::Casters& casters,
+                                  double now) {
+    shadowMaps->render(target, casters, now);
+    RenderViews::applyOrder(RenderViews::MaxShadowViews);
+    fillLightUniforms();
+}
+
+void LightRenderer::fillLightUniforms() {
     std::array<float, MaxLights * 16> data{};
     activeLights = std::min<int>(MaxLights, int(visible.size()));
     for (int i = 0; i < activeLights; ++i) {
@@ -67,58 +123,108 @@ void LightRenderer::update(const LightSourceRegistry& registry,
         // Every far light also has a flood-filled near field (tiles and
         // entity lights alike), so the per-pixel term hands over from it.
         v[13] = 1;
+        v[14] = float(shadowMaps->slot(view.id));
     }
     lights.setVec4Array(data.data(), MaxLights * 4);
     info.setVec4({float(activeLights), skyDarkness, 0, 0});
+}
 
-    // Glare: nearest first.
-    std::vector<const FarLightView*> glaring;
-    for (const auto& view : visible)
-        if (view.distance > GlareNear && view.distance < camera.viewDistance)
-            glaring.push_back(&view);
-    std::sort(glaring.begin(), glaring.end(),
-              [](auto* a, auto* b) { return a->distance < b->distance; });
-    activeGlares = std::min<int>(MaxGlares, int(glaring.size()));
+void LightRenderer::appendUniforms(std::vector<ShaderProperty*>& uniforms,
+                                   Program program) {
+    const bool block = program == Program::Block;
+    uniforms.push_back(&lights);
+    uniforms.push_back(&info);
+    uniforms.push_back(&glowOrigin);
+    uniforms.push_back(shadowMaps->info());
+    uniforms.push_back(
+        shadowMaps->atlas(block ? BlockAtlasStage : LodAtlasStage));
+    uniforms.push_back(block ? &glowBlock : &glowLod);
+}
+
+void LightRenderer::drawGlare(RenderTarget& target, const Camera& camera,
+                              Vec2 viewport) {
+    activeGlares = 0;
+    if (!registry) return;
+    const Vec3 eye = camera.eye();
+    struct Candidate {
+        const LightSource* source;
+        LightSourceRegistry::Id id;
+        std::array<double, 3> position;
+        double distance;
+    };
+    std::vector<Candidate> candidates;
+    registry->forEachNear(
+        eye.x, eye.z, camera.viewDistance, wrap.tiles,
+        [&](LightSourceRegistry::Id id, const LightSource& s) {
+            if (!s.emission.emits() || s.sealed()) return;
+            std::array<double, 3> p = s.position;
+            p[0] = eye.x + wrap.deltaX(p[0], eye.x);
+            const double dx = p[0] - eye.x, dy = p[1] - eye.y,
+                         dz = p[2] - eye.z;
+            const double d = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (d <= GlareNear || d >= camera.viewDistance) return;
+            candidates.push_back({&s, id, p, d});
+        });
+    if (candidates.size() > size_t(MaxGlares)) {
+        std::nth_element(candidates.begin(), candidates.begin() + MaxGlares,
+                         candidates.end(), [](const auto& a, const auto& b) {
+                             return a.distance < b.distance;
+                         });
+        candidates.resize(MaxGlares);
+    }
+    const uint32_t count = bgfx::getAvailInstanceDataBuffer(
+        uint32_t(candidates.size()), InstanceStride);
+    if (count == 0) return;
+    bgfx::allocInstanceDataBuffer(&instances, count, InstanceStride);
     const double pixelWorld =
         2 * std::tan(30.0 * 3.14159265 / 180.0) / std::max(1.f, viewport.y);
-    for (int i = 0; i < activeGlares; ++i) {
-        const auto& view = *glaring[i];
-        const auto& e = view.source->emission;
-        double rel[3] = {view.position[0] - eye.x, view.position[1] - eye.y,
-                         view.position[2] - eye.z};
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& c = candidates[i];
+        const auto& e = c.source->emission;
+        double rel[3] = {c.position[0] - eye.x, c.position[1] - eye.y,
+                         c.position[2] - eye.z};
         // Pull toward the eye so the lamp's own block never hides it.
-        const double pull =
-            std::min(view.distance * 0.5, 1.5 + view.distance * 0.01);
-        for (auto& c : rel) c *= 1 - pull / view.distance;
-        const double size = std::max(
-            GlareWorldSize, GlareMinPixels * pixelWorld * view.distance);
-        glares[i].center.setVec4(
-            {float(rel[0]), float(rel[1]), float(rel[2]), float(size)});
+        const double pull = std::min(c.distance * 0.5, 1.5 + c.distance * 0.01);
+        for (auto& v : rel) v *= 1 - pull / c.distance;
+        const bool far = e.isFar();
+        const double minPixels =
+            far ? GlareMinPixels
+                : std::clamp(SmallGlareMinPixels *
+                                 std::sqrt(e.radius / LightEmission::NearRange),
+                             2.0, GlareMinPixels);
+        const double size =
+            std::max(far ? GlareWorldSize : GlareWorldSize * 0.5,
+                     minPixels * pixelWorld * c.distance);
         const double fade = std::clamp(
-            (view.distance - GlareNear) / (GlareFull - GlareNear), 0.0, 1.0);
+            (c.distance - GlareNear) / (GlareFull - GlareNear), 0.0, 1.0);
         // Spotlights glare only when the eye is inside their cone.
         float cone = 1;
         if (e.cone) {
-            const float len = float(view.distance);
+            const float len = float(c.distance);
             cone = e.coneFactor({float(-rel[0]) / len, float(-rel[1]) / len,
                                  float(-rel[2]) / len},
-                                view.source->direction);
+                                c.source->direction);
         }
         const float k = float(fade) * e.intensity * cone;
-
-        glares[i].color.setVec4(
-            {e.color[0] * k, e.color[1] * k, e.color[2] * k, 0});
+        const int slot = far ? shadowMaps->slot(c.id) : -1;
+        float* v =
+            reinterpret_cast<float*>(instances.data + i * InstanceStride);
+        v[0] = float(rel[0]);
+        v[1] = float(rel[1]);
+        v[2] = float(rel[2]);
+        v[3] = float(size);
+        v[4] = e.color[0] * k;
+        v[5] = e.color[1] * k;
+        v[6] = e.color[2] * k;
+        v[7] = 0;
+        v[8] = float(slot);
+        v[9] = e.radius;
+        v[10] = float(pull);
+        v[11] = 0;
     }
-}
-
-void LightRenderer::appendUniforms(std::vector<ShaderProperty*>& uniforms) {
-    uniforms.push_back(&lights);
-    uniforms.push_back(&info);
-}
-
-void LightRenderer::drawGlare(RenderTarget& target, const Camera& camera) {
-    for (int i = 0; i < activeGlares; ++i)
-        target.drawVertexBuffer(
-            quad.get(), &shader, {&glares[i].center, &glares[i].color}, true,
-            relativeTransform(camera, 0, 0, 0), DrawLayer::GAME_GLOW);
+    activeGlares = int(count);
+    target.drawInstanced(
+        quad.get(), &shader,
+        {shadowMaps->info(), shadowMaps->atlas(GlareAtlasStage)}, true,
+        relativeTransform(camera, 0, 0, 0), DrawLayer::GAME_GLOW, &instances);
 }

@@ -9,6 +9,9 @@ SAMPLER2DARRAY(u_normal_array, 1);
 SAMPLER3D(u_light_volume, 2);
 uniform vec4 u_light_chunk;  // w = 0: no volume, use full sky light
 uniform vec4 u_light_slot;   // xyz = slot base texel inside the page
+// LightShadows atlas and LodLightMap (LightRenderer).
+SAMPLER2D(u_shadow_atlas, 3);
+SAMPLER2D(u_lod_light_map, 4);
 #include "../world_surface.sh"
 
 // 1 / (144, 144, 72): LightVolumeManager::PageX/PageY/PageZ.
@@ -63,9 +66,11 @@ void main()
         blockDirStrength = clamp(slope * 15.0, 0.0, 1.0);
         blockDir = slope > 0.0001 ? grad / slope : geometric;
     }
-    // Far lights are not occluded by voxels; sky exposure keeps them out
-    // of caves and enclosed rooms.
-    vec3 far = surfaceFarLight(v_position, normal) * light.x;
+    vec3 far = surfaceFarLight(v_position, normal, geometric, light.x,
+                               u_light_chunk.w);
+    // Without a volume (distant joins and structures) small lights come
+    // from the coarse distant glow map.
+    if (u_light_chunk.w < 0.5) far += surfaceLodLight(v_position);
     color = surfaceLight(normal, color * v_color0.rgb, light, tint, blockDir,
                          blockDirStrength, far);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);

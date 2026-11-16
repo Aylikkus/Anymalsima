@@ -11,6 +11,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/block_light_propagator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_sources.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/lod_light_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/world_editor.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edits.cpp
@@ -58,6 +59,7 @@ add_executable(world_logic_tests
     integration/region_persistence_tests.cpp
     integration/block_light_tests.cpp
     unit/game/items/light_emission_tests.cpp
+    unit/game/world/light_shadow_tests.cpp
     unit/engine/serialization/binary_stream_tests.cpp
     unit/game/world/save_codec_tests.cpp
 )
@@ -172,6 +174,12 @@ set(block_light_cases
     block_light_spotlight block_light_far_registry
     block_light_far_registry_removed_with_block block_light_entity_source
     block_light_wraps_x far_light_selection
+    block_light_additive block_light_spot_into_wall
+    block_light_sealed_registry block_light_spot_sealed_by_front
+    block_light_open_faces_neighbor_arrives light_registry_buckets
+    shadow_face_mapping shadow_tile_layout shadow_reachable_faces
+    shadow_guard_band
+    lod_light_map_splat lod_light_map_wraps block_light_far_spreads_directly
 )
 foreach(case IN LISTS block_light_cases)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
@@ -216,7 +224,8 @@ foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
              region_file_roundtrip world_seed_derivation world_map_roundtrip
              save_catalog_slots region_index_covers_world_height
              terrain_edits_roundtrip terrain_edits_rejects_corrupt
-             light_sources_roundtrip light_sources_rejects_corrupt)
+             light_sources_roundtrip light_sources_rejects_corrupt
+             light_sources_versions)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "unit;gameplay;save" TIMEOUT 10)

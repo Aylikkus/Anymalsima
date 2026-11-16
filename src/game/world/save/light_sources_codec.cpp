@@ -8,7 +8,7 @@
 
 namespace light_sources_codec {
 namespace {
-constexpr uint16_t LightSectionVersion = 1;
+constexpr uint16_t LightSectionVersion = 2;
 constexpr uint32_t MaxLights = 1u << 22;
 }  // namespace
 
@@ -25,6 +25,7 @@ Bytes encode(std::vector<Record> lights, const SectionContainer& extra) {
         out.write(uint16_t(light.tile.y));
         out.write(uint32_t(light.tile.z));
         out.write(light.block);
+        out.write(light.openFaces);
     }
     SectionContainer container = extra;
     container.put("LITE", LightSectionVersion, out.take());
@@ -35,7 +36,8 @@ File decode(ByteView bytes) {
     File file;
     file.extra = SectionContainer::decode(bytes);
     if (const auto* section = file.extra.find("LITE")) {
-        if (section->version != LightSectionVersion)
+        const auto version = section->version;
+        if (version != 1 && version != LightSectionVersion)
             throw SerializationError("unsupported LITE version");
         BinaryReader in(section->data);
         const auto count = in.read<uint32_t>();
@@ -48,6 +50,11 @@ File decode(ByteView bytes) {
             const auto y = in.read<uint16_t>();
             const auto z = in.read<uint32_t>();
             record.block = in.read<uint8_t>();
+            if (version >= 2) {
+                record.openFaces = in.read<uint8_t>();
+                if (record.openFaces > 0x3f)
+                    throw SerializationError("bad light faces");
+            }
             if (x > uint32_t(INT32_MAX) || z > uint32_t(INT32_MAX) ||
                 y >= WORLD_HEIGHT_Y)
                 throw SerializationError("light position out of range");

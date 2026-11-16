@@ -63,6 +63,8 @@ class ChunkManager {
     // Tile light or opacity of a Ready chunk changed. Geometry may be
     // unchanged; listeners refresh light volumes around the chunk.
     Signal<const ChunkCoord&> lightChanged;
+    // A chunk's drawn geometry changed (new mesh uploaded, or emptied).
+    Signal<const ChunkCoord&> meshUploaded;
     void setFocus(Vec3 value) { focus = value; }
     // X wrapping of the world this manager streams (disabled without a map).
     WorldWrap wrap() const { return terrainWorld.wrap(); }
@@ -124,6 +126,7 @@ class ChunkManager {
                 handle.mesh.release();
                 handle.initialised = false;
                 meshed.erase(result.coord);
+                meshUploaded.emit(result.coord);
                 continue;
             }
             if (!handle.initialised) {
@@ -135,6 +138,7 @@ class ChunkManager {
                                handle.indices.data(), handle.indices.size(),
                                true);
             meshed.insert(result.coord);
+            meshUploaded.emit(result.coord);
         }
         readyMeshes.clear();
     }

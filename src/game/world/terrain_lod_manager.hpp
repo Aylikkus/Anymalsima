@@ -8,6 +8,7 @@
 
 #include "chunk_manager.hpp"
 #include "detail_coverage.hpp"
+#include "light_shadows.hpp"
 #include "lod_cover.hpp"
 #include "render/render_target.hpp"
 #include "structure_lod.hpp"
@@ -30,11 +31,22 @@ class TerrainLodManager {
     void update(const Camera& camera, Vec2 viewport);
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
                 const Camera& camera, Vec2 viewport);
-    // Uniforms appended to every distant terrain draw (far lights). They
+    // Uniforms appended to every distant terrain draw (lights): patches use
+    // the terrain_lod program, joins and structures the block program. They
     // must outlive the manager's draws.
-    void setExtraUniforms(std::vector<ShaderProperty*> uniforms) {
-        extraUniforms = std::move(uniforms);
+    void setExtraUniforms(std::vector<ShaderProperty*> patchUniforms,
+                          std::vector<ShaderProperty*> blockUniforms) {
+        extraUniforms = std::move(patchUniforms);
+        extraBlockUniforms = std::move(blockUniforms);
     }
+    // Increments whenever the drawn distant geometry changes (patch
+    // selection, joins, structure meshes); shadow maps refresh on it.
+    uint64_t drawnVersion() const { return drawnRevision; }
+    // Shadow caster pass of one light cube face: the patches, joins and
+    // structure slabs drawn last frame that reach into the face.
+    void submitShadowCasters(RenderTarget& target,
+                             const LightShadows::Face& face,
+                             ChunkManager& chunks, const Camera& camera);
     bool drawsColumn(unsigned x, unsigned z) const;
     size_t residentBytes() const {
         return resident + (joinsInitialised ? JoinBudget : 0) +
@@ -168,4 +180,8 @@ class TerrainLodManager {
     ShaderProperty joinLightVolume, joinLightChunk, joinLightSlot;
     std::string shader = "terrain_lod";
     std::vector<ShaderProperty*> extraUniforms;
+    std::vector<ShaderProperty*> extraBlockUniforms;
+    uint64_t drawnRevision = 0;
+    // u_detail_map at the light_shadow program's stage.
+    ShaderProperty shadowDetail;
 };

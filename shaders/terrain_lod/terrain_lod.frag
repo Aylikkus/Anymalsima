@@ -5,6 +5,9 @@ SAMPLER2DARRAY(u_texture_array, 0);
 SAMPLER2D(u_surface_map, 1);
 SAMPLER2D(u_detail_map, 2);
 SAMPLER2DARRAY(u_normal_array, 3);
+// LightShadows atlas and LodLightMap (LightRenderer).
+SAMPLER2D(u_shadow_atlas, 4);
+SAMPLER2D(u_lod_light_map, 5);
 uniform vec4 u_lod_patch;
 uniform vec4 u_detail_origin;
 #include "../world_surface.sh"
@@ -36,8 +39,11 @@ void main()
         color = surfaceTexture(v_position, normal, layer).rgb;
         surface = surfaceNormal(v_position, normal, layer);
     }
-    // Distant terrain is fully sky-lit; only far lights add block light.
+    // Distant terrain is fully sky-lit; far lights and the distant glow of
+    // small lights add block light.
+    vec3 far = surfaceFarLight(v_position, surface, normal, 1.0, 0.0)
+             + surfaceLodLight(v_position);
     color = surfaceLight(surface, color, vec2(1.0, 0.0), vec3_splat(1.0),
-                         normal, 0.0, surfaceFarLight(v_position, surface));
+                         normal, 0.0, far);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

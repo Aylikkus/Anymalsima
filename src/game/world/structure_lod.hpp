@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "chunk_mesher.hpp"
+#include "light_shadow_math.hpp"
 #include "render/frustrum.hpp"
 #include "render/render_target.hpp"
 #include "render/ui_context.hpp"
@@ -59,6 +60,36 @@ class StructureLod {
             target.drawVertexBuffer(proxy->mesh.get(), shader, std::move(bound),
                                     false, std::move(transform),
                                     DrawLayer::GAME);
+        }
+    }
+    // Shadow caster pass of one light cube face (LightShadows): slabs inside
+    // the light's sphere and the face frustum (light-relative coordinates).
+    template <typename Hidden>
+    void drawShadow(RenderTarget& target, const Frustum& frustum,
+                    const std::array<double, 3>& light, float radius,
+                    const std::string* shader,
+                    const std::vector<ShaderProperty*>& uniforms, uint16_t view,
+                    Hidden&& hidden) {
+        for (auto& [coord, proxy] : proxies) {
+            if (!proxy->drawable || !proxy->hasMesh || hidden(coord)) continue;
+            const double x = drawX(coord.x, float(light[0]));
+            const double y = double(coord.y) * Chunk::SIZE_Y;
+            const double z = double(coord.z) * Chunk::SIZE_Z;
+            const auto& b = proxy->bounds;
+            const double lx = x - light[0], ly = b.minY - light[1],
+                         lz = b.minZ - light[2];
+            const double hx = lx + (b.maxX - b.minX), hy = b.maxY - light[1],
+                         hz = b.maxZ - light[2];
+            if (!LightShadowMath::reaches(lx, ly, lz, hx, hy, hz, radius))
+                continue;
+            if (!frustum.intersects(AABB{float(lx), float(ly), float(lz),
+                                         float(hx), float(hy), float(hz)}))
+                continue;
+            target.drawShadowCaster(
+                proxy->mesh.get(), shader, std::vector(uniforms), false,
+                LightShadowMath::translation(x - light[0], y - light[1],
+                                             z - light[2]),
+                view);
         }
     }
     size_t residentBytes() const { return resident; }

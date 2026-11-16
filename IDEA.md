@@ -153,6 +153,12 @@ Controlled characters have a vision radius. Unseen territory is hidden or dimmed
 
 Travel and relocation require carrying people, possessions, and supplies. Existing settlements and distant actors must retain continuity when their detailed regions unload. Exact map transitions, continuous travel boundaries, and information shared between separated companions remain open.
 
+### Light, night, and great beacons
+
+Light is part of how places are read from afar. Torches and lamps are common: a town at night shows as a cluster of warm points and a soft glow across the land. Lighthouses with roughly kilometre-long reach belong to large cities and important territories, and guide travel across the sea.
+
+Kilometre-scale beacons and light-emitting megastructures are very rare achievements rather than something the player places freely. They are expensive to sustain in lore and to simulate (each one needs its own shadow maps), so their number near any territory stays small. A world rule may enforce that, for example celestial laws that punish a territory for gathering too many great lights.
+
 ### People, agency, and ownership
 
 People have needs, personalities, relationships, knowledge, possessions, and progression. They should remain actors with interests even when the player employs, governs, or travels with them.
@@ -254,6 +260,7 @@ Decide these when their first prototype requires an answer:
 - **Society and awakening:** how sapience develops into language, education, institutions, and recognition by other societies. Individual awakening need not instantly produce a functioning civilization.
 - **World form:** continuous versus linked local regions, how the fox-origin sequence is presented, technological range, and how far generated history must go initially.
 - **Vertical layers:** names for the celestial and underworld layers; the lore reason building fails above Y 1024; how the 1024–2048 gap is crossed and when in progression; how the underworld is entered; whether either layer has its own species, resources, or history; and whether layer connections occur everywhere or only at specific sites.
+- **Great lights:** how kilometre-scale beacons are obtained and maintained, and whether a lore rule (such as celestial laws against gathering too many great lights in one territory) limits them.
 - **Presentation:** final camera and art style; the original 2D readability goal must be reconciled with the current 3D voxel renderer.
 - **Performance targets:** minimum hardware and representative simulation workloads.
 

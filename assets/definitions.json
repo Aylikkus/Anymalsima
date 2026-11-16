@@ -140,6 +140,7 @@
     "block": "assets/shaders/block",
     "color": "assets/shaders/color",
     "light_glare": "assets/shaders/light_glare",
+    "light_shadow": "assets/shaders/light_shadow",
     "map_preview": "assets/shaders/map_preview",
     "river_preview": "assets/shaders/river_preview",
     "sprite": "assets/shaders/sprite",

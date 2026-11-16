@@ -64,6 +64,7 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
         throw std::runtime_error(
             "Cannot create terrain detail coverage texture");
     detailUniform.initTexture("u_detail_map", 2, detailMap);
+    shadowDetail.initTexture("u_detail_map", 0, detailMap);
     detailOrigin.initVec4("u_detail_origin", {0, 0, DetailSize * 16, 0});
     fogUniform.initVec4("u_world_eye", {0, 0, 0, quality.viewDistance});
     patchNormals.initTexture("u_normal_array", 3,
@@ -449,6 +450,7 @@ void TerrainLodManager::editChanged(uint64_t column) {
 }
 
 void TerrainLodManager::selectDrawn() {
+    const auto previous = drawn;
     drawn.clear();
     const TerrainLod::Cover cover(
         splitSet, [&](const auto& p) { return inView(p); },
@@ -456,6 +458,7 @@ void TerrainLodManager::selectDrawn() {
         [&](const auto& p) { return drawableBelow.contains(p); });
     for (const auto& root : roots) cover.select(root, drawn);
     for (const auto& p : drawn) entries.at(p)->lastDrawn = frame;
+    if (drawn != previous) ++drawnRevision;
 }
 
 bool TerrainLodManager::drawsColumn(unsigned x, unsigned z) const {
@@ -596,6 +599,7 @@ void TerrainLodManager::uploadJoins(IRenderer& renderer) {
         detailJoins.update(mesh.vertices.data(), mesh.vertices.size(),
                            mesh.indices.data(), mesh.indices.size(), true);
     uploaded += mesh.bytes();
+    ++drawnRevision;
     joinedLayout = std::move(layout);
     joinedCoverageVersion = detailCoverage.version();
 }
@@ -606,11 +610,16 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     updateCoverage(chunks, camera);
     upload(renderer);
     uploadReplacements(renderer);
-    if (structures)
-        uploaded +=
+    // New or rebuilt meshes change what casts shadows.
+    if (uploaded) ++drawnRevision;
+    if (structures) {
+        const size_t bytes =
             structures->upload(renderer, quality.uploadBudget > uploaded
                                              ? quality.uploadBudget - uploaded
                                              : 0);
+        uploaded += bytes;
+        if (bytes) ++drawnRevision;
+    }
     selectDrawn();
     uploadJoins(renderer);
     uploadCoverage();
@@ -652,8 +661,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         std::vector<ShaderProperty*> uniforms{&textureArray,  &joinNormals,
                                               &fogUniform,    &joinLightChunk,
                                               &joinLightSlot, &joinLightVolume};
-        uniforms.insert(uniforms.end(), extraUniforms.begin(),
-                        extraUniforms.end());
+        uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
+                        extraBlockUniforms.end());
         target.drawVertexBuffer(detailJoins.get(), &joinShader,
                                 std::move(uniforms), false,
                                 std::move(transform), DrawLayer::GAME);
@@ -668,8 +677,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         std::vector<ShaderProperty*> uniforms{&textureArray,  &joinNormals,
                                               &fogUniform,    &joinLightChunk,
                                               &joinLightSlot, &joinLightVolume};
-        uniforms.insert(uniforms.end(), extraUniforms.begin(),
-                        extraUniforms.end());
+        uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
+                        extraBlockUniforms.end());
         structures->draw(
             target, frustum, camera, &joinShader, std::move(uniforms),
             [&](const ChunkCoord& c) {
@@ -683,6 +692,59 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     }
     ++frame;
 }
+void TerrainLodManager::submitShadowCasters(RenderTarget& target,
+                                            const LightShadows::Face& face,
+                                            ChunkManager& chunks,
+                                            const Camera& camera) {
+    const auto& l = face.light;
+    std::vector<ShaderProperty*> lodUniforms = face.lodUniforms;
+    lodUniforms.push_back(&shadowDetail);
+    lodUniforms.push_back(&detailOrigin);
+    for (const auto& p : drawn) {
+        auto& entry = *entries.at(p);
+        // Patch vertices are absolute world positions: shift the patch to
+        // its copy nearest the light, then place it relative to the light.
+        const double shift = patchShift(p, float(l[0]), periodX);
+        const auto& b = entry.bounds;
+        const double lx = b.minX + shift - l[0], ly = b.minY - l[1],
+                     lz = b.minZ - l[2];
+        const double hx = b.maxX + shift - l[0], hy = b.maxY - l[1],
+                     hz = b.maxZ - l[2];
+        if (!LightShadowMath::reaches(lx, ly, lz, hx, hy, hz, face.radius) ||
+            !face.frustum.intersects(AABB{float(lx), float(ly), float(lz),
+                                          float(hx), float(hy), float(hz)}))
+            continue;
+        auto uniforms = lodUniforms;
+        uniforms.push_back(&entry.patchUniform);  // w = spacing
+        target.drawShadowCaster(
+            entry.mesh.get(), face.shader, std::move(uniforms), false,
+            LightShadowMath::translation(shift - l[0], -l[1], -l[2]),
+            face.view);
+    }
+    if (joinsDrawable)
+        // Joins hold world positions in the camera's frame, like the light.
+        target.drawShadowCaster(
+            detailJoins.get(), face.shader, std::vector(face.chunkUniforms),
+            false, LightShadowMath::translation(-l[0], -l[1], -l[2]),
+            face.view);
+    if (structures) {
+        // The same hand-over to real chunks as render().
+        const int cx = int(camera.position.x) / Chunk::SIZE_X,
+                  cy = int(camera.position.y) / Chunk::SIZE_Y,
+                  cz = int(camera.position.z) / Chunk::SIZE_Z;
+        structures->drawShadow(
+            target, face.frustum, l, face.radius, face.shader,
+            face.chunkUniforms, face.view, [&](const ChunkCoord& c) {
+                return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
+                           DETAIL_CHUNK_RADIUS &&
+                       std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
+                       std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
+                       detailCoverage.contains(int(c.x), int(c.z)) &&
+                       chunks.hasUploadedMesh(c);
+            });
+    }
+}
+
 size_t TerrainLodManager::backlog() const {
     return (structures ? structures->backlog() : 0) +
            std::count_if(queue.begin(), queue.end(), [&](const auto& p) {
