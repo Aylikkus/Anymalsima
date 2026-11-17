@@ -22,6 +22,12 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/flora_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/flora_mesh_builder.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/flora_simulation.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tree_skeleton.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tree_rasterizer.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tree_wood_lod.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tree_generator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tree_foliage_builder.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tree_simulation.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/region_file.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/region_store.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/world_map_codec.cpp
@@ -29,6 +35,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/save/save_catalog.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/terrain_edits_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/light_sources_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/trees_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/binary_stream.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/compression.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/section_container.cpp
@@ -69,6 +76,8 @@ add_executable(world_logic_tests
     unit/game/world/ground_cover_tests.cpp
     unit/game/world/flora_tests.cpp
     unit/game/items/flora_data_tests.cpp
+    unit/game/items/tree_data_tests.cpp
+    unit/game/world/tree_tests.cpp
 )
 add_executable(lighting_benchmark benchmarks/lighting_benchmark.cpp)
 option(ANYMALSIMA_TEST_SANITIZERS "Instrument logic tests with ASan and UBSan" OFF)
@@ -273,6 +282,27 @@ foreach(case flora_value_ranges ground_cover_parsing foliage_material_parsing
     add_test(NAME game.items.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.items.${case} PROPERTIES
         LABELS "unit;gameplay;data;flora" TIMEOUT 10)
+endforeach()
+# Tree data (docs/handoff/trees.md).
+foreach(case tree_species_parsing tree_size_classes tree_references_validated
+             tree_runtime_content)
+    add_test(NAME game.items.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.items.${case} PROPERTIES
+        LABELS "unit;gameplay;data;flora;trees" TIMEOUT 10)
+endforeach()
+foreach(case tree_skeleton_deterministic tree_sizes_follow_species
+             tree_growth_only_adds_wood tree_size_classes_in_blocks
+             tree_height_cap tree_ground_pruning tree_cuts_and_regrowth
+             tree_skeleton_cache tree_region_sets tree_column_wraps_seam
+             tree_chunks_order_independent tree_chunks_air_and_tops
+             tree_saved_chunks_not_edits tree_flora_avoids_trunks
+             tree_landmarks tree_rotation_exact tree_foliage_meshes
+             trees_codec_roundtrip tree_cuts_incremental tree_cut_and_regrowth
+             tree_reload_catches_up tree_planted_indoors tree_billboards
+             tree_wood_lod_slabs)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;flora;trees" TIMEOUT 30)
 endforeach()
 foreach(case cover_generation_surface_only cover_wraps_seam cover_mesh_faces
              cover_volume_dilation cover_cleared_by_edits

@@ -82,5 +82,165 @@
         "hue_jitter": 0.02,
         "value_jitter": 0.1,
         "translucency": 0.0
+    },
+    {
+        "name": "foliage.spruce_needles",
+        "albedo": "foliage.needles",
+        "normal": "foliage.needles_normal",
+        "palette": {"base": "#2f5a3c", "shade": "#1a3426", "tip": "#4f7a4a", "dry": "#7a6a3a"},
+        "gradient": "center_to_edge",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.2,
+        "withered": ["#7a6a3a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.pine_needles",
+        "albedo": "foliage.needles",
+        "normal": "foliage.needles_normal",
+        "palette": {"base": "#4a7034", "shade": "#2a4226", "tip": "#7a9a48", "dry": "#8a7a3a"},
+        "gradient": "center_to_edge",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.25,
+        "withered": ["#8a7a3a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.oak_leaf",
+        "albedo": "foliage.leaf_broad",
+        "normal": "foliage.leaf_broad_normal",
+        "palette": {"base": "#4a7a30", "shade": "#2a4822", "tip": "#86b048", "dry": "#8a7a3a"},
+        "gradient": "center_to_edge",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.35,
+        "withered": ["#8a7a3a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.palm_frond",
+        "albedo": "foliage.palm_frond",
+        "normal": "foliage.palm_frond_normal",
+        "palette": {"base": "#5a8c36", "shade": "#345a26", "tip": "#a2c25a", "dry": "#a8944a"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.4,
+        "withered": ["#a8944a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.redwood_needles",
+        "albedo": "foliage.needles",
+        "normal": "foliage.needles_normal",
+        "palette": {"base": "#365c30", "shade": "#1e3622", "tip": "#5a8040", "dry": "#7a5a32"},
+        "gradient": "center_to_edge",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.2,
+        "withered": ["#7a5a32", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.elder_leaf",
+        "albedo": "foliage.leaf_broad",
+        "normal": "foliage.leaf_broad_normal",
+        "palette": {"base": "#5e8c4a", "shade": "#2e5034", "tip": "#c2d27a", "dry": "#b09a4a"},
+        "gradient": "center_to_edge",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.45,
+        "withered": ["#b09a4a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.bark_spruce",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#5e4434", "shade": "#33241c", "tip": "#6e5240", "dry": "#33241c"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.08,
+        "translucency": 0.0
+    },
+    {
+        "name": "foliage.bark_pine",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#7a523a", "shade": "#3e2a20", "tip": "#8e6244", "dry": "#3e2a20"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.08,
+        "translucency": 0.0
+    },
+    {
+        "name": "foliage.bark_oak",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#5a5046", "shade": "#2e2822", "tip": "#6a5e50", "dry": "#2e2822"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.08,
+        "translucency": 0.0
+    },
+    {
+        "name": "foliage.bark_palm",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#8a7656", "shade": "#4e4030", "tip": "#9a8460", "dry": "#4e4030"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.08,
+        "translucency": 0.0
+    },
+    {
+        "name": "foliage.bark_redwood",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#7e4430", "shade": "#3e2018", "tip": "#8e5038", "dry": "#3e2018"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.08,
+        "translucency": 0.0
+    },
+    {
+        "name": "foliage.bark_elder",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#6a645a", "shade": "#34302c", "tip": "#7e766a", "dry": "#34302c"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.08,
+        "translucency": 0.0
+    },
+    {
+        "name": "foliage.billboard_conifer",
+        "albedo": "foliage.billboard_conifer",
+        "normal": "foliage.billboard_conifer_normal",
+        "palette": {"base": "#4a7a30", "shade": "#2a4822", "tip": "#86b048", "dry": "#8a7a3a"},
+        "gradient": "uniform",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.2
+    },
+    {
+        "name": "foliage.billboard_broadleaf",
+        "albedo": "foliage.billboard_broadleaf",
+        "normal": "foliage.billboard_broadleaf_normal",
+        "palette": {"base": "#4a7a30", "shade": "#2a4822", "tip": "#86b048", "dry": "#8a7a3a"},
+        "gradient": "uniform",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.2
+    },
+    {
+        "name": "foliage.billboard_palm",
+        "albedo": "foliage.billboard_palm",
+        "normal": "foliage.billboard_palm_normal",
+        "palette": {"base": "#4a7a30", "shade": "#2a4822", "tip": "#86b048", "dry": "#8a7a3a"},
+        "gradient": "uniform",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.2
+    },
+    {
+        "name": "foliage.billboard_pine",
+        "albedo": "foliage.billboard_pine",
+        "normal": "foliage.billboard_pine_normal",
+        "palette": {"base": "#4a7a30", "shade": "#2a4822", "tip": "#86b048", "dry": "#8a7a3a"},
+        "gradient": "uniform",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.2
     }
 ]

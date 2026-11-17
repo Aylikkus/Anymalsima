@@ -33,7 +33,14 @@ add_library(game
     world/flora_generator.cpp
     world/flora_mesh_builder.cpp
     world/flora_simulation.cpp
+    world/tree_skeleton.cpp
+    world/tree_rasterizer.cpp
+    world/tree_wood_lod.cpp
+    world/tree_generator.cpp
     world/flora_renderer.cpp
+    world/tree_foliage_builder.cpp
+    world/tree_renderer.cpp
+    world/tree_simulation.cpp
     world/save/region_file.cpp
     world/save/region_store.cpp
     world/save/world_map_codec.cpp
@@ -41,6 +48,7 @@ add_library(game
     world/save/save_catalog.cpp
     world/save/terrain_edits_codec.cpp
     world/save/light_sources_codec.cpp
+    world/save/trees_codec.cpp
     items/soil.hpp
     items/soil_validation.hpp
     world/soil_generator.hpp

@@ -1,0 +1,32 @@
+[
+    {
+        "name": "materials.spruce_wood",
+        "texture_albedo": "blocks.wood.spruce_bark",
+        "texture_normal": "blocks.wood.spruce_bark_normal"
+    },
+    {
+        "name": "materials.pine_wood",
+        "texture_albedo": "blocks.wood.pine_bark",
+        "texture_normal": "blocks.wood.pine_bark_normal"
+    },
+    {
+        "name": "materials.oak_wood",
+        "texture_albedo": "blocks.wood.oak_bark",
+        "texture_normal": "blocks.wood.oak_bark_normal"
+    },
+    {
+        "name": "materials.palm_wood",
+        "texture_albedo": "blocks.wood.palm_bark",
+        "texture_normal": "blocks.wood.palm_bark_normal"
+    },
+    {
+        "name": "materials.redwood_wood",
+        "texture_albedo": "blocks.wood.redwood_bark",
+        "texture_normal": "blocks.wood.redwood_bark_normal"
+    },
+    {
+        "name": "materials.elder_wood",
+        "texture_albedo": "blocks.wood.elder_bark",
+        "texture_normal": "blocks.wood.elder_bark_normal"
+    }
+]

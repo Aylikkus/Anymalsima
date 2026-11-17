@@ -49,6 +49,8 @@ struct RegionSnapshot {
     std::vector<std::pair<uint16_t, std::shared_ptr<const Chunk>>> chunks;
     // Plants of the same chunks (an empty layer is saved too).
     std::vector<std::pair<uint16_t, FloraLayerPtr>> flora;
+    // Tree stamps of the same chunks, saved in their FLOR blobs.
+    std::vector<std::pair<uint16_t, TreeStamp>> trees;
     bool empty() const { return chunks.empty(); }
 };
 

@@ -22,6 +22,7 @@
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
+#include "world/tree_renderer.hpp"
 
 int main(int argc, char** argv) {
     const std::string output = argc > 1 ? argv[1] : "build/lod_capture";
@@ -62,11 +63,50 @@ int main(int argc, char** argv) {
         assets.buildMaterialTextureArrays();
         // Seams need coordinates as large as a full-size world (~64k tiles).
         // Wrap: 128 regions = 16384 tiles, a whole number of LOD roots.
-        const auto world = lodScene(wrapScene ? 128 : seams ? 480 : 96);
+        auto world = lodScene(wrapScene ? 128 : seams ? 480 : 96);
+        // SMOKE_FOREST: trees everywhere (docs/handoff/trees.md). Values:
+        // taiga (spruces), tropical (palms on plains), mountain (thin
+        // pines on the hills), anything else: humid temperate forest
+        // (oaks, redwood groves).
+        if (const char* forest = std::getenv("SMOKE_FOREST")) {
+            const std::string kind = forest;
+            for (auto& r : world.regions) {
+                r.vegetation = VegetationType::FOREST;
+                r.humidity = .75f;
+                r.temperature_c = 14;
+                if (kind == "taiga") {
+                    r.biome = BiomeType::TUNDRA;
+                    r.temperature_c = 2;
+                    r.humidity = .6f;
+                } else if (kind == "tropical") {
+                    r.biome = BiomeType::TROPICAL;
+                    r.temperature_c = 27;
+                    r.humidity = .6f;
+                    r.land = LandType::PLAINS;
+                } else if (kind == "mountain") {
+                    // The scene's own hills and mountains, without forest.
+                    r.vegetation = VegetationType::GRASS;
+                    r.temperature_c = 6;
+                    r.humidity = .4f;
+                }
+            }
+        }
         LodCaptureRenderer renderer;
         LocationGenerator generator;
         ThreadPool pool(4);
         ChunkMesher mesher(assets);
+        // SMOKE_FOREST=elder: temperate forest with many elder landmarks
+        // (test-only: the shipped density is about one per 200 km²).
+        const bool elders = std::getenv("SMOKE_FOREST") &&
+                            std::string(std::getenv("SMOKE_FOREST")) == "elder";
+        if (elders && assets.hasStorage<Tree>())
+            for (auto& tree :
+                 const_cast<DataStorage<Tree>&>(assets.getStorage<Tree>())
+                     .items)
+                if (tree.landmark()) {
+                    tree.placement.density_per_100m2 = 0.01f;
+                    tree.spacing_m = 600;
+                }
         ChunkManager chunks(generator, pool, &mesher, world, &assets);
         SunLightPropagator sunlight(chunks, assets.getStorage<Block>(), pool);
         LocationManager locations(chunks, world);
@@ -88,6 +128,8 @@ int main(int argc, char** argv) {
         // Plants, in the lights scenario (the only one binding light
         // volumes, like the game).
         FloraRenderer flora(chunks, assets, world, renderer);
+        TreeRenderer trees(chunks, assets, world, renderer);
+        double treesMaxMs = 0;
         double floraMaxMs = 0;
         std::vector<TilePos> lamps;
         Camera home{};
@@ -188,6 +230,22 @@ int main(int argc, char** argv) {
             camera.position = {
                 x, float(surface.height(int(x), int(z))) + 1 + above, z};
         }
+        // Elders: look at the landmark nearest the default view.
+        if (elders && !std::getenv("SMOKE_CAMERA") &&
+            !chunks.treeLandmarks().empty()) {
+            const auto& sites = chunks.treeLandmarks();
+            const auto nearest = std::min_element(
+                sites.begin(), sites.end(), [](const auto& a, const auto& b) {
+                    return std::hypot(a.x - 6144.0, a.z - 6144.0) <
+                           std::hypot(b.x - 6144.0, b.z - 6144.0);
+                });
+            const float x = float(nearest->x), z = float(nearest->z);
+            camera = {{x, float(surface.height(int(x), int(z))) + 12, z},
+                      bx::kPiHalf,
+                      -.1f,
+                      95};
+            std::cout << "elder at " << nearest->x << ' ' << nearest->z << '\n';
+        }
         if (handover)
             locations.loadRegion({unsigned(camera.position.x) / 128,
                                   unsigned(camera.position.z) / 128},
@@ -199,8 +257,12 @@ int main(int argc, char** argv) {
         const std::string blockShader = "block";
         const auto begin = std::chrono::steady_clock::now();
         {
-            TerrainLodManager lod(world, assets, pool, TerrainLod::Qualities[0],
-                                  structure ? &edits : nullptr);
+            // Forests track edits like the game: landmark wood is drawn as
+            // structure voxels at distance.
+            TerrainLodManager lod(
+                world, assets, pool, TerrainLod::Qualities[0],
+                structure || std::getenv("SMOKE_FOREST") ? &edits : nullptr);
+            trees.setVoxelLandmarks(lod.drawsTreeWood());
             if (lights) {
                 std::vector<ShaderProperty*> patchLights, blockLights;
                 lightRenderer.appendUniforms(patchLights,
@@ -232,9 +294,15 @@ int main(int argc, char** argv) {
                     chunks.setFocus(camera.position);
                     sunlight.setFocus(camera.position);
                     blockLight.setFocus(camera.position);
-                    for (int z = cz - 3; z <= cz + 3; ++z)
-                        for (int x = cx - 3; x <= cx + 3; ++x)
-                            for (int y = cy - 3; y <= cy + 3; ++y)
+                    // SMOKE_RADIUS: chunks requested around the target
+                    // (default 3; the game uses DETAIL_CHUNK_RADIUS).
+                    static const int reach =
+                        std::getenv("SMOKE_RADIUS")
+                            ? std::atoi(std::getenv("SMOKE_RADIUS"))
+                            : 3;
+                    for (int z = cz - reach; z <= cz + reach; ++z)
+                        for (int x = cx - reach; x <= cx + reach; ++x)
+                            for (int y = cy - reach; y <= cy + reach; ++y)
                                 chunks.request(
                                     {unsigned(world.wrap().wrapChunk(x)),
                                      unsigned(y), unsigned(z)});
@@ -249,6 +317,7 @@ int main(int argc, char** argv) {
                                        .count();
                 if (lights)
                     lightRenderer.update(registry, camera, world.wrap(), now);
+                lod.setTreeWood(trees.landmarkWood(0));
                 lod.update(camera, {1280, 720});
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720});
@@ -376,6 +445,10 @@ int main(int argc, char** argv) {
                                  Frustum::fromViewProj(viewProj), lightRenderer,
                                  frame / 60.0);
                     floraMaxMs = std::max(floraMaxMs, flora.cpuMilliseconds());
+                    trees.render(target, camera,
+                                 Frustum::fromViewProj(viewProj), lightRenderer,
+                                 frame / 60.0, 0);
+                    treesMaxMs = std::max(treesMaxMs, trees.cpuMilliseconds());
                 }
                 float view[16], projection[16];
                 // Camera-relative world view, as in Renderer: the eye is the
@@ -486,6 +559,9 @@ int main(int argc, char** argv) {
                             gallery[c].instances.push_back(p);
                         }
                     for (auto& [c, layer] : gallery) {
+                        // Keep the resolved day: a reset one re-samples.
+                        if (const auto live = chunks.flora(c))
+                            layer.resolvedDay = live->resolvedDay;
                         chunks.setFlora(c, std::make_shared<FloraLayer>(layer));
                     }
                 }
@@ -630,11 +706,18 @@ int main(int argc, char** argv) {
                         << " detail_regressions=" << detailRegressions
                         << " edited_columns=" << edits.size()
                         << " structure_slabs=" << lod.structureCount()
+                        << " tree_wood_slabs=" << lod.treeWoodSlabs()
                         << " plants=" << flora.drawnPlants()
                         << " plant_draws=" << flora.drawCalls()
                         << " plant_meshes=" << flora.meshCount()
                         << " plant_cpu_ms=" << flora.cpuMilliseconds()
-                        << " plant_max_cpu_ms=" << floraMaxMs << '\n';
+                        << " plant_max_cpu_ms=" << floraMaxMs
+                        << " trees=" << trees.drawnTrees()
+                        << " billboards=" << trees.drawnBillboards()
+                        << " tree_draws=" << trees.drawCalls()
+                        << " tree_meshes=" << trees.meshCount()
+                        << " tree_cpu_ms=" << trees.cpuMilliseconds()
+                        << " tree_max_cpu_ms=" << treesMaxMs << '\n';
                     if ((!transition && lod.backlog() != 0) || draws == 0 ||
                         (handover && detailed == 0 && !farLights) ||
                         // Structure proxies have their own 1/8 cap.

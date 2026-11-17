@@ -72,6 +72,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
     // Unregistered column (region unloaded meanwhile): keep what is stored.
     if (!inputs) return true;
     const auto old = edits.find(key);
+    // Tree wood is regenerated from the seed: neither ground nor structure.
+    const auto& grown = chunks.grownBlocks();
     auto next = std::make_shared<ColumnEdit>();
     bool complete = true;
     bool generated = true;
@@ -100,7 +102,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     break;
                 }
                 const Tile& tile = chunk->tiles[lz][y % Chunk::SIZE_Y][lx];
-                if (y <= surface && tile.isSolid()) {
+                if (y <= surface && tile.isSolid() &&
+                    !grown.test(tile.block_id)) {
                     ground = y;
                     block = tile.block_id;
                     break;
@@ -114,7 +117,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 surface < SEA_LEVEL_Y ? SEA_LEVEL_Y + 1 : -1;
             generated &= ground == surface && water == generatedWater;
         }
-    // Structure: every solid tile above its generated surface.
+    // Structure: every solid tile above its generated surface, except tree
+    // wood.
     const int top = std::min(chunks.getColumnTopY(cx, cz), WORLD_HEIGHT_Y - 1);
     for (int slab = std::max(0, lowestSurface / Chunk::SIZE_Y);
          slab <= top / Chunk::SIZE_Y; ++slab) {
@@ -134,7 +138,7 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             for (int y = 0; y < Chunk::SIZE_Y; ++y)
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {
                     const auto& tile = chunk->tiles[z][y][x];
-                    if (!tile.isSolid() ||
+                    if (!tile.isSolid() || grown.test(tile.block_id) ||
                         slab * Chunk::SIZE_Y + y <=
                             inputs->columns[ColumnEdit::index(x, z)].surface_y)
                         continue;

@@ -84,9 +84,16 @@ TEST(flora_codec_roundtrip) {
                                    uint8_t(255 - i), uint8_t(i % 16),
                                    uint8_t(i * 7), -i * 13, i * 3});
     layer.resolvedDay = 42;
-    const auto bytes = flora_codec::encode(layer);
-    EQUAL(bytes.size(), size_t(7 + 40 * 16), "16 bytes per plant");
-    CHECK(flora_codec::decode(bytes) == layer);
+    // v3 header: version, resolvedDay, tree stamp (day, version), count.
+    constexpr size_t Header = 1 + 4 + 4 + 2 + 2;
+    const TreeStamp stamp{77, 3};
+    const auto bytes = flora_codec::encode(layer, stamp);
+    EQUAL(bytes.size(), size_t(Header + 40 * 16), "16 bytes per plant");
+    TreeStamp decoded;
+    CHECK(flora_codec::decode(bytes, &decoded) == layer);
+    CHECK(decoded == stamp);
+    flora_codec::decode(flora_codec::encode({}), &decoded);
+    CHECK(!decoded.placed());  // no trees placed by default
     CHECK(flora_codec::decode(flora_codec::encode({})).empty());
     const auto rejects = [](Bytes bad, const char* context) {
         test::expectThrows([&] { flora_codec::decode(bad); }, context);
@@ -101,10 +108,10 @@ TEST(flora_codec_roundtrip) {
     trailing.push_back(std::byte{0});
     rejects(trailing, "trailing bytes");
     auto species = bytes;
-    species[7] = std::byte{0};
+    species[Header] = std::byte{0};
     rejects(species, "no species");
     auto anchor = bytes;
-    anchor[7 + 6] = std::byte{16};
+    anchor[Header + 6] = std::byte{16};
     rejects(anchor, "anchor outside the chunk");
     // Version 1 (no day stamps) still decodes.
     BinaryWriter v1;
@@ -118,6 +125,14 @@ TEST(flora_codec_roundtrip) {
     EQUAL(old.instances[0].birthDay, -20, "v1 birth day");
     EQUAL(old.instances[0].harvestDay, 0, "v1 has no harvest");
     EQUAL(old.resolvedDay, 0, "v1 has no day stamp");
+    // Version 2 (no tree stamp): chunks saved before trees get them once.
+    BinaryWriter v2;
+    v2.write(uint8_t(2));
+    v2.write(int32_t(15));
+    v2.write(uint16_t(0));
+    TreeStamp none{5, 5};
+    CHECK(flora_codec::decode(v2.take(), &none).resolvedDay == 15);
+    CHECK(!none.placed());
 
     // Region files keep plants per chunk in FLOR.
     RegionSnapshot snapshot;
@@ -125,11 +140,13 @@ TEST(flora_codec_roundtrip) {
     snapshot.flora.emplace_back(70, std::make_shared<const FloraLayer>(layer));
     snapshot.chunks.emplace_back(71, std::make_shared<const Chunk>());
     snapshot.flora.emplace_back(71, nullptr);  // emptied: saved as empty
+    snapshot.trees.emplace_back(71, stamp);
     const auto data = region_file::decode(
         region_file::encode(region_file::merge(RegionData{}, snapshot)));
     EQUAL(data.flora.size(), size_t(2), "flora entries");
     CHECK(flora_codec::decode(*data.flora.at(70)) == layer);
-    CHECK(flora_codec::decode(*data.flora.at(71)).empty());
+    CHECK(flora_codec::decode(*data.flora.at(71), &decoded).empty());
+    CHECK(decoded == stamp);  // stamps travel with empty layers too
     CHECK(data.extra.find("FLOR") == nullptr);
 }
 
@@ -375,11 +392,20 @@ TEST(flora_edits) {
     const TilePos inBush{int(bv.minX), bv.anchorY + 1, int(bv.minZ)};
     EQUAL(int(editor.placeBlock(inBush, 1)), int(EditStatus::Blocked),
           "bush footprint blocks placement");
-    // Digging the ground under the bush removes it.
+    // Digging the ground under the bush removes it. The layer keeps its
+    // resolved day: a reset day makes FloraSimulation re-sample the chunk
+    // after a year (regression).
+    {
+        auto stamped = std::make_shared<FloraLayer>(*f.chunks->flora(bc));
+        stamped->resolvedDay = 500;
+        f.chunks->setFlora(bc, std::move(stamped));
+    }
     const auto before = count(bc);
     EQUAL(int(editor.removeBlock({int(bv.minX), bv.anchorY, int(bv.minZ)})),
           int(EditStatus::Applied), "dig under the bush");
     EQUAL(count(bc), before - 1, "bush removed with its ground");
+    EQUAL(f.chunks->flora(bc)->resolvedDay, 500,
+          "edits keep the layer's resolved day");
     CHECK(f.chunks->isPersistDirty(bc));
     // A block placed on a small plant removes it.
     const auto& [sc, sp] = *small;

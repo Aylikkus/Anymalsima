@@ -81,6 +81,8 @@ struct FloraRules {
     std::vector<std::string> ground_cover_required;
     std::vector<std::string> ground_cover_forbidden;
     std::vector<SoilPlacement> climate;
+    // Region vegetation types the species grows in; empty: any.
+    std::vector<VegetationType> vegetation;
     float max_slope = 1;
     bool underwater = false;
     ValueRange density_per_100m2{1};
@@ -211,6 +213,57 @@ inline void soilRule(const Json& j, FloraSoilRule& out) {
     out.names = names(j, "names");
     range(j, "fertility", out.fertility, 0, 1);
     range(j, "water_retention", out.water_retention, 0, 1);
+}
+
+// The "placement" object shared by flora and trees (docs/modding/plants.md,
+// docs/modding/trees.md).
+inline void placement(const Json& p, FloraRules& r) {
+    known(p, "placement",
+          {"soils", "ground_cover", "climate", "max_slope", "underwater",
+           "density_per_100m2", "cluster", "companions", "priority",
+           "persistent_sites", "vegetation"});
+    if (p.contains("soils")) soilRule(p.at("soils"), r.soils);
+    if (p.contains("ground_cover")) {
+        const auto& g = p.at("ground_cover");
+        known(g, "ground_cover", {"required", "forbidden"});
+        r.ground_cover_required = names(g, "required");
+        r.ground_cover_forbidden = names(g, "forbidden");
+    }
+    if (!p.contains("climate") || !p.at("climate").is_array() ||
+        p.at("climate").empty())
+        fail("climate", "expected at least one rule");
+    p.at("climate").get_to(r.climate);
+    soil_json::enums(p, "vegetation", RegionEnumMaps::vegetation(),
+                     r.vegetation);
+    r.max_slope = number(p, "max_slope", 1, 0, 64);
+    r.underwater = boolean(p, "underwater", false);
+    range(p, "density_per_100m2", r.density_per_100m2, 0, 10000);
+    if (p.contains("cluster")) {
+        const auto& c = p.at("cluster");
+        known(c, "cluster", {"scale_m", "threshold"});
+        if (!c.contains("scale_m") || !c.at("scale_m").is_number_integer() ||
+            c.at("scale_m").get<int64_t>() < 1 ||
+            c.at("scale_m").get<int64_t>() > 4096)
+            fail("scale_m", "expected an integer in [1, 4096]");
+        r.cluster_scale_m = c.at("scale_m").get<int>();
+        r.cluster_threshold = number(c, "threshold", 0.5f, 0, 0.999f);
+    }
+    if (p.contains("companions")) {
+        const auto& list = p.at("companions");
+        if (!list.is_array()) fail("companions", "expected an array");
+        for (const auto& c : list) {
+            known(c, "companion", {"species", "radius_m", "chance"});
+            r.companions.push_back({name(c, "species"),
+                                    number(c, "radius_m", 2, 0, 64),
+                                    number(c, "chance", 0.5f, 0, 1)});
+        }
+    }
+    r.persistent_sites = boolean(p, "persistent_sites", false);
+    if (p.contains("priority")) {
+        if (!p.at("priority").is_number_integer())
+            fail("priority", "expected an integer");
+        r.priority = p.at("priority").get<int>();
+    }
 }
 
 }  // namespace flora_json
@@ -350,55 +403,7 @@ inline void from_json(const Json& j, Flora& f) {
             fail("blocks_placement", "only tile footprints block placement");
 
         if (!j.contains("placement")) fail("placement", "missing placement");
-        {
-            const auto& p = j.at("placement");
-            known(p, "placement",
-                  {"soils", "ground_cover", "climate", "max_slope",
-                   "underwater", "density_per_100m2", "cluster", "companions",
-                   "priority", "persistent_sites"});
-            auto& r = f.placement;
-            if (p.contains("soils")) soilRule(p.at("soils"), r.soils);
-            if (p.contains("ground_cover")) {
-                const auto& g = p.at("ground_cover");
-                known(g, "ground_cover", {"required", "forbidden"});
-                r.ground_cover_required = names(g, "required");
-                r.ground_cover_forbidden = names(g, "forbidden");
-            }
-            if (!p.contains("climate") || !p.at("climate").is_array() ||
-                p.at("climate").empty())
-                fail("climate", "expected at least one rule");
-            p.at("climate").get_to(r.climate);
-            r.max_slope = number(p, "max_slope", 1, 0, 64);
-            r.underwater = boolean(p, "underwater", false);
-            range(p, "density_per_100m2", r.density_per_100m2, 0, 10000);
-            if (p.contains("cluster")) {
-                const auto& c = p.at("cluster");
-                known(c, "cluster", {"scale_m", "threshold"});
-                if (!c.contains("scale_m") ||
-                    !c.at("scale_m").is_number_integer() ||
-                    c.at("scale_m").get<int64_t>() < 1 ||
-                    c.at("scale_m").get<int64_t>() > 4096)
-                    fail("scale_m", "expected an integer in [1, 4096]");
-                r.cluster_scale_m = c.at("scale_m").get<int>();
-                r.cluster_threshold = number(c, "threshold", 0.5f, 0, 0.999f);
-            }
-            if (p.contains("companions")) {
-                const auto& list = p.at("companions");
-                if (!list.is_array()) fail("companions", "expected an array");
-                for (const auto& c : list) {
-                    known(c, "companion", {"species", "radius_m", "chance"});
-                    r.companions.push_back({name(c, "species"),
-                                            number(c, "radius_m", 2, 0, 64),
-                                            number(c, "chance", 0.5f, 0, 1)});
-                }
-            }
-            r.persistent_sites = boolean(p, "persistent_sites", false);
-            if (p.contains("priority")) {
-                if (!p.at("priority").is_number_integer())
-                    fail("priority", "expected an integer");
-                r.priority = p.at("priority").get<int>();
-            }
-        }
+        placement(j.at("placement"), f.placement);
 
         if (j.contains("growth")) {
             const auto& g = j.at("growth");

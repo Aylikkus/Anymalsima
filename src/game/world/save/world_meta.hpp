@@ -17,8 +17,8 @@ struct WorldMeta : ISerializable {
     // Older saves are not migrated.
     static constexpr int MinFormatVersion = 3;
     // Bump when chunk generation output changes. 6: ground cover on the
-    // surface topsoil tile. 7: plants (FLOR).
-    static constexpr int GeneratorVersion = 7;
+    // surface topsoil tile. 7: plants (FLOR). 8: trees (living wood).
+    static constexpr int GeneratorVersion = 8;
     // Oldest generator version whose surface heights match the current one.
     // Bump it whenever surface heights change (not for material changes).
     static constexpr int SurfaceVersion = 5;

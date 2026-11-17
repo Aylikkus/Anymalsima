@@ -125,6 +125,23 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     skySlider->setAxis(ScrollAxis::Horizontal);
     skySlider->setGridPlacement({12, 15, 5, 1});
     harvestButton = makeToolButton(_("HARVEST"), 17, EditTool::Harvest);
+    // Debug: plant a tree sapling; clicking again while armed picks the
+    // next species.
+    plantButton = ui_manager->createWidget(
+        std::make_unique<TextButton>(context, "ui.black.9slice", "mouse_click"),
+        root_ptr);
+    plantButton->setTextAlignment(TextAlign::Center, VerticalAlign::Middle);
+    plantButton->setFontRole(FontRole::Bold);
+    plantButton->setGridPlacement({17, 14, 7, 1});
+    plantButton->onClick.connect([this]() {
+        if (tool == EditTool::PlantTree) {
+            const size_t count = chunkManager->treeSpecies().species().size();
+            if (count) plantSpecies = (plantSpecies + 1) % count;
+            updatePlantLabel();
+        } else {
+            setTool(EditTool::PlantTree);
+        }
+    });
     // Debug game speed: normal (a day per 72 minutes), then a day every
     // 72 s, 6 s and 0.6 s.
     timeButton = ui_manager->createWidget(
@@ -151,6 +168,17 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     chunkManager = std::make_unique<ChunkManager>(
         *generator, context.threadPool, mesher.get(), *this->world.get(),
         context.assets);
+    // Cut and planted trees, before any region registers (tree jobs read
+    // them).
+    try {
+        auto file = save_catalog::readTrees(slot);
+        treesExtra = std::move(file.extra);
+        chunkManager->setTreeOverrides(
+            std::make_shared<const TreeOverrideMap>(std::move(file.trees)));
+    } catch (const std::exception& e) {
+        std::cerr << "trees.dat unreadable (" << e.what()
+                  << "); cut and planted trees are lost\n";
+    }
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
         context.threadPool);
@@ -161,6 +189,9 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         *chunkManager, context.assets->getStorage<Block>(), blockLight.get());
     floraRenderer = std::make_unique<FloraRenderer>(
         *chunkManager, *context.assets, *this->world, *context.renderer);
+    treeRenderer = std::make_unique<TreeRenderer>(
+        *chunkManager, *context.assets, *this->world, *context.renderer);
+    treeRenderer->setVoxelLandmarks(terrainLod->drawsTreeWood());
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
     blockLight->watch(*editor);
@@ -168,6 +199,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
                                                  *this->world);
     floraSim->watch(*editor);
+    treeSim = std::make_unique<TreeSimulation>(*chunkManager, *editor);
+    updatePlantLabel();
     // Comparing saved chunks with generated terrain is only meaningful when
     // the save's generator produced the same surface heights.
     const bool sameGenerator =
@@ -241,10 +274,33 @@ GameplayState::~GameplayState() {
         regionStore->flush();
         saveTerrainEdits(true);
         saveLightSources(true);
+        saveTrees();
         writeMeta();
     } catch (const std::exception& e) {
         std::cerr << "Saving world failed: " << e.what() << '\n';
     }
+}
+
+void GameplayState::saveTrees() {
+    if (!treeSim) return;
+    treeSim->clearDirty();
+    try {
+        save_catalog::writeTrees(slot, *chunkManager->treeOverrides(),
+                                 treesExtra);
+    } catch (const std::exception& e) {
+        std::cerr << "Saving trees.dat failed: " << e.what() << '\n';
+    }
+}
+
+void GameplayState::updatePlantLabel() {
+    if (!plantButton) return;
+    const auto& species = chunkManager->treeSpecies().species();
+    std::string name = "-";
+    if (!species.empty()) {
+        name = species[plantSpecies % species.size()].species.name;
+        if (name.starts_with("trees.")) name = name.substr(6);
+    }
+    plantButton->setText("PLANT TREE: " + name);
 }
 
 void GameplayState::writeMeta() {
@@ -473,6 +529,9 @@ void GameplayState::setTool(EditTool value) {
         tool == EditTool::PlaceLight ? armed : idle);
     harvestButton->getButton()->setNormalColor(
         tool == EditTool::Harvest ? armed : idle);
+    plantButton->getButton()->setNormalColor(
+        tool == EditTool::PlantTree ? armed : idle);
+    updatePlantLabel();
 }
 
 std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
@@ -515,6 +574,16 @@ void GameplayState::useTool(int mouseX, int mouseY) {
         editor->removeBlock({hit->tx, hit->ty, hit->tz});
         return;
     }
+    if (tool == EditTool::PlantTree) {
+        const auto& species = chunkManager->treeSpecies().species();
+        if (species.empty()) return;
+        const auto& rule = species[plantSpecies % species.size()];
+        lastTreeAction =
+            treeSim->plant({hit->tx, hit->ty, hit->tz}, rule.id, clock.days())
+                ? "planted " + rule.species.name
+                : "cannot plant here (solid ground, open air above)";
+        return;
+    }
     const auto& blocks = uiContext->assets->getStorage<Block>();
     if (blocks.items.empty() || (!hit->nx && !hit->ny && !hit->nz)) return;
     // Against the face under the cursor: the debug light, or else the first
@@ -544,6 +613,7 @@ void GameplayState::update(Game& game, float dt) {
     locationMgr->update();
     regionStore->update();
     updateAutosave(dt);
+    terrainLod->setTreeWood(treeRenderer->landmarkWood(clock.days()));
     terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
@@ -554,6 +624,8 @@ void GameplayState::update(Game& game, float dt) {
     blockLight->update();
     clock.advance(dt);
     floraSim->update(clock.days());
+    treeSim->update(clock.days());
+    if (treeSim->dirty()) saveTrees();
     if (timeButton) {
         const double t = clock.timeOfDay() * 24;
         char label[64];
@@ -629,6 +701,11 @@ void GameplayState::update(Game& game, float dt) {
                     ss << ", harvested";
             }
             if (!lastHarvest.empty()) ss << "\n\nHarvest:\n" << lastHarvest;
+            if (const auto tree = treeSim->describe({hit->tx, hit->ty, hit->tz},
+                                                    clock.days());
+                !tree.empty())
+                ss << "\n\nTree: " << tree;
+            if (!lastTreeAction.empty()) ss << "\n" << lastTreeAction;
 
             tileDebugText->setText(ss.str());
         }
@@ -714,6 +791,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     });
     floraRenderer->render(target, camera, frustum, *lightRenderer, now,
                           clock.days());
+    treeRenderer->render(target, camera, frustum, *lightRenderer, now,
+                         clock.days());
     lightRenderer->drawGlare(target, camera, viewport);
 
     ui_manager->render(target, context);

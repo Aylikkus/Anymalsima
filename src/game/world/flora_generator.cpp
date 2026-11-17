@@ -40,8 +40,41 @@ float floraHeightEstimate(const Flora& flora) {
     return std::max(top, 0.1f) * 1.15f;
 }
 
+void floraPlacementRule(const FloraRules& p, const IAssets& assets,
+                        FloraSpeciesRule& r) {
+    const auto coverId = [&](const std::string& name) -> int {
+        if (!assets.hasStorage<GroundCover>()) return -1;
+        const auto& covers = assets.getStorage<GroundCover>();
+        const auto it = covers.indexByName.find(name);
+        return it == covers.indexByName.end() ? -1
+                                              : covers.items[it->second].id;
+    };
+    r.priority = p.priority;
+    r.persistentSites = p.persistent_sites;
+    r.density = p.density_per_100m2;
+    r.clusterScale = p.cluster_scale_m;
+    r.clusterThreshold = p.cluster_threshold;
+    r.maxSlope = p.max_slope;
+    r.underwater = p.underwater;
+    for (const auto& name : p.ground_cover_required)
+        if (const int id = coverId(name); id > 0) r.coverRequired.set(id);
+    for (const auto& name : p.ground_cover_forbidden)
+        if (const int id = coverId(name); id > 0) r.coverForbidden.set(id);
+    if (assets.hasStorage<Soil>())
+        for (const auto& name : p.soils.names) {
+            const auto& soils = assets.getStorage<Soil>();
+            if (const auto it = soils.indexByName.find(name);
+                it != soils.indexByName.end())
+                r.soilAllowed.set(soils.items[it->second].id);
+        }
+    r.fertility = p.soils.fertility;
+    r.retention = p.soils.water_retention;
+    r.climate = p.climate;
+    r.vegetation = p.vegetation;
+}
+
 FloraSpeciesTable::FloraSpeciesTable(const IAssets& assets) {
-    if (!assets.hasStorage<Flora>() || !assets.hasStorage<Soil>()) return;
+    if (!assets.hasStorage<Soil>()) return;
     for (const auto& soil : assets.getStorage<Soil>().items)
         soilTable.push_back({soil.properties, soil.propertiesFor(true)});
     if (assets.hasStorage<Block>()) {
@@ -57,13 +90,8 @@ FloraSpeciesTable::FloraSpeciesTable(const IAssets& assets) {
             if (soil.topsoil_block_name) mark(*soil.topsoil_block_name, true);
         }
     }
-    const auto coverId = [&](const std::string& name) -> int {
-        if (!assets.hasStorage<GroundCover>()) return -1;
-        const auto& covers = assets.getStorage<GroundCover>();
-        const auto it = covers.indexByName.find(name);
-        return it == covers.indexByName.end() ? -1
-                                              : covers.items[it->second].id;
-    };
+    // Soil tables serve trees too, with or without plant species.
+    if (!assets.hasStorage<Flora>()) return;
     const auto& all = assets.getStorage<Flora>();
     byId.assign(all.items.size(), -1);
     int maxFootprint = 0, maxCompanion = 0;
@@ -79,9 +107,7 @@ FloraSpeciesTable::FloraSpeciesTable(const IAssets& assets) {
             r.footprintZ = (*f.footprint.tiles)[1];
         }
         r.spacing = f.footprint.min_spacing_m;
-        r.priority = p.priority;
-        r.persistentSites = p.persistent_sites;
-        r.density = p.density_per_100m2;
+        floraPlacementRule(p, assets, r);
         // Cells hold about one plant at the highest density; large plants
         // get at least their footprint plus clearance.
         // Rare species get cells as large as their density asks (about
@@ -93,23 +119,6 @@ FloraSpeciesTable::FloraSpeciesTable(const IAssets& assets) {
                                           int(std::ceil(r.spacing)));
         r.perCell =
             std::max(1, int(std::ceil(r.density.max * r.cell * r.cell / Area)));
-        r.clusterScale = p.cluster_scale_m;
-        r.clusterThreshold = p.cluster_threshold;
-        r.maxSlope = p.max_slope;
-        r.underwater = p.underwater;
-        for (const auto& name : p.ground_cover_required)
-            if (const int id = coverId(name); id > 0) r.coverRequired.set(id);
-        for (const auto& name : p.ground_cover_forbidden)
-            if (const int id = coverId(name); id > 0) r.coverForbidden.set(id);
-        for (const auto& name : p.soils.names) {
-            const auto& soils = assets.getStorage<Soil>();
-            if (const auto it = soils.indexByName.find(name);
-                it != soils.indexByName.end())
-                r.soilAllowed.set(soils.items[it->second].id);
-        }
-        r.fertility = p.soils.fertility;
-        r.retention = p.soils.water_retention;
-        r.climate = p.climate;
         r.heightTiles = std::max(1, int(std::ceil(floraHeightEstimate(f))));
         double stages = 0;
         for (const auto& s : f.growth.stages)
@@ -249,6 +258,14 @@ bool Generator::suits(const FloraSpeciesRule& r, const Env& e) const {
 }
 
 bool Generator::suits(const Candidate& c) {
+    if (in.treeDiscs) {
+        // A large plant's footprint is a box; pad by its half diagonal.
+        const double pad = c.rule->large ? 0.5 * std::hypot(c.rule->footprintX,
+                                                            c.rule->footprintZ)
+                                         : 0;
+        for (const auto& disc : *in.treeDiscs)
+            if (disc.contains(c.x, c.z, pad)) return false;
+    }
     const auto& anchor =
         env(int64_t(std::floor(c.x)), int64_t(std::floor(c.z)));
     if (!suits(*c.rule, anchor)) return false;
@@ -475,6 +492,10 @@ bool floraSuits(const FloraSpeciesTable& table, const FloraSpeciesRule& r,
     const auto& properties = e.topsoil ? soil.topsoil : soil.base;
     if (!r.fertility.contains(properties.fertility) ||
         !r.retention.contains(properties.water_retention))
+        return false;
+    if (!r.vegetation.empty() &&
+        std::find(r.vegetation.begin(), r.vegetation.end(),
+                  e.region->vegetation) == r.vegetation.end())
         return false;
     Region region = *e.region;
     region.land_height_m = e.surfaceY;

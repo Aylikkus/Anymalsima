@@ -1,0 +1,68 @@
+[
+    {
+        "name": "blocks.spruce_wood",
+        "material": "materials.spruce_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 3,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.pine_wood",
+        "material": "materials.pine_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 3,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.oak_wood",
+        "material": "materials.oak_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 4,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.palm_wood",
+        "material": "materials.palm_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 3,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.redwood_wood",
+        "material": "materials.redwood_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 4,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.elder_wood",
+        "material": "materials.elder_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 6,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    }
+]

@@ -16,6 +16,7 @@
 #include "location_generator.hpp"
 #include "render/ui_context.hpp"
 #include "save/region_file.hpp"
+#include "tree_generator.hpp"
 
 enum class ChunkState { Unloaded, Queued, Ready };
 enum class MeshState { None, Queued, Built };
@@ -41,6 +42,8 @@ struct ChunkHandle {
     bool edited = false;
     // Plants anchored in this chunk (null: none). Replaced, never mutated.
     FloraLayerPtr flora;
+    // When its tree wood was last brought up to date (saved with plants).
+    TreeStamp trees;
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
 };
@@ -120,6 +123,67 @@ class ChunkManager {
     const FloraSpeciesTable& floraSpecies() const { return *floraTable; }
     // Seed of the world's plant placement (generateFlora).
     uint32_t floraSeed() const { return floraSeed_; }
+    // Tree species rules (empty without tree data).
+    const TreeSpeciesTable& treeSpecies() const { return *treeTable; }
+    // Living wood block ids: edit detection and distant structures treat
+    // them as air (docs/handoff/trees.md).
+    const GrownBlockSet& grownBlocks() const { return treeTable->grown(); }
+    // Massive trees of the whole map (placeTreeLandmarks).
+    const std::vector<TreeLandmark>& treeLandmarks() const { return landmarks; }
+    // Trees over a registered chunk column, or null while its region tree
+    // jobs are still running (or for an unregistered column).
+    std::shared_ptr<const TreeColumn> treeColumn(unsigned chunkX,
+                                                 unsigned chunkZ) const;
+    // Tree stamp of a Ready chunk.
+    TreeStamp treeStamp(const ChunkCoord& coord) const;
+    // Records that a Ready chunk's wood is up to date with `stamp`.
+    // persist: its tiles changed and must be saved with the stamp.
+    void setTreeStamp(const ChunkCoord& coord, TreeStamp stamp, bool persist);
+    // Cut and planted trees (trees.dat). Set the loaded overrides before
+    // regions register; later changes come with updateTree.
+    void setTreeOverrides(TreeOverridesPtr overrides);
+    const TreeOverridesPtr& treeOverrides() const { return overrides; }
+    // Replaces (or adds) one tree in the set of the region holding its
+    // anchor and rebuilds the tree columns it covers (old and new bounds),
+    // raising their tops. Chunk jobs that used an older column are redone.
+    void updateTree(const TreeInstancePtr& tree,
+                    const TreeTileBox& oldBounds = {});
+    // fn(chunkX, chunkZ, column) for every built tree column with trees.
+    template <typename F>
+    void forEachTreeColumn(F&& fn) const {
+        for (const auto& [key, cache] : columnInputs)
+            if (cache.trees && !cache.trees->trees.empty())
+                fn(unsigned(key >> 32), unsigned(key & 0xFFFFFFFFu),
+                   *cache.trees);
+    }
+    // fn(tree) for every tree of the built region sets (the regions around
+    // the loaded area: distant trees).
+    template <typename F>
+    void forEachTree(F&& fn) const {
+        for (const auto& [region, set] : treeSets)
+            for (const auto& tree : *set) fn(tree);
+    }
+    // Landmarks within `range` tiles of (x, z), built ones only; the
+    // regions of missing ones get tree jobs. Landmarks stay cached once
+    // built (a handful per world), so they are seen from kilometres away.
+    std::vector<TreeInstancePtr> landmarkTrees(double x, double z,
+                                               double range);
+    // Far billboards of a region (regionBillboards), or null until built.
+    // Cached until releaseBillboards.
+    using BillboardSet = std::shared_ptr<const std::vector<TreeBillboard>>;
+    BillboardSet billboards(Vec2u region) const;
+    // Regions whose billboards are wanted, nearest first: update() keeps
+    // MaxBillboardJobs low-priority jobs busy building them.
+    void wantBillboards(std::vector<Vec2u> regions);
+    // Increases whenever a billboard set is built.
+    uint64_t billboardRevision() const { return billboardRevision_; }
+    // Drops billboard sets of regions farther than `range` tiles.
+    void releaseBillboards(double x, double z, double range);
+    static constexpr size_t MaxBillboardJobs = 2;
+    // World map size in regions along Z (0 without a map).
+    int worldHeightRegions() const { return terrainWorld.height; }
+    // Increases whenever a tree changes (renderers refresh).
+    uint64_t treeRevision() const { return treeRevision_; }
     // Game day new chunks generate their plants for: the epoch's placement
     // (FloraSimulation::CatchUpDays long), ages counted back from this day.
     void setFloraDay(int32_t day) { floraDay = std::max(0, day); }
@@ -176,7 +240,8 @@ class ChunkManager {
     MeshHandle* getMesh(const ChunkCoord& coord);
 
     bool hasGenerationWork() const {
-        return !generationQueue.empty() || !generationJobs.empty();
+        return !generationQueue.empty() || !generationJobs.empty() ||
+               !treeJobs.empty();
     }
     size_t generationInFlight() const { return generationJobs.size(); }
     size_t meshInFlight() const { return meshJobs.size(); }
@@ -222,6 +287,11 @@ class ChunkManager {
         FloraLayerPtr flora;
         // Plants were regrown for a saved chunk: save them.
         bool floraRegrown = false;
+        TreeStamp trees = {};
+        // Tree wood was added to a saved chunk: save it.
+        bool treesPlaced = false;
+        // The tree column the job used; a newer one makes the result stale.
+        const TreeColumn* treesUsed = nullptr;
     };
     struct GenerationJob {
         ChunkCoord coord;
@@ -249,9 +319,18 @@ class ChunkManager {
     struct ColumnCache {
         size_t registrations = 0;
         std::shared_ptr<const ChunkColumnInputs> data;
+        std::shared_ptr<const TreeColumn> trees;
     };
     std::shared_ptr<const ChunkColumnInputs> prepareColumns(
         ChunkCoord coord, const Region& region);
+    // Trees of a column once every region tree set it needs is ready
+    // (starting the missing jobs); raises the column top to its wood.
+    std::shared_ptr<const TreeColumn> prepareTrees(ChunkCoord coord,
+                                                   Vec2u region);
+    // Region tree set, or null while its job runs (started if missing).
+    const TreeSet* regionTrees(Vec2u region);
+    // Drops tree sets no registered region within two regions needs.
+    void releaseTreeSets();
     const TerrainNeighborhood& terrainNeighborhood(Vec2u region) {
         return *terrainShared(region);
     }
@@ -282,6 +361,33 @@ class ChunkManager {
     std::unordered_map<Vec2u, std::shared_ptr<const TerrainNeighborhood>>
         regionTerrain;
     std::shared_ptr<const FloraSpeciesTable> floraTable;
+    std::shared_ptr<const TreeSpeciesTable> treeTable;
+    std::vector<TreeLandmark> landmarks;
+    std::unordered_set<Vec2u> landmarkRegions;
+    uint32_t treeSeed = 0;
+    std::unordered_map<Vec2u, std::shared_ptr<const TreeSet>> treeSets;
+    struct TreeJob {
+        Vec2u region;
+        std::future<TreeSet> future;
+        TreeOverridesPtr overrides;  // the overrides it was built with
+    };
+    std::vector<TreeJob> treeJobs;
+    TreeOverridesPtr overrides = std::make_shared<const TreeOverrideMap>();
+    std::unordered_map<uint64_t, TreeInstancePtr> landmarkCache;
+    std::unordered_map<Vec2u, BillboardSet> billboardSets;
+    struct BillboardJob {
+        Vec2u region;
+        std::future<std::vector<TreeBillboard>> future;
+    };
+    std::vector<BillboardJob> billboardJobs;
+    std::vector<Vec2u> billboardWishes;  // nearest first
+    size_t billboardWishNext = 0;
+    uint64_t billboardRevision_ = 0;
+    void dispatchBillboards();
+    // Regions whose set is built: landmark sites without a tree there were
+    // dropped by generation (no ground) and are not asked for again.
+    std::unordered_set<Vec2u> landmarkRegionsBuilt;
+    uint64_t treeRevision_ = 0;
     uint32_t floraSeed_ = 0;
     int32_t floraDay = 0;
     std::unordered_map<Vec2u, size_t> regionRegistrations;

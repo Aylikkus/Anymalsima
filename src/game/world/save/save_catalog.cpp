@@ -13,6 +13,7 @@ constexpr const char* MetaFile = "world.json";
 constexpr const char* MapFile = "world_map.dat";
 constexpr const char* EditsFile = "terrain_edits.dat";
 constexpr const char* LightsFile = "light_sources.dat";
+constexpr const char* TreesFile = "trees.dat";
 
 std::string folderName(uint64_t seed, const std::string& createdAt) {
     std::string stamp = createdAt;  // YYYY-MM-DDTHH:MM:SS
@@ -115,6 +116,19 @@ void writeLightSources(const SaveSlot& slot,
     FileIO::writeBytesAtomic(
         slot.directory / LightsFile,
         light_sources_codec::encode(std::move(lights), extra));
+}
+
+trees_codec::File readTrees(const SaveSlot& slot) {
+    const auto path = slot.directory / TreesFile;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return {};
+    return trees_codec::decode(FileIO::readBytes(path));
+}
+
+void writeTrees(const SaveSlot& slot, const TreeOverrideMap& trees,
+                const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(slot.directory / TreesFile,
+                             trees_codec::encode(trees, extra));
 }
 
 }  // namespace save_catalog

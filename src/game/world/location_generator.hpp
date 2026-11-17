@@ -1,4 +1,6 @@
 #pragma once
+#include <climits>
+
 #include "chunk.hpp"
 #include "chunk_coord.hpp"
 #include "consts.hpp"
@@ -26,8 +28,10 @@ class LocationGenerator {
     // True when generateChunk would leave every tile of the chunk as air, so
     // callers may skip the worker job. Keep every "is this chunk air?" rule
     // here (future sky islands and underworld layers must extend it).
-    bool isAirChunk(const ChunkCoord& coord,
-                    const ChunkColumnInputs& columns) const;
+    // woodTop: the highest tile tree wood may occupy over the column
+    // (TreeColumn::woodTop), INT_MIN without trees.
+    bool isAirChunk(const ChunkCoord& coord, const ChunkColumnInputs& columns,
+                    int woodTop = INT_MIN) const;
 
    private:
     const RegionLayer* layerAtDepth(const std::vector<RegionLayer>& layers,

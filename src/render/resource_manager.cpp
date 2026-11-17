@@ -59,6 +59,8 @@ ResourceManager::ResourceManager() {
     registerDataType<GroundCover>();
     registerDataType<FoliageMaterial>();
     registerDataType<Flora>();
+    // Trees (docs/handoff/trees.md); ids saved raw like flora.
+    registerDataType<Tree>();
 }
 
 inline FontRole matchRole(std::string key) {
@@ -144,6 +146,7 @@ void ResourceManager::loadFromJson(const Json& j) {
     }
     validateSoilReferences(*this);
     validateFloraReferences(*this);
+    validateTreeReferences(*this);
     validateFoliageTextures(*this, [&](const std::string& key) {
         return materialsTextures.contains(key);
     });

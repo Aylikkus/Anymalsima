@@ -13,6 +13,7 @@ design handoff `docs/handoff/flora.md`.
 | Grass, moss, lichen painted on the ground | a ground cover + an overlay material + 2 textures | `assets/data/ground_covers/`, `assets/data/materials/`, `assets/materials/blocks/cover/` |
 | A new colour or texture for leaves, petals, fruit, bark | a foliage material (+ textures if new shapes) | `assets/data/foliage_materials/`, `assets/materials/foliage/` |
 | A plant (grass tuft, flower, fern, bush, ...) | a flora definition | `assets/data/flora/` |
+| A tree | a tree definition + a wood block | see `docs/modding/trees.md` |
 
 Neither grass nor plants are blocks. Ground covers are painted on the faces
 of the soil tile they grow on; plants are lightweight instances anchored on a
@@ -264,6 +265,7 @@ enough for the bush you want.
 | `ground_cover.required` | none | the tile must have one of these covers, with some density |
 | `ground_cover.forbidden` | none | the tile must not have these covers |
 | `climate` | required | at least one climate rule |
+| `vegetation` | any | list of region vegetation types the plant grows in (for example `["Forest", "Rainforest"]` for a forest-floor fern) |
 | `max_slope` | 1 | steepest ground, metres per metre (0.6 is already a steep hill) |
 | `underwater` | false | allow ground below sea level |
 | `density_per_100m2` | 1 | plants per 100 m² where everything allows them |

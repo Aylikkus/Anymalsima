@@ -48,15 +48,30 @@ Ground cover (grass) and plants follow `docs/handoff/flora.md` (its Progress sec
 - Game time is `WorldClock` (`world/world_clock.hpp`, saved as `worldDays` in `world.json`). Plant stages are analytic in the clock's day; `FloraSimulation` advances layers lazily (on load and in a slow sweep): dead plants are removed, populations continue only through seeds (dropped once per seeding cycle, germinating against local crowding toward the generated density; deterministic and deduplicated), chunks unloaded for a year or more are re-sampled at equilibrium (`regenerateFlora`, epoch-salted placement with fixed cluster patches), harvests regrow, and cover regrows on exposed topsoil. Never tick plants per frame or per day across the world. Large plants need level ground under their footprint and nothing rising beside it, and `FloraMeshBuilder` keeps their canopy within the footprint plus 0.3 m. Rare species are data (tiny `density_per_100m2`; `persistent_sites` keeps their sites across epochs by placing them with the unsalted seed, `FloraGenerationInput::clusterSeed`).
 - Modder-facing documentation of the data formats is `docs/modding/plants.md`: update it with any change to ground cover, foliage material or flora schemas.
 
+### Trees
+
+Trees follow `docs/handoff/trees.md` (its Progress section lists what exists); modder docs are `docs/modding/trees.md` (update with any `Tree` schema change).
+
+- `Tree` (`items/tree.hpp`, `assets/data/trees/`) shares the flora placement parser (`flora_json::placement`) and foliage materials. Tree ids are saved raw: keep new `trees` files after existing ones.
+- Trunks and limbs at least `TreeVoxelRadius` thick are living wood: blocks with `natural_growth` (`naturalGrowthBlocks` gives the id set). Only tree growth places them; edit detection and distant structures must treat them as air, and player-placeable logs or planks must be other block ids.
+- Ordinary trees reach at most `TreeMaxReach` from their anchor (generation reads terrain only within one region of a chunk); massive trees are landmarks placed from a world-wide list (`placeTreeLandmarks`).
+- Each tree is placed and built (`generateRegionTrees`, skeleton included) only by the worker job of the region holding its anchor; chunks read the sets of the regions around them through `ChunkManager::prepareTrees`/`treeColumn`. Never build a tree's skeleton elsewhere from different inputs, or neighbours disagree. A chunk's generation waits for those sets; building its `TreeColumn` raises the column top to the wood before sunlight runs.
+- Landmark wood is drawn at distance as structure voxels: `TreeRenderer::landmarkWood` feeds `TerrainLodManager::setTreeWood` (`StructureLod`, rasterized by `tree_wood_lod` at full or 2x/4x coarser cells by distance), and those landmarks' crowns skip bark prisms (`Detail::DistantCrown`).
+- Far forests are billboards: `regionBillboards` (placement only, same positions as full generation) built by low-priority jobs from `ChunkManager::wantBillboards`, drawn per species with a fade-in (`i_data3.w`) that complements the distant meshes' fade-out.
+- Crowns (foliage, branches thinner than a block) are drawn by `TreeRenderer` with the foliage program in tree mode (`u_foliage.z = 1`). Ordinary trees share skeletons per species variant and quarter turn (`TreeSpeciesTable::variant`), so their crown meshes are shared and instanced; keep `TreeSkeletonInput::rotation` and the foliage shader's yaw convention identical.
+- During play `TreeSimulation` grows wood in loaded chunks (through `WorldEditor`), turns wood removals that sever a branch or trunk into cuts, and plants trees (debug tool). Cuts and planted trees live in `TreeOverrideMap` (`ChunkManager::treeOverrides`, saved as `trees.dat`); change them only with `setTreeOverrides` plus `updateTree`, so tree sets, columns and in-flight jobs follow. Skeletons with cuts must come from `applyTreeCuts` in record order.
+- Chunk jobs write wood only into air (`placeTreeWood`) and stamp the chunk (`TreeStamp`: day and `TreeVersion`, saved in the FLOR blob header). Bump `TreeVersion` with any change to skeleton, rasterizer or placement output.
+
 ## Persistence
 
 Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/save_catalog.hpp`):
 
 - `world.json`: `WorldMeta` (format/generator versions, master seed, timestamps, camera).
 - `world_map.dat`: `world_map_codec` sections `GENS`, `RGNS`, `RIVR`. Preview meshes are not stored.
-- `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`; v2 palette entries include ground cover, v1 still decodes), `TOPS` (column ceilings) and `FLOR` (one `flora_codec` blob of plants per saved chunk, same index; a saved chunk without one regrows its generated plants).
+- `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`; v2 palette entries include ground cover, v1 still decodes), `TOPS` (column ceilings) and `FLOR` (one `flora_codec` blob of plants per saved chunk, same index; a saved chunk without one regrows its generated plants; v3 blobs also carry the chunk's `TreeStamp`, and a chunk without one gets its trees once).
 - `terrain_edits.dat`: `terrain_edits_codec` section `EDIT`, the world-wide index of edited chunk columns that distant terrain shows (`world/terrain_edits.hpp`). It is derived data: region files hold the truth.
 - `light_sources.dat`: `light_sources_codec` section `LITE` (v2: position, block id, open faces), the world-wide index of emissive tiles (see Lighting). Also derived.
+- `trees.dat`: `trees_codec` section `TREE` (cut and planted trees, `TreeOverrideMap`). Not derived: it is the only record of cuts and planted trees, so `GameplayState` writes it whenever it changes.
 
 Every sub-seed derives from `WorldGenSettings::seed` through `WorldGenSettings::fromSeed`. Bump `WorldMeta::GeneratorVersion` when chunk generation output changes.
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <climits>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -48,6 +49,18 @@ struct FloraLayer {
     bool operator==(const FloraLayer&) const = default;
 };
 using FloraLayerPtr = std::shared_ptr<const FloraLayer>;
+
+// Per chunk: the game day its tree wood was last brought up to date and the
+// tree generator version that made it (docs/handoff/trees.md). Saved in the
+// header of the chunk's FLOR blob. Never: no tree wood placed yet (chunks
+// saved before trees existed get whole trees once).
+struct TreeStamp {
+    static constexpr int32_t Never = INT32_MIN;
+    int32_t day = Never;
+    uint16_t version = 0;
+    bool placed() const { return day != Never; }
+    bool operator==(const TreeStamp&) const = default;
+};
 
 // Analytic growth: a plant's stage is a pure function of its age, so
 // unloaded areas need no ticking (docs/handoff/flora.md, section 4).

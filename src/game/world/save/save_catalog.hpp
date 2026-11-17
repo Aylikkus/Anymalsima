@@ -6,6 +6,7 @@
 
 #include "light_sources_codec.hpp"
 #include "terrain_edits_codec.hpp"
+#include "trees_codec.hpp"
 #include "world/world.hpp"
 #include "world_meta.hpp"
 
@@ -44,5 +45,10 @@ light_sources_codec::File readLightSources(const SaveSlot& slot);
 void writeLightSources(const SaveSlot& slot,
                        std::vector<light_sources_codec::Record> lights,
                        const SectionContainer& extra = {});
+// trees.dat (cut and planted trees): empty when the file does not exist
+// yet. Throws on corrupt data.
+trees_codec::File readTrees(const SaveSlot& slot);
+void writeTrees(const SaveSlot& slot, const TreeOverrideMap& trees,
+                const SectionContainer& extra = {});
 
 }  // namespace save_catalog

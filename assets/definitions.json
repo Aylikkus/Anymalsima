@@ -134,14 +134,38 @@
     "blocks.stones.shale_normal": "assets/materials/blocks/stones/shale_normal.png",
     "blocks.stones.slate": "assets/materials/blocks/stones/slate.png",
     "blocks.stones.slate_normal": "assets/materials/blocks/stones/slate_normal.png",
+    "blocks.wood.elder_bark": "assets/materials/blocks/wood/elder_bark.png",
+    "blocks.wood.elder_bark_normal": "assets/materials/blocks/wood/elder_bark_normal.png",
+    "blocks.wood.oak_bark": "assets/materials/blocks/wood/oak_bark.png",
+    "blocks.wood.oak_bark_normal": "assets/materials/blocks/wood/oak_bark_normal.png",
+    "blocks.wood.palm_bark": "assets/materials/blocks/wood/palm_bark.png",
+    "blocks.wood.palm_bark_normal": "assets/materials/blocks/wood/palm_bark_normal.png",
+    "blocks.wood.pine_bark": "assets/materials/blocks/wood/pine_bark.png",
+    "blocks.wood.pine_bark_normal": "assets/materials/blocks/wood/pine_bark_normal.png",
+    "blocks.wood.redwood_bark": "assets/materials/blocks/wood/redwood_bark.png",
+    "blocks.wood.redwood_bark_normal": "assets/materials/blocks/wood/redwood_bark_normal.png",
+    "blocks.wood.spruce_bark": "assets/materials/blocks/wood/spruce_bark.png",
+    "blocks.wood.spruce_bark_normal": "assets/materials/blocks/wood/spruce_bark_normal.png",
     "foliage.berry": "assets/materials/foliage/berry.png",
     "foliage.berry_normal": "assets/materials/foliage/berry_normal.png",
+    "foliage.billboard_broadleaf": "assets/materials/foliage/billboard_broadleaf.png",
+    "foliage.billboard_broadleaf_normal": "assets/materials/foliage/billboard_broadleaf_normal.png",
+    "foliage.billboard_conifer": "assets/materials/foliage/billboard_conifer.png",
+    "foliage.billboard_conifer_normal": "assets/materials/foliage/billboard_conifer_normal.png",
+    "foliage.billboard_palm": "assets/materials/foliage/billboard_palm.png",
+    "foliage.billboard_palm_normal": "assets/materials/foliage/billboard_palm_normal.png",
+    "foliage.billboard_pine": "assets/materials/foliage/billboard_pine.png",
+    "foliage.billboard_pine_normal": "assets/materials/foliage/billboard_pine_normal.png",
     "foliage.blade": "assets/materials/foliage/blade.png",
     "foliage.blade_normal": "assets/materials/foliage/blade_normal.png",
     "foliage.frond": "assets/materials/foliage/frond.png",
     "foliage.frond_normal": "assets/materials/foliage/frond_normal.png",
     "foliage.leaf_broad": "assets/materials/foliage/leaf_broad.png",
     "foliage.leaf_broad_normal": "assets/materials/foliage/leaf_broad_normal.png",
+    "foliage.needles": "assets/materials/foliage/needles.png",
+    "foliage.needles_normal": "assets/materials/foliage/needles_normal.png",
+    "foliage.palm_frond": "assets/materials/foliage/palm_frond.png",
+    "foliage.palm_frond_normal": "assets/materials/foliage/palm_frond_normal.png",
     "foliage.petal": "assets/materials/foliage/petal.png",
     "foliage.petal_normal": "assets/materials/foliage/petal_normal.png"
   },
@@ -171,7 +195,8 @@
       "files": [
         "assets/data/materials/rocks.json",
         "assets/data/materials/soils.json",
-        "assets/data/materials/vegetation.json"
+        "assets/data/materials/vegetation.json",
+        "assets/data/materials/wood.json"
       ]
     },
     {
@@ -200,7 +225,8 @@
       "files": [
         "assets/data/blocks/rocks.json",
         "assets/data/blocks/soils.json",
-        "assets/data/blocks/test_light.json"
+        "assets/data/blocks/test_light.json",
+        "assets/data/blocks/trees.json"
       ]
     },
     {
@@ -213,6 +239,12 @@
       "type": "soils",
       "files": [
         "assets/data/soils/soils.json"
+      ]
+    },
+    {
+      "type": "trees",
+      "files": [
+        "assets/data/trees/trees.json"
       ]
     }
   ]

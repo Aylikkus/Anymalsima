@@ -28,6 +28,8 @@
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/tile_raycast.hpp"
+#include "world/tree_renderer.hpp"
+#include "world/tree_simulation.hpp"
 #include "world/world_clock.hpp"
 #include "world/world_editor.hpp"
 #include "world/world_generation_task.hpp"
@@ -86,7 +88,19 @@ class GameplayState : public IGameState {
     // Declared after chunkManager and editor: they disconnect from their
     // signals.
     std::unique_ptr<FloraRenderer> floraRenderer;
+    std::unique_ptr<TreeRenderer> treeRenderer;
     std::unique_ptr<FloraSimulation> floraSim;
+    // Tree growth, cuts and planting; listens to editor (declared after it).
+    std::unique_ptr<TreeSimulation> treeSim;
+    // trees.dat sections this build does not know, written back unchanged.
+    SectionContainer treesExtra;
+    // Writes trees.dat (cuts and planted trees: not derived data, so it is
+    // written as soon as it changes).
+    void saveTrees();
+    TextButton* plantButton = nullptr;
+    size_t plantSpecies = 0;  // index into treeSpecies().species()
+    std::string lastTreeAction;
+    void updatePlantLabel();
     // Game time (saved in world.json); the TIME button cycles debug speeds.
     WorldClock clock;
     TextButton* timeButton = nullptr;
@@ -110,7 +124,7 @@ class GameplayState : public IGameState {
     Text* tileDebugText = nullptr;
 
     // HUD block editing: a tool is armed by its button and applied with LMB.
-    enum class EditTool { None, Place, Remove, PlaceLight, Harvest };
+    enum class EditTool { None, Place, Remove, PlaceLight, Harvest, PlantTree };
     EditTool tool = EditTool::None;
     TextButton* placeButton = nullptr;
     TextButton* removeButton = nullptr;

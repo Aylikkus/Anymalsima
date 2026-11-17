@@ -82,8 +82,9 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
 }
 
 bool LocationGenerator::isAirChunk(const ChunkCoord& coord,
-                                   const ChunkColumnInputs& columns) const {
-    int top = SEA_LEVEL_Y;
+                                   const ChunkColumnInputs& columns,
+                                   int woodTop) const {
+    int top = std::max(SEA_LEVEL_Y, woodTop);
     for (const auto& column : columns.columns)
         top = std::max(top, column.surface_y);
     return int(coord.y) * Chunk::SIZE_Y > top;

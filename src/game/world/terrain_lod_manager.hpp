@@ -48,6 +48,15 @@ class TerrainLodManager {
                              const LightShadows::Face& face,
                              ChunkManager& chunks, const Camera& camera);
     bool drawsColumn(unsigned x, unsigned z) const;
+    // Massive trees drawn as voxel wood at distance (StructureLod::setTrees);
+    // ignored without edit tracking (no structure proxies).
+    void setTreeWood(std::vector<TreeWoodSource> trees) {
+        if (structures) structures->setTrees(std::move(trees));
+    }
+    bool drawsTreeWood() const { return structures != nullptr; }
+    size_t treeWoodSlabs() const {
+        return structures ? structures->treeSlabCount() : 0;
+    }
     size_t residentBytes() const {
         return resident + (joinsInitialised ? JoinBudget : 0) +
                (structures ? structures->residentBytes() : 0);

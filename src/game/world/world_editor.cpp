@@ -194,7 +194,10 @@ void WorldEditor::commit(Pending& pending) {
         std::sort(indices.begin(), indices.end());
         indices.erase(std::unique(indices.begin(), indices.end()),
                       indices.end());
-        auto kept = std::make_shared<FloraLayer>();
+        // Copy the layer so its header (resolvedDay) survives: a reset day
+        // would make FloraSimulation re-sample or re-seed the whole chunk.
+        auto kept = std::make_shared<FloraLayer>(*layer);
+        kept->instances.clear();
         for (size_t i = 0; i < layer->instances.size(); ++i)
             if (!std::binary_search(indices.begin(), indices.end(), i))
                 kept->instances.push_back(layer->instances[i]);

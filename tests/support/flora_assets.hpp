@@ -11,6 +11,7 @@
 #include "items/material.hpp"
 #include "items/rock.hpp"
 #include "items/soil.hpp"
+#include "items/tree.hpp"
 #include "test.hpp"
 
 namespace test {
@@ -27,6 +28,7 @@ class FloraAssets final : public IAssets {
         registerDataType<GroundCover>();
         registerDataType<FoliageMaterial>();
         registerDataType<Flora>();
+        registerDataType<Tree>();
     }
     template <typename T>
     void load(const Json& j) {
@@ -67,19 +69,22 @@ void expectThrows(F fn, const std::string& context) {
 
 // Every shipped definition the world generator and flora use.
 inline void loadAllContent(FloraAssets& a) {
-    for (const auto* file : {"materials/rocks.json", "materials/soils.json",
-                             "materials/vegetation.json"})
+    for (const auto* file :
+         {"materials/rocks.json", "materials/soils.json",
+          "materials/vegetation.json", "materials/wood.json"})
         a.loadContent<Material>(file);
     for (const auto* file :
          {"rocks/igneous_extrusive.json", "rocks/igneous_intrusive.json",
           "rocks/metamorphic.json", "rocks/sedimentary.json"})
         a.loadContent<Rock>(file);
-    for (const auto* file : {"blocks/rocks.json", "blocks/soils.json"})
+    for (const auto* file :
+         {"blocks/rocks.json", "blocks/soils.json", "blocks/trees.json"})
         a.loadContent<Block>(file);
     a.loadContent<Soil>("soils/soils.json");
     a.loadContent<GroundCover>("ground_covers/ground_covers.json");
     a.loadContent<FoliageMaterial>("foliage_materials/foliage_materials.json");
     a.loadContent<Flora>("flora/flora.json");
+    a.loadContent<Tree>("trees/trees.json");
 }
 
 // Loam with a topsoil variant and one meadow cover on Plains.

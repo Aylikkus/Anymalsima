@@ -8,8 +8,8 @@ harvest). Step 10 is the plan for future work, in
 `docs/modding/plants.md`. This document is a long-term roadmap. It is implemented in the
 small, separately shippable steps listed in
 [Implementation steps](#7-implementation-steps); see
-[Progress](#9-progress) for what was built and where. Trees are out of scope (a
-separate plan) but should reuse the plant pipeline described here.
+[Progress](#9-progress) for what was built and where. Trees are a separate
+plan (`docs/handoff/trees.md`) that reuses the plant pipeline described here.
 
 ## Why
 
@@ -682,6 +682,10 @@ Tables, beds, torches: data-defined objects placed by the player.
   neighbouring layers).
 
 ### Trees and distant vegetation
+
+Trees have their own plan: `docs/handoff/trees.md` (voxel trunks, size
+classes up to massive landmarks, growth, cutting). The notes below were the
+first sketch; the trees handoff supersedes them where they differ.
 
 - Trees as large flora: new part types (`trunk`, `branch`, `canopy` built on
   `leaf_clump`), `collision: solid`, footprints of 1-3 tiles, heights of 4-20

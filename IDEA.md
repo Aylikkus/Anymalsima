@@ -198,6 +198,16 @@ Distinguish knowing a design from having the skill, tools, materials, and infras
 
 Vertical deposits should make excavation and material choice meaningful. Ore can support tools, weapons, armor, ornaments, and trade. Production connects geology, access, labor, expertise, and ownership. A proposed quality model combines material properties and maker skill; its exact formula is not decided.
 
+### Trees and great trees
+
+Direction from the author (recorded 2026-11-17; technical plan in `docs/handoff/trees.md`):
+
+- **From shrubs to world trees.** Trees range from thin mountain pines to rare world-scale landmarks, a handful per continent, with trunks up to about 128 m wide and heights up to about 120 m. A tree never grows into a ceiling or past the build limit; it spreads instead, so trees also grow indoors and on mountain tops.
+- **Trees are terrain.** Trunks and limbs thick enough are blocks that can be cut, climbed, and built upon; leaves and thin twigs are not. Peoples such as elves can make homes on and in great trees.
+- **Cutting and regrowth.** Without physics, cutting a trunk or limb removes what is above the cut, and the tree regrows from the cut. Whether a stump resprouts depends on the species. Once physics exists, a cut tree should fall instead.
+- **Death leaves the wood.** When a tree dies, its leaves fall but all its wood stays. Some peoples (for example elves) may live on great trees and prolong their lives; other species that inhabit tree houses do not care. How a settlement reacts when its tree dies is open.
+- **Growth accelerators.** Growth is compressed by size (small trees mature in about a game year, massive ones in centuries). Fertilizers and special abilities can speed up growth and possibly extend a tree's life; details are open.
+
 ### Temperature, fluids, and phase changes
 
 Temperature should vary locally with weather, depth, insulation, heat sources, and surrounding materials. Active geysers can warm nearby areas; sheltered deep spaces can behave differently from exposed terrain. Cave temperature should follow the chosen environmental model rather than always being colder by definition.

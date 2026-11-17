@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_map>
 
 #include "chunk_codec.hpp"
 #include "flora_codec.hpp"
@@ -112,9 +113,14 @@ RegionData merge(const RegionData& base, const RegionSnapshot& snapshot) {
             column = std::max(column, int32_t(worldY));
         }
     }
-    for (const auto& [index, layer] : snapshot.flora)
-        result.flora[index] = std::make_shared<const Bytes>(
-            flora_codec::encode(layer ? *layer : FloraLayer{}));
+    std::unordered_map<uint16_t, TreeStamp> stamps(snapshot.trees.begin(),
+                                                   snapshot.trees.end());
+    for (const auto& [index, layer] : snapshot.flora) {
+        const auto stamp = stamps.find(index);
+        result.flora[index] = std::make_shared<const Bytes>(flora_codec::encode(
+            layer ? *layer : FloraLayer{},
+            stamp != stamps.end() ? stamp->second : TreeStamp{}));
+    }
     return result;
 }
 

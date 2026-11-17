@@ -1,11 +1,13 @@
 #pragma once
 
 #include "core/assets_api.hpp"
+#include "items/block.hpp"
 #include "items/flora.hpp"
 #include "items/foliage_material.hpp"
 #include "items/ground_cover.hpp"
 #include "items/material.hpp"
 #include "items/soil.hpp"
+#include "items/tree.hpp"
 
 // Cross-references of ground covers, foliage materials and flora. Run after
 // every data file has loaded, independently of manifest order. Forage items
@@ -49,6 +51,39 @@ inline void validateFloraReferences(const IAssets& assets) {
         for (const auto& part : flora.parts)
             if (!storageHas.template operator()<FoliageMaterial>(part.material))
                 fail("unknown foliage material " + part.material);
+    }
+}
+
+// Cross-references of tree species (docs/modding/trees.md): wood must be a
+// natural_growth block, bark and foliage foliage materials.
+inline void validateTreeReferences(const IAssets& assets) {
+    if (!assets.hasStorage<Tree>()) return;
+    const auto storageHas = [&]<typename T>(const std::string& name) {
+        return assets.hasStorage<T>() &&
+               assets.getStorage<T>().indexByName.contains(name);
+    };
+    for (const auto& tree : assets.getStorage<Tree>().items) {
+        const auto fail = [&](const std::string& what) {
+            throw std::runtime_error(tree.name + ": " + what);
+        };
+        if (!storageHas.template operator()<Block>(tree.wood.block))
+            fail("unknown wood block " + tree.wood.block);
+        const auto& blocks = assets.getStorage<Block>();
+        if (!blocks.items[blocks.indexByName.at(tree.wood.block)]
+                 .properties.natural_growth)
+            fail("wood block " + tree.wood.block +
+                 " needs \"natural_growth\": true");
+        for (const auto* material : {&tree.wood.bark, &tree.foliage.material})
+            if (!storageHas.template operator()<FoliageMaterial>(*material))
+                fail("unknown foliage material " + *material);
+        for (const auto& soil : tree.placement.soils.names)
+            if (!storageHas.template operator()<Soil>(soil))
+                fail("unknown soil " + soil);
+        for (const auto* list : {&tree.placement.ground_cover_required,
+                                 &tree.placement.ground_cover_forbidden})
+            for (const auto& cover : *list)
+                if (!storageHas.template operator()<GroundCover>(cover))
+                    fail("unknown ground cover " + cover);
     }
 }
 

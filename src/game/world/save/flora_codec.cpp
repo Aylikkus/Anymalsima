@@ -2,12 +2,14 @@
 
 namespace flora_codec {
 
-Bytes encode(const FloraLayer& layer) {
+Bytes encode(const FloraLayer& layer, const TreeStamp& trees) {
     if (layer.instances.size() > MaxInstances)
         throw SerializationError("too many plants in a chunk");
     BinaryWriter out;
     out.write(Version);
     out.write(layer.resolvedDay);
+    out.write(trees.day);
+    out.write(trees.version);
     out.write(uint16_t(layer.instances.size()));
     for (const auto& p : layer.instances) {
         out.write(p.species);
@@ -23,13 +25,19 @@ Bytes encode(const FloraLayer& layer) {
     return out.take();
 }
 
-FloraLayer decode(ByteView data) {
+FloraLayer decode(ByteView data, TreeStamp* trees) {
     BinaryReader in(data);
     const auto version = in.read<uint8_t>();
     if (version < 1 || version > Version)
         throw SerializationError("unsupported flora encoding version");
     FloraLayer layer;
     if (version >= 2) layer.resolvedDay = in.read<int32_t>();
+    TreeStamp stamp;
+    if (version >= 3) {
+        stamp.day = in.read<int32_t>();
+        stamp.version = in.read<uint16_t>();
+    }
+    if (trees) *trees = stamp;
     const auto count = in.read<uint16_t>();
     if (count > MaxInstances) throw SerializationError("too many plants");
     layer.instances.resize(count);

@@ -23,7 +23,18 @@
 
    Cards: leaf_broad (cluster of broad leaves for bush clumps), blade (a tuft
    of grass blades), frond (fern frond), petal (one petal), berry (a small
-   cluster of berries).
+   cluster of berries), needles (a conifer needle spray), palm_frond (a long
+   pinnate palm leaf), and tree billboards for distant forests
+   (billboard_conifer, billboard_broadleaf, billboard_palm, billboard_pine):
+   whole crown silhouettes made of many small leaf shapes, the crown filling
+   the card (the trunk is drawn separately).
+
+3. Tree wood in assets/materials/blocks/wood/ (docs/handoff/trees.md):
+
+  <name>.png         128x128 RGBA, coloured bark (wood blocks use the terrain
+                     material array, which has no palette), tiling, with
+                     vertical furrows so trunk sides read as bark.
+  <name>_normal.png  OpenGL-style tangent-space normals.
 
 Output is deterministic; keys stay stable so real art can replace the files
 one by one. Run from the repository root, then `python3 generate_assets.py`.
@@ -38,6 +49,7 @@ SIZE = 128
 OUT_DIR = os.path.join("assets", "materials", "blocks", "cover")
 CARD_DIR = os.path.join("assets", "materials", "foliage")
 CARD = 256
+WOOD_DIR = os.path.join("assets", "materials", "blocks", "wood")
 
 
 def periodic_noise(rng, size, scale):
@@ -225,6 +237,112 @@ def berry(rng):
     card.save("berry", normal_strength=3.0)
 
 
+def needles(rng):
+    card = Card()
+    # A twig from the bottom centre with fine needles on both sides, and a
+    # few side twigs: a dense spray that reads as conifer foliage in clumps.
+    twigs = [((0.0, 0.0), 0.0, 0.95)]
+    for i in range(4):
+        side = 1 if i % 2 else -1
+        t = 0.25 + 0.17 * i
+        twigs.append(((0.0, t * 0.95), side * rng.uniform(0.5, 0.8),
+                      rng.uniform(0.35, 0.5) * (1.1 - t)))
+    for base, angle, length in twigs:
+        card.leaf(base, angle, length, 0.006, veins=False)
+        dx, dy = np.sin(angle), np.cos(angle)
+        count = int(length * 70)
+        for k in range(count):
+            u = (k + 0.5) / count
+            p = (base[0] + dx * length * u, base[1] + dy * length * u)
+            for side in (-1, 1):
+                card.leaf(p, angle + side * rng.uniform(0.6, 1.0),
+                          rng.uniform(0.06, 0.09) * (1.15 - 0.5 * u),
+                          0.006, veins=False, shade=1)
+    card.save("needles", normal_strength=2.5)
+
+
+def palm_frond(rng):
+    card = Card()
+    leaflets = 26
+    card.leaf((0, 0), 0.0, 0.99, 0.01, veins=False)
+    for i in range(leaflets):
+        t = (i + 0.5) / leaflets
+        y = 0.04 + 0.94 * t
+        length = 0.4 * np.sin(np.pi * (0.08 + 0.86 * t)) ** 0.6 + 0.03
+        for side in (-1, 1):
+            card.leaf((0, y), side * (1.05 - 0.4 * t), length,
+                      0.022 * (1.1 - 0.5 * t), bend=side * 0.25,
+                      veins=False, shade=1)
+    card.save("palm_frond", normal_strength=3.0)
+
+
+def billboard(name, rng, outline, leaves, size, shade=1):
+    """A crown silhouette: `leaves` small leaf blobs scattered inside
+    outline(x, y) -> bool (card space, x in [-0.5, 0.5], y in [0, 1]),
+    lit from above so the crown reads as a volume."""
+    card = Card()
+    placed = 0
+    while placed < leaves:
+        x, y = rng.uniform(-0.5, 0.5), rng.uniform(0, 1)
+        if not outline(x, y):
+            continue
+        placed += 1
+        a = rng.uniform(-np.pi, np.pi)
+        card.leaf((x, y), a, size * rng.uniform(0.7, 1.3),
+                  size * 0.35 * rng.uniform(0.8, 1.2), veins=False, shade=shade)
+    # Darker toward the bottom and the inside: a crown in its own shade.
+    card.value *= 0.7 + 0.3 * np.clip(card.y, 0, 1)
+    card.save(name, normal_strength=2.0)
+
+
+def palm_billboard(rng):
+    """A crown of fronds radiating from the top of the trunk and drooping
+    (the card's centre column near the top)."""
+    card = Card()
+    for i in range(16):
+        a = -2.5 + 5.0 * (i + rng.uniform(0.2, 0.8)) / 16
+        card.leaf((0.0, 0.62), a, rng.uniform(0.38, 0.48), 0.06,
+                  bend=np.sign(a) * 0.5, veins=True, shade=1)
+    card.value *= 0.7 + 0.3 * np.clip(card.y, 0, 1)
+    card.save("billboard_palm", normal_strength=2.0)
+
+
+def anisotropic_noise(rng, size, scale_x, scale_y):
+    """Tiling noise stretched along y (furrows run vertically)."""
+    white = rng.standard_normal((size, size))
+    f = np.fft.fftfreq(size)
+    fy, fx = np.meshgrid(f, f, indexing="ij")
+    spectrum = np.fft.fft2(white) * np.exp(
+        -((fx * scale_x) ** 2 + (fy * scale_y) ** 2))
+    field = np.real(np.fft.ifft2(spectrum))
+    return (field - field.min()) / (np.ptp(field) + 1e-9)
+
+
+def bark(name, seed, base, dark, furrow, plates, rings=0.0):
+    """base, dark: RGB 0-255. furrow: furrow width scale; plates: how much
+    the bark breaks into plates across the furrows."""
+    rng = np.random.default_rng(seed)
+    ridges = anisotropic_noise(rng, SIZE, furrow, furrow * 6)
+    cracks = anisotropic_noise(rng, SIZE, furrow * 2.5, furrow * 1.2)
+    fine = periodic_noise(rng, SIZE, 2.0)
+    height = 0.7 * ridges + plates * 0.3 * cracks
+    height = (height - height.min()) / (np.ptp(height) + 1e-9)
+    if rings:
+        ys = np.arange(SIZE)[:, None] / SIZE
+        height = height * (1 - rings) + rings * (
+            0.5 + 0.5 * np.sin(ys * np.pi * 2 * 8 + 3 * fine))
+    shade = np.clip(height ** 0.8 * 0.85 + 0.15 * fine, 0, 1)
+    base = np.array(base) / 255.0
+    dark = np.array(dark) / 255.0
+    rgb = dark[None, None, :] + (base - dark)[None, None, :] * shade[..., None]
+    rgba = np.dstack((rgb, np.ones((SIZE, SIZE))))
+    os.makedirs(WOOD_DIR, exist_ok=True)
+    Image.fromarray(np.uint8(np.round(np.clip(rgba, 0, 1) * 255)), "RGBA").save(
+        os.path.join(WOOD_DIR, name + ".png"))
+    Image.fromarray(normals(height + 0.15 * fine, 4.0), "RGB").save(
+        os.path.join(WOOD_DIR, name + "_normal.png"))
+
+
 def main():
     if not os.path.isdir("assets"):
         sys.exit("Run from the repository root")
@@ -239,6 +357,24 @@ def main():
     frond(np.random.default_rng(107))
     petal(np.random.default_rng(109))
     berry(np.random.default_rng(113))
+    needles(np.random.default_rng(127))
+    palm_frond(np.random.default_rng(131))
+    billboard("billboard_conifer", np.random.default_rng(301),
+              lambda x, y: abs(x) < 0.47 * (1 - y) ** 0.9 * (
+                  0.8 + 0.2 * np.sin(y * 40)), 900, 0.07)
+    billboard("billboard_broadleaf", np.random.default_rng(307),
+              lambda x, y: (x / 0.44) ** 2 + ((y - 0.52) / 0.45) ** 2 < 1,
+              700, 0.09)
+    palm_billboard(np.random.default_rng(311))
+    billboard("billboard_pine", np.random.default_rng(313),
+              lambda x, y: (x / 0.48) ** 2 + ((y - 0.55) / 0.42) ** 2 < 1 and
+              (np.sin(x * 9 + y * 5) > -0.6), 500, 0.09)
+    bark("spruce_bark", 211, (118, 84, 62), (52, 36, 28), 10, 0.6)
+    bark("pine_bark", 223, (146, 98, 66), (60, 40, 30), 7, 0.9)
+    bark("oak_bark", 227, (112, 100, 86), (44, 38, 32), 6, 0.5)
+    bark("palm_bark", 229, (150, 128, 96), (78, 64, 48), 14, 0.2, rings=0.45)
+    bark("redwood_bark", 233, (150, 78, 52), (66, 32, 24), 12, 0.3)
+    bark("elder_bark", 239, (126, 118, 102), (50, 46, 42), 5, 0.7)
 
 
 if __name__ == "__main__":

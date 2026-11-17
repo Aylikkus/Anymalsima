@@ -1,4 +1,4 @@
-$input v_position, v_normal, v_uv, v_params, v_color0, v_color1, v_light, v_ground
+$input v_position, v_normal, v_uv, v_params, v_color0, v_color1, v_light, v_ground, v_fade
 
 #include <bgfx_shader.sh>
 // Foliage cards (FoliageMaterial albedo/normal, layer = material id - 1).
@@ -8,7 +8,7 @@ SAMPLER2DARRAY(u_normal_array, 1);
 SAMPLER2D(u_shadow_atlas, 3);
 SAMPLER2D(u_lod_light_map, 4);
 #include "../world_surface.sh"
-uniform vec4 u_foliage;  // x = time, y = wind
+uniform vec4 u_foliage;  // x = time, y = wind, z = 1: tree crowns
 
 // Rotates a colour's hue around the grey axis.
 vec3 hueShift(vec3 color, float angle)
@@ -25,7 +25,14 @@ void main()
     float distanceToEye = length(v_position - u_world_eye.xyz);
     float fadeEnd = v_ground.w;
     float fade = 1.0 - smoothstep(fadeEnd * 0.8, fadeEnd, distanceToEye);
-    if (surfaceCoverHash(vec3(floor(gl_FragCoord.xy), 7.0)) > fade) discard;
+    float dither = surfaceCoverHash(vec3(floor(gl_FragCoord.xy), 7.0));
+    if (dither > fade) discard;
+    // Fade-in (billboards): the complement of a mesh fading out over the
+    // same distances, so the two cross-fade without gaps or overlap.
+    float fadeIn = v_fade.x;
+    if (fadeIn > 0.0 &&
+        dither <= 1.0 - smoothstep(fadeIn * 0.8, fadeIn, distanceToEye))
+        discard;
 
     float layer = v_uv.z;
     vec4 texel = vec4(0.85, 0.85, 0.85, 1.0);
@@ -49,7 +56,9 @@ void main()
     vec3 groundHue = ground / max(dot(ground, vec3(0.3, 0.59, 0.11)), 0.05)
                    * luma;
     color = mix(color, groundHue, 0.12);
-    color = mix(ground * 0.7, color, smoothstep(0.0, 0.3, height));
+    // (Plants only: in tree crowns height is the wind weight.)
+    if (u_foliage.z < 0.5)
+        color = mix(ground * 0.7, color, smoothstep(0.0, 0.3, height));
 
     vec3 normal = normalize(v_normal);
     vec3 toEye = normalize(u_world_eye.xyz - v_position);

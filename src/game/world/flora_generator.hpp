@@ -35,6 +35,7 @@ struct FloraSpeciesRule {
     std::bitset<256> soilAllowed;  // none set: any soil
     ValueRange fertility{0, 1}, retention{0, 1};
     std::vector<SoilPlacement> climate;
+    std::vector<VegetationType> vegetation;  // empty: any
     struct Companion {
         uint8_t species;
         float radius;
@@ -45,6 +46,11 @@ struct FloraSpeciesRule {
     int heightTiles = 1;
     double maxAgeDays = 365;  // spreads generated plants over this many days
 };
+
+// Resolves a placement block (flora or tree species) into rule fields:
+// covers, soils, climate, vegetation, slope, density and clustering.
+void floraPlacementRule(const FloraRules& placement, const IAssets& assets,
+                        FloraSpeciesRule& rule);
 
 class FloraSpeciesTable {
    public:
@@ -145,6 +151,16 @@ double floraClusterMask(const FloraSpeciesRule& rule, uint32_t worldSeed,
 // largest part extent), used for placement blocking and removal.
 float floraHeightEstimate(const Flora& flora);
 
+// A tree trunk's footprint on the ground: plants never grow inside it.
+// x, z in the same frame as the chunk's world tiles (nearest X image).
+struct TreeDisc {
+    double x = 0, z = 0, radius = 0;
+    bool contains(double px, double pz, double pad = 0) const {
+        const double dx = px - x, dz = pz - z;
+        return dx * dx + dz * dz < (radius + pad) * (radius + pad);
+    }
+};
+
 struct FloraGenerationInput {
     const FloraSpeciesTable* rules = nullptr;
     const TerrainNeighborhood* terrain = nullptr;
@@ -159,6 +175,10 @@ struct FloraGenerationInput {
     // cluster patches (habitat) and species with persistent sites, which
     // stay fixed while `seed` varies by epoch.
     uint32_t clusterSeed = 0;
+    // Tree trunks near the chunk (docs/handoff/trees.md); plants whose
+    // anchor or footprint falls inside one are not placed. Must hold every
+    // trunk within reach() of the chunk, so neighbours agree.
+    const std::vector<TreeDisc>* treeDiscs = nullptr;
 };
 
 // Plants anchored in one chunk. Deterministic: a pure function of the world

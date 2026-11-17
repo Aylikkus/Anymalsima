@@ -17,3 +17,4 @@ vec4 v_color0 : COLOR0;
 vec4 v_color1 : COLOR1;
 vec4 v_light : TEXCOORD4;
 vec4 v_ground : TEXCOORD5;
+vec4 v_fade : TEXCOORD6;
