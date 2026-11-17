@@ -11,6 +11,15 @@ You can edit `IDEA.md` only after approval and careful planning with me.
 
 All `CLAUDE.md` files are respective symlinks to `AGENTS.md` files. `.claude` directory is a symlink to `.agents` folder to respect development with various coding agents.
 
+## Documentation
+
+`docs/` is for people rather than for code: contributors, modders and future maintainers. Its detailed structure is still to be decided by the maintainer; for now:
+
+- `docs/handoff/`: design plans and implementation notes for systems in progress (for example `flora.md`).
+- `docs/modding/`: guides for creating content with data files only (for example `plants.md`).
+
+Keep these documents in sync with the code: when a data schema, file layout or workflow they describe changes, update them in the same change. Write for readers who know the game but not its source.
+
 ## Module Guides
 
 Follow the guide for the source module you are changing:

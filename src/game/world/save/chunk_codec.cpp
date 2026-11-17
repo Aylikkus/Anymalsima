@@ -9,10 +9,13 @@ namespace {
 
 constexpr size_t Volume = Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
 
-uint32_t key(const Tile& tile) {
-    return uint32_t(tile.block_id) | uint32_t(uint8_t(tile.liquid)) << 8 |
-           uint32_t(tile.liquidLevel) << 16;
+// Saved tile fields, one byte each in palette order.
+uint64_t key(const Tile& tile) {
+    return uint64_t(tile.block_id) | uint64_t(uint8_t(tile.liquid)) << 8 |
+           uint64_t(tile.liquidLevel) << 16 | uint64_t(tile.cover) << 24 |
+           uint64_t(tile.coverState) << 32;
 }
+constexpr int KeyBytes = 5;
 
 const Tile* flat(const Chunk& chunk) { return &chunk.tiles[0][0][0]; }
 Tile* flat(Chunk& chunk) { return &chunk.tiles[0][0][0]; }
@@ -21,11 +24,11 @@ Tile* flat(Chunk& chunk) { return &chunk.tiles[0][0][0]; }
 
 Bytes encode(const Chunk& chunk) {
     const Tile* tiles = flat(chunk);
-    std::unordered_map<uint32_t, uint16_t> lookup;
-    std::vector<uint32_t> palette;
+    std::unordered_map<uint64_t, uint16_t> lookup;
+    std::vector<uint64_t> palette;
     std::vector<uint16_t> indices(Volume);
     // Neighbouring tiles usually match, so skip the hash lookup for runs.
-    uint32_t lastKey = 0;
+    uint64_t lastKey = 0;
     uint16_t lastIndex = 0;
     for (size_t i = 0; i < Volume; ++i) {
         const auto k = key(tiles[i]);
@@ -42,11 +45,9 @@ Bytes encode(const Chunk& chunk) {
     BinaryWriter out;
     out.write(Version);
     out.write(uint16_t(palette.size()));
-    for (const auto k : palette) {
-        out.write(uint8_t(k & 0xFF));
-        out.write(uint8_t((k >> 8) & 0xFF));
-        out.write(uint8_t((k >> 16) & 0xFF));
-    }
+    for (const auto k : palette)
+        for (int b = 0; b < KeyBytes; ++b)
+            out.write(uint8_t((k >> 8 * b) & 0xFF));
     if (palette.size() == 1) return out.take();
 
     BinaryWriter raw;
@@ -66,7 +67,7 @@ Bytes encode(const Chunk& chunk) {
 void decode(ByteView data, Chunk& chunk) {
     BinaryReader in(data);
     const auto version = in.read<uint8_t>();
-    if (version != Version)
+    if (version < MinVersion || version > Version)
         throw SerializationError("unsupported chunk encoding version");
     const auto count = in.read<uint16_t>();
     if (count == 0 || count > Volume)
@@ -79,6 +80,12 @@ void decode(ByteView data, Chunk& chunk) {
             throw SerializationError("bad liquid type");
         tile.liquid = LiquidType(liquid);
         tile.liquidLevel = in.read<uint8_t>();
+        if (version >= 2) {
+            tile.cover = in.read<uint8_t>();
+            tile.coverState = in.read<uint8_t>();
+            if (!tile.cover && tile.coverState)
+                throw SerializationError("cover state without cover");
+        }
     }
     Tile* tiles = flat(chunk);
     if (count == 1) {

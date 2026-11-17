@@ -6,11 +6,29 @@
 #include "chunk.hpp"
 #include "chunk_coord.hpp"
 #include "core/assets_api.hpp"
+#include "items/ground_cover.hpp"
 #include "render/vertex.hpp"
 
 struct ChunkMesh {
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
+};
+
+// Climate at the four horizontal corners of a chunk (index x + 2 * z, in
+// chunk corners (0, 0), (16, 0), (0, 16), (16, 16)), interpolated for the
+// ground-cover tint. Defaults to a mild, moderately humid climate.
+struct CoverClimate {
+    std::array<float, 4> humidity{0.5f, 0.5f, 0.5f, 0.5f};
+    std::array<float, 4> temperature_c{15, 15, 15, 15};
+
+    std::pair<float, float> at(float fx, float fz) const {
+        const auto bilinear = [&](const std::array<float, 4>& v) {
+            const float top = v[0] + (v[1] - v[0]) * fx;
+            const float bottom = v[2] + (v[3] - v[2]) * fx;
+            return top + (bottom - top) * fz;
+        };
+        return {bilinear(humidity), bilinear(temperature_c)};
+    }
 };
 
 enum class Face : uint8_t {
@@ -24,8 +42,7 @@ enum class Face : uint8_t {
 
 class ChunkMesher {
    public:
-    explicit ChunkMesher(const IAssets& assets)
-        : assets(assets), blocks(assets.getStorage<Block>()) {}
+    explicit ChunkMesher(const IAssets& assets);
 
     using NeighbourFn = std::function<const Tile*(int tx, int ty, int tz)>;
 
@@ -38,12 +55,37 @@ class ChunkMesher {
     // Vertex positions are chunk-local (0..16, plus SeamOverlap); draw with
     // relativeTransform(camera, chunk origin). Neighbour lookups use world
     // tile coordinates.
+    //
+    // Ground cover (Tile::cover) is not geometry: faces that show it carry
+    // the overlay in otherwise unused attributes, read by block.vert/frag:
+    //   u    = overlay material layer, or -1 without cover
+    //   v    = side fringe range: min_cm + 1000 * max_cm (0 on top faces)
+    //   tint = cover tint from the climate (white without cover)
+    // Cover density is not per vertex; LightVolumeManager uploads it.
     ChunkMesh build(const Chunk& chunk, const ChunkCoord& coord,
-                    const NeighbourFn& neighbour) const;
+                    const NeighbourFn& neighbour,
+                    const CoverClimate& climate = {}) const;
+
+    // Packs the side-fringe range for the v attribute (see build).
+    static float packFringe(const ValueRange& metres);
 
    private:
     const IAssets& assets;
     const DataStorage<Block>& blocks;
+
+    // Resolved ground covers, indexed by GroundCover id (0 = none).
+    struct CoverInfo {
+        bool valid = false;
+        bool top = false;
+        bool sides = false;
+        float layer = -1;
+        float fringe = 0;
+        GroundCoverTint tint;
+    };
+    std::vector<CoverInfo> covers;
+    const CoverInfo* coverInfo(uint8_t id) const {
+        return id < covers.size() && covers[id].valid ? &covers[id] : nullptr;
+    }
 
     // Describes a single face's geometry: normal direction and 4 corners.
     struct FaceDesc {
@@ -58,15 +100,17 @@ class ChunkMesher {
     // lighting comes from the GPU light volume (see light_volume.hpp).
     static constexpr uint32_t NeutralTint = 0xFFFFFFFFu;
 
-    // Identifies a mergeable face: same block + texture + tint.
-    // A zeroed FaceKey (block == nullptr) means "no face / air".
+    // Identifies a mergeable face: same block + texture + tint + ground
+    // cover. A zeroed FaceKey (block == nullptr) means "no face / air".
     struct FaceKey {
         const Block* block = nullptr;
         uint16_t texLayer = 0;
         uint32_t tint = 0;
+        uint8_t cover = 0;
 
         bool operator==(const FaceKey& o) const {
-            return block == o.block && texLayer == o.texLayer && tint == o.tint;
+            return block == o.block && texLayer == o.texLayer &&
+                   tint == o.tint && cover == o.cover;
         }
         bool valid() const { return block != nullptr; }
     };
@@ -83,5 +127,6 @@ class ChunkMesher {
     // key      – texture / tint info
     void emitQuad(ChunkMesh& mesh, float ox, float oy, float oz, float dux,
                   float duy, float duz, float dvx, float dvy, float dvz,
-                  Face face, const FaceKey& key) const;
+                  Face face, const FaceKey& key,
+                  const CoverClimate& climate) const;
 };

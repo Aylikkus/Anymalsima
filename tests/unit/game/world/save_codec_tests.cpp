@@ -24,7 +24,8 @@ bool sameTiles(const Chunk& a, const Chunk& b) {
             for (int x = 0; x < Chunk::SIZE_X; ++x) {
                 const auto &l = a.tiles[z][y][x], &r = b.tiles[z][y][x];
                 if (l.block_id != r.block_id || l.liquid != r.liquid ||
-                    l.liquidLevel != r.liquidLevel)
+                    l.liquidLevel != r.liquidLevel || l.cover != r.cover ||
+                    l.coverState != r.coverState)
                     return false;
             }
     return true;

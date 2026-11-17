@@ -17,6 +17,10 @@
 // neighbors, so the trilinear filter interpolates identical values on both
 // sides of a chunk face. Light changes only re-upload slots; they never
 // remesh. Pages avoid one texture per chunk (bgfx caps textures at 4096).
+//
+// Each page has a second R8 texture with the same slot layout holding
+// ground-cover density (LightVolume::buildCover), sampled as
+// u_cover_volume through the same u_light_slot/u_light_chunk uniforms.
 class LightVolumeManager {
    public:
     // Slots per page along each axis; keep in sync with LIGHT_PAGE_INV in
@@ -27,8 +31,10 @@ class LightVolumeManager {
     static constexpr int PageY = SlotsY * LightVolume::SizeY;  // 144
     static constexpr int PageZ = SlotsZ * LightVolume::SizeZ;  // 72
     static constexpr int MaxPages = 16;
-    // Sampler stage of u_light_volume in the block program.
+    // Sampler stages of u_light_volume and u_cover_volume in the block
+    // program (keep in sync with block.frag and TerrainLodManager's joins).
     static constexpr uint8_t VolumeStage = 2;
+    static constexpr uint8_t CoverStage = 5;
 
     // blockLight: optional source of artificial light chroma; must outlive
     // the manager.
@@ -62,7 +68,9 @@ class LightVolumeManager {
     // queued draw commands keep pointers to these bindings.
     struct Page {
         bgfx::TextureHandle texture = BGFX_INVALID_HANDLE;
+        bgfx::TextureHandle coverTexture = BGFX_INVALID_HANDLE;
         ShaderProperty sampler;
+        ShaderProperty coverSampler;
         std::array<Binding, SlotsPerPage> bindings;
         std::vector<uint16_t> free;
     };
@@ -73,6 +81,7 @@ class LightVolumeManager {
     };
     struct CachedCells {
         LightVolume::Cells cells;
+        LightVolume::CoverCells cover;
         bool valid = false;
         uint64_t lastUsed = 0;
     };
@@ -82,7 +91,7 @@ class LightVolumeManager {
     bool allocate(const ChunkCoord& coord);
     void release(const ChunkCoord& coord);
     void rebuild(const ChunkCoord& coord, const Slot& slot);
-    const LightVolume::Cells* cells(const ChunkCoord& coord);
+    const CachedCells* cells(const ChunkCoord& coord);
     void addPage();
 
     ChunkManager& chunks;
@@ -101,4 +110,5 @@ class LightVolumeManager {
     bgfx::TextureFormat::Enum format = bgfx::TextureFormat::RGBA8;
     uint64_t frame = 1;
     LightVolume::Volume scratch;
+    LightVolume::CoverVolume coverScratch;
 };

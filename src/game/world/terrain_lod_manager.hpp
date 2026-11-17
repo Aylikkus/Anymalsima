@@ -61,11 +61,19 @@ class TerrainLodManager {
     size_t uploadedBytes() const { return uploaded; }
     const TerrainLod::Quality& settings() const { return quality; }
 
+    // Sampler stage of u_cover_map in terrain_lod.frag.
+    static constexpr uint8_t CoverStage = 6;
+
    private:
     struct Entry {
         MeshHandle mesh;
         bgfx::TextureHandle materialMap = BGFX_INVALID_HANDLE;
+        // Ground cover (TerrainLod::Mesh::covers) at stage CoverStage, and
+        // u_lod_cover: x = texels per side.
+        bgfx::TextureHandle coverMap = BGFX_INVALID_HANDLE;
         ShaderProperty mapUniform;
+        ShaderProperty coverUniform;
+        ShaderProperty coverInfo;
         ShaderProperty patchUniform;
         // x: offset (0 or ±period) placing the patch at its copy nearest
         // the eye when the world wraps on X.
@@ -177,7 +185,10 @@ class TerrainLodManager {
     // Joins use the block program but have no voxel light volume. A 1^3
     // dummy volume plus u_light_chunk.w = 0 selects full sky light.
     bgfx::TextureHandle joinLightTexture = BGFX_INVALID_HANDLE;
-    ShaderProperty joinLightVolume, joinLightChunk, joinLightSlot;
+    // Zero ground-cover density for the same draws (block.frag samples it).
+    bgfx::TextureHandle joinCoverTexture = BGFX_INVALID_HANDLE;
+    ShaderProperty joinLightVolume, joinLightChunk, joinLightSlot,
+        joinCoverVolume;
     std::string shader = "terrain_lod";
     std::vector<ShaderProperty*> extraUniforms;
     std::vector<ShaderProperty*> extraBlockUniforms;

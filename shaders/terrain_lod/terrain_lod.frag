@@ -1,4 +1,4 @@
-$input v_position, v_normal, v_layer, v_color0
+$input v_position, v_normal, v_layer, v_color0, v_cover
 
 #include <bgfx_shader.sh>
 SAMPLER2DARRAY(u_texture_array, 0);
@@ -8,9 +8,63 @@ SAMPLER2DARRAY(u_normal_array, 3);
 // LightShadows atlas and LodLightMap (LightRenderer).
 SAMPLER2D(u_shadow_atlas, 4);
 SAMPLER2D(u_lod_light_map, 5);
+// Ground cover per texel (TerrainLod::Mesh::covers): r = overlay layer + 1
+// (0 = none), g = density, ba = tint RGB565 little endian. Point sampled.
+SAMPLER2D(u_cover_map, 6);
 uniform vec4 u_lod_patch;
+uniform vec4 u_lod_cover;  // x = cover texels per side
 uniform vec4 u_detail_origin;
 #include "../world_surface.sh"
+
+struct CoverSample {
+    float layer;
+    float density;
+    vec3 tint;
+};
+
+CoverSample coverTexel(vec2 texel, float size)
+{
+    vec4 t = texture2D(u_cover_map,
+                       (clamp(texel, vec2_splat(0.0), vec2_splat(size - 1.0))
+                        + 0.5) / size);
+    vec4 b = floor(t * 255.0 + 0.5);
+    float rgb = b.b + b.a * 256.0;
+    CoverSample s;
+    s.layer = b.r - 1.0;
+    s.density = t.g;
+    s.tint = vec3(floor(rgb / 2048.0) / 31.0,
+                  mod(floor(rgb / 32.0), 64.0) / 63.0,
+                  mod(rgb, 32.0) / 31.0);
+    return s;
+}
+
+// The cover at owner: layer from the nearest texel; density and tint
+// filtered bilinearly over neighbouring texels of the same cover, like the
+// voxel density volume.
+CoverSample sampleCover(vec2 owner)
+{
+    float size = u_lod_cover.x;
+    vec2 at = (owner - u_lod_patch.xy) / u_lod_patch.z * size;
+    CoverSample nearest = coverTexel(floor(at), size);
+    if (nearest.layer < 0.0) return nearest;
+    vec2 base = floor(at - 0.5);
+    vec2 f = at - 0.5 - base;
+    float density = 0.0;
+    vec3 tint = vec3_splat(0.0);
+    float weights = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec2 o = vec2(float(i - (i / 2) * 2), float(i / 2));
+        CoverSample s = coverTexel(base + o, size);
+        float w = (o.x > 0.5 ? f.x : 1.0 - f.x) * (o.y > 0.5 ? f.y : 1.0 - f.y);
+        if (abs(s.layer - nearest.layer) > 0.5) continue;
+        density += w * s.density;
+        tint += w * s.tint;
+        weights += w;
+    }
+    nearest.density = density;
+    nearest.tint = weights > 0.0001 ? tint / weights : nearest.tint;
+    return nearest;
+}
 
 void main()
 {
@@ -38,6 +92,25 @@ void main()
         }
         color = surfaceTexture(v_position, normal, layer).rgb;
         surface = surfaceNormal(v_position, normal, layer);
+        // Ground cover on tops, and the fringe on stepped walls (v_cover.x:
+        // the column top). Distant walls use one full-height fringe length.
+        bool top = normal.y > 0.65;
+        bool wall = abs(normal.y) < 0.01 && v_cover.x > -0.5;
+        if (top || wall) {
+            CoverSample cover = sampleCover(owner);
+            if (cover.layer >= 0.0) {
+                vec4 overlay = surfaceTexture(v_position, normal, cover.layer);
+                float coverage = top
+                    ? surfaceCoverTop(cover.density, overlay.a)
+                    : surfaceCoverSide(
+                          coverTexel(floor((owner - u_lod_patch.xy)
+                                           / u_lod_patch.z * u_lod_cover.x),
+                                     u_lod_cover.x).density,
+                          overlay.a, 0.9, v_cover.x - v_position.y);
+                surfaceApplyCover(v_position, normal, cover.layer, overlay,
+                                  coverage, cover.tint, color, surface);
+            }
+        }
     }
     // Distant terrain is fully sky-lit; far lights and the distant glow of
     // small lights add block light.

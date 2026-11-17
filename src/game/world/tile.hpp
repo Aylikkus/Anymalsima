@@ -15,13 +15,32 @@ struct TileLightning {
 };
 
 struct Tile {
+    // Low nibble of coverState: cover density 0-15. The high nibble is
+    // reserved (trampled, withered, snow-covered).
+    static constexpr uint8_t CoverDensityMask = 0x0F;
+
     uint8_t block_id = 0;  // 0 = air
     LiquidType liquid = LiquidType::None;
     uint8_t liquidLevel = 0;  // 0-255
     TileLightning lightLevel;
+    // Ground cover (GroundCover id, 0 = none) painted on this solid tile's
+    // faces. It never changes solidity, opacity, sunlight or edit detection;
+    // see docs/handoff/flora.md.
+    uint8_t cover = 0;
+    uint8_t coverState = 0;
+
+    uint8_t coverDensity() const { return coverState & CoverDensityMask; }
+    void setCover(uint8_t id, uint8_t density) {
+        cover = id;
+        coverState = id ? uint8_t((coverState & ~CoverDensityMask) |
+                                  (density & CoverDensityMask))
+                        : 0;
+    }
+    void clearCover() { cover = coverState = 0; }
 
     bool isAir() const { return block_id == 0 && liquid == LiquidType::None; }
     bool isVisible() const { return block_id != 0; }
     bool isSolid() const { return block_id != 0; }
     bool isLiquid() const { return liquid != LiquidType::None; }
 };
+static_assert(sizeof(Tile) == 6, "Tile layout is saved and cached per chunk");

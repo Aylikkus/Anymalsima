@@ -1,5 +1,5 @@
 $input a_position, a_normal, a_tangent, a_texcoord0, a_texcoord1, a_color0
-$output v_position, v_normal, v_layer, v_color0
+$output v_position, v_normal, v_layer, v_color0, v_cover
 
 #include <bgfx_shader.sh>
 
@@ -15,4 +15,6 @@ void main()
     v_normal = a_normal;
     v_layer = a_texcoord1;
     v_color0 = a_color0;
+    // x: column top above a stepped wall (ground-cover fringe), else -1.
+    v_cover = a_texcoord0;
 }

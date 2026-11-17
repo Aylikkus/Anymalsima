@@ -11,6 +11,7 @@
 #include "camera_work_queue.hpp"
 #include "chunk_mesher.hpp"
 #include "consts.hpp"
+#include "flora_generator.hpp"
 #include "layers_generator.hpp"
 #include "location_generator.hpp"
 #include "render/ui_context.hpp"
@@ -38,6 +39,8 @@ struct ChunkHandle {
     // Loaded from disk with solid/air different from generated terrain
     // (an earlier gameplay edit).
     bool edited = false;
+    // Plants anchored in this chunk (null: none). Replaced, never mutated.
+    FloraLayerPtr flora;
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
 };
@@ -65,13 +68,19 @@ class ChunkManager {
     Signal<const ChunkCoord&> lightChanged;
     // A chunk's drawn geometry changed (new mesh uploaded, or emptied).
     Signal<const ChunkCoord&> meshUploaded;
+    // The plants of a Ready chunk changed (setFlora). Chunks becoming
+    // ready announce their plants through becameReady.
+    Signal<const ChunkCoord&> floraChanged;
     void setFocus(Vec3 value) { focus = value; }
     // X wrapping of the world this manager streams (disabled without a map).
     WorldWrap wrap() const { return terrainWorld.wrap(); }
     void update();
     // stored: saved chunk payload; the chunk is decoded instead of generated.
+    // storedFlora: its saved plants; a saved chunk without them regrows its
+    // generated plants.
     void registerChunk(const ChunkCoord& coord, const ChunkCoord& regionOrigin,
-                       const Region* region, ChunkBlob stored = nullptr);
+                       const Region* region, ChunkBlob stored = nullptr,
+                       ChunkBlob storedFlora = nullptr);
     Chunk* request(const ChunkCoord& coord);
     Chunk* requestLighting(const ChunkCoord& coord, ChunkCoord beneficiary);
     bool isRegistered(const ChunkCoord& coord) const;
@@ -100,6 +109,28 @@ class ChunkManager {
     // Records a gameplay edit of a Ready chunk: it will be saved and remeshed.
     void markModified(const ChunkCoord& coord);
     bool isPersistDirty(const ChunkCoord& coord) const;
+    // Plants of a Ready chunk (null when none or not ready).
+    FloraLayerPtr flora(const ChunkCoord& coord) const;
+    // Replaces a Ready chunk's plants and announces it (floraChanged).
+    // persist: the change must be saved (false for derived bookkeeping such
+    // as FloraLayer::resolvedDay, which is recomputed after a reload).
+    void setFlora(const ChunkCoord& coord, FloraLayerPtr layer,
+                  bool persist = true);
+    // Species rules (empty without flora data).
+    const FloraSpeciesTable& floraSpecies() const { return *floraTable; }
+    // Seed of the world's plant placement (generateFlora).
+    uint32_t floraSeed() const { return floraSeed_; }
+    // Game day new chunks generate their plants for: the epoch's placement
+    // (FloraSimulation::CatchUpDays long), ages counted back from this day.
+    void setFloraDay(int32_t day) { floraDay = std::max(0, day); }
+    static uint32_t floraEpochSalt(int32_t day) {
+        return uint32_t(day / FloraEpochDays) * 0x9e3779b9u;
+    }
+    static constexpr int32_t FloraEpochDays = 365;
+    // Plants of a Ready chunk as generation would place them with the world
+    // seed varied by `salt`, on its live tiles. Synchronous (a few ms);
+    // empty without generation inputs (map-less fixtures).
+    FloraLayer regenerateFlora(const ChunkCoord& coord, uint32_t salt);
     // Captures Ready chunks of a region that need saving and clears their
     // persistDirty flags. copy=false shares the live data and is only valid
     // when the region is unregistered right afterwards.
@@ -182,11 +213,15 @@ class ChunkManager {
         const Region* region;
         std::optional<ChunkCoord> beneficiary;
         ChunkBlob stored;
+        ChunkBlob storedFlora;
     };
     struct GeneratedChunk {
         std::shared_ptr<Chunk> data;
         bool fromDisk = false;
         bool edited = false;
+        FloraLayerPtr flora;
+        // Plants were regrown for a saved chunk: save them.
+        bool floraRegrown = false;
     };
     struct GenerationJob {
         ChunkCoord coord;
@@ -217,7 +252,11 @@ class ChunkManager {
     };
     std::shared_ptr<const ChunkColumnInputs> prepareColumns(
         ChunkCoord coord, const Region& region);
-    const TerrainNeighborhood& terrainNeighborhood(Vec2u region);
+    const TerrainNeighborhood& terrainNeighborhood(Vec2u region) {
+        return *terrainShared(region);
+    }
+    // Shared so generation jobs can keep it after the region unloads.
+    std::shared_ptr<const TerrainNeighborhood> terrainShared(Vec2u region);
     const World& terrainWorld;
     const LocationGenerator& generator;
     ThreadPool& pool;
@@ -240,7 +279,11 @@ class ChunkManager {
     uint64_t nextIdentity = 0;
     std::unordered_map<Vec2u, std::vector<RegionLayer>> regionLayers;
     std::unordered_map<Vec2u, SoilProfile> regionSoils;
-    std::unordered_map<Vec2u, TerrainNeighborhood> regionTerrain;
+    std::unordered_map<Vec2u, std::shared_ptr<const TerrainNeighborhood>>
+        regionTerrain;
+    std::shared_ptr<const FloraSpeciesTable> floraTable;
+    uint32_t floraSeed_ = 0;
+    int32_t floraDay = 0;
     std::unordered_map<Vec2u, size_t> regionRegistrations;
     std::unordered_map<uint64_t, ColumnCache> columnInputs;
     std::unordered_map<ChunkCoord, ChunkHandle> chunks;

@@ -171,3 +171,56 @@ vec4 surfaceTexture(vec3 position, vec3 normal, float layer)
          + texture2DArray(u_texture_array, vec3(position.xz, layer)) * weights.y
          + texture2DArray(u_texture_array, vec3(position.xy, layer)) * weights.z;
 }
+
+// Ground cover (docs/handoff/flora.md), shared by voxel and distant terrain
+// so grass looks the same on both sides of the hand-over. The overlay alpha
+// orders texels: a texel shows once the density exceeds 1 - alpha, so edges
+// are ragged, not tile squares.
+float surfaceCoverHash(vec3 p)
+{
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float surfaceCoverNoise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = surfaceCoverHash(vec3(i, 0.0));
+    float b = surfaceCoverHash(vec3(i + vec2(1.0, 0.0), 0.0));
+    float c = surfaceCoverHash(vec3(i + vec2(0.0, 1.0), 0.0));
+    float d = surfaceCoverHash(vec3(i + vec2(1.0, 1.0), 0.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Coverage of a top face.
+float surfaceCoverTop(float density, float alpha)
+{
+    return smoothstep(-0.05, 0.05, density - (1.0 - alpha));
+}
+
+// Coverage of a side face: a fringe hanging `depth` metres below the
+// covered tile's top edge. fringe: this tile's length (up to the whole side);
+// blade alpha makes the lower edge ragged.
+float surfaceCoverSide(float density, float alpha, float fringe, float depth)
+{
+    float reach = fringe * (0.75 + 0.5 * alpha)
+        * clamp(density * 2.0, 0.0, 1.0);
+    return 1.0 - smoothstep(reach - 0.02, reach + 0.02, depth);
+}
+
+// Paints the overlay of `layer` over albedo and normal, with broad painted
+// value variation across the tint (by XZ only, so smooth distant slopes
+// show no contour lines).
+void surfaceApplyCover(vec3 position, vec3 geometric, float layer,
+                       vec4 overlay, float coverage, vec3 coverTint,
+                       inout vec3 color, inout vec3 normal)
+{
+    vec3 tint = coverTint
+        * (0.88 + 0.24 * surfaceCoverNoise(position.xz * 0.11));
+    color = mix(color, overlay.rgb * tint, coverage);
+    normal = normalize(mix(normal, surfaceNormal(position, geometric, layer),
+                           coverage));
+}

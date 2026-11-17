@@ -1,0 +1,263 @@
+[
+    {
+        "name": "flora.grass_tuft",
+        "kind": "grass_tuft",
+        "footprint": {"radius_m": [0.15, 0.3]},
+        "placement": {
+            "ground_cover": {"required": ["ground_covers.meadow_grass", "ground_covers.steppe_grass"]},
+            "climate": [
+                {"allowed_land": ["Shore", "Plains", "Hills", "Mountains"]}
+            ],
+            "max_slope": 0.8,
+            "density_per_100m2": [40, 90],
+            "cluster": {"scale_m": 9, "threshold": 0.3},
+            "priority": 0
+        },
+        "growth": {
+            "stages": {
+                "seedling": [2, 4],
+                "young": [5, 10],
+                "mature": [30, 60],
+                "withering": [5, 8]
+            },
+            "perennial": true,
+            "lifespan_days": [200, 400],
+            "spread": {
+                "radius_m": 1.5,
+                "chance_per_cycle": 0.6,
+                "seeds": [2, 4],
+                "germination": 0.6
+            }
+        },
+        "parts": [
+            {
+                "type": "blade",
+                "count": [7, 14],
+                "length_m": [0.25, 0.5],
+                "width_m": [0.03, 0.06],
+                "bend": [0.2, 0.5],
+                "spread_angle": [10, 35],
+                "normal_mode": "cylindrical",
+                "material": "foliage.grass_blade",
+                "color_variation": 0.1,
+                "stages": {"seedling": 0.3, "young": 0.7, "mature": 1.0, "withering": 0.9}
+            }
+        ]
+    },
+    {
+        "name": "flora.fern",
+        "kind": "fern",
+        "footprint": {"radius_m": [0.3, 0.6], "min_spacing_m": 0.8},
+        "placement": {
+            "soils": {"water_retention": [0.5, 1.0]},
+            "climate": [
+                {"humidity_range": [0.55, 1.0], "temperature_range_c": [4, 35]}
+            ],
+            "max_slope": 0.6,
+            "density_per_100m2": [1, 4],
+            "cluster": {"scale_m": 14, "threshold": 0.5},
+            "priority": 5
+        },
+        "growth": {
+            "stages": {
+                "seedling": [4, 8],
+                "young": [10, 20],
+                "mature": [60, 120],
+                "withering": [8, 12]
+            },
+            "perennial": true,
+            "lifespan_days": [500, 1200],
+            "spread": {
+                "radius_m": 4,
+                "chance_per_cycle": 0.8,
+                "seeds": [3, 5],
+                "germination": 0.6
+            }
+        },
+        "parts": [
+            {
+                "type": "frond",
+                "count": [5, 9],
+                "length_m": [0.5, 0.9],
+                "width_m": [0.15, 0.25],
+                "droop": [0.3, 0.6],
+                "spread_angle": [35, 60],
+                "phyllotaxis": 137.5,
+                "material": "foliage.fern",
+                "color_variation": 0.08,
+                "stages": {"seedling": 0.25, "young": 0.6, "mature": 1.0, "withering": 0.85}
+            }
+        ]
+    },
+    {
+        "name": "flora.round_bush",
+        "kind": "bush",
+        "footprint": {
+            "tiles": [2, 2],
+            "blocks_placement": true,
+            "collision": "soft",
+            "min_spacing_m": 1.5
+        },
+        "placement": {
+            "soils": {"fertility": [0.3, 1], "water_retention": [0.25, 1]},
+            "ground_cover": {"required": ["ground_covers.meadow_grass"], "forbidden": []},
+            "climate": [
+                {"allowed_land": ["Plains", "Hills"], "humidity_range": [0.35, 1.0]}
+            ],
+            "max_slope": 0.6,
+            "underwater": false,
+            "density_per_100m2": [0.5, 2],
+            "cluster": {"scale_m": 18, "threshold": 0.55},
+            "companions": [
+                {"species": "flora.fern", "radius_m": 3, "chance": 0.4}
+            ],
+            "priority": 10
+        },
+        "growth": {
+            "stages": {
+                "seedling": [3, 6],
+                "young": [10, 20],
+                "mature": [40, 80],
+                "flowering": [8, 14],
+                "fruiting": [10, 20],
+                "withering": [6, 10]
+            },
+            "perennial": true,
+            "lifespan_days": [400, 900],
+            "season_mask": null,
+            "spread": {
+                "radius_m": 6,
+                "chance_per_cycle": 0.8,
+                "seeds": [3, 6],
+                "germination": 0.6,
+                "stage": "fruiting"
+            },
+            "regrow_after_harvest_days": [10, 20]
+        },
+        "parts": [
+            {
+                "type": "stem",
+                "count": [3, 5],
+                "height_m": [0.35, 0.6],
+                "width_m": [0.025, 0.04],
+                "bend": [0.25, 0.45],
+                "normal_mode": "cylindrical",
+                "material": "foliage.bark",
+                "stages": {
+                    "seedling": 0.3,
+                    "young": 0.7,
+                    "mature": 1.0,
+                    "flowering": 1.0,
+                    "fruiting": 1.0,
+                    "withering": 1.0
+                }
+            },
+            {
+                "type": "leaf_clump",
+                "count": [3, 5],
+                "shell": {"radii_m": [[0.7, 1.0], [0.5, 0.8], [0.7, 1.0]], "lift_m": [0.0, 0.12]},
+                "cards_per_clump": [18, 30],
+                "card_size_m": [0.35, 0.55],
+                "normal_mode": "spherical",
+                "material": "foliage.broadleaf",
+                "color_variation": 0.12,
+                "stages": {
+                    "seedling": 0.2,
+                    "young": 0.6,
+                    "mature": 1.0,
+                    "flowering": 1.0,
+                    "fruiting": 1.0,
+                    "withering": 0.9
+                }
+            },
+            {
+                "type": "fruit_cluster",
+                "count": [2, 6],
+                "material": "foliage.red_berry",
+                "attach": "leaf_clump_surface",
+                "stages": {"fruiting": 1.0}
+            }
+        ],
+        "forage": [
+            {"item": "items.red_berry", "count": [2, 6], "stage": "fruiting"}
+        ]
+    },
+    {
+        "name": "flora.meadow_flower",
+        "kind": "flower",
+        "footprint": {"radius_m": [0.1, 0.2]},
+        "placement": {
+            "ground_cover": {"required": ["ground_covers.meadow_grass"]},
+            "climate": [
+                {
+                    "allowed_land": ["Plains", "Hills"],
+                    "humidity_range": [0.35, 1.0],
+                    "temperature_range_c": [5, 35]
+                }
+            ],
+            "max_slope": 0.7,
+            "density_per_100m2": [3, 12],
+            "cluster": {"scale_m": 12, "threshold": 0.45},
+            "priority": 2
+        },
+        "growth": {
+            "stages": {
+                "seedling": [2, 4],
+                "young": [6, 10],
+                "mature": [6, 12],
+                "flowering": [10, 20],
+                "withering": [4, 8]
+            },
+            "perennial": false,
+            "lifespan_days": [40, 70],
+            "spread": {
+                "radius_m": 3,
+                "chance_per_cycle": 1.0,
+                "seeds": [5, 10],
+                "germination": 0.6,
+                "stage": "flowering"
+            }
+        },
+        "parts": [
+            {
+                "type": "stem",
+                "count": 1,
+                "height_m": [0.25, 0.45],
+                "width_m": 0.012,
+                "bend": [0.05, 0.2],
+                "normal_mode": "cylindrical",
+                "material": "foliage.grass_blade"
+            },
+            {
+                "type": "leaf_card",
+                "count": [2, 4],
+                "length_m": [0.08, 0.14],
+                "width_m": [0.03, 0.05],
+                "droop": [0.1, 0.4],
+                "attach": "stem",
+                "phyllotaxis": 137.5,
+                "material": "foliage.small_leaf",
+                "color_variation": 0.08
+            },
+            {
+                "type": "petal_ring",
+                "count": [5, 7],
+                "length_m": [0.035, 0.05],
+                "width_m": [0.018, 0.026],
+                "spread_angle": [60, 85],
+                "attach": "stem_tip",
+                "material": "foliage.meadow_petal",
+                "color_variation": 0.15,
+                "stages": {"flowering": 1.0, "withering": 0.7}
+            },
+            {
+                "type": "flower_head",
+                "count": 1,
+                "length_m": [0.025, 0.035],
+                "attach": "stem_tip",
+                "material": "foliage.flower_center",
+                "stages": {"flowering": 1.0, "withering": 0.8}
+            }
+        ]
+    }
+]

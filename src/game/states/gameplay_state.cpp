@@ -124,6 +124,22 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     skySlider->setStep(1.0f);
     skySlider->setAxis(ScrollAxis::Horizontal);
     skySlider->setGridPlacement({12, 15, 5, 1});
+    harvestButton = makeToolButton(_("HARVEST"), 17, EditTool::Harvest);
+    // Debug game speed: normal (a day per 72 minutes), then a day every
+    // 72 s, 6 s and 0.6 s.
+    timeButton = ui_manager->createWidget(
+        std::make_unique<TextButton>(context, "ui.black.9slice", "mouse_click"),
+        root_ptr);
+    timeButton->setTextAlignment(TextAlign::Center, VerticalAlign::Middle);
+    timeButton->setFontRole(FontRole::Bold);
+    timeButton->setGridPlacement({20, 15, 4, 1});
+    timeButton->onClick.connect([this]() {
+        static constexpr double Speeds[] = {1, 60, 720, 7200};
+        size_t next = 0;
+        for (size_t i = 0; i < std::size(Speeds); ++i)
+            if (clock.speed() == Speeds[i]) next = (i + 1) % std::size(Speeds);
+        clock.setSpeed(Speeds[next]);
+    });
     skySlider->setValue(100.0f);
     skySlider->onValueChanged.connect([this](float value) {
         skyText->setText(_F("SKY {0}%", int(value)));
@@ -143,9 +159,15 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         lightSources.get());
     lightVolumes = std::make_unique<LightVolumeManager>(
         *chunkManager, context.assets->getStorage<Block>(), blockLight.get());
+    floraRenderer = std::make_unique<FloraRenderer>(
+        *chunkManager, *context.assets, *this->world, *context.renderer);
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
     blockLight->watch(*editor);
+    clock.set(slot.meta.worldDays);
+    floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
+                                                 *this->world);
+    floraSim->watch(*editor);
     // Comparing saved chunks with generated terrain is only meaningful when
     // the save's generator produced the same surface heights.
     const bool sameGenerator =
@@ -229,6 +251,7 @@ void GameplayState::writeMeta() {
     slot.meta.lastPlayed = WorldMeta::now();
     slot.meta.camera = WorldMeta::CameraState{camera.position, camera.yaw,
                                               camera.pitch, camera.distance};
+    slot.meta.worldDays = clock.days();
     try {
         save_catalog::writeMeta(slot);
     } catch (const std::exception& e) {
@@ -448,6 +471,8 @@ void GameplayState::setTool(EditTool value) {
                                                                        : idle);
     lightButton->getButton()->setNormalColor(
         tool == EditTool::PlaceLight ? armed : idle);
+    harvestButton->getButton()->setNormalColor(
+        tool == EditTool::Harvest ? armed : idle);
 }
 
 std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
@@ -475,6 +500,17 @@ std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
 void GameplayState::useTool(int mouseX, int mouseY) {
     const auto hit = pickTile(mouseX, mouseY);
     if (!hit) return;
+    if (tool == EditTool::Harvest) {
+        // Plants standing on (or growing into) the tile under the cursor.
+        // Items do not exist yet: the yield is shown in the debug panel.
+        const auto yields =
+            floraSim->harvest({hit->tx, hit->ty, hit->tz}, clock.days());
+        lastHarvest.clear();
+        for (const auto& y : yields)
+            lastHarvest += std::to_string(y.count) + " " + y.item + "\n";
+        if (lastHarvest.empty()) lastHarvest = "nothing to harvest\n";
+        return;
+    }
     if (tool == EditTool::Remove) {
         editor->removeBlock({hit->tx, hit->ty, hit->tz});
         return;
@@ -516,6 +552,16 @@ void GameplayState::update(Game& game, float dt) {
     chunkManager->update();
     sunLight->update();
     blockLight->update();
+    clock.advance(dt);
+    floraSim->update(clock.days());
+    if (timeButton) {
+        const double t = clock.timeOfDay() * 24;
+        char label[64];
+        std::snprintf(label, sizeof(label), "DAY %lld %02d:%02d x%g",
+                      static_cast<long long>(clock.day()), int(t),
+                      int((t - int(t)) * 60), clock.speed());
+        timeButton->setText(label);
+    }
 
     // --- Tile debug raycast -------------------------------------------------
     float dirX, dirY, dirZ;
@@ -562,6 +608,27 @@ void GameplayState::update(Game& game, float dt) {
                << lightRenderer->shadowedCount() << " shadowed\n";
             ss << "glare: " << lightRenderer->glareCount()
                << ", distant glow: " << lightRenderer->glowLights() << "\n";
+
+            if (t.cover)
+                ss << "cover: " << int(t.cover) << " density "
+                   << int(t.coverDensity()) << "\n";
+            static constexpr const char* StageNames[] = {
+                "seedling",  "young",    "mature",
+                "flowering", "fruiting", "withering"};
+            for (const auto& info : floraSim->plantsAt(
+                     {hit->tx, hit->ty, hit->tz}, clock.days())) {
+                ss << "\n" << info.species->name << ": ";
+                if (!info.state.alive)
+                    ss << "seed";
+                else
+                    ss << StageNames[int(info.state.stage)] << " "
+                       << int(info.state.progress * 100) << "%";
+                ss << ", age " << int(clock.days() - info.plant.birthDay)
+                   << " d";
+                if (info.plant.flags & FloraInstance::Harvested)
+                    ss << ", harvested";
+            }
+            if (!lastHarvest.empty()) ss << "\n\nHarvest:\n" << lastHarvest;
 
             tileDebugText->setText(ss.str());
         }
@@ -645,6 +712,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
                                 false, std::move(transform), DrawLayer::GAME);
     });
+    floraRenderer->render(target, camera, frustum, *lightRenderer, now,
+                          clock.days());
     lightRenderer->drawGlare(target, camera, viewport);
 
     ui_manager->render(target, context);

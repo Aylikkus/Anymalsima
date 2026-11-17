@@ -5,6 +5,8 @@
 #include <fstream>
 
 #include "items/block.hpp"
+#include "items/flora_validation.hpp"
+#include "items/foliage_material.hpp"
 #include "items/material.hpp"
 #include "items/rock.hpp"
 #include "items/soil_validation.hpp"
@@ -52,6 +54,11 @@ ResourceManager::ResourceManager() {
     registerDataType<Rock>();
     registerDataType<Block>();
     registerDataType<Soil>();
+    // Flora types (docs/handoff/flora.md). Ground cover ids are saved raw in
+    // tiles, so keep new types and files after the existing ones.
+    registerDataType<GroundCover>();
+    registerDataType<FoliageMaterial>();
+    registerDataType<Flora>();
 }
 
 inline FontRole matchRole(std::string key) {
@@ -136,6 +143,10 @@ void ResourceManager::loadFromJson(const Json& j) {
         }
     }
     validateSoilReferences(*this);
+    validateFloraReferences(*this);
+    validateFoliageTextures(*this, [&](const std::string& key) {
+        return materialsTextures.contains(key);
+    });
     for (const auto& material : getStorage<Material>().items) {
         if (!materialsTextures.contains(material.texture_albedo) ||
             !materialsTextures.contains(material.texture_normal))
@@ -176,6 +187,8 @@ void ResourceManager::clear() {
 
     if (bgfx::isValid(materialAlbedoArray)) bgfx::destroy(materialAlbedoArray);
     if (bgfx::isValid(materialNormalArray)) bgfx::destroy(materialNormalArray);
+    if (bgfx::isValid(foliageAlbedoArray)) bgfx::destroy(foliageAlbedoArray);
+    if (bgfx::isValid(foliageNormalArray)) bgfx::destroy(foliageNormalArray);
 
     textures.clear();
     fonts.clear();
@@ -567,5 +580,80 @@ void ResourceManager::buildMaterialTextureArrays() {
 
         materialGpu[mat.name] =
             MaterialGpuData{.albedoLayer = layer, .normalLayer = layer};
+    }
+    buildFoliageTextureArrays();
+}
+
+// Mips of a cutout card keep the coverage of the full-size card: plain box
+// filtering thins leaves and blades into nothing at a distance.
+static void keepCoverage(std::vector<uint8_t>& texels, double coverage) {
+    const size_t count = texels.size() / 4;
+    if (!count || coverage <= 0) return;
+    const auto covered = [&](double scale) {
+        size_t n = 0;
+        for (size_t i = 0; i < count; ++i)
+            if (texels[i * 4 + 3] * scale >= 127.5) ++n;
+        return double(n) / double(count);
+    };
+    double lo = 0.5, hi = 8;
+    for (int step = 0; step < 16; ++step) {
+        const double mid = (lo + hi) / 2;
+        (covered(mid) < coverage ? lo : hi) = mid;
+    }
+    for (size_t i = 0; i < count; ++i)
+        texels[i * 4 + 3] =
+            uint8_t(std::min(255.0, std::round(texels[i * 4 + 3] * hi)));
+}
+
+void ResourceManager::buildFoliageTextureArrays() {
+    if (!hasStorage<FoliageMaterial>()) return;
+    const auto& materials = getStorage<FoliageMaterial>().items;
+    if (materials.empty()) return;
+    constexpr uint16_t size = 256;
+    uint16_t mips = 0;
+    for (uint16_t s = size; s > 0; s >>= 1) ++mips;
+    const auto layers = uint16_t(materials.size());
+    const uint64_t flags = BGFX_TEXTURE_NONE | BGFX_SAMPLER_MIN_ANISOTROPIC;
+    foliageAlbedoArray = bgfx::createTexture2D(
+        size, size, true, layers, bgfx::TextureFormat::RGBA8, flags);
+    foliageNormalArray = bgfx::createTexture2D(
+        size, size, true, layers, bgfx::TextureFormat::RGBA8, flags);
+    if (!bgfx::isValid(foliageAlbedoArray) ||
+        !bgfx::isValid(foliageNormalArray))
+        throw std::runtime_error("Failed to create foliage texture arrays");
+    std::vector<uint8_t> flat(size_t(size) * size * 4);
+    for (size_t i = 0; i < flat.size(); i += 4) {
+        flat[i] = flat[i + 1] = 128;
+        flat[i + 2] = flat[i + 3] = 255;
+    }
+    const auto upload = [&](bgfx::TextureHandle array, uint16_t layer,
+                            const std::vector<uint8_t>& texels,
+                            const std::string& name, bool cutout) {
+        if (texels.size() != size_t(size) * size * 4)
+            throw std::runtime_error("Foliage texture must be 256x256: " +
+                                     name);
+        std::vector<uint8_t> current(texels);
+        size_t opaque = 0;
+        for (size_t i = 3; i < current.size(); i += 4)
+            opaque += current[i] >= 128;
+        const double coverage = double(opaque) / double(size * size);
+        uint16_t w = size;
+        for (uint16_t mip = 0; mip < mips; ++mip) {
+            bgfx::updateTexture2D(
+                array, layer, mip, 0, 0, w, w,
+                bgfx::copy(current.data(), uint32_t(current.size())));
+            if (w == 1) break;
+            current = downsample(current.data(), w, w);
+            w = std::max<uint16_t>(1, w / 2);
+            if (cutout) keepCoverage(current, coverage);
+        }
+    };
+    for (const auto& m : materials) {
+        const auto layer = uint16_t(m.id - 1);
+        upload(foliageAlbedoArray, layer,
+               materialsTextures.at(m.albedo).cpuData, m.albedo, true);
+        upload(foliageNormalArray, layer,
+               m.normal.empty() ? flat : materialsTextures.at(m.normal).cpuData,
+               m.normal, false);
     }
 }

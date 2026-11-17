@@ -1,0 +1,17 @@
+[
+    {
+        "name": "materials.cover_meadow_grass",
+        "texture_albedo": "blocks.cover.meadow_grass",
+        "texture_normal": "blocks.cover.meadow_grass_normal"
+    },
+    {
+        "name": "materials.cover_steppe_grass",
+        "texture_albedo": "blocks.cover.steppe_grass",
+        "texture_normal": "blocks.cover.steppe_grass_normal"
+    },
+    {
+        "name": "materials.cover_tundra_moss",
+        "texture_albedo": "blocks.cover.tundra_moss",
+        "texture_normal": "blocks.cover.tundra_moss_normal"
+    }
+]

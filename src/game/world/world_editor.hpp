@@ -15,6 +15,7 @@ enum class EditStatus : uint8_t {
     Occupied,      // Place: a solid block is already there
     Empty,         // Remove: there is no solid block to remove
     InvalidBlock,  // the block id is not defined
+    Blocked,       // Place: a plant footprint that blocks placement is there
 };
 
 enum class EditMode : uint8_t {
@@ -45,6 +46,16 @@ struct BlockChange {
 // light volumes refresh. Bulk edits coalesce that bookkeeping, so removing
 // thousands of tiles costs one notification per touched chunk and column.
 //
+// Ground cover (Tile::cover) is cleared on every tile whose block changes,
+// and on the tile below a placed block. Cover-only changes are saved and
+// remeshed but not reported through blockChanged.
+//
+// Plants (ChunkManager::flora): Place refuses tiles inside the footprint of
+// a plant that blocks placement (Blocked); any block placed into another
+// plant's volume removes that plant, and a removed block takes the plants
+// it supported with it. Replace never refuses; it removes plants in the
+// way.
+//
 // Main thread only, like ChunkManager's mutating API.
 class WorldEditor {
    public:
@@ -65,6 +76,9 @@ class WorldEditor {
    private:
     struct Pending;
     EditStatus applyOne(const EditRequest& request, Pending& pending);
+    // Calls fn(coord, index, volume, rule) for plants near a tile.
+    template <typename F>
+    void forPlantsNear(int64_t x, int y, int64_t z, F&& fn);
     void commit(Pending& pending);
 
     ChunkManager& chunks;

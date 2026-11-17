@@ -92,6 +92,12 @@ class ResourceManager : public IAssets {
     uint16_t getMaterialNormalLayer(const std::string& materialId) const;
 
     bgfx::TextureHandle getMaterialAlbedoArray() const;
+    bgfx::TextureHandle getFoliageAlbedoArray() const {
+        return foliageAlbedoArray;
+    }
+    bgfx::TextureHandle getFoliageNormalArray() const {
+        return foliageNormalArray;
+    }
     bgfx::TextureHandle getMaterialNormalArray() const;
 
     void clear();
@@ -118,6 +124,9 @@ class ResourceManager : public IAssets {
 
     bgfx::TextureHandle materialAlbedoArray = BGFX_INVALID_HANDLE;
     bgfx::TextureHandle materialNormalArray = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle foliageAlbedoArray = BGFX_INVALID_HANDLE;
+    bgfx::TextureHandle foliageNormalArray = BGFX_INVALID_HANDLE;
+    void buildFoliageTextureArrays();
     std::unordered_map<std::string, MaterialGpuData> materialGpu;
 
     std::unordered_map<std::string, bgfx::ProgramHandle> programs;

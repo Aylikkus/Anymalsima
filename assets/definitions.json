@@ -26,6 +26,12 @@
     "ui.white.track_vertical_no_sides": "assets/textures/ui/white/track_vertical_no_sides.png"
   },
   "materials": {
+    "blocks.cover.meadow_grass": "assets/materials/blocks/cover/meadow_grass.png",
+    "blocks.cover.meadow_grass_normal": "assets/materials/blocks/cover/meadow_grass_normal.png",
+    "blocks.cover.steppe_grass": "assets/materials/blocks/cover/steppe_grass.png",
+    "blocks.cover.steppe_grass_normal": "assets/materials/blocks/cover/steppe_grass_normal.png",
+    "blocks.cover.tundra_moss": "assets/materials/blocks/cover/tundra_moss.png",
+    "blocks.cover.tundra_moss_normal": "assets/materials/blocks/cover/tundra_moss_normal.png",
     "blocks.soils.clay": "assets/materials/blocks/soils/clay.png",
     "blocks.soils.clay_loam": "assets/materials/blocks/soils/clay_loam.png",
     "blocks.soils.clay_loam_normal": "assets/materials/blocks/soils/clay_loam_normal.png",
@@ -127,7 +133,17 @@
     "blocks.stones.shale": "assets/materials/blocks/stones/shale.png",
     "blocks.stones.shale_normal": "assets/materials/blocks/stones/shale_normal.png",
     "blocks.stones.slate": "assets/materials/blocks/stones/slate.png",
-    "blocks.stones.slate_normal": "assets/materials/blocks/stones/slate_normal.png"
+    "blocks.stones.slate_normal": "assets/materials/blocks/stones/slate_normal.png",
+    "foliage.berry": "assets/materials/foliage/berry.png",
+    "foliage.berry_normal": "assets/materials/foliage/berry_normal.png",
+    "foliage.blade": "assets/materials/foliage/blade.png",
+    "foliage.blade_normal": "assets/materials/foliage/blade_normal.png",
+    "foliage.frond": "assets/materials/foliage/frond.png",
+    "foliage.frond_normal": "assets/materials/foliage/frond_normal.png",
+    "foliage.leaf_broad": "assets/materials/foliage/leaf_broad.png",
+    "foliage.leaf_broad_normal": "assets/materials/foliage/leaf_broad_normal.png",
+    "foliage.petal": "assets/materials/foliage/petal.png",
+    "foliage.petal_normal": "assets/materials/foliage/petal_normal.png"
   },
   "music": {
     "reflection": "assets/audio/music/reflection.flac"
@@ -139,6 +155,7 @@
   "shaders": {
     "block": "assets/shaders/block",
     "color": "assets/shaders/color",
+    "foliage": "assets/shaders/foliage",
     "light_glare": "assets/shaders/light_glare",
     "light_shadow": "assets/shaders/light_shadow",
     "map_preview": "assets/shaders/map_preview",
@@ -153,7 +170,14 @@
       "type": "materials",
       "files": [
         "assets/data/materials/rocks.json",
-        "assets/data/materials/soils.json"
+        "assets/data/materials/soils.json",
+        "assets/data/materials/vegetation.json"
+      ]
+    },
+    {
+      "type": "ground_covers",
+      "files": [
+        "assets/data/ground_covers/ground_covers.json"
       ]
     },
     {
@@ -166,11 +190,23 @@
       ]
     },
     {
+      "type": "flora",
+      "files": [
+        "assets/data/flora/flora.json"
+      ]
+    },
+    {
       "type": "blocks",
       "files": [
         "assets/data/blocks/rocks.json",
         "assets/data/blocks/soils.json",
         "assets/data/blocks/test_light.json"
+      ]
+    },
+    {
+      "type": "foliage_materials",
+      "files": [
+        "assets/data/foliage_materials/foliage_materials.json"
       ]
     },
     {

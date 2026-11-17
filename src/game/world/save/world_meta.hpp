@@ -16,8 +16,9 @@ struct WorldMeta : ISerializable {
     // the world on X (periodic terrain noise, 512-region default width).
     // Older saves are not migrated.
     static constexpr int MinFormatVersion = 3;
-    // Bump when chunk generation output changes.
-    static constexpr int GeneratorVersion = 5;
+    // Bump when chunk generation output changes. 6: ground cover on the
+    // surface topsoil tile. 7: plants (FLOR).
+    static constexpr int GeneratorVersion = 7;
     // Oldest generator version whose surface heights match the current one.
     // Bump it whenever surface heights change (not for material changes).
     static constexpr int SurfaceVersion = 5;
@@ -38,6 +39,9 @@ struct WorldMeta : ISerializable {
     std::string lastPlayed;  // same format
     Vec2u startRegion{0, 0};
     std::optional<CameraState> camera;  // absent until first save in play
+    // Game time (WorldClock): days since the world began. Absent in older
+    // saves (day 0).
+    double worldDays = 0;
     Json extra = Json::object();
 
     Json serialize() const override;

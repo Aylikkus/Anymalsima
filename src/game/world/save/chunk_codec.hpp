@@ -5,15 +5,19 @@
 
 // Compact per-chunk encoding for save files.
 //
-// v1: u8 version, u16 paletteCount, palette {block_id, liquid, liquidLevel}.
+// v2: u8 version, u16 paletteCount, palette {block_id, liquid, liquidLevel,
+//     cover, coverState}.
 //     paletteCount == 1 → uniform chunk, nothing follows.
 //     Otherwise: u8 codec, u32 storedSize, indices (u8 when the palette fits
 //     in 256 entries, else u16 LE) in [z][y][x] order, zstd when codec == 1.
+// v1: the same with a three-byte palette {block_id, liquid, liquidLevel};
+//     decoded tiles have no ground cover.
 // Lighting is derived (SunLightPropagator recomputes it), so it is not stored
 // and decoded tiles have zeroed light.
 namespace chunk_codec {
 
-inline constexpr uint8_t Version = 1;
+inline constexpr uint8_t Version = 2;
+inline constexpr uint8_t MinVersion = 1;
 
 Bytes encode(const Chunk& chunk);
 // Throws SerializationError on malformed input.

@@ -1,0 +1,86 @@
+[
+    {
+        "name": "foliage.broadleaf",
+        "albedo": "foliage.leaf_broad",
+        "normal": "foliage.leaf_broad_normal",
+        "palette": {"base": "#4c7d33", "shade": "#2c4a26", "tip": "#9bbf4a", "dry": "#8a7a3a"},
+        "gradient": "center_to_edge",
+        "hue_jitter": 0.04,
+        "value_jitter": 0.12,
+        "translucency": 0.35,
+        "withered": ["#8a7a3a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.grass_blade",
+        "albedo": "foliage.blade",
+        "normal": "foliage.blade_normal",
+        "palette": {"base": "#5a9a3e", "shade": "#2f5a2a", "tip": "#b4c860", "dry": "#a89a52"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.45,
+        "withered": ["#a89a52", "#7a6a3e"]
+    },
+    {
+        "name": "foliage.red_berry",
+        "albedo": "foliage.berry",
+        "palette": {"base": "#b8282e", "shade": "#6e1420", "tip": "#e85a4a", "dry": "#5e2a2a"},
+        "gradient": "uniform",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.15,
+        "translucency": 0.1,
+        "normal": "foliage.berry_normal"
+    },
+    {
+        "name": "foliage.meadow_petal",
+        "albedo": "foliage.petal",
+        "normal": "foliage.petal_normal",
+        "palette": {"base": "#f2e6a0", "shade": "#c8b45a", "tip": "#fff6d0", "dry": "#a08a4a"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.08,
+        "value_jitter": 0.1,
+        "translucency": 0.5,
+        "withered": ["#b09a5a", "#7a6a3e"]
+    },
+    {
+        "name": "foliage.fern",
+        "albedo": "foliage.frond",
+        "normal": "foliage.frond_normal",
+        "palette": {"base": "#3f7a35", "shade": "#23472a", "tip": "#7fae4a", "dry": "#8a7440"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.4,
+        "withered": ["#8a7440", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.small_leaf",
+        "albedo": "foliage.petal",
+        "normal": "foliage.petal_normal",
+        "palette": {"base": "#4f8a38", "shade": "#2f5428", "tip": "#7fae4a", "dry": "#8a7a3a"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.03,
+        "value_jitter": 0.1,
+        "translucency": 0.4,
+        "withered": ["#8a7a3a", "#5e4a2a"]
+    },
+    {
+        "name": "foliage.flower_center",
+        "albedo": "foliage.berry",
+        "normal": "foliage.berry_normal",
+        "palette": {"base": "#e8b830", "shade": "#b07a20", "tip": "#f6d860", "dry": "#8a6a30"},
+        "gradient": "uniform",
+        "hue_jitter": 0.04,
+        "value_jitter": 0.1,
+        "translucency": 0.1
+    },
+    {
+        "name": "foliage.bark",
+        "albedo": "foliage.blade",
+        "palette": {"base": "#5a4430", "shade": "#3a2a1e", "tip": "#6e5438", "dry": "#4a3a2a"},
+        "gradient": "root_to_tip",
+        "hue_jitter": 0.02,
+        "value_jitter": 0.1,
+        "translucency": 0.0
+    }
+]

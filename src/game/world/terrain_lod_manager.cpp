@@ -29,6 +29,7 @@ float horizontalDistance(const TerrainLod::Patch& p, Vec3 eye,
 
 TerrainLodManager::Entry::~Entry() {
     if (bgfx::isValid(materialMap)) bgfx::destroy(materialMap);
+    if (bgfx::isValid(coverMap)) bgfx::destroy(coverMap);
 }
 TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
                                      ThreadPool& pool,
@@ -79,6 +80,14 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
     if (!bgfx::isValid(joinLightTexture))
         throw std::runtime_error("Cannot create LOD join light volume");
     joinLightVolume.initTexture("u_light_volume", 2, joinLightTexture);
+    const uint8_t noCover = 0;
+    joinCoverTexture = bgfx::createTexture3D(
+        1, 1, 1, false, bgfx::TextureFormat::R8,
+        BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_W_CLAMP,
+        bgfx::copy(&noCover, 1));
+    if (!bgfx::isValid(joinCoverTexture))
+        throw std::runtime_error("Cannot create LOD join cover volume");
+    joinCoverVolume.initTexture("u_cover_volume", 5, joinCoverTexture);
     joinLightChunk.initVec4("u_light_chunk", {0, 0, 0, 0});
     joinLightSlot.initVec4("u_light_slot", {0, 0, 0, 0});
 }
@@ -94,6 +103,7 @@ TerrainLodManager::~TerrainLodManager() {
     }
     if (bgfx::isValid(detailMap)) bgfx::destroy(detailMap);
     if (bgfx::isValid(joinLightTexture)) bgfx::destroy(joinLightTexture);
+    if (bgfx::isValid(joinCoverTexture)) bgfx::destroy(joinCoverTexture);
 }
 
 bool TerrainLodManager::wanted(const TerrainLod::Patch& p) const {
@@ -371,7 +381,21 @@ bool TerrainLodManager::createGpu(Entry& entry, const TerrainLod::Patch& p,
         entry.mesh.release();
         return false;
     }
+    entry.coverMap = bgfx::createTexture2D(
+        uint16_t(cpu.coverSize), uint16_t(cpu.coverSize), false, 1,
+        bgfx::TextureFormat::RGBA8,
+        BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT | BGFX_SAMPLER_U_CLAMP |
+            BGFX_SAMPLER_V_CLAMP,
+        bgfx::copy(cpu.covers.data(), uint32_t(cpu.covers.size())));
+    if (!bgfx::isValid(entry.coverMap)) {
+        entry.mesh.release();
+        bgfx::destroy(entry.materialMap);
+        entry.materialMap = BGFX_INVALID_HANDLE;
+        return false;
+    }
     entry.mapUniform.initTexture("u_surface_map", 1, entry.materialMap);
+    entry.coverUniform.initTexture("u_cover_map", CoverStage, entry.coverMap);
+    entry.coverInfo.initVec4("u_lod_cover", {float(cpu.coverSize), 0, 0, 0});
     entry.patchUniform.initVec4(
         "u_lod_patch",
         {float(p.x), float(p.z), float(p.size()), float(p.spacing)});
@@ -647,9 +671,10 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                                     float(p.size()), float(p.spacing)});
         entry.shiftUniform.setVec4({shift, 0, 0, 0});
         std::vector<ShaderProperty*> uniforms{
-            &textureArray,  &entry.mapUniform,  &entry.patchUniform,
-            &detailUniform, &detailOrigin,      &fogUniform,
-            &patchNormals,  &entry.shiftUniform};
+            &textureArray,   &entry.mapUniform,   &entry.patchUniform,
+            &detailUniform,  &detailOrigin,       &fogUniform,
+            &patchNormals,   &entry.shiftUniform, &entry.coverUniform,
+            &entry.coverInfo};
         uniforms.insert(uniforms.end(), extraUniforms.begin(),
                         extraUniforms.end());
         target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
@@ -658,9 +683,9 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     if (joinsDrawable) {
         // World-space vertices, placed relative to the eye.
         auto transform = relativeTransform(camera, 0, 0, 0);
-        std::vector<ShaderProperty*> uniforms{&textureArray,  &joinNormals,
-                                              &fogUniform,    &joinLightChunk,
-                                              &joinLightSlot, &joinLightVolume};
+        std::vector<ShaderProperty*> uniforms{
+            &textureArray,  &joinNormals,     &fogUniform,     &joinLightChunk,
+            &joinLightSlot, &joinLightVolume, &joinCoverVolume};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
         target.drawVertexBuffer(detailJoins.get(), &joinShader,
@@ -674,9 +699,9 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         const int cx = int(camera.position.x) / Chunk::SIZE_X,
                   cy = int(camera.position.y) / Chunk::SIZE_Y,
                   cz = int(camera.position.z) / Chunk::SIZE_Z;
-        std::vector<ShaderProperty*> uniforms{&textureArray,  &joinNormals,
-                                              &fogUniform,    &joinLightChunk,
-                                              &joinLightSlot, &joinLightVolume};
+        std::vector<ShaderProperty*> uniforms{
+            &textureArray,  &joinNormals,     &fogUniform,     &joinLightChunk,
+            &joinLightSlot, &joinLightVolume, &joinCoverVolume};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
         structures->draw(

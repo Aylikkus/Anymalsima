@@ -1,7 +1,34 @@
 #include "chunk_mesher.hpp"
 
+#include <cmath>
+
 #include "items/block.hpp"
 #include "items/material.hpp"
+
+ChunkMesher::ChunkMesher(const IAssets& assets)
+    : assets(assets), blocks(assets.getStorage<Block>()) {
+    if (!assets.hasStorage<GroundCover>()) return;
+    const auto& storage = assets.getStorage<GroundCover>();
+    covers.resize(storage.items.size() + 1);
+    for (const auto& cover : storage.items) {
+        auto& info = covers[cover.id];
+        info.valid = true;
+        info.top = cover.faces.top;
+        info.sides = cover.faces.sides;
+        info.layer =
+            float(assets.getMaterialAlbedoLayer(cover.overlay_material));
+        info.fringe =
+            cover.faces.sides ? packFringe(cover.faces.side_fringe_m) : 0;
+        info.tint = cover.tint_gradient;
+    }
+}
+
+float ChunkMesher::packFringe(const ValueRange& metres) {
+    const auto cm = [](float m) {
+        return std::clamp(std::round(m * 100.f), 0.f, 999.f);
+    };
+    return cm(metres.min) + 1000.f * cm(metres.max);
+}
 
 // ---------------------------------------------------------------------------
 // Face descriptors (identical to the original — geometry is unchanged).
@@ -37,8 +64,8 @@ const std::array<ChunkMesher::FaceDesc, 6> ChunkMesher::FACES = {{
 // ---------------------------------------------------------------------------
 void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
                            float dux, float duy, float duz, float dvx,
-                           float dvy, float dvz, Face face,
-                           const FaceKey& key) const {
+                           float dvy, float dvz, Face face, const FaceKey& key,
+                           const CoverClimate& climate) const {
     const FaceDesc& fd = FACES[static_cast<int>(face)];
 
     // Derive the UV extents from the edge vector magnitudes so textures
@@ -73,6 +100,7 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
     };
 
     uint32_t base = static_cast<uint32_t>(mesh.vertices.size());
+    const CoverInfo* cover = coverInfo(key.cover);
 
     for (const auto& c : corners) {
         BlockVertex v;
@@ -85,10 +113,20 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
         v.tx = fd.tx;
         v.ty = fd.ty;
         v.tz = fd.tz;
-        v.u = c.u;
-        v.v = c.v;
+        // Shaders texture faces triplanarly from world positions, so u/v
+        // carry the ground cover instead of texture coordinates.
+        v.u = -1;
+        v.v = 0;
         v.layer = key.texLayer == UINT16_MAX ? -2.f : float(key.texLayer);
         v.tint = key.tint;
+        if (cover) {
+            v.u = cover->layer;
+            v.v = face == Face::PosY ? 0.f : cover->fringe;
+            const auto [humidity, temperature] =
+                climate.at(std::clamp(c.x / Chunk::SIZE_X, 0.f, 1.f),
+                           std::clamp(c.z / Chunk::SIZE_Z, 0.f, 1.f));
+            v.tint = cover->tint.at(humidity, temperature).packed();
+        }
         mesh.vertices.push_back(v);
     }
 
@@ -120,7 +158,8 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
 //     rectangle and mark those cells as consumed (block = nullptr).
 // ---------------------------------------------------------------------------
 ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
-                             const NeighbourFn& neighbour) const {
+                             const NeighbourFn& neighbour,
+                             const CoverClimate& climate) const {
     ChunkMesh mesh;
 
     // World-space origin of this chunk (tile units).
@@ -203,6 +242,16 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     // Light is sampled from the chunk's light volume in the
                     // shader, so faces merge regardless of light levels.
                     FaceKey key{&block, texLayer, NeutralTint};
+                    // Ground cover shows on the top face and, when enabled,
+                    // on side faces; never on the bottom.
+                    const CoverInfo* cover = coverInfo(tile->cover);
+                    const auto covered = [&](bool posDir) {
+                        FaceKey k = key;
+                        if (cover &&
+                            (d == 1 ? posDir && cover->top : cover->sides))
+                            k.cover = tile->cover;
+                        return k;
+                    };
 
                     // +d neighbour
                     {
@@ -212,7 +261,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         const Tile* nbr =
                             getNeighbourTile(nlocal[0], nlocal[1], nlocal[2]);
 
-                        if (isFaceVisible(nbr)) maskPos[vi * uCount + ui] = key;
+                        if (isFaceVisible(nbr))
+                            maskPos[vi * uCount + ui] = covered(true);
                     }
 
                     // -d neighbour
@@ -223,7 +273,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         const Tile* nbr =
                             getNeighbourTile(nlocal[0], nlocal[1], nlocal[2]);
 
-                        if (isFaceVisible(nbr)) maskNeg[vi * uCount + ui] = key;
+                        if (isFaceVisible(nbr))
+                            maskNeg[vi * uCount + ui] = covered(false);
                     }
                 }
             }
@@ -303,7 +354,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
 
                         emitQuad(mesh, qOrigin[0], qOrigin[1], qOrigin[2],
                                  qDu[0], qDu[1], qDu[2], qDv[0], qDv[1], qDv[2],
-                                 faceEnum, startKey);
+                                 faceEnum, startKey, climate);
 
                         // Mark merged cells as consumed
                         for (int dv = 0; dv < h; ++dv)
@@ -338,7 +389,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     above->block_id)
                     continue;
                 emitQuad(mesh, x, y + 1, z, 0, 0, 1, 1, 0, 0, Face::PosY,
-                         {nullptr, UINT16_MAX, NeutralTint});
+                         {nullptr, UINT16_MAX, NeutralTint}, climate);
             }
 
     return mesh;

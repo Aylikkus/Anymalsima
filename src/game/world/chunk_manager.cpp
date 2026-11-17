@@ -1,8 +1,11 @@
 #include "chunk_manager.hpp"
 
+#include <climits>
 #include <iostream>
 
+#include "ground_cover_climate.hpp"
 #include "save/chunk_codec.hpp"
+#include "save/flora_codec.hpp"
 
 ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
                            const ChunkMesher* mesher, const World& world,
@@ -14,6 +17,9 @@ ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
       layersGenerator(world.genSettings, assets),
       soilAssets(assets),
       soilSeed(world.genSettings.feature_seed) {
+    floraTable = assets ? std::make_shared<const FloraSpeciesTable>(*assets)
+                        : std::make_shared<const FloraSpeciesTable>();
+    floraSeed_ = world.genSettings.feature_seed ^ 0x5f10a7u;
     const size_t threads = std::max<size_t>(1, pool.get_thread_count());
     maxGenerationJobs = std::clamp<size_t>(threads * 2, 4, 32);
     maxMeshJobs = std::clamp<size_t>(threads, 2, 16);
@@ -26,12 +32,13 @@ ChunkManager::~ChunkManager() {
 
 void ChunkManager::registerChunk(const ChunkCoord& coord,
                                  const ChunkCoord& origin, const Region* region,
-                                 ChunkBlob stored) {
+                                 ChunkBlob stored, ChunkBlob storedFlora) {
     if (chunks.contains(coord)) unregister(coord);
     auto& handle = chunks[coord];
     handle.identity = ++nextIdentity;
     handle.regionCoord = region->coord;
-    pending[coord] = {origin, region, std::nullopt, std::move(stored)};
+    pending[coord] = {origin, region, std::nullopt, std::move(stored),
+                      std::move(storedFlora)};
     if (!regionLayers.contains(region->coord))
         regionLayers[region->coord] = layersGenerator.get(*region);
     if (!regionSoils.contains(region->coord))
@@ -176,6 +183,35 @@ void ChunkManager::markLightChanged(const ChunkCoord& coord) {
     if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
     lightChanged.emit(coord);
 }
+FloraLayer ChunkManager::regenerateFlora(const ChunkCoord& coord,
+                                         uint32_t salt) {
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready ||
+        floraTable->empty() || terrainWorld.regions.empty())
+        return {};
+    const auto columns = generatedColumns(coord.x, coord.z);
+    if (!columns) return {};
+    const auto terrain = terrainShared(it->second.regionCoord);
+    const auto tiles = getChunkShared(coord);
+    return generateFlora({floraTable.get(), terrain.get(), columns.get(), coord,
+                          floraSeed_ ^ salt, tiles.get(), floraSeed_});
+}
+
+FloraLayerPtr ChunkManager::flora(const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    return it != chunks.end() && it->second.state == ChunkState::Ready
+               ? it->second.flora
+               : nullptr;
+}
+void ChunkManager::setFlora(const ChunkCoord& coord, FloraLayerPtr layer,
+                            bool persist) {
+    auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
+    if (layer && layer->empty()) layer = nullptr;
+    it->second.flora = std::move(layer);
+    if (persist) it->second.persistDirty = true;
+    floraChanged.emit(coord);
+}
 bool ChunkManager::isPersistDirty(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);
     return it != chunks.end() && it->second.persistDirty;
@@ -195,10 +231,13 @@ RegionSnapshot ChunkManager::snapshotRegion(Vec2u region, bool copy) {
                     !it->second.persistDirty)
                     continue;
                 it->second.persistDirty = false;
+                const auto index = RegionData::localIndex(coord);
                 snapshot.chunks.emplace_back(
-                    RegionData::localIndex(coord),
-                    copy ? std::make_shared<const Chunk>(*it->second.data)
-                         : std::shared_ptr<const Chunk>(it->second.data));
+                    index, copy
+                               ? std::make_shared<const Chunk>(*it->second.data)
+                               : std::shared_ptr<const Chunk>(it->second.data));
+                // Layers are immutable: sharing is a snapshot.
+                snapshot.flora.emplace_back(index, it->second.flora);
             }
     return snapshot;
 }
@@ -256,13 +295,24 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
         if (auto* chunk = getChunk(neighbor))
             neighbors[neighbor] = std::make_shared<Chunk>(*chunk);
     }
+    CoverClimate climate;
+    if (!terrainWorld.regions.empty())
+        for (int corner = 0; corner < 4; ++corner) {
+            const auto [humidity, temperature] = ground_cover_climate::at(
+                terrainWorld, double(coord.x + (corner & 1)) * Chunk::SIZE_X,
+                double(coord.z + (corner >> 1)) * Chunk::SIZE_Z);
+            climate.humidity[corner] = humidity;
+            climate.temperature_c[corner] = temperature;
+        }
     const auto identity = handle.identity, revision = handle.meshRevision;
     const auto priority = handle.meshUrgent ? BS::pr::high : BS::pr::normal;
     auto future = pool.submit_task(
         [coord, data, neighbors = std::move(neighbors), builder = *mesher,
-         identity, revision, wrapX, depth = terrainWorld.height * 128]() {
+         identity, revision, wrapX, depth = terrainWorld.height * 128,
+         climate]() {
             auto mesh = builder.build(
-                *data, coord, [&](int x, int y, int z) -> const Tile* {
+                *data, coord,
+                [&](int x, int y, int z) -> const Tile* {
                     static const Tile outside{};
                     // X wraps; Z and Y end at the world edge.
                     x = int(wrapX.wrapTile(x));
@@ -279,7 +329,8 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                                : &it->second->tiles[z % Chunk::SIZE_Z]
                                                    [y % Chunk::SIZE_Y]
                                                    [x % Chunk::SIZE_X];
-                });
+                },
+                climate);
             return FinishedMesh{coord, std::move(mesh), identity, revision};
         },
         priority);
@@ -351,8 +402,9 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
         std::lock_guard<std::mutex> lock(tileAtMutex);
         it->second.data = std::move(data.data);
         it->second.state = ChunkState::Ready;
-        it->second.persistDirty = !data.fromDisk;
+        it->second.persistDirty = !data.fromDisk || data.floraRegrown;
         it->second.edited = data.edited;
+        it->second.flora = std::move(data.flora);
     }
     pending.erase(coord);
     markDirty(coord);
@@ -401,16 +453,42 @@ void ChunkManager::dispatchGeneration() {
             if (air >= AirChunksPerUpdate && !oldest) continue;
             ++air;
             generationQueue.erase(coord);
-            publishGenerated(coord, identity,
-                             {std::make_shared<Chunk>(), false});
+            publishGenerated(
+                coord, identity,
+                {std::make_shared<Chunk>(), false, false, nullptr});
             continue;
         }
         if (!slots) continue;
+        // Plants are generated for slabs holding a surface tile.
+        std::shared_ptr<const TerrainNeighborhood> terrain;
+        if (columns && !floraTable->empty()) {
+            int low = INT_MAX, high = INT_MIN;
+            for (const auto& c : columns->columns) {
+                low = std::min(low, c.surface_y);
+                high = std::max(high, c.surface_y);
+            }
+            const int base = int(coord.y) * Chunk::SIZE_Y;
+            if (high >= base && low < base + Chunk::SIZE_Y)
+                terrain = terrainShared(info.region->coord);
+        }
         auto future = pool.submit_task(
             [generator = generator, coord, columns, origin = info.regionOrigin,
              region = *info.region,
              layers = regionLayers.at(info.region->coord),
-             soil = regionSoils.at(info.region->coord), stored = info.stored] {
+             soil = regionSoils.at(info.region->coord), stored = info.stored,
+             storedFlora = info.storedFlora, terrain, rules = floraTable,
+             seed = floraSeed_, day = floraDay] {
+                const auto plants = [&](const Chunk* tiles) -> FloraLayerPtr {
+                    if (!terrain) return nullptr;
+                    auto layer = generateFlora(
+                        {rules.get(), terrain.get(), columns.get(), coord,
+                         seed ^ floraEpochSalt(day), tiles, seed});
+                    for (auto& p : layer.instances) p.birthDay += day;
+                    layer.resolvedDay = day;
+                    return layer.empty() ? nullptr
+                                         : std::make_shared<const FloraLayer>(
+                                               std::move(layer));
+                };
                 auto result = std::make_shared<Chunk>();
                 if (stored) {
                     try {
@@ -435,7 +513,27 @@ void ChunkManager::dispatchGeneration() {
                                             break;
                                         }
                                     }
-                        return GeneratedChunk{result, true, edited};
+                        GeneratedChunk out{result, true, edited, nullptr};
+                        if (storedFlora) {
+                            try {
+                                auto layer = flora_codec::decode(*storedFlora);
+                                if (!layer.empty())
+                                    out.flora =
+                                        std::make_shared<const FloraLayer>(
+                                            std::move(layer));
+                                return out;
+                            } catch (const std::exception& e) {
+                                std::cerr << "Saved plants of chunk " << coord.x
+                                          << ',' << coord.y << ',' << coord.z
+                                          << " are unreadable (" << e.what()
+                                          << "); regrowing\n";
+                            }
+                        }
+                        // Older saves: regrow generated plants where the
+                        // ground still allows them.
+                        out.flora = plants(result.get());
+                        out.floraRegrown = out.flora != nullptr;
+                        return out;
                     } catch (const std::exception& e) {
                         std::cerr << "Saved chunk " << coord.x << ',' << coord.y
                                   << ',' << coord.z << " is unreadable ("
@@ -444,7 +542,7 @@ void ChunkManager::dispatchGeneration() {
                 }
                 generator.generateChunk(*result, coord, origin, region, layers,
                                         soil, columns.get());
-                return GeneratedChunk{result, false};
+                return GeneratedChunk{result, false, false, plants(nullptr)};
             },
             info.beneficiary ? BS::pr::high : BS::pr::normal);
         generationJobs.push_back({coord, identity, std::move(future)});
@@ -547,12 +645,14 @@ MeshHandle* ChunkManager::getMesh(const ChunkCoord& coord) {
                                                          : &it->second.mesh;
 }
 
-const TerrainNeighborhood& ChunkManager::terrainNeighborhood(Vec2u region) {
+std::shared_ptr<const TerrainNeighborhood> ChunkManager::terrainShared(
+    Vec2u region) {
     auto it = regionTerrain.find(region);
     if (it == regionTerrain.end())
         it = regionTerrain
-                 .emplace(region, TerrainNeighborhood::capture(
-                                      terrainWorld, region, *soilAssets))
+                 .emplace(region, std::make_shared<const TerrainNeighborhood>(
+                                      TerrainNeighborhood::capture(
+                                          terrainWorld, region, *soilAssets)))
                  .first;
     return it->second;
 }

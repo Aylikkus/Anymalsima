@@ -29,6 +29,11 @@ add_library(game
     world/terrain_edit_tracker.cpp
     world/location_manager.cpp
     world/save/chunk_codec.cpp
+    world/save/flora_codec.cpp
+    world/flora_generator.cpp
+    world/flora_mesh_builder.cpp
+    world/flora_simulation.cpp
+    world/flora_renderer.cpp
     world/save/region_file.cpp
     world/save/region_store.cpp
     world/save/world_map_codec.cpp

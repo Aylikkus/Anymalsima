@@ -1,5 +1,5 @@
 $input a_position, a_normal, a_tangent, a_texcoord0, a_texcoord1, a_color0
-$output v_position, v_normal, v_layer, v_light, v_color0
+$output v_position, v_normal, v_layer, v_light, v_color0, v_cover
 
 #include <bgfx_shader.sh>
 
@@ -21,5 +21,8 @@ void main()
     // Slot-local light texel coordinates, half a block in front of the face
     // (the air cell that lights it). Affine, so interpolation is exact.
     v_light = world - u_light_chunk.xyz + 0.5 * a_normal;
+    // Ground cover (ChunkMesher::build): x = overlay layer or -1, y = side
+    // fringe range; a_color0 is then the cover tint.
     v_color0 = a_color0;
+    v_cover = a_texcoord0;
 }

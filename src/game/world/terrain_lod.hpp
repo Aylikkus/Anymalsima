@@ -52,12 +52,17 @@ struct Mesh {
     // RG: surface material layer, BA: bare rock layer, little endian.
     std::vector<uint8_t> materials;
     int mapSize = 1;
+    // Ground cover (CoverTexel per texel): R overlay layer + 1, G density,
+    // BA tint RGB565. coverSize texels per side over the whole patch.
+    std::vector<uint8_t> covers;
+    int coverSize = 1;
     std::vector<SurfaceBand> bands;
     AABB bounds{};
     float error = 0;
     size_t bytes() const {
         return vertices.size() * sizeof(BlockVertex) +
-               indices.size() * sizeof(uint32_t) + materials.size();
+               indices.size() * sizeof(uint32_t) + materials.size() +
+               covers.size();
     }
 };
 using ErrorFn = std::function<float(const Patch&)>;

@@ -51,6 +51,8 @@ LightVolumeManager::LightVolumeManager(ChunkManager& chunks,
     };
     if (!supports(format))
         throw std::runtime_error("Light volumes require RGBA8 3D textures");
+    if (!supports(bgfx::TextureFormat::R8))
+        throw std::runtime_error("Ground cover volumes require R8 3D textures");
     readyConnection = chunks.becameReady.connect(
         [this](const ChunkCoord& coord) { changed(coord); });
     lightConnection = chunks.lightChanged.connect(
@@ -64,8 +66,11 @@ LightVolumeManager::~LightVolumeManager() {
     chunks.lightChanged.disconnect(lightConnection);
     chunks.removed.disconnect(removedConnection);
     // bgfx defers destruction until frames referencing the pages finish.
-    for (auto& page : pages)
+    for (auto& page : pages) {
         if (bgfx::isValid(page->texture)) bgfx::destroy(page->texture);
+        if (bgfx::isValid(page->coverTexture))
+            bgfx::destroy(page->coverTexture);
+    }
 }
 
 void LightVolumeManager::changed(const ChunkCoord& coord) {
@@ -91,11 +96,12 @@ void LightVolumeManager::forget(const ChunkCoord& coord) {
                     });
 }
 
-const LightVolume::Cells* LightVolumeManager::cells(const ChunkCoord& coord) {
+const LightVolumeManager::CachedCells* LightVolumeManager::cells(
+    const ChunkCoord& coord) {
     auto it = cache.find(coord);
     if (it != cache.end() && it->second.valid) {
         it->second.lastUsed = frame;
-        return &it->second.cells;
+        return &it->second;
     }
     if (!chunks.isReady(coord)) return nullptr;
     auto& entry = it != cache.end() ? it->second : cache[coord];
@@ -104,11 +110,12 @@ const LightVolume::Cells* LightVolumeManager::cells(const ChunkCoord& coord) {
                 blockLight ? blockLight->chroma(coord) : nullptr;
             LightVolume::encode(chunk, blocks,
                                 chroma ? chroma->data() : nullptr, entry.cells);
+            LightVolume::encodeCover(chunk, entry.cover);
         }))
         return nullptr;
     entry.valid = true;
     entry.lastUsed = frame;
-    return &entry.cells;
+    return &entry;
 }
 
 void LightVolumeManager::addPage() {
@@ -119,6 +126,13 @@ void LightVolumeManager::addPage() {
     if (!bgfx::isValid(page->texture))
         throw std::runtime_error("Cannot create light volume page");
     page->sampler.initTexture("u_light_volume", VolumeStage, page->texture);
+    page->coverTexture = bgfx::createTexture3D(
+        PageX, PageY, PageZ, false, bgfx::TextureFormat::R8,
+        BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_W_CLAMP);
+    if (!bgfx::isValid(page->coverTexture))
+        throw std::runtime_error("Cannot create ground cover volume page");
+    page->coverSampler.initTexture("u_cover_volume", CoverStage,
+                                   page->coverTexture);
     for (auto& binding : page->bindings) {
         binding.chunk.initVec4("u_light_chunk", {0, 0, 0, 0});
         binding.slot.initVec4("u_light_slot", {0, 0, 0, 0});
@@ -167,12 +181,17 @@ void LightVolumeManager::release(const ChunkCoord& coord) {
 
 void LightVolumeManager::rebuild(const ChunkCoord& coord, const Slot& slot) {
     std::array<const LightVolume::Cells*, 27> neighborhood{};
-    forNeighborhood(
-        chunks.wrap(), coord, [&](const ChunkCoord& n, int dx, int dy, int dz) {
-            neighborhood[LightVolume::neighbor(dx, dy, dz)] = cells(n);
-        });
+    std::array<const LightVolume::CoverCells*, 27> coverNeighborhood{};
+    forNeighborhood(chunks.wrap(), coord,
+                    [&](const ChunkCoord& n, int dx, int dy, int dz) {
+                        const auto* entry = cells(n);
+                        const int i = LightVolume::neighbor(dx, dy, dz);
+                        neighborhood[i] = entry ? &entry->cells : nullptr;
+                        coverNeighborhood[i] = entry ? &entry->cover : nullptr;
+                    });
     if (!neighborhood[LightVolume::neighbor(0, 0, 0)]) return;
     LightVolume::build(neighborhood, scratch);
+    LightVolume::buildCover(coverNeighborhood, coverScratch);
 
     const int sx = slot.index % SlotsX;
     const int sy = (slot.index / SlotsX) % SlotsY;
@@ -186,6 +205,11 @@ void LightVolumeManager::rebuild(const ChunkCoord& coord, const Slot& slot) {
                           uint16_t(sy * LightVolume::SizeY),
                           uint16_t(sz * LightVolume::SizeZ), LightVolume::SizeX,
                           LightVolume::SizeY, LightVolume::SizeZ, memory);
+    bgfx::updateTexture3D(
+        page.coverTexture, 0, uint16_t(sx * LightVolume::SizeX),
+        uint16_t(sy * LightVolume::SizeY), uint16_t(sz * LightVolume::SizeZ),
+        LightVolume::SizeX, LightVolume::SizeY, LightVolume::SizeZ,
+        bgfx::copy(coverScratch.data(), uint32_t(coverScratch.size())));
     // The vertex shader turns world positions into slot-local texel
     // coordinates: texel = world - origin + 1 (the border is texel 0).
     auto& binding = page.bindings[slot.index];
@@ -266,5 +290,6 @@ bool LightVolumeManager::bind(const ChunkCoord& coord,
     uniforms.push_back(&binding.chunk);
     uniforms.push_back(&binding.slot);
     uniforms.push_back(&page.sampler);
+    uniforms.push_back(&page.coverSampler);
     return true;
 }

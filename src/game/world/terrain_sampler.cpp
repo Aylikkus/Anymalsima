@@ -84,6 +84,8 @@ TerrainNeighborhood TerrainNeighborhood::capture(const World& world,
             const auto& definition =
                 assets.getStorage<Soil>().get(target.soil.soil_id);
             target.soil_rules = definition.placement;
+            target.cover = GroundCoverGenerator::select(
+                r, target.soil.soil_id, assets, result.feature_seed);
             // Preserve the variant for land columns in a neighboring region.
             if (definition.topsoil_block_name)
                 target.soil.topsoil_block_id =
@@ -380,6 +382,15 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
             std::min(layer.thickness_m, depth - layer.depth_from_surface_m);
         if (layer.thickness_m > 0) result.layers[result.count++] = layer;
     }
+    // Cover grows on the top topsoil tile of dry land. It follows the soil's
+    // source region, so it blends across region borders with the soil.
+    if (result.count > 0 && result.layers[0].topsoil &&
+        result.layers[0].depth_from_surface_m == 0 &&
+        terrain.surface_y >= SEA_LEVEL_Y && selected->cover.cover_id) {
+        result.cover = selected->cover.cover_id;
+        result.coverDensity = GroundCoverGenerator::density(
+            selected->cover, x, z, terrain.slope, data.periodX());
+    }
     return result;
 }
 
@@ -405,7 +416,8 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
                     std::max(slope, std::abs(heights[index + offset] - center));
             const TerrainSample terrain{int(std::floor(center)), slope};
             out.columns[z * Chunk::SIZE_X + x] = {
-                terrain.surface_y, soil(originX + x, originZ + z, terrain)};
+                terrain.surface_y, soil(originX + x, originZ + z, terrain),
+                slope};
         }
     return out;
 }

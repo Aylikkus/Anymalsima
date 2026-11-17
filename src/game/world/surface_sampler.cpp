@@ -1,5 +1,8 @@
 #include "surface_sampler.hpp"
 
+#include "ground_cover_climate.hpp"
+#include "items/ground_cover.hpp"
+
 const SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
     const unsigned rx = wrapX(x) / TerrainTuning::RegionX;
     const unsigned rz = std::clamp(z, 0, depth() - 1) / TerrainTuning::RegionZ;
@@ -46,6 +49,27 @@ const ColumnEdit* SurfaceSampler::editAt(int x, int z) {
         lastEdit = it == edits->end() ? nullptr : it->second.get();
     }
     return lastEdit;
+}
+
+CoverTexel SurfaceSampler::cover(int x, int z) {
+    const auto column = generatedColumn(x, z);
+    if (!column.soil.cover || !assets.hasStorage<GroundCover>()) return {};
+    if (const auto* edit = editAt(x, z)) {
+        const int wx = wrapX(x), wz = std::clamp(z, 0, depth() - 1);
+        if (edit->groundY[ColumnEdit::index(
+                wx % Chunk::SIZE_X, wz % Chunk::SIZE_Z)] != column.surfaceY)
+            return {};
+    }
+    const auto& definition =
+        assets.getStorage<GroundCover>().get(column.soil.cover);
+    const auto layer =
+        assets.getMaterialAlbedoLayer(definition.overlay_material);
+    if (layer >= 255) return {};
+    const auto [humidity, temperature] =
+        ground_cover_climate::at(world, wrapX(x) + 0.5, z + 0.5);
+    return {uint8_t(layer + 1), uint8_t(column.soil.coverDensity * 17),
+            ground_cover_climate::packRgb565(
+                definition.tint_gradient.at(humidity, temperature))};
 }
 
 int SurfaceSampler::structureTop(int x, int z) {

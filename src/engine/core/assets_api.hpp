@@ -21,6 +21,14 @@ class IAssets {
 
     virtual bgfx::TextureHandle getMaterialAlbedoArray() const = 0;
     virtual bgfx::TextureHandle getMaterialNormalArray() const = 0;
+    // Plant card arrays: layer = FoliageMaterial id - 1 (albedo with alpha
+    // cutout; normal at the same layer). Invalid without foliage data.
+    virtual bgfx::TextureHandle getFoliageAlbedoArray() const {
+        return BGFX_INVALID_HANDLE;
+    }
+    virtual bgfx::TextureHandle getFoliageNormalArray() const {
+        return BGFX_INVALID_HANDLE;
+    }
 
     template <typename T>
     void registerDataType();

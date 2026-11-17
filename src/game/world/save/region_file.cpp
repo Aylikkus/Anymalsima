@@ -4,6 +4,7 @@
 #include <string>
 
 #include "chunk_codec.hpp"
+#include "flora_codec.hpp"
 
 uint16_t RegionData::localIndex(const ChunkCoord& coord) {
     return uint16_t(coord.y * Columns +
@@ -22,6 +23,43 @@ namespace region_file {
 namespace {
 constexpr uint16_t ChunkSectionVersion = 1;
 constexpr uint16_t TopsSectionVersion = 1;
+constexpr uint16_t FloraSectionVersion = 1;
+
+void writeBlobs(SectionContainer& container, const char* tag, uint16_t version,
+                const std::unordered_map<uint16_t, ChunkBlob>& blobs) {
+    std::vector<uint16_t> order;
+    order.reserve(blobs.size());
+    for (const auto& [index, blob] : blobs) order.push_back(index);
+    std::sort(order.begin(), order.end());  // stable, diff-friendly output
+    BinaryWriter out;
+    out.write(uint32_t(order.size()));
+    for (const auto index : order) {
+        out.write(index);
+        out.writeBlock(*blobs.at(index));
+    }
+    container.put(tag, version, out.take(), false);
+}
+
+void readBlobs(const SectionContainer& container, const char* tag,
+               uint16_t version,
+               std::unordered_map<uint16_t, ChunkBlob>& blobs) {
+    const auto* section = container.find(tag);
+    if (!section) return;
+    if (section->version != version)
+        throw SerializationError(std::string("unsupported ") + tag +
+                                 " version");
+    BinaryReader in(section->data);
+    const auto count = in.read<uint32_t>();
+    if (count > RegionData::ChunkCount)
+        throw SerializationError("too many chunks in region");
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto index = in.read<uint16_t>();
+        if (index >= RegionData::ChunkCount)
+            throw SerializationError("chunk index out of range");
+        const auto blob = in.readBlock(1u << 20);
+        blobs[index] = std::make_shared<const Bytes>(blob.begin(), blob.end());
+    }
+}
 }  // namespace
 
 std::filesystem::path path(const std::filesystem::path& worldDir, Vec2u rc) {
@@ -32,18 +70,9 @@ std::filesystem::path path(const std::filesystem::path& worldDir, Vec2u rc) {
 Bytes encode(const RegionData& data) {
     SectionContainer container = data.extra;
 
-    std::vector<uint16_t> order;
-    order.reserve(data.chunks.size());
-    for (const auto& [index, blob] : data.chunks) order.push_back(index);
-    std::sort(order.begin(), order.end());  // stable, diff-friendly output
-
-    BinaryWriter chunks;
-    chunks.write(uint32_t(order.size()));
-    for (const auto index : order) {
-        chunks.write(index);
-        chunks.writeBlock(*data.chunks.at(index));
-    }
-    container.put("CHNK", ChunkSectionVersion, chunks.take(), false);
+    writeBlobs(container, "CHNK", ChunkSectionVersion, data.chunks);
+    if (!data.flora.empty())
+        writeBlobs(container, "FLOR", FloraSectionVersion, data.flora);
 
     BinaryWriter tops;
     for (const auto top : data.tops) tops.write(top);
@@ -55,22 +84,8 @@ RegionData decode(ByteView bytes) {
     RegionData data;
     data.extra = SectionContainer::decode(bytes);
 
-    if (const auto* section = data.extra.find("CHNK")) {
-        if (section->version != ChunkSectionVersion)
-            throw SerializationError("unsupported CHNK version");
-        BinaryReader in(section->data);
-        const auto count = in.read<uint32_t>();
-        if (count > RegionData::ChunkCount)
-            throw SerializationError("too many chunks in region");
-        for (uint32_t i = 0; i < count; ++i) {
-            const auto index = in.read<uint16_t>();
-            if (index >= RegionData::ChunkCount)
-                throw SerializationError("chunk index out of range");
-            const auto blob = in.readBlock(1u << 20);
-            data.chunks[index] =
-                std::make_shared<const Bytes>(blob.begin(), blob.end());
-        }
-    }
+    readBlobs(data.extra, "CHNK", ChunkSectionVersion, data.chunks);
+    readBlobs(data.extra, "FLOR", FloraSectionVersion, data.flora);
     if (const auto* section = data.extra.find("TOPS")) {
         if (section->version != TopsSectionVersion)
             throw SerializationError("unsupported TOPS version");
@@ -80,6 +95,7 @@ RegionData decode(ByteView bytes) {
     // Known sections are rebuilt from fields on encode.
     data.extra.remove("CHNK");
     data.extra.remove("TOPS");
+    data.extra.remove("FLOR");
     return data;
 }
 
@@ -96,6 +112,9 @@ RegionData merge(const RegionData& base, const RegionSnapshot& snapshot) {
             column = std::max(column, int32_t(worldY));
         }
     }
+    for (const auto& [index, layer] : snapshot.flora)
+        result.flora[index] = std::make_shared<const Bytes>(
+            flora_codec::encode(layer ? *layer : FloraLayer{}));
     return result;
 }
 

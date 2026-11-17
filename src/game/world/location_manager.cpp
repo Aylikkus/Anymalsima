@@ -104,13 +104,17 @@ void LocationManager::registerRegionChunks(const Vec2u& rc,
         for (int cz = 0; cz < CHUNKS_PER_REGION; ++cz) {
             for (int cx = 0; cx < CHUNKS_PER_REGION; ++cx) {
                 ChunkCoord coord{origin.x + cx, slabY, origin.z + cz};
-                ChunkBlob stored;
+                ChunkBlob stored, storedFlora;
                 if (data) {
-                    const auto it =
-                        data->chunks.find(RegionData::localIndex(coord));
+                    const auto index = RegionData::localIndex(coord);
+                    const auto it = data->chunks.find(index);
                     if (it != data->chunks.end()) stored = it->second;
+                    const auto plants = data->flora.find(index);
+                    if (plants != data->flora.end())
+                        storedFlora = plants->second;
                 }
-                chunks.registerChunk(coord, origin, &region, stored);
+                chunks.registerChunk(coord, origin, &region, stored,
+                                     storedFlora);
             }
         }
     }

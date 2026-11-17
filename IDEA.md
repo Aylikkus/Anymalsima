@@ -224,6 +224,16 @@ Time slowing, time manipulation, and heightened perception belong in the intende
 
 These mechanics need explicit rules for duration, costs, affected actors, projectiles, AI, and environmental simulation. Whether NPCs can acquire equivalent abilities and how the player perceives their use remain open. Single-player is a firm constraint; the mechanic itself should be prototyped early enough to inform the simulation clock.
 
+### World time, reaction speed, and perception
+
+Direction from the author (recorded 2026-11-17; details open):
+
+- **Day length.** One game day lasts 72 real minutes: exactly 5% of a real day. About 30 minutes of a day are meant to be experienced by the player, and the remaining night is mostly skipped through sleep. The clock is continuous (fractional game days) with no base tick unit, unlike Minecraft's ticks; one game second is `DayLengthSeconds / 86400` real seconds (0.05 s at 72 minutes).
+- **Configurable later, not now.** Day length may become a player setting (some may find 72 minutes too long or too short). Decide this only once the game is playable with time-based skills and settlement/NPC simulation.
+- **Decision timing is separate from the clock.** A game second (0.05 s) is too short for a player to react to anything. Decision windows are expressed in real time instead: an ordinary NPC makes a decision about once per real second.
+- **Reaction speed is a stat.** Strong enemies decide faster, down to fractions of a millisecond for very strong ones. The length of the chain *thought about attacking -> attack started -> attack ended* also follows the actor's stats (agility and similar).
+- **Time abilities are perception.** A time-based ability makes time appear to flow slower for the player: the player still moves at the pace of world time and gets no instant movement; they gain a longer decision window and see more. This is the basis for answering the open time-ability decision below.
+
 ## 6. Technical Direction
 
 Use the existing C++20 foundation, EnTT for appropriate actor/component systems, chunk-based terrain, and worker jobs for suitable independent work. ECS supports organizing data and behavior; autonomous societies still require actual decision, economy, and world-simulation systems. Terrain need not become one entity per voxel.
@@ -254,7 +264,8 @@ Decide these when their first prototype requires an answer:
 - **Player identity:** one persistent protagonist, switchable controlled people, or a protagonist with delegated companions? What happens after death?
 - **Control and management:** what can be ordered directly, what needs consent or authority, and what can leaders execute automatically?
 - **Settlement entry:** implement founding or joining first, and which shared rules must already support both?
-- **Time abilities:** perception versus physical time effects, targeting, and NPC access.
+- **Time abilities:** perception versus physical time effects, targeting, and NPC access. Current direction: perception (a longer decision window), with reaction speed as an actor stat (see *World time, reaction speed, and perception*).
+- **Day length setting:** whether players may change the 72-minute day, decided once time-based skills and settlement simulation are playable.
 - **Progression:** stats and points, class/tree structure, combination constraints, and how exceptional power interacts with social authority.
 - **Lore and progression:** the fox's name and fate; sources and transfer of energy; fixed versus conditional thresholds; humanoid transformation versus optional shapeshifting; aspect selection; the level-100 combat promise; and the undefined 1000–2000 band.
 - **Society and awakening:** how sapience develops into language, education, institutions, and recognition by other societies. Individual awakening need not instantly produce a functioning civilization.

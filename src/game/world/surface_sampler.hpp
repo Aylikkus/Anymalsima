@@ -8,6 +8,14 @@
 #include "terrain_edits.hpp"
 #include "terrain_sampler.hpp"
 
+// Ground cover of a distant column, as stored in TerrainLod::Mesh::covers:
+// overlay layer + 1 (0 = none), density 0-255, tint RGB565 little endian.
+struct CoverTexel {
+    uint8_t layer = 0;
+    uint8_t density = 0;
+    uint16_t tint = 0;
+};
+
 struct SurfaceColumn {
     int surfaceY = 0;
     int waterY = -1;
@@ -74,6 +82,9 @@ class SurfaceSampler {
     uint16_t materialAt(int x, int y, int z);
     // Ground height after edits.
     int height(int x, int z);
+    // Ground cover of the column's surface after edits (none where an edit
+    // moved the ground).
+    CoverTexel cover(int x, int z);
     // Highest structure tile of the chunk column containing (x, z), or -1.
     int structureTop(int x, int z);
     // Replaces the edits and drops the derived caches.

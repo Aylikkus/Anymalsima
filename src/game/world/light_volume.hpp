@@ -46,6 +46,27 @@ constexpr int neighbor(int dx, int dy, int dz) {
 void encode(const Chunk& chunk, const DataStorage<Block>& blocks,
             const uint8_t* chroma, Cells& out);
 
+// Ground-cover density, one byte per cell in the same layout (channel
+// count 1), uploaded next to the light volume (LightVolumeManager) and
+// sampled bilinearly by block.frag, so density fades smoothly across tiles
+// without breaking greedy quads.
+using CoverCells = std::array<uint8_t, CellsX * CellsY * CellsZ>;
+using CoverVolume = std::array<uint8_t, SizeX * SizeY * SizeZ>;
+constexpr int coverCellIndex(int x, int y, int z) {
+    return (z * CellsY + y) * CellsX + x;
+}
+constexpr int coverTexelIndex(int x, int y, int z) {
+    return (z * SizeY + y) * SizeX + x;
+}
+// Raw cells: 0 = no cover, else 1 + density (1-16).
+void encodeCover(const Chunk& chunk, CoverCells& out);
+// Bordered density volume of chunks[13], 0-255. A cell without cover takes
+// the density of a covered tile directly below it (the air above grass) or
+// directly above it (soil under grass), so filtering across one-tile steps
+// does not fade the cover. Missing neighbors repeat the edge, as in build().
+void buildCover(const std::array<const CoverCells*, 27>& chunks,
+                CoverVolume& out);
+
 // Assembles the bordered volume of chunks[13]. A missing neighbor (nullptr)
 // repeats the center chunk's nearest edge cell, which neither invents sky
 // nor darkens the seam until that neighbor arrives. chunks[13] must be set.

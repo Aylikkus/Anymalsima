@@ -18,6 +18,10 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edit_tracker.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/location_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/chunk_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/flora_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/flora_generator.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/flora_mesh_builder.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/flora_simulation.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/region_file.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/region_store.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/world_map_codec.cpp
@@ -62,6 +66,9 @@ add_executable(world_logic_tests
     unit/game/world/light_shadow_tests.cpp
     unit/engine/serialization/binary_stream_tests.cpp
     unit/game/world/save_codec_tests.cpp
+    unit/game/world/ground_cover_tests.cpp
+    unit/game/world/flora_tests.cpp
+    unit/game/items/flora_data_tests.cpp
 )
 add_executable(lighting_benchmark benchmarks/lighting_benchmark.cpp)
 option(ANYMALSIMA_TEST_SANITIZERS "Instrument logic tests with ASan and UBSan" OFF)
@@ -258,6 +265,40 @@ foreach(case soil_data_validation soil_loading_references_capacity
             ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
     endif()
 endforeach()
+
+# Ground cover and flora data (docs/handoff/flora.md).
+foreach(case flora_value_ranges ground_cover_parsing foliage_material_parsing
+             flora_species_parsing flora_references_validated
+             ground_cover_selection_rules flora_runtime_content)
+    add_test(NAME game.items.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.items.${case} PROPERTIES
+        LABELS "unit;gameplay;data;flora" TIMEOUT 10)
+endforeach()
+foreach(case cover_generation_surface_only cover_wraps_seam cover_mesh_faces
+             cover_volume_dilation cover_cleared_by_edits
+             cover_lod_matches_detail cover_tint_packing)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;flora" TIMEOUT 15)
+endforeach()
+foreach(case flora_growth_stages flora_generation_borders
+             flora_generation_wraps_seam flora_edits flora_meshes
+             flora_world_clock flora_life_cycle
+             flora_simulation_spread_harvest_regrow flora_rare_species
+             flora_rare_species_persists)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;flora" TIMEOUT 30)
+endforeach()
+foreach(case flora_codec_roundtrip flora_streaming_persists)
+    add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.save.${case} PROPERTIES
+        LABELS "unit;gameplay;save;flora" TIMEOUT 30)
+endforeach()
+add_test(NAME game.save.cover_codec_versions
+    COMMAND world_logic_tests cover_codec_versions)
+set_tests_properties(game.save.cover_codec_versions PROPERTIES
+    LABELS "unit;gameplay;save;flora" TIMEOUT 10)
 
 foreach(case terrain_caps_repeatability terrain_shared_edges_corners
              terrain_relief_strength terrain_cliff_segments

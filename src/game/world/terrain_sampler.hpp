@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "chunk.hpp"
+#include "ground_cover_generator.hpp"
 #include "height_profile.hpp"
 #include "soil_generator.hpp"
 #include "world.hpp"
@@ -68,6 +69,9 @@ struct TerrainRegion {
     Region region{};
     SoilProfile soil;
     std::vector<SoilPlacement> soil_rules;
+    // Cover of the region's own soil and climate; columns that take their
+    // soil from this region take this cover too.
+    GroundCoverProfile cover;
 };
 
 // A two-region halo is sufficient for sampling the adjacent column's surface,
@@ -100,6 +104,8 @@ struct TerrainNeighborhood {
 struct ColumnGenerationInput {
     int surface_y = 0;
     SoilColumn soil;
+    // Same value as TerrainSampler::sample(x, z).slope.
+    double slope = 0;
 };
 
 struct ChunkColumnInputs {

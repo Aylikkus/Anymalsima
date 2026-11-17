@@ -12,6 +12,7 @@
 #include "world/chunk.hpp"
 #include "world/chunk_coord.hpp"
 #include "world/consts.hpp"
+#include "world/flora.hpp"
 
 // Immutable, encoded chunk payload (see chunk_codec.hpp).
 using ChunkBlob = std::shared_ptr<const Bytes>;
@@ -20,12 +21,16 @@ using ChunkBlob = std::shared_ptr<const Bytes>;
 //   "CHNK" v1: u32 count, then {u16 localIndex, u32 size, blob} per chunk.
 //   "TOPS" v1: one i32 per chunk column (CHUNKS_PER_REGION²), the highest
 //              solid world Y seen in saved chunks, INT_MIN when unknown.
+//   "FLOR" v1: u32 count, then {u16 localIndex, u32 size, blob} per chunk:
+//              its plants (flora_codec.hpp). A saved chunk without an entry
+//              (older saves) regrows its generated plants.
 // Unknown sections are kept in `extra` and written back unchanged.
 struct RegionData {
     static constexpr int Columns = CHUNKS_PER_REGION * CHUNKS_PER_REGION;
     static constexpr int ChunkCount = Columns * Y_CHUNKS;
 
     std::unordered_map<uint16_t, ChunkBlob> chunks;
+    std::unordered_map<uint16_t, ChunkBlob> flora;
     std::array<int32_t, Columns> tops;
     SectionContainer extra;
 
@@ -42,6 +47,8 @@ struct RegionData {
 // Chunks captured from ChunkManager that changed since they were last saved.
 struct RegionSnapshot {
     std::vector<std::pair<uint16_t, std::shared_ptr<const Chunk>>> chunks;
+    // Plants of the same chunks (an empty layer is saved too).
+    std::vector<std::pair<uint16_t, FloraLayerPtr>> flora;
     bool empty() const { return chunks.empty(); }
 };
 

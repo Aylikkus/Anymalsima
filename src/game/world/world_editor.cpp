@@ -1,9 +1,13 @@
 #include "world_editor.hpp"
 
+#include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 struct WorldEditor::Pending {
     std::unordered_set<ChunkCoord> modified;
+    // Plants to remove, by chunk: indices into that chunk's layer.
+    std::unordered_map<ChunkCoord, std::vector<size_t>> plants;
     std::unordered_set<ChunkCoord> remesh;
     std::unordered_set<uint64_t> columns;
     std::vector<BlockChange> changes;
@@ -41,6 +45,37 @@ std::vector<EditStatus> WorldEditor::apply(
     return result;
 }
 
+template <typename F>
+void WorldEditor::forPlantsNear(int64_t x, int y, int64_t z, F&& fn) {
+    const auto& table = chunks.floraSpecies();
+    if (table.empty()) return;
+    const auto wrap = chunks.wrap();
+    // Footprints reach one chunk sideways at most; plants stand on anchors
+    // up to the tallest species below the tile.
+    const int64_t cx = x / Chunk::SIZE_X, cz = z / Chunk::SIZE_Z;
+    const int lowY = std::max(0, (y - table.maxHeight() - 1) / Chunk::SIZE_Y);
+    for (int64_t dz = -1; dz <= 1; ++dz)
+        for (int64_t dx = -1; dx <= 1; ++dx) {
+            const int64_t nx = wrap.wrapChunk(cx + dx), nz = cz + dz;
+            if (nx < 0 || nz < 0) continue;
+            for (int ny = lowY; ny <= y / Chunk::SIZE_Y; ++ny) {
+                const ChunkCoord coord{unsigned(nx), unsigned(ny),
+                                       unsigned(nz)};
+                const auto layer = chunks.flora(coord);
+                if (!layer) continue;
+                for (size_t i = 0; i < layer->instances.size(); ++i) {
+                    const auto& p = layer->instances[i];
+                    const auto* rule = table.find(p.species);
+                    if (!rule) continue;
+                    auto volume = floraVolume(p, coord, *rule);
+                    // Compare in the edited tile's frame across the X seam.
+                    volume.minX = x + wrap.deltaTile(volume.minX, x);
+                    fn(coord, i, volume, *rule);
+                }
+            }
+        }
+}
+
 EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     // X wraps: a position just past the seam edits the canonical tile.
     auto pos = request.pos;
@@ -50,6 +85,16 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     const bool placing = request.mode != EditMode::Remove && request.block;
     if (placing && request.block > blocks.items.size())
         return EditStatus::InvalidBlock;
+    if (placing && request.mode == EditMode::Place) {
+        bool blocked = false;
+        forPlantsNear(x, y, z,
+                      [&](const ChunkCoord&, size_t, const FloraVolume& v,
+                          const FloraSpeciesRule& r) {
+                          blocked = blocked ||
+                                    (r.blocksPlacement && v.contains(x, y, z));
+                      });
+        if (blocked) return EditStatus::Blocked;
+    }
 
     const ChunkCoord coord{unsigned(x / Chunk::SIZE_X),
                            unsigned(y / Chunk::SIZE_Y),
@@ -85,6 +130,8 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             return;
         }
         tile.block_id = block;
+        // A new or removed block never keeps the old block's ground cover.
+        tile.clearCover();
         if (block) {
             // A block displaces any liquid in its cell.
             tile.liquid = LiquidType::None;
@@ -97,6 +144,14 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     if (status != EditStatus::Applied) return status;
 
     pending.modified.insert(coord);
+    // Plants in the way of a new block, or standing on a removed one.
+    forPlantsNear(x, y, z,
+                  [&](const ChunkCoord& c, size_t i, const FloraVolume& v,
+                      const FloraSpeciesRule&) {
+                      if (change.after.block_id ? v.contains(x, y, z)
+                                                : v.supportedBy(x, y, z))
+                          pending.plants[c].push_back(i);
+                  });
     // Face visibility of the six neighbors depends on this tile.
     auto neighbor = [&](int local, int size, int axis) {
         int delta = local == 0 ? -1 : (local == size - 1 ? 1 : 0);
@@ -110,13 +165,41 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     neighbor(lx, Chunk::SIZE_X, 0);
     neighbor(ly, Chunk::SIZE_Y, 1);
     neighbor(lz, Chunk::SIZE_Z, 2);
-    if (change.after.block_id) chunks.raiseColumnTopY(coord.x, coord.z, y);
+    if (change.after.block_id) {
+        chunks.raiseColumnTopY(coord.x, coord.z, y);
+        // Cover needs open sky above it: a block placed on a covered tile
+        // smothers that cover (regrowth comes with flora growth).
+        if (y > 0) {
+            const ChunkCoord below{coord.x, unsigned((y - 1) / Chunk::SIZE_Y),
+                                   coord.z};
+            bool cleared = false;
+            chunks.withChunkLocked(below, [&](Chunk& chunk) {
+                Tile& tile = chunk.tiles[lz][(y - 1) % Chunk::SIZE_Y][lx];
+                if (!tile.cover) return;
+                tile.clearCover();
+                cleared = true;
+            });
+            if (cleared) pending.modified.insert(below);
+        }
+    }
     pending.columns.insert((uint64_t{coord.x} << 32) | coord.z);
     pending.changes.push_back(change);
     return status;
 }
 
 void WorldEditor::commit(Pending& pending) {
+    for (auto& [coord, indices] : pending.plants) {
+        const auto layer = chunks.flora(coord);
+        if (!layer) continue;
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()),
+                      indices.end());
+        auto kept = std::make_shared<FloraLayer>();
+        for (size_t i = 0; i < layer->instances.size(); ++i)
+            if (!std::binary_search(indices.begin(), indices.end(), i))
+                kept->instances.push_back(layer->instances[i]);
+        chunks.setFlora(coord, std::move(kept));
+    }
     // Saved, remeshed urgently, and light volumes refreshed.
     for (const auto& coord : pending.modified) chunks.markModified(coord);
     for (const auto& coord : pending.remesh)

@@ -19,6 +19,7 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
     for (int localY = 0; localY < Chunk::SIZE_Y; ++localY) {
         const int tileY = chunkBaseY + localY;
         Tile& tile = chunk.tiles[localZ][localY][localX];
+        tile.clearCover();
 
         if (tileY <= surfaceY) {
             int depth_m = surfaceY - tileY;
@@ -36,6 +37,10 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
             tile.block_id = layer->block_id;
             tile.liquid = LiquidType::None;
             tile.liquidLevel = 0;
+            // Only the surface tile carries cover (soil.cover is set only
+            // when that tile is topsoil on dry land).
+            if (depth_m == 0 && soil.cover)
+                tile.setCover(soil.cover, soil.coverDensity);
 
         } else if (tileY <= SEA_LEVEL_Y) {
             // surface is below sea level — fill with water

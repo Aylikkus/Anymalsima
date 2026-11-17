@@ -27,6 +27,10 @@ struct SoilColumn {
     std::array<RegionLayer, 2> layers{};
     int count = 0;
     int depth_m = 0;
+    // Ground cover of the column's top topsoil tile (GroundCover id, 0 =
+    // none) and its density 0-15. Set by TerrainSampler::soil.
+    uint8_t cover = 0;
+    uint8_t coverDensity = 0;
 };
 
 class SoilGenerator {

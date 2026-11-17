@@ -15,6 +15,8 @@
 #include "widgets/text_box.hpp"
 #include "world/block_light_propagator.hpp"
 #include "world/chunk_manager.hpp"
+#include "world/flora_renderer.hpp"
+#include "world/flora_simulation.hpp"
 #include "world/light_renderer.hpp"
 #include "world/light_sources.hpp"
 #include "world/light_volume_manager.hpp"
@@ -26,6 +28,7 @@
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/tile_raycast.hpp"
+#include "world/world_clock.hpp"
 #include "world/world_editor.hpp"
 #include "world/world_generation_task.hpp"
 
@@ -80,6 +83,15 @@ class GameplayState : public IGameState {
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     std::unique_ptr<LightRenderer> lightRenderer;
+    // Declared after chunkManager and editor: they disconnect from their
+    // signals.
+    std::unique_ptr<FloraRenderer> floraRenderer;
+    std::unique_ptr<FloraSimulation> floraSim;
+    // Game time (saved in world.json); the TIME button cycles debug speeds.
+    WorldClock clock;
+    TextButton* timeButton = nullptr;
+    TextButton* harvestButton = nullptr;
+    std::string lastHarvest;
     Signal<const ChunkCoord&>::Connection meshConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     uint64_t shadowLodVersion = 0;
@@ -98,7 +110,7 @@ class GameplayState : public IGameState {
     Text* tileDebugText = nullptr;
 
     // HUD block editing: a tool is armed by its button and applied with LMB.
-    enum class EditTool { None, Place, Remove, PlaceLight };
+    enum class EditTool { None, Place, Remove, PlaceLight, Harvest };
     EditTool tool = EditTool::None;
     TextButton* placeButton = nullptr;
     TextButton* removeButton = nullptr;

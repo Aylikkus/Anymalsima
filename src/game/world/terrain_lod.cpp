@@ -28,7 +28,11 @@ std::array<Point, 4> terrainRing(const Patch& p, SurfaceSampler& sampler,
     return {terrainPoint(p, sampler, x, z), terrainPoint(p, sampler, x, z1),
             terrainPoint(p, sampler, x1, z1), terrainPoint(p, sampler, x1, z)};
 }
-void triangle(Mesh& mesh, Point a, Point b, Point c, float layer) {
+// top >= 0: the world Y of the column top above a stepped wall (fringe of
+// ground cover); -1 elsewhere. Stored in u, which the block program reads as
+// "no cover" when negative.
+void triangle(Mesh& mesh, Point a, Point b, Point c, float layer,
+              float top = -1) {
     const Point u{b.x - a.x, b.y - a.y, b.z - a.z};
     const Point v{c.x - a.x, c.y - a.y, c.z - a.z};
     Point n{u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z,
@@ -38,16 +42,17 @@ void triangle(Mesh& mesh, Point a, Point b, Point c, float layer) {
     n = {n.x / length, n.y / length, n.z / length};
     const auto base = uint32_t(mesh.vertices.size());
     for (const auto& p : {a, b, c}) {
-        mesh.vertices.push_back({p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, p.x,
-                                 p.z, layer, 0xffffffff});
+        mesh.vertices.push_back(
+            {p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, top, 0, layer, 0xffffffff});
         mesh.bounds.minY = std::min(mesh.bounds.minY, p.y);
         mesh.bounds.maxY = std::max(mesh.bounds.maxY, p.y);
     }
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
 }
-void quad(Mesh& mesh, Point a, Point b, Point c, Point d, float layer) {
-    triangle(mesh, a, b, c, layer);
-    triangle(mesh, a, c, d, layer);
+void quad(Mesh& mesh, Point a, Point b, Point c, Point d, float layer,
+          float top = -1) {
+    triangle(mesh, a, b, c, layer, top);
+    triangle(mesh, a, c, d, layer, top);
 }
 }  // namespace
 
@@ -284,8 +289,7 @@ Mesh joinDetails(std::span<const Patch> layout,
                                                                {x, y0, z}}})
                     result.vertices.push_back(
                         {point.x, point.y, point.z, dx[edge] * sign, 0,
-                         dz[edge] * sign, 1, 0, 0, point.x, point.z, layer,
-                         0xffffffff});
+                         dz[edge] * sign, 1, 0, 0, -1, 0, layer, 0xffffffff});
                 result.indices.insert(
                     result.indices.end(),
                     {base, base + 1, base + 2, base, base + 2, base + 3});
@@ -348,18 +352,20 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                         if (edge == 0)
                             quad(mesh, {float(x), low, float(z)},
                                  {float(x), low, z1}, {float(x), high, z1},
-                                 {float(x), high, float(z)}, layer);
+                                 {float(x), high, float(z)}, layer, y);
                         if (edge == 1)
                             quad(mesh, {x1, low, z1}, {x1, low, float(z)},
-                                 {x1, high, float(z)}, {x1, high, z1}, layer);
+                                 {x1, high, float(z)}, {x1, high, z1}, layer,
+                                 y);
                         if (edge == 2)
                             quad(mesh, {x1, low, float(z)},
                                  {float(x), low, float(z)},
                                  {float(x), high, float(z)},
-                                 {x1, high, float(z)}, layer);
+                                 {x1, high, float(z)}, layer, y);
                         if (edge == 3)
                             quad(mesh, {float(x), low, z1}, {x1, low, z1},
-                                 {x1, high, z1}, {float(x), high, z1}, layer);
+                                 {x1, high, z1}, {float(x), high, z1}, layer,
+                                 y);
                     }
                 }
                 // Clip each terrain triangle against the water plane. The
@@ -447,6 +453,23 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                     }
                 mesh.bands.push_back({cx, cz, low / 16, high / 16});
             }
+    }
+    // Ground cover: one texel per tile on stepped patches, so the hand-over
+    // to detailed chunks matches; the material map's grid elsewhere.
+    mesh.coverSize = stepped ? p.size() : std::max(1, materialMap);
+    mesh.covers.resize(size_t(mesh.coverSize) * mesh.coverSize * 4);
+    for (int z = 0; z < mesh.coverSize; ++z) {
+        if (cancelled.load(std::memory_order_relaxed)) return {};
+        for (int x = 0; x < mesh.coverSize; ++x) {
+            const auto c =
+                sampler.cover(p.x + (x + .5) * p.size() / mesh.coverSize,
+                              p.z + (z + .5) * p.size() / mesh.coverSize);
+            const size_t i = (size_t(z) * mesh.coverSize + x) * 4;
+            mesh.covers[i] = c.layer;
+            mesh.covers[i + 1] = c.density;
+            mesh.covers[i + 2] = uint8_t(c.tint & 255);
+            mesh.covers[i + 3] = uint8_t(c.tint >> 8);
+        }
     }
     mesh.mapSize = stepped ? 1 : std::max(1, materialMap);
     mesh.materials.resize(mesh.mapSize * mesh.mapSize * 4);

@@ -35,13 +35,26 @@ Tiles carry two 4-bit light levels: `sun_exposure` (`SunLightPropagator`) and `a
 - Gameplay light queries (how much and what colour of light reaches a position, loaded or not) are planned after the day/night cycle: see `docs/handoff/light-query.md`. Tiles hold only the voxel near field; do not build gameplay on `artificial_light` alone.
 - Scaling to many far lights (e.g. ~100 lighthouses across a large map): current limits and planned fixes are in `docs/handoff/far-light-scaling.md`.
 
+### Flora
+
+Ground cover (grass) and plants follow `docs/handoff/flora.md` (its Progress section lists what exists). Neither is a block: a solid tile above the generated surface counts as a player edit and a distant structure voxel. Ground cover is per-tile data (`Tile::cover`, `coverState`) on the soil tile it grows on; plants will be per-chunk instances.
+
+- Cover never changes `isSolid`, opacity, sunlight or `ChunkManager::isEdited`. Generation puts it on the surface topsoil tile (`GroundCoverGenerator`, `TerrainSampler::soil`); `WorldEditor` clears it on changed tiles and under placed blocks.
+- Covered faces carry the overlay in `BlockVertex` `u`/`v`/`tint` (see `ChunkMesher::build`); any other producer of `BlockVertex` for the block program must write `u = -1`. Density comes from the `u_cover_volume` page beside each light volume page; every block-program draw must bind a sampler at `LightVolumeManager::CoverStage`.
+- Distant terrain draws cover from `TerrainLod::Mesh::covers` (`u_cover_map`, stage 6) built by `SurfaceSampler::cover`; stepped LOD wall vertices store their column top in `u`. Keep `ground_cover_climate::at` the single climate source for tints so the detail/LOD hand-over matches.
+- Ground cover ids are saved raw in tiles: keep new `ground_covers` files after existing ones.
+- Plants are `FloraInstance`s in a per-chunk `FloraLayer` (`ChunkManager::flora`/`setFlora`, signal `floraChanged`), produced by the chunk job with `generateFlora` (`world/flora_generator.hpp`). Generation must stay a pure function of world coordinates and the seed: neighbouring chunks decide border plants independently (large plants by the local outranking rule within `FloraSpeciesTable::reach()`), and X-periodic hashing keeps the seam invisible. Layers are immutable: replace them, never mutate a shared one. Flora ids are saved raw: keep new `flora` files after existing ones.
+- `FloraRenderer` draws plants instanced (`shaders/foliage/`), meshes from `FloraMeshBuilder`; see `docs/handoff/flora.md` section 9 for limits and the smoke-test switches.
+- Game time is `WorldClock` (`world/world_clock.hpp`, saved as `worldDays` in `world.json`). Plant stages are analytic in the clock's day; `FloraSimulation` advances layers lazily (on load and in a slow sweep): dead plants are removed, populations continue only through seeds (dropped once per seeding cycle, germinating against local crowding toward the generated density; deterministic and deduplicated), chunks unloaded for a year or more are re-sampled at equilibrium (`regenerateFlora`, epoch-salted placement with fixed cluster patches), harvests regrow, and cover regrows on exposed topsoil. Never tick plants per frame or per day across the world. Large plants need level ground under their footprint and nothing rising beside it, and `FloraMeshBuilder` keeps their canopy within the footprint plus 0.3 m. Rare species are data (tiny `density_per_100m2`; `persistent_sites` keeps their sites across epochs by placing them with the unsalted seed, `FloraGenerationInput::clusterSeed`).
+- Modder-facing documentation of the data formats is `docs/modding/plants.md`: update it with any change to ground cover, foliage material or flora schemas.
+
 ## Persistence
 
 Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/save_catalog.hpp`):
 
 - `world.json`: `WorldMeta` (format/generator versions, master seed, timestamps, camera).
 - `world_map.dat`: `world_map_codec` sections `GENS`, `RGNS`, `RIVR`. Preview meshes are not stored.
-- `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`) and `TOPS` (column ceilings).
+- `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`; v2 palette entries include ground cover, v1 still decodes), `TOPS` (column ceilings) and `FLOR` (one `flora_codec` blob of plants per saved chunk, same index; a saved chunk without one regrows its generated plants).
 - `terrain_edits.dat`: `terrain_edits_codec` section `EDIT`, the world-wide index of edited chunk columns that distant terrain shows (`world/terrain_edits.hpp`). It is derived data: region files hold the truth.
 - `light_sources.dat`: `light_sources_codec` section `LITE` (v2: position, block id, open faces), the world-wide index of emissive tiles (see Lighting). Also derived.
 

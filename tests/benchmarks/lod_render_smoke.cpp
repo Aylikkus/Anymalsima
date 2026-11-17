@@ -1,17 +1,21 @@
 #include <bx/math.h>
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <thread>
 
 #include "lod_capture_renderer.hpp"
 #include "lod_scene.hpp"
+#include "render/frustrum.hpp"
 #include "render/render_views.hpp"
 #include "resource_manager.hpp"
 #include "world/block_light_propagator.hpp"
+#include "world/flora_renderer.hpp"
 #include "world/light_renderer.hpp"
 #include "world/light_volume_manager.hpp"
 #include "world/location_manager.hpp"
@@ -81,6 +85,10 @@ int main(int argc, char** argv) {
                                      ? std::atoi(std::getenv("SMOKE_QUALITY"))
                                      : 0;
         LightRenderer lightRenderer(renderer, lightQuality);
+        // Plants, in the lights scenario (the only one binding light
+        // volumes, like the game).
+        FloraRenderer flora(chunks, assets, world, renderer);
+        double floraMaxMs = 0;
         std::vector<TilePos> lamps;
         Camera home{};
         TilePos boxLamp{};
@@ -171,6 +179,15 @@ int main(int argc, char** argv) {
             camera.position.y, float(surface.height(int(camera.position.x),
                                                     int(camera.position.z)) +
                                      20));
+        // SMOKE_CAMERA="x z yaw pitch distance above": look at (x, z) from
+        // `above` tiles over its surface (close-ups of plants and cover).
+        if (const char* override = std::getenv("SMOKE_CAMERA")) {
+            float x = 0, z = 0, above = 2;
+            std::sscanf(override, "%f %f %f %f %f %f", &x, &z, &camera.yaw,
+                        &camera.pitch, &camera.distance, &above);
+            camera.position = {
+                x, float(surface.height(int(x), int(z))) + 1 + above, z};
+        }
         if (handover)
             locations.loadRegion({unsigned(camera.position.x) / 128,
                                   unsigned(camera.position.z) / 128},
@@ -346,6 +363,20 @@ int main(int argc, char** argv) {
                         ++detailed;
                     });
                 }
+                if (lights) {
+                    float worldView[16], worldProj[16], viewProj[16];
+                    bx::mtxLookAt(worldView, {eye.x, eye.y, eye.z},
+                                  {camera.position.x, camera.position.y,
+                                   camera.position.z},
+                                  {0, 1, 0});
+                    bx::mtxProj(worldProj, 60.f, 1280.f / 720, 1.f, 4608.f,
+                                bgfx::getCaps()->homogeneousDepth);
+                    bx::mtxMul(viewProj, worldView, worldProj);
+                    flora.render(target, camera,
+                                 Frustum::fromViewProj(viewProj), lightRenderer,
+                                 frame / 60.0);
+                    floraMaxMs = std::max(floraMaxMs, flora.cpuMilliseconds());
+                }
                 float view[16], projection[16];
                 // Camera-relative world view, as in Renderer: the eye is the
                 // origin and draws carry relativeTransform().
@@ -416,6 +447,48 @@ int main(int argc, char** argv) {
                 const bool transition = walking && phase == 1 &&
                                         lod.patchCount() < 32 && detailed > 0 &&
                                         !capturedTransition;
+                // SMOKE_FLORA_GALLERY=1: before the first capture, plant every
+                // species in rows by growth stage (seedling .. withering)
+                // around the camera target, replacing generated plants.
+                if (lights && phase == 0 && settled == 5 &&
+                    std::getenv("SMOKE_FLORA_GALLERY")) {
+                    const auto& species = assets.getStorage<Flora>().items;
+                    std::unordered_map<ChunkCoord, FloraLayer> gallery;
+                    for (size_t s = 0; s < species.size(); ++s)
+                        for (int st = 0; st < FloraStageCount; ++st) {
+                            // The first age (in days) with this stage.
+                            int age = -1;
+                            for (int a = 0; a < 3000 && age < 0; ++a) {
+                                const auto state =
+                                    flora_growth::at(species[s], 4242, a);
+                                if (state.alive && int(state.stage) == st &&
+                                    state.progress > 0.4f)
+                                    age = a;
+                            }
+                            if (age < 0) continue;
+                            const double x =
+                                camera.position.x +
+                                (double(s) - species.size() / 2.0) * 2.5;
+                            const double z =
+                                camera.position.z + (double(st) - 2.5) * 2.5;
+                            const int y = chunks.generatedSurfaceY(unsigned(x),
+                                                                   unsigned(z));
+                            const ChunkCoord c{unsigned(x) / 16,
+                                               unsigned(y) / 16,
+                                               unsigned(z) / 16};
+                            FloraInstance p;
+                            p.species = species[s].id;
+                            p.seed = 4242;
+                            p.x = uint8_t((x - c.x * 16) * 16);
+                            p.z = uint8_t((z - c.z * 16) * 16);
+                            p.y = uint8_t(y - int(c.y) * 16);
+                            p.birthDay = -age;
+                            gallery[c].instances.push_back(p);
+                        }
+                    for (auto& [c, layer] : gallery) {
+                        chunks.setFlora(c, std::make_shared<FloraLayer>(layer));
+                    }
+                }
                 if (settled == 10 || frame + 1 == maxFrames || transition) {
                     if (transition) capturedTransition = true;
                     std::vector<uint8_t> pixels(1280 * 720 * 4);
@@ -556,7 +629,12 @@ int main(int argc, char** argv) {
                         << " preserved_detail_checks=" << preservedChecks
                         << " detail_regressions=" << detailRegressions
                         << " edited_columns=" << edits.size()
-                        << " structure_slabs=" << lod.structureCount() << '\n';
+                        << " structure_slabs=" << lod.structureCount()
+                        << " plants=" << flora.drawnPlants()
+                        << " plant_draws=" << flora.drawCalls()
+                        << " plant_meshes=" << flora.meshCount()
+                        << " plant_cpu_ms=" << flora.cpuMilliseconds()
+                        << " plant_max_cpu_ms=" << floraMaxMs << '\n';
                     if ((!transition && lod.backlog() != 0) || draws == 0 ||
                         (handover && detailed == 0 && !farLights) ||
                         // Structure proxies have their own 1/8 cap.

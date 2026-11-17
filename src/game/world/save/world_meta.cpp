@@ -1,13 +1,14 @@
 #include "world_meta.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <stdexcept>
 
 namespace {
 const char* const KnownKeys[] = {
-    "formatVersion", "generatorVersion", "seed",        "width", "height",
-    "createdAt",     "lastPlayed",       "startRegion", "camera"};
+    "formatVersion", "generatorVersion", "seed",        "width",  "height",
+    "createdAt",     "lastPlayed",       "startRegion", "camera", "worldDays"};
 }
 
 Json WorldMeta::serialize() const {
@@ -21,6 +22,7 @@ Json WorldMeta::serialize() const {
     j["createdAt"] = createdAt;
     j["lastPlayed"] = lastPlayed;
     j["startRegion"] = {startRegion.x, startRegion.y};
+    j["worldDays"] = worldDays;
     if (camera)
         j["camera"] = {
             {"position",
@@ -46,6 +48,11 @@ void WorldMeta::deserialize(const Json& j) {
     lastPlayed = j.value("lastPlayed", createdAt);
     if (auto it = j.find("startRegion"); it != j.end() && it->size() == 2)
         startRegion = {(*it)[0].get<uint32_t>(), (*it)[1].get<uint32_t>()};
+    worldDays = 0;
+    if (auto it = j.find("worldDays"); it != j.end() && it->is_number()) {
+        worldDays = it->get<double>();
+        if (!std::isfinite(worldDays) || worldDays < 0) worldDays = 0;
+    }
     camera.reset();
     if (auto it = j.find("camera"); it != j.end() && it->is_object()) {
         CameraState c;

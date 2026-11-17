@@ -10,3 +10,4 @@ vec3 v_normal : TEXCOORD2;
 float v_layer : TEXCOORD1;
 vec3 v_light : TEXCOORD3;
 vec4 v_color0 : COLOR0;
+vec2 v_cover : TEXCOORD4;
