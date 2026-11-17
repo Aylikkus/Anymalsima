@@ -26,10 +26,50 @@ float maxRadius(const TreeSkeleton& k, const TreeSegment& s) {
     const float flare = s.order == 0 ? 1 + k.flare.amount : 1;
     return std::max(s.r0, s.r1) * flare;
 }
+
+// A flat cut: no tile whose centre lies past `point` along `normal` (cuts
+// sit on a tile face, so the row above the face goes with the cut).
+struct CutPlane {
+    TreeVec point, normal;
+};
+
+// Cut planes by segment. A cut end clips its own segment and the segments
+// of the same axis below it whose rounded ends reach past the cut (on a
+// thick trunk the sample sphere at a joint bulges up to its radius beyond
+// it, which would leave a floating dome above a horizontal cut).
+std::vector<std::vector<CutPlane>> cutPlanes(const TreeSkeleton& k) {
+    std::vector<std::vector<CutPlane>> planes;
+    for (size_t i = 0; i < k.segments.size(); ++i) {
+        const auto& c = k.segments[i];
+        if (!c.live() || !(c.flags & TreeSegment::CutEnd)) continue;
+        // The axis of the cut: its own, or (cut right at its start) the
+        // axis of the segment it continues.
+        TreeVec axis = c.b - c.a;
+        if (axis.dot(axis) < 1e-6f && c.parent >= 0) {
+            const auto& p = k.segments[size_t(c.parent)];
+            axis = p.b - p.a;
+        }
+        if (axis.dot(axis) < 1e-6f) continue;
+        const CutPlane plane{c.b, axis.normalized()};
+        if (planes.empty()) planes.resize(k.segments.size());
+        planes[i].push_back(plane);
+        for (size_t s = i; k.segments[s].attachT >= 1;) {
+            const int32_t parent = k.segments[s].parent;
+            if (parent < 0) break;
+            const auto& p = k.segments[size_t(parent)];
+            if (!p.live() || p.order != c.order) break;
+            if ((c.b - p.b).length() > maxRadius(k, p) + 1) break;
+            planes[size_t(parent)].push_back(plane);
+            s = size_t(parent);
+        }
+    }
+    return planes;
+}
 }  // namespace
 
 TreeTileBox treeWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
                            bool includePruned) {
+    if (!skeleton.formsWood()) return {};
     TreeVec lo{INFINITY, INFINITY, INFINITY},
         hi{-INFINITY, -INFINITY, -INFINITY};
     for (const auto& s : skeleton.segments) {
@@ -58,9 +98,15 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                   const TreeTileBox& box, float age, std::vector<uint8_t>& mask,
                   TreeWoodSelection selection) {
     mask.assign(box.volume(), 0);
-    if (box.empty() || age <= 0) return;
-    for (const auto& s : skeleton.segments) {
+    if (box.empty() || age <= 0 || !skeleton.formsWood()) return;
+    const auto planes = selection.cut == 0
+                            ? cutPlanes(skeleton)
+                            : std::vector<std::vector<CutPlane>>{};
+    static const std::vector<CutPlane> noPlanes;
+    for (size_t si = 0; si < skeleton.segments.size(); ++si) {
+        const auto& s = skeleton.segments[si];
         if (!selected(s, selection)) continue;
+        const auto& clip = planes.empty() ? noPlanes : planes[si];
         // Pruned pieces are rasterized whole (as they were when cut).
         const float visible = selection.cut ? 1 : skeleton.visible(s, age);
         if (visible < 0) continue;
@@ -103,10 +149,11 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                     // of samples tested only grows as the tip extends.
                     const float tu =
                         length2 > 1e-8f ? (q - s.a).dot(axis) / length2 : 0;
-                    // A cut end is flat: nothing past the cut plane.
-                    if ((s.flags & TreeSegment::CutEnd) &&
-                        selection.cut == 0 &&
-                        (tu - 1) * length > 0.5f)
+                    // A cut is flat: nothing past its plane.
+                    if (std::any_of(
+                            clip.begin(), clip.end(), [&](const CutPlane& p) {
+                                return (q - p.point).dot(p.normal) > 0.f;
+                            }))
                         continue;
                     const float t0 = std::max(0.f, tu - window);
                     const float t1 = std::min(visible, tu + window);

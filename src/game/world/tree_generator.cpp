@@ -229,6 +229,14 @@ bool RegionGenerator::level(const TreeSpeciesRule& r, double x, double z,
         high = std::max(high, e.surfaceY);
     }
     if (high - low > std::max(2.0, radius * 0.5)) return false;
+    // A thin tree (mesh stem, no blocks) stands on its own column: put on
+    // the lowest neighbour it would grow out of the side of a step, under
+    // the higher ground. A neighbour more than a tile higher is a ledge.
+    if (p.sizeClass() == TreeSizeClass::Thin) {
+        if (high > centre.surfaceY + 1) return false;
+        anchorY = centre.surfaceY;
+        return true;
+    }
     anchorY = low;
     return true;
 }
@@ -333,7 +341,7 @@ TreeInstancePtr RegionGenerator::build(const TreeSpeciesRule& r, int64_t x,
         tree->skeleton = buildTreeSkeleton(r.species, input);
     }
     // Cut generated trees: their saved cuts, on their own skeleton.
-    if (in.overrides)
+    if (in.overrides && !in.lightweight)
         if (const auto it = in.overrides->find(key);
             it != in.overrides->end() && !it->second.cuts.empty()) {
             tree->skeleton =
@@ -357,7 +365,12 @@ TreeSet RegionGenerator::run() {
         double x, z, radius;
     };
     std::vector<Disc> landmarkDiscs;
-    if (in.landmarks && !in.lightweight)
+    const auto removed = [&](uint64_t key) {
+        if (!in.overrides) return false;
+        const auto it = in.overrides->find(key);
+        return it != in.overrides->end() && it->second.removed;
+    };
+    if (in.landmarks)
         for (const auto& site : *in.landmarks) {
             const auto* r = table.find(site.species);
             if (!r) continue;
@@ -366,7 +379,9 @@ TreeSet RegionGenerator::run() {
                                       (1 + r->species.form_params.root_flare) +
                                   table.maxSpacing();
             landmarkDiscs.push_back({x + 0.5, double(site.z) + 0.5, radius});
-            if (!owned(x, double(site.z))) continue;
+            // Billboards only need the exclusion: landmarks are drawn as
+            // distant structures.
+            if (in.lightweight || !owned(x, double(site.z))) continue;
             // A landmark stands on the lowest ground under its whole flared
             // base (up to ~100 m across), so no buttress floats; on a slope
             // the upper side is buried like roots. Never dropped for uneven
@@ -390,10 +405,12 @@ TreeSet RegionGenerator::run() {
                 }
             }
             if (!any || anchorY < SEA_LEVEL_Y) continue;
-            out.push_back(build(*r, int64_t(x), anchorY, site.z, site.hash,
-                                (uint64_t(0xFF) << 56) |
-                                    (uint64_t(site.x) & 0xFFFFFFF) << 28 |
-                                    (uint64_t(site.z) & 0xFFFFFFF)));
+            const uint64_t key = (uint64_t(0xFF) << 56) |
+                                 (uint64_t(site.x) & 0xFFFFFFF) << 28 |
+                                 (uint64_t(site.z) & 0xFFFFFFF);
+            if (removed(key)) continue;
+            out.push_back(
+                build(*r, int64_t(x), anchorY, site.z, site.hash, key));
         }
     // Ordinary trees anchored here; rivals within spacing are evaluated
     // around the region (a local rule, so every region decides the same).
@@ -433,7 +450,8 @@ TreeSet RegionGenerator::run() {
                 const double gap = std::max(a.spacing, b.spacing);
                 return dx * dx + dz * dz < gap * gap && outranks(b, a);
             });
-        if (beaten) continue;
+        // A removed tree still claims its spot: its rivals stay beaten.
+        if (beaten || removed(a.key)) continue;
         out.push_back(build(*a.rule, int64_t(std::floor(a.x)), a.anchorY,
                             int64_t(std::floor(a.z)), a.hash, a.key));
     }
@@ -445,8 +463,8 @@ TreeSet RegionGenerator::run() {
 }  // namespace
 
 std::vector<TreeBillboard> regionBillboards(RegionTreesInput input) {
+    // Overrides only remove trees here; cuts keep the shared shape.
     input.lightweight = true;
-    input.overrides = nullptr;
     std::vector<TreeBillboard> out;
     for (const auto& tree : generateRegionTrees(input)) {
         if (!tree->skeleton) continue;
@@ -571,6 +589,7 @@ TreeColumn makeTreeColumn(unsigned chunkX, unsigned chunkZ,
             column.trees.push_back({tree, anchor});
             // Highest wood over this column, from segments crossing it.
             const auto& k = *tree->skeleton;
+            if (!k.formsWood()) continue;
             for (const auto& s : k.segments) {
                 if (!s.live()) continue;
                 const float flare = s.order == 0 ? 1 + k.flare.amount : 1;

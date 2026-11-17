@@ -1,5 +1,8 @@
 #pragma once
 
+#include <optional>
+#include <utility>
+
 #include "core/assets_api.hpp"
 #include "flora_mesh_builder.hpp"
 #include "items/foliage_material.hpp"
@@ -28,17 +31,32 @@ namespace tree_foliage {
 // drawn as voxels at distance (landmarks, StructureLod).
 enum class Detail : uint8_t { Near, Far, Distant, DistantCrown };
 
-// Growth is drawn in steps of 1/Buckets of the tree's maturity.
+// Growth is drawn in steps of 1/Buckets of the current growth phase: from
+// `start` (0, or the latest regrowth's start: TreeSkeleton::
+// growthPhaseStart) to the tree's maturity, so fresh regrowth on an old
+// tree gets fine steps too.
 inline constexpr int Buckets = 32;
-inline int bucket(float age, float matureAge) {
-    if (matureAge <= 0 || age >= matureAge) return Buckets;
-    return std::clamp(int(age / matureAge * Buckets), 0, Buckets - 1);
+inline int bucket(float age, float matureAge, float start = 0) {
+    if (matureAge <= start || age >= matureAge) return Buckets;
+    return std::clamp(int((age - start) / (matureAge - start) * Buckets), 0,
+                      Buckets - 1);
 }
-// The age a bucket's mesh is built for.
-inline float bucketAge(int bucket, float matureAge) {
-    return bucket >= Buckets ? matureAge
-                             : (float(bucket) + 0.5f) / Buckets * matureAge;
+// The age a bucket's mesh is built for: the bucket's start, so a mesh is
+// never ahead of the wood blocks (grown for the exact day). Ahead, a
+// branch's base would be left to blocks that do not exist yet and its thin
+// rest drawn floating above them. A sapling's first bucket uses a quarter
+// step (its start would be empty).
+inline float bucketAge(int bucket, float matureAge, float start = 0) {
+    if (bucket >= Buckets) return matureAge;
+    const float step = (matureAge - start) / Buckets;
+    return start + step * (bucket == 0 && start <= 0 ? 0.25f : float(bucket));
 }
+
+// The part of a segment drawn as bark strips at `age` (t from, t to): the
+// visible part thinner than a block. None when blocks or nothing show it.
+std::optional<std::pair<float, float>> tubeSpan(const TreeSkeleton& k,
+                                                const TreeSegment& s,
+                                                float age);
 
 // bare: a dead tree, twigs only (its leaves have fallen).
 FloraMesh build(const TreeSkeleton& skeleton, const Tree& species,

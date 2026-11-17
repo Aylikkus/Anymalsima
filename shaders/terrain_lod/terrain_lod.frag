@@ -77,7 +77,15 @@ void main()
         && all(lessThan(detailUv, vec2(1.0)))) {
         if (texture2D(u_detail_map, detailUv).r > 0.5) discard;
     }
-    vec3 normal = normalize(v_normal);
+    if (u_world_water.z > 0.5 && v_cover.y > 0.5) {
+        gl_FragColor = v_cover.y < 1.5 ? vec4(1.0, 0.0, 1.0, 1.0)
+                                       : vec4(0.0, 1.0, 1.0, 1.0);
+        return;
+    }
+    // Skirts are vertical only to close a gap. Sample the owning patch's
+    // top material and light it like the ground, not an exposed rock face.
+    bool skirt = v_cover.y > 0.5 && v_cover.y < 1.5;
+    vec3 normal = skirt ? vec3(0.0, 1.0, 0.0) : normalize(v_normal);
     vec3 color;
     vec3 surface = normal;
     if (v_layer < -1.5) {
@@ -85,7 +93,8 @@ void main()
     } else {
         float layer = floor(v_layer + 0.5);
         if (v_layer < -0.5) {
-            vec2 uv = (v_position.xz - u_lod_patch.xy) / u_lod_patch.z;
+            vec2 uv = ((skirt ? owner : v_position.xz) - u_lod_patch.xy)
+                      / u_lod_patch.z;
             vec4 encoded = floor(texture2D(u_surface_map, uv) * 255.0 + 0.5);
             layer = normal.y > 0.65 ? encoded.r + encoded.g * 256.0
                                     : encoded.b + encoded.a * 256.0;
@@ -112,11 +121,12 @@ void main()
             }
         }
     }
-    // Distant terrain is fully sky-lit; far lights and the distant glow of
-    // small lights add block light.
+    // Without a light volume, approximate the ocean's skylight attenuation.
+    // Keep artificial lights independent of this estimate.
+    float sky = surfaceOceanSky(v_position.y);
     vec3 far = surfaceFarLight(v_position, surface, normal, 1.0, 0.0)
              + surfaceLodLight(v_position);
-    color = surfaceLight(surface, color, vec2(1.0, 0.0), vec3_splat(1.0),
+    color = surfaceLight(surface, color, vec2(sky, 0.0), vec3_splat(1.0),
                          normal, 0.0, far);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

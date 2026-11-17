@@ -162,10 +162,12 @@ TEST(lod_smooth_skirts_cover_edges) {
     CHECK(!b.vertices.empty());
     // Each patch's skirt along the shared edge reaches below both surfaces,
     // so any T-junction gap between them is closed.
-    const auto lowest = [](const TerrainLod::Mesh& mesh, float z0, float z1) {
+    const auto lowest = [](const TerrainLod::Mesh& mesh, float normalX,
+                           float z0, float z1) {
         float result = std::numeric_limits<float>::infinity();
         for (const auto& v : mesh.vertices)
-            if (v.layer == -1 && close(v.x, 384) && v.z >= z0 && v.z <= z1)
+            if (v.v == 1 && v.layer == -1 && v.nx == normalX &&
+                close(v.x, 384) && v.z >= z0 && v.z <= z1)
                 result = std::min(result, v.y);
         return result;
     };
@@ -175,8 +177,8 @@ TEST(lod_smooth_skirts_cover_edges) {
             std::min(TerrainLod::meshHeight(coarse, sampler, 384, z + .5f),
                      TerrainLod::meshHeight(fine, sampler, 384, z + .5f));
         const float coarseStart = z / 4 * 4, fineStart = z / 2 * 2;
-        CHECK(lowest(a, coarseStart, coarseStart + 4) < surface);
-        CHECK(lowest(b, fineStart, fineStart + 2) < surface);
+        CHECK(lowest(a, 1, coarseStart, coarseStart + 4) < surface);
+        CHECK(lowest(b, -1, fineStart, fineStart + 2) < surface);
     }
     CHECK(a.bytes() < TerrainLod::UploadBudget);
 }
@@ -185,23 +187,46 @@ TEST(lod_stepped_boundary_walls) {
     auto world = worldForLod();
     world.regions[2 * 6 + 2].land_height_m = 500;
     world.regions[2 * 6 + 2].addFeature(FeatureMask::CLIFF);
-    SurfaceSampler sampler(world, assets);
+    SurfaceSampler generated(world, assets);
+    auto edits = std::make_shared<EditMap>();
+    for (int cz : {16, 17}) {
+        auto edit = std::make_shared<ColumnEdit>();
+        edit->waterY.fill(-1);
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x) {
+                const int i = ColumnEdit::index(x, z);
+                edit->groundY[i] = generated.height(320 + x, cz * 16 + z);
+                if (x == 0) {
+                    --edit->groundY[i];
+                    edit->groundBlock[i] = 2;  // distinct from generated rock
+                }
+            }
+        edits->emplace(editKey(20, cz), std::move(edit));
+    }
+    SurfaceSampler sampler(world, assets, nullptr, edits);
     const TerrainLod::Patch stepped{320, 256, 1};
     const auto mesh = TerrainLod::build(stepped, sampler, running);
     // Every boundary column has a side wall reaching below the lower of its
     // own top and the outside column, whatever the neighbour's resolution.
     for (int z = 256; z < 288; ++z) {
-        const int top = sampler.height(320, z) + 1;
+        const auto column = sampler.column(320, z);
+        const int top = column.surfaceY + 1;
         const int outside = sampler.height(319, z) + 1;
         const float bottom =
             std::max(0, std::min(top, outside) - TerrainLod::SteppedSkirt);
-        bool found = false;
+        bool foundBottom = false, foundSurface = false;
+        CHECK(column.material != sampler.materialAt(320, top - 2, z));
         for (const auto& v : mesh.vertices)
-            if (v.x == 320 && v.z == z && close(v.y, bottom)) {
-                found = true;
-                break;
+            if (v.v == 2 && v.nx == -1 && v.x == 320 &&
+                v.z >= z && v.z <= z + 1 && v.u == top) {
+                if (close(v.y, bottom) &&
+                    v.layer == sampler.materialAt(320, int(bottom), z))
+                    foundBottom = true;
+                if (close(v.y, top - 2) && v.layer == column.material)
+                    foundSurface = true;
             }
-        CHECK(found);
+        CHECK(foundBottom);
+        CHECK(foundSurface);
     }
 }
 TEST(lod_water_and_bounds) {

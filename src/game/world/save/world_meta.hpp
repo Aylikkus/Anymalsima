@@ -18,10 +18,11 @@ struct WorldMeta : ISerializable {
     static constexpr int MinFormatVersion = 3;
     // Bump when chunk generation output changes. 6: ground cover on the
     // surface topsoil tile. 7: plants (FLOR). 8: trees (living wood).
-    static constexpr int GeneratorVersion = 8;
+    // 9: surface ceiling blended across region borders (no beach steps).
+    static constexpr int GeneratorVersion = 9;
     // Oldest generator version whose surface heights match the current one.
     // Bump it whenever surface heights change (not for material changes).
-    static constexpr int SurfaceVersion = 5;
+    static constexpr int SurfaceVersion = 9;
 
     struct CameraState {
         Vec3 position{0, 0, 0};

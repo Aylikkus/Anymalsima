@@ -15,6 +15,7 @@ void main()
     v_normal = a_normal;
     v_layer = a_texcoord1;
     v_color0 = a_color0;
-    // x: column top above a stepped wall (ground-cover fringe), else -1.
+    // x: column top above a stepped wall (ground-cover fringe), else -1;
+    // y: ordinary face (0), smooth skirt (1), stepped boundary wall (2).
     v_cover = a_texcoord0;
 }

@@ -293,13 +293,20 @@ endforeach()
 foreach(case tree_skeleton_deterministic tree_sizes_follow_species
              tree_growth_only_adds_wood tree_size_classes_in_blocks
              tree_height_cap tree_ground_pruning tree_cuts_and_regrowth
+             tree_cut_flat_on_thick_trunks tree_regrowth_coherent
              tree_skeleton_cache tree_region_sets tree_column_wraps_seam
              tree_chunks_order_independent tree_chunks_air_and_tops
              tree_saved_chunks_not_edits tree_flora_avoids_trunks
              tree_landmarks tree_rotation_exact tree_foliage_meshes
              trees_codec_roundtrip tree_cuts_incremental tree_cut_and_regrowth
              tree_reload_catches_up tree_planted_indoors tree_billboards
-             tree_wood_lod_slabs)
+             tree_wood_lod_slabs tree_waiting_chunk_does_not_stall_streaming
+             tree_dies_without_ground tree_dies_without_base_wood
+             tree_trunk_foliage_on_stem tree_far_crowns_stay_attached
+             tree_sets_wanted_by_renderer streaming_progresses_with_huge_queue
+             streaming_withdraws_stale_requests tree_regrowth_starts_on_stump
+             streaming_new_chunks_sky_lit tree_regrowth_takes_time
+             tree_crown_mesh_never_ahead_of_wood)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;flora;trees" TIMEOUT 30)
@@ -333,6 +340,7 @@ set_tests_properties(game.save.cover_codec_versions PROPERTIES
 foreach(case terrain_caps_repeatability terrain_shared_edges_corners
              terrain_relief_strength terrain_cliff_segments
              terrain_coast_dry_inland terrain_world_bounds
+             terrain_surface_continuous_at_region_borders
              terrain_air_chunks_skip_jobs
              terrain_geology_erosion terrain_soil_transition
              terrain_streaming_cache terrain_column_inputs_seams

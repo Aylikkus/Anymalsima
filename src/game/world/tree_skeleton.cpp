@@ -578,11 +578,42 @@ class Builder {
             v.z = pivot.z + (v.z - pivot.z) * k;
             if (v.y > crownBase) v.y = crownBase + (v.y - crownBase) * sy;
         };
+        // Foliage on the trunk (palm fronds, juvenile leaves) stays where
+        // it grows on it: scaling it around the pivot like the crown would
+        // pull it off a stem that keeps its place (leaning or young trees).
+        struct Attach {
+            float t = 0;
+            TreeVec offset;
+        };
+        std::vector<Attach> attach(s.foliage.size());
+        for (size_t i = 0; i < s.foliage.size(); ++i) {
+            const auto& f = s.foliage[i];
+            if (f.segment < 0 || s.segments[size_t(f.segment)].order > 0)
+                continue;
+            const auto& seg = s.segments[size_t(f.segment)];
+            const TreeVec axis = seg.b - seg.a;
+            const float l2 = axis.dot(axis);
+            const float t =
+                l2 > 1e-8f
+                    ? std::clamp((f.position - seg.a).dot(axis) / l2, 0.f, 1.f)
+                    : 0.f;
+            attach[i] = {t, f.position - lerp(seg.a, seg.b, t)};
+        }
         for (auto& seg : s.segments) {
             apply(seg.a, seg.order > 0);
             apply(seg.b, seg.order > 0);
         }
-        for (auto& f : s.foliage) apply(f.position, true);
+        for (size_t i = 0; i < s.foliage.size(); ++i) {
+            auto& f = s.foliage[i];
+            if (f.segment < 0 || s.segments[size_t(f.segment)].order > 0) {
+                apply(f.position, true);
+                continue;
+            }
+            const auto& seg = s.segments[size_t(f.segment)];
+            const auto& [t, offset] = attach[i];
+            f.position = lerp(seg.a, seg.b, t) +
+                         TreeVec{offset.x * sx, offset.y, offset.z * sx};
+        }
     }
 
     // Nothing rises past the headroom: wood (with its radius) or foliage.
@@ -653,8 +684,12 @@ class Builder {
             }
             // Prune everything attached above the cut.
             std::vector<int32_t> stack;
+            // A cut at the very end also takes the axis continuing from it
+            // (attached at 1), or the trunk above would stay standing.
             for (const int32_t c : children[index])
-                if (s.segments[size_t(c)].attachT > t) stack.push_back(c);
+                if (s.segments[size_t(c)].attachT > t ||
+                    (t >= 0.999f && s.segments[size_t(c)].attachT >= 1))
+                    stack.push_back(c);
             while (!stack.empty()) {
                 const int32_t k = stack.back();
                 stack.pop_back();
@@ -720,6 +755,11 @@ class Builder {
         Rng local(skeleton.seed ^ (uint64_t(tag) * 0x9E3779B97F4A7C15ull));
         std::swap(rng, local);
         const float start = age + rng.sample(tree.cut.resprout_days);
+        if (order == 0 && tree.form != TreeForm::Palm) {
+            graft(from, origin, radius, length, start, tag);
+            std::swap(rng, local);
+            return;
+        }
         const float span =
             maturity * std::clamp(length / std::max(1.f, s.height), 0.2f, 1.f);
         Axis a;
@@ -743,8 +783,10 @@ class Builder {
         if (tree.form == TreeForm::Palm) {
             palmCrown(chain, 0.3f, 4);
         } else if (order < p.branch_orders) {
-            forks(at(chain, 0.7f), length * 0.4f, a.r1, uint8_t(order + 1),
-                  order + 2, p.branch_orders + 1,
+            // Capped: a long regrown branch must not reach past the crown.
+            forks(at(chain, 0.7f),
+                  std::min(length * 0.4f, s.crownRadius * 0.5f), a.r1,
+                  uint8_t(order + 1), order + 2, p.branch_orders + 1,
                   std::lerp(a.birth0, a.done, 0.7f), a.done, a.mature,
                   tree.form == TreeForm::Stunted, TreeSegment::Sprout, tag);
             addFoliage(chain, 0.5f, 1);
@@ -752,6 +794,60 @@ class Builder {
             addFoliage(chain, 0.2f, 1);
         }
         std::swap(rng, local);
+    }
+
+    // Trunk regrowth: a young tree of the species (its own form, crown and
+    // growth curve) grown from the cut, at most `length` tall and thinner
+    // than the stump. Its segments and foliage are appended as sprouts of
+    // cut `tag`, its root continuing segment `from`, its times shifted to
+    // `start`.
+    void graft(int32_t from, TreeVec origin, float radius, float length,
+               float start, uint16_t tag) {
+        auto& s = skeleton;
+        TreeSkeletonInput in;
+        in.seed = uint32_t(s.seed ^ (uint32_t(tag) * 0x9E3779B9u) ^ 0x5eedu);
+        in.headroom = std::max(1.f, length);
+        const auto young = Builder(tree, in).run();
+        if (young->segments.empty()) return;
+        // Thinner than the stump it grows from.
+        const float scale =
+            young->trunkRadius > 0
+                ? std::min(1.f, radius * 0.7f / young->trunkRadius)
+                : 1.f;
+        const auto base = int32_t(s.segments.size());
+        const auto place = [&](TreeVec v) {
+            // Its below-ground part (the trunk's sink) starts at the cut.
+            return TreeVec{v.x + origin.x, std::max(0.f, v.y) + origin.y,
+                           v.z + origin.z};
+        };
+        for (const auto& y : young->segments) {
+            TreeSegment seg = y;
+            seg.a = place(y.a);
+            seg.b = place(y.b);
+            seg.r0 *= scale;
+            seg.r1 *= scale;
+            seg.birthA += start;
+            seg.birthB += start;
+            seg.matureAge += start;
+            if (y.parent < 0) {
+                seg.parent = from;
+                seg.attachT = 1;
+            } else {
+                seg.parent = y.parent + base;
+            }
+            seg.flags |= TreeSegment::Sprout;
+            // Parts the young tree pruned itself are not cut wood.
+            if (seg.live()) seg.cut = tag;
+            s.segments.push_back(seg);
+        }
+        for (const auto& f : young->foliage) {
+            TreeFoliageSite site = f;
+            site.position = place(f.position);
+            site.birth += start;
+            site.death += start;
+            if (f.segment >= 0) site.segment = f.segment + base;
+            s.foliage.push_back(site);
+        }
     }
 
     TreeSkeletonPtr finish() {
@@ -801,6 +897,21 @@ float TreeSkeleton::radius(const TreeSegment& s, float t, float age,
     if (age <= born) return 0;
     const float span = std::max(1e-3f, s.matureAge - born);
     return fullRadius(s, t, angle) * growth((age - born) / span);
+}
+
+float TreeSkeleton::growthPhaseStart() const {
+    // The latest cut's regrowth starts with its earliest part (its root);
+    // later parts (twigs born years on) must not push the start forward.
+    uint16_t latest = 0;
+    for (const auto& s : segments)
+        if (s.live() && (s.flags & TreeSegment::Sprout))
+            latest = std::max(latest, s.cut);
+    if (!latest) return 0;
+    float start = INFINITY;
+    for (const auto& s : segments)
+        if (s.live() && (s.flags & TreeSegment::Sprout) && s.cut == latest)
+            start = std::min(start, s.birthA);
+    return start;
 }
 
 float TreeSkeleton::matureAge() const {

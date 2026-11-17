@@ -23,6 +23,10 @@ class CameraWorkQueue {
     bool contains(ChunkCoord coord) const { return ages.contains(coord); }
     bool empty() const { return ages.empty(); }
     size_t size() const { return ages.size(); }
+    template <typename F>
+    void forEach(F&& fn) const {
+        for (const auto& [coord, age] : ages) fn(coord);
+    }
 
     // periodX: world width in tiles when X wraps (0: no wrapping). The X
     // distance is measured to the chunk copy nearest to the focus.
@@ -92,6 +96,37 @@ class CameraWorkQueue {
         std::vector<ChunkCoord> result;
         result.reserve(entries.size());
         for (const auto& entry : entries) result.push_back(entry.coord);
+        return result;
+    }
+
+    // The `limit` first entries of ordered(focus, false, anchor), without
+    // sorting the rest: a queue of tens of thousands stays cheap.
+    template <typename Anchor>
+    std::vector<ChunkCoord> nearest(Vec3 focus, Anchor anchor,
+                                    size_t limit) const {
+        struct Entry {
+            double distance;
+            uint64_t age;
+            ChunkCoord coord;
+        };
+        std::vector<Entry> entries;
+        entries.reserve(ages.size());
+        for (const auto& [coord, age] : ages)
+            entries.push_back({distance(anchor(coord), focus), age, coord});
+        const auto less = [](const Entry& a, const Entry& b) {
+            return std::tie(a.distance, a.age, a.coord.x, a.coord.y,
+                            a.coord.z) <
+                   std::tie(b.distance, b.age, b.coord.x, b.coord.y, b.coord.z);
+        };
+        if (entries.size() > limit) {
+            std::nth_element(entries.begin(), entries.begin() + limit,
+                             entries.end(), less);
+            entries.resize(limit);
+        }
+        std::sort(entries.begin(), entries.end(), less);
+        std::vector<ChunkCoord> result;
+        result.reserve(entries.size());
+        for (const auto& e : entries) result.push_back(e.coord);
         return result;
     }
 

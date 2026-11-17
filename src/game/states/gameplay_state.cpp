@@ -644,13 +644,21 @@ void GameplayState::update(Game& game, float dt) {
                            /*maxDistance=*/64.0f);
 
     if (tileDebugText) {
+        // Voxel streaming counters: a stuck queue shows here first.
+        const std::string streaming =
+            "Chunks: " + std::to_string(chunkManager->pendingGeneration()) +
+            " queued, " + std::to_string(chunkManager->generationInFlight()) +
+            " generating, " + std::to_string(chunkManager->meshInFlight()) +
+            " meshing\nTree sets: " +
+            std::to_string(chunkManager->treeJobsInFlight()) + " building, " +
+            std::to_string(chunkManager->pendingTreeSets()) + " waiting\n";
         if (!hit) {
             tileDebugText->setText(
-                "No tile\nLOD: " + std::to_string(terrainLod->patchCount()) +
-                " patches, " +
+                "No tile\n" + streaming + "LOD: " +
+                std::to_string(terrainLod->patchCount()) + " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
-                std::to_string(terrainLod->jobCount()) + " jobs, " +
-                std::to_string(terrainLod->backlog()) + " pending\n" +
+                std::to_string(terrainLod->jobCount()) + " LOD jobs, " +
+                std::to_string(terrainLod->backlog()) + " LOD pending\n" +
                 std::to_string(edits->size()) + " edited columns, " +
                 std::to_string(terrainLod->structureCount()) +
                 " structure slabs");
@@ -660,6 +668,7 @@ void GameplayState::update(Game& game, float dt) {
 
             ss << "Tile [" << hit->tx << ", " << hit->ty << ", " << hit->tz
                << "]\n";
+            ss << streaming;
 
             ss << "\n--- Block ---\n";
             ss << "block_id:  " << (int)t.block_id << "\n";
@@ -713,8 +722,6 @@ void GameplayState::update(Game& game, float dt) {
 }
 
 void GameplayState::render(RenderTarget& target, UIContext& context) {
-    context.renderer->setCamera(camera);
-
     // Poll mesh futures and upload any that finished this frame.
     chunkManager->uploadReadyMeshes(*context.renderer);
     // After uploads: deferred light volumes switch with their new meshes.
@@ -725,6 +732,9 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize());
+    camera.underwater = terrainLod->eyeUnderwater();
+    context.renderer->setCamera(camera);
+    auto& water = terrainLod->waterUniform();
     if (terrainLod->drawnVersion() != shadowLodVersion) {
         shadowLodVersion = terrainLod->drawnVersion();
         lightRenderer->shadows().lodChanged();
@@ -782,7 +792,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         // Chunk meshes are chunk-local; place them relative to the eye.
         auto transform = relativeTransform(camera, wx, wy, wz);
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
-                                              &worldEye};
+                                              &worldEye, &water};
         lightRenderer->appendUniforms(uniforms, LightRenderer::Program::Block);
         // Without a light volume the chunk would render unlit; skip it.
         if (!lightVolumes->bind(coord, uniforms, wx)) return;
@@ -790,9 +800,9 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                                 false, std::move(transform), DrawLayer::GAME);
     });
     floraRenderer->render(target, camera, frustum, *lightRenderer, now,
-                          clock.days());
+                          clock.days(), water);
     treeRenderer->render(target, camera, frustum, *lightRenderer, now,
-                         clock.days());
+                         clock.days(), water);
     lightRenderer->drawGlare(target, camera, viewport);
 
     ui_manager->render(target, context);
@@ -848,6 +858,16 @@ void GameplayState::requestChunksAroundCamera() {
 
     // Calculate max distance squared for bounds
     int maxDist = CHUNK_RADIUS;
+
+    // Chunks still queued from earlier camera positions leave the queue:
+    // fast travel would otherwise pile up requests nobody needs.
+    const ChunkCoord centre{unsigned(world->wrap().wrapChunk(camCX)),
+                            unsigned(std::max(0, camCY)),
+                            unsigned(std::max(0, camCZ))};
+    if (requestCentre != centre) {
+        requestCentre = centre;
+        chunkManager->withdrawOutside(centre, CHUNK_RADIUS);
+    }
 
     // Iterate by distance from camera
     for (int d = 0; d <= maxDist; ++d) {

@@ -30,9 +30,10 @@ std::array<Point, 4> terrainRing(const Patch& p, SurfaceSampler& sampler,
 }
 // top >= 0: the world Y of the column top above a stepped wall (fringe of
 // ground cover); -1 elsewhere. Stored in u, which the block program reads as
-// "no cover" when negative.
+// "no cover" when negative. The terrain program reads v as the edge kind:
+// 0 ordinary face, 1 smooth skirt, 2 stepped boundary wall.
 void triangle(Mesh& mesh, Point a, Point b, Point c, float layer,
-              float top = -1) {
+              float top = -1, float edgeKind = 0) {
     const Point u{b.x - a.x, b.y - a.y, b.z - a.z};
     const Point v{c.x - a.x, c.y - a.y, c.z - a.z};
     Point n{u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z,
@@ -43,16 +44,17 @@ void triangle(Mesh& mesh, Point a, Point b, Point c, float layer,
     const auto base = uint32_t(mesh.vertices.size());
     for (const auto& p : {a, b, c}) {
         mesh.vertices.push_back(
-            {p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, top, 0, layer, 0xffffffff});
+            {p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, top, edgeKind, layer,
+             0xffffffff});
         mesh.bounds.minY = std::min(mesh.bounds.minY, p.y);
         mesh.bounds.maxY = std::max(mesh.bounds.maxY, p.y);
     }
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
 }
 void quad(Mesh& mesh, Point a, Point b, Point c, Point d, float layer,
-          float top = -1) {
-    triangle(mesh, a, b, c, layer, top);
-    triangle(mesh, a, c, d, layer, top);
+          float top = -1, float edgeKind = 0) {
+    triangle(mesh, a, b, c, layer, top, edgeKind);
+    triangle(mesh, a, c, d, layer, top, edgeKind);
 }
 }  // namespace
 
@@ -289,7 +291,7 @@ Mesh joinDetails(std::span<const Patch> layout,
                                                                {x, y0, z}}})
                     result.vertices.push_back(
                         {point.x, point.y, point.z, dx[edge] * sign, 0,
-                         dz[edge] * sign, 1, 0, 0, -1, 0, layer, 0xffffffff});
+                         dz[edge] * sign, 1, 0, 0, -1, 3, layer, 0xffffffff});
                 result.indices.insert(
                     result.indices.end(),
                     {base, base + 1, base + 2, base, base + 2, base + 3});
@@ -341,31 +343,39 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                         : boundary ? std::max(0, std::min(neighbour, int(y)) -
                                                      SteppedSkirt)
                                    : neighbour;
+                    const auto wallLayer = [&](int tileY) {
+                        // The top of an overlap wall is a continuation of the
+                        // surface. Preserve the strata below it and on cliffs.
+                        return boundary && !outside && tileY >= int(y) - 2
+                                   ? column.material
+                                   : sampler.materialAt(x, tileY, z);
+                    };
                     for (int y0 = bottom; y0 < int(y);) {
-                        const float layer = sampler.materialAt(x, y0, z);
+                        const float layer = wallLayer(y0);
                         int nextY = y0 + 1;
-                        while (nextY < int(y) &&
-                               sampler.materialAt(x, nextY, z) == layer)
+                        while (nextY < int(y) && wallLayer(nextY) == layer)
                             ++nextY;
                         const float low = y0, high = nextY;
                         y0 = nextY;
                         if (edge == 0)
                             quad(mesh, {float(x), low, float(z)},
                                  {float(x), low, z1}, {float(x), high, z1},
-                                 {float(x), high, float(z)}, layer, y);
+                                 {float(x), high, float(z)}, layer, y,
+                                 boundary ? 2.f : 0.f);
                         if (edge == 1)
                             quad(mesh, {x1, low, z1}, {x1, low, float(z)},
                                  {x1, high, float(z)}, {x1, high, z1}, layer,
-                                 y);
+                                 y, boundary ? 2.f : 0.f);
                         if (edge == 2)
                             quad(mesh, {x1, low, float(z)},
                                  {float(x), low, float(z)},
                                  {float(x), high, float(z)},
-                                 {x1, high, float(z)}, layer, y);
+                                 {x1, high, float(z)}, layer, y,
+                                 boundary ? 2.f : 0.f);
                         if (edge == 3)
                             quad(mesh, {float(x), low, z1}, {x1, low, z1},
                                  {x1, high, z1}, {float(x), high, z1}, layer,
-                                 y);
+                                 y, boundary ? 2.f : 0.f);
                     }
                 }
                 // Clip each terrain triangle against the water plane. The
@@ -438,7 +448,14 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
             const auto a = point(x, z), b = point(xx, zz);
             const float bottom =
                 outer ? 0 : std::max(0.f, std::min(a.y, b.y) - skirt);
-            quad(mesh, a, b, {xx, bottom, zz}, {x, bottom, z}, -1);
+            const Point lowA{x, bottom, z}, lowB{xx, bottom, zz};
+            const float edgeKind = outer ? 0.f : 1.f;
+            // Outward normals are used to test detailed coverage on the
+            // owning side, even when the skirt is shaded as top terrain.
+            if (edge == 0 || edge == 3)
+                quad(mesh, b, a, lowA, lowB, -1, -1, edgeKind);
+            else
+                quad(mesh, a, b, lowB, lowA, -1, -1, edgeKind);
         }
     }
     if (stepped) {

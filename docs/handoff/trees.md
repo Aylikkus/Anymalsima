@@ -351,7 +351,7 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   barks in `assets/materials/blocks/wood/` and cards `foliage.needles`,
   `foliage.palm_frond` (`tools/generate_foliage_textures.py`), twelve
   foliage materials appended, `trees/trees.json`: spruce (small), mountain
-  pine (thin), oak (medium), palm (small), redwood (large), elder (massive).
+  pine, oak and palm (thin), redwood (large), elder (massive).
 - Fixed: `WorldEditor::commit` rebuilt the flora layer and lost
   `resolvedDay`, so any edit in a world older than a year re-sampled the
   chunk's plants (regression check in `flora_edits`); the smoke gallery
@@ -390,9 +390,19 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
     slot (`Pruned`, `cut` = 1-based cut index) and the part above the cut
     is appended as a pruned piece. A root cut (trunk below
     max(1.5 m, half the flare height)) kills species without
-    `stump_resprouts`; any other cut grows a `Sprout` axis (to the tree's
-    height for the trunk, the former length for a branch) after
-    `resprout_days`, forking like a broadleaf (palms grow new frond rings).
+    `stump_resprouts`. A trunk cut regrows after `resprout_days` as a
+    young tree of the species grafted onto the cut (`Builder::graft`: the
+    normal builder with the remaining height as headroom, radii at most 0.7
+    of the stump, times shifted to the resprout day, every part a `Sprout`
+    of that cut), so spruces regrow whorled cones and oaks forks. Palms
+    grow new frond rings; a cut branch grows a `Sprout` axis of its former
+    length with forks capped at half the crown radius.
+  - **Where a cut lies:** on the removed tile's lower face (the stump's top
+    face), not its centre. Cut planes clip every tile whose centre lies
+    past them, on the cut segment and on the segments of the same axis
+    below whose rounded ends reach past it, so a cut is flat and the
+    regrowth starts exactly on the remaining blocks. A cut at a segment's
+    end also takes the axis continuing from it.
   - `TreeSkeletonCache`: mutex LRU of shared skeletons (build outside the
     lock; keys must include the cut revision).
 - `world/tree_rasterizer.{hpp,cpp}`: `markTreeWood` (mask over a
@@ -503,8 +513,11 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   a block, needle/leaf clumps (3-5 cards, spherical normals, centre-to-edge
   gradient) at each live foliage site, arching drooping strips for fronds.
   Vertex `height` is the wind weight. `Detail::Far` keeps half the clumps
-  (larger, 3 cards) and only main branches. Growth is drawn in 32 buckets
-  of the maturity (`bucket`, `bucketAge`); dead trees (age past their
+  (larger, 3 cards) and only main branches, plus any branch carrying a kept
+  clump. Growth is drawn in 32 buckets of the current growth phase (from
+  `TreeSkeleton::growthPhaseStart`, the latest regrowth, to maturity), each
+  built at its bucket's start so a mesh never runs ahead of the wood
+  blocks (`bucket`, `bucketAge`, `tubeSpan`); dead trees (age past their
   lifespan) keep only twigs. Decurrent crowns now carry a larger clump at
   every twig tip and leaves along the last two fork levels.
 - `world/tree_renderer.{hpp,cpp}` (`TreeRenderer`, in `GameplayState` and
@@ -522,7 +535,8 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   no root darkening).
 - Data tuning after visual review: oak clumps 1.8-2.6 m at density 2.2,
   elder 5-8 m at 1.0, oak and redwood root flares 0.25 and 0.5, palm trunk
-  radius 0.5-0.65 (one block, the tapering top becomes a mesh), palm lean
+  radius 0.1-0.35 m and oak 0.2-0.45 m (both mesh-only, including the
+  root flare), palm lean
   3-15 degrees; rasterizer slack 0.4 (thin leaning trunks stay
   face-connected).
 - Smoke harness: `SMOKE_FOREST=taiga|tropical|mountain|elder|1` (elder
@@ -531,8 +545,11 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   harness): tree CPU per frame below 0.05 ms once meshes exist; a mesh
   build costs up to about 1.5 ms, the elder's about 7 ms once.
 - Known limits: GPU cost of dense forests was not measured; crowns end at
-  128 m (distant trees are step 7); light inside a crown is one value per
-  tree (no per-pixel canopy shading); a landmark mesh build is a one-time
+  128 m (distant trees are step 7); sky light is one value per tree
+  and block (lamp) light two, sampled by the trunk near the ground and in
+  the crown and blended by height in `foliage.frag` (packed 4+4 bits in
+  `i_data3.y` in tree mode), so a lamp at a tree's foot lights its trunk
+  and lower branches; there is no per-pixel canopy shading; a landmark mesh build is a one-time
   main-thread hitch.
 - Tests: `tree_rotation_exact` (quarter turns, shared shapes in
   generation), `tree_foliage_meshes` (all species, both details, buckets,
@@ -552,9 +569,10 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
 ### Steps 5 and 6: growth, overrides, cutting (done)
 
 - `world/tree_overrides.hpp`: `TreeRecord` (planted trees: species,
-  seed, anchor, birth day, headroom; any tree: its cuts) in a
+  seed, anchor, birth day, headroom; any tree: its cuts; generated trees:
+  a persistent removal marker) in a
   `TreeOverrideMap`, the truth for trees that differ from generation.
-  `save/trees_codec` writes it to `trees.dat` (fourcc `TREE` v1);
+  `save/trees_codec` writes it to `trees.dat` (fourcc `TREE` v2, reads v1);
   `save_catalog::readTrees`/`writeTrees`. `GameplayState` loads it before
   regions register and writes it as soon as it changes (and on exit).
 - Cuts on existing skeletons: `applyTreeCuts(skeleton, species, cuts,
@@ -597,8 +615,8 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   while armed for the next species); the tile panel shows the tree under
   the cursor (species, age, maturity, height, cuts, dead, planted).
 - Tests: `trees_codec_roundtrip`, `tree_cuts_incremental`,
-  `tree_cut_and_regrowth` (saw through an oak, nothing above, regrowth,
-  identical reload from `trees.dat`), `tree_reload_catches_up`,
+  `tree_cut_and_regrowth` (saw through a voxel-wood oak test fixture, nothing
+  above, regrowth, identical reload from `trees.dat`), `tree_reload_catches_up`,
   `tree_planted_indoors`.
 
 ### Step 7: distant trees (done, simple form)
@@ -650,6 +668,22 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   tree CPU per frame.
 - Known limits: billboards end at 2 km; one shape per species (variants
   differ only in size); no per-tree light or ground tint at that distance.
+
+### Playtest fixes: support, cuts, placement and LOD
+
+- A tree that loses its last ground support or its voxel trunk base vanishes
+  immediately. Loaded natural wood is cleared through `WorldEditor`. A
+  removal record prevents a generated tree from returning after reload;
+  a removed planted tree is erased from the overrides. Natural aging is
+  separate and can leave standing wood.
+- The cut plane clips the surviving trunk chain, not just the last segment.
+  Thin trees sit on their own column with room above it, and fronds and
+  juvenile foliage stay attached to their parent segments. Palm and oak
+  are mesh-only at every age; cutting tests use a separate voxel-wood fixture.
+- Rendering requests tree sets beyond the voxel streaming radius. Billboards
+  cover a region until its tree set arrives and account for cuts, planting,
+  removals and landmark exclusion. Distant meshes keep the branches that
+  carry visible foliage and supply bark where voxel wood is not yet uploaded.
 
 
 ### Landmark voxel wood at distance (done)

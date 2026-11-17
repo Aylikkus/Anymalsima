@@ -65,6 +65,16 @@ void main()
     // Cards light from the side facing the viewer.
     if (v_params.w < 0.5 && dot(normal, toEye) < 0.0) normal = -normal;
     vec2 light = v_light.xy;
+    if (u_foliage.z > 0.5) {
+        // Tree crowns: block light near the ground and in the crown (4 bits
+        // each), blended up the tree, so a lamp at its foot lights the
+        // trunk and lower branches, not the whole tree alike.
+        float packed = floor(light.y * 255.0 + 0.5);
+        float base = floor(packed / 16.0) / 15.0;
+        float crown = mod(packed, 16.0) / 15.0;
+        light.y = mix(base, crown,
+                      smoothstep(1.5, 6.0, v_position.y - v_fade.y));
+    }
     vec3 far = surfaceFarLight(v_position, normal, normal, light.x, 1.0);
     vec3 lit = surfaceLight(normal, color, light, vec3_splat(1.0), normal,
                             0.0, far);

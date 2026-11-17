@@ -2,7 +2,7 @@ $input a_position
 $output v_ray
 
 #include <bgfx_shader.sh>
-uniform vec4 u_sky_camera; // yaw, pitch, aspect, unused
+uniform vec4 u_sky_camera; // yaw, pitch, aspect, underwater
 
 void main()
 {

@@ -50,7 +50,7 @@ class TreeRenderer {
     // now: seconds (wind). today: game day (growth and death).
     void render(RenderTarget& target, const Camera& camera,
                 const Frustum& frustum, LightRenderer& lights, double now,
-                double today);
+                double today, ShaderProperty& water);
 
     size_t drawnTrees() const { return drawn; }
     size_t drawCalls() const { return calls; }
@@ -73,7 +73,11 @@ class TreeRenderer {
     };
     struct TreeDraw {
         TreeInstancePtr tree;
-        float sun = 1, block = 0;
+        float sun = 1;
+        // Block (lamp) light by the trunk near the ground and in the crown:
+        // the shader blends them by height, so a lamp at a tree's foot
+        // lights its lower part, not the whole tree.
+        float blockBase = 0, blockCrown = 0;
         Color3 ground;
     };
 
@@ -102,6 +106,9 @@ class TreeRenderer {
         Vec2u region;
         ChunkManager::BillboardSet set;
         float low = 0, high = 0;  // anchor heights, for culling
+        // Inside the mesh range without a tree set yet: drawn without the
+        // near fade, so no ring of the forest is ever empty.
+        bool fallback = false;
     };
     std::vector<BillboardRegion> billboardRegions;
     size_t billboardsDrawn = 0;
@@ -110,7 +117,12 @@ class TreeRenderer {
     ShaderProperty albedo, normals, eyeUniform, params;
     std::string shader = "foliage";
     int gatheredX = INT_MIN, gatheredZ = INT_MIN;
-    uint64_t frame = 0, gatheredFrame = 0, gatheredRevision = ~0ULL;
+    uint64_t frame = 0, gatheredFrame = 0, gatheredRevision = ~0ULL,
+             gatheredSets = ~0ULL;
+    // True while a detailed tree's wood chunks are still meshing: its
+    // crown is drawn whole (distant mesh with bark prisms) meanwhile, so
+    // leaves never hang over missing wood.
+    bool woodPending(const TreeInstance& tree) const;
     size_t drawn = 0, calls = 0;
     double cpuMs = 0;
     bool voxelLandmarks = false;

@@ -5,7 +5,10 @@
 // array uses the same layer index as the albedo array), u_shadow_atlas
 // (shadow_sampling.sh) and u_lod_light_map.
 uniform vec4 u_world_eye;
+// x = ocean surface Y, y = 1 when the eye is in water, z = debug LOD edges.
+uniform vec4 u_world_water;
 #include "shadow_sampling.sh"
+#include "water_fog.sh"
 
 // Light response: ambient + diffuse * N.L, both scaled by the light level.
 #define SURFACE_AMBIENT 0.6
@@ -158,9 +161,20 @@ vec3 surfaceLight(vec3 normal, vec3 albedo, vec2 light, vec3 blockTint,
     vec3 lit = max(vec3_splat(sky), min(block, vec3_splat(1.0)));
     return albedo * max(lit, vec3_splat(SURFACE_MIN_LIGHT));
 }
+float surfaceOceanSky(float y)
+{
+    // Water opacity is 8: full sky at the surface, about 7/15 one tile
+    // down and zero by two. surfaceLight applies the usual minimum light.
+    return clamp(1.0 - (u_world_water.x - y) * (8.0 / 15.0), 0.0, 1.0);
+}
+
 vec3 surfaceFog(vec3 position, vec3 color)
 {
     float distanceToEye = length(position - u_world_eye.xyz);
+    if (u_world_water.y > 0.5) {
+        float fog = smoothstep(2.0, 48.0, distanceToEye);
+        return mix(color, WATER_FOG_COLOR, fog);
+    }
     float fog = smoothstep(u_world_eye.w * 0.45, u_world_eye.w, distanceToEye);
     return mix(color, vec3(0.68, 0.77, 0.84), fog);
 }

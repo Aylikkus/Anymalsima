@@ -20,6 +20,13 @@
 // cut at the root, from the stump when the species resprouts (otherwise
 // the tree is dead and the stump stays).
 //
+// Death: a tree that loses its base dies and leaves the world at once. The
+// base is the ground under its trunk (the anchor layer within the flared
+// trunk radius) and, for trees with wood blocks, the first row of trunk
+// wood. When every tile of either is gone, the tree's remaining wood is
+// cleared, its crown disappears, and it is recorded as removed (planted
+// trees are forgotten) so generation never brings it back.
+//
 // Planting (debug tool): a sapling on a solid tile, with the free height
 // above it as its headroom, so trees grow indoors under ceilings.
 class TreeSimulation {
@@ -45,6 +52,7 @@ class TreeSimulation {
     void clearDirty() { changed = false; }
     // Debug counters.
     size_t cutCount() const { return cuts; }
+    size_t removedCount() const { return deaths; }
 
    private:
     struct Owner {
@@ -52,7 +60,12 @@ class TreeSimulation {
         int32_t segment = -1;
         float t = 0;
     };
+    void blockChanged(const BlockChange& change);
     void woodRemoved(const BlockChange& change);
+    // Trees whose base the change may have taken die.
+    void checkBases(TilePos pos);
+    bool baseLost(const TreeColumn::Entry& entry);
+    void kill(const TreeColumn::Entry& entry);
     std::optional<Owner> owner(TilePos pos, uint8_t block) const;
     bool severed(const Owner& owner, TilePos removed) const;
     void cut(const Owner& owner);
@@ -69,6 +82,7 @@ class TreeSimulation {
     bool changed = false;
     double today = 0;
     size_t cuts = 0;
+    size_t deaths = 0;
     std::deque<ChunkCoord> sweep;
     uint64_t sweepRevision = ~0ULL;
     size_t updates = 0;

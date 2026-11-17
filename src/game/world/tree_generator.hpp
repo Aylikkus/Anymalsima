@@ -124,8 +124,9 @@ struct RegionTreesInput {
     // Cut and planted trees (trees.dat); null: none.
     const TreeOverrideMap* overrides = nullptr;
     // Placement only (far billboards): every tree takes its shared shape
-    // (no ground fit, no own skeleton, no wood bounds), landmarks and
-    // overrides are skipped. Positions, species and ages equal the full
+    // (no ground fit, no own skeleton, no wood bounds, no cuts); landmarks
+    // only exclude trees around their trunks, and removed trees are left
+    // out. Positions, species and ages equal the full
     // generation's.
     bool lightweight = false;
 };

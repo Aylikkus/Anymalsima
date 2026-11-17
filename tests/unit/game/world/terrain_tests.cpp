@@ -182,6 +182,35 @@ TEST(terrain_coast_dry_inland) {
     CHECK(slab.tiles[0][1][0].isAir());
 }
 
+TEST(terrain_surface_continuous_at_region_borders) {
+    // The surface height must not step along region borders: a step on a
+    // beach strips the soil from its edge and shows a straight line of
+    // rock (low land beside the sea used to clamp the beach berm to its
+    // own, lower ceiling while the sea region next to it did not).
+    test::Assets assets;
+    for (const int land : {SEA_LEVEL_Y + 1, SEA_LEVEL_Y + 2, 420}) {
+        auto world = terrainWorld(5, 5, land, LandType::PLAINS);
+        for (auto& r : world.regions)
+            if (r.coord.x < 2 || (r.coord.x == 3 && r.coord.y == 1)) {
+                r.land_height_m = SEA_LEVEL_Y - 12;
+                r.land = LandType::WATER;
+            }
+        const auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+        const TerrainSampler sampler(data);
+        double worst = 0;
+        for (const double border : {256.0, 384.0})
+            for (double along = 200; along < 440; along += 1) {
+                worst = std::max(
+                    worst, std::abs(sampler.surface(border - 1e-4, along) -
+                                    sampler.surface(border + 1e-4, along)));
+                worst = std::max(
+                    worst, std::abs(sampler.surface(along, border - 1e-4) -
+                                    sampler.surface(along, border + 1e-4)));
+            }
+        CHECK(worst < 0.05);
+    }
+}
+
 TEST(terrain_world_bounds) {
     test::Assets assets;
     auto world = terrainWorld(1, 1);

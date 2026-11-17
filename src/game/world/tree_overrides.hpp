@@ -9,9 +9,10 @@
 #include "tree_skeleton.hpp"
 
 // Trees that differ from generation (docs/handoff/trees.md, "Tree state and
-// persistence"): cuts made to generated trees, and trees planted during
-// play. Authoritative (saved in trees.dat); untouched generated trees are
-// never stored, they are regenerated from the seed.
+// persistence"): cuts made to generated trees, generated trees that died
+// and were removed, and trees planted during play. Authoritative (saved in
+// trees.dat); untouched generated trees are never stored, they are regenerated
+// from the seed.
 struct TreeRecord {
     // Planted trees have bit 62 set; others are generated tree keys
     // (TreeInstance::key).
@@ -27,6 +28,9 @@ struct TreeRecord {
     // In order; indices refer to the skeleton with the earlier cuts applied
     // (applyTreeCuts). Ages are tree ages.
     std::vector<TreeCut> cuts;
+    // A generated tree that died and left the world (it lost its base);
+    // generation skips it. Removed planted trees are simply erased.
+    bool removed = false;
     bool operator==(const TreeRecord&) const = default;
 };
 using TreeOverrideMap = std::unordered_map<uint64_t, TreeRecord>;

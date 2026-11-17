@@ -31,6 +31,8 @@ class TerrainLodManager {
     void update(const Camera& camera, Vec2 viewport);
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
                 const Camera& camera, Vec2 viewport);
+    ShaderProperty& waterUniform() { return water; }
+    bool eyeUnderwater() const { return underwater; }
     // Uniforms appended to every distant terrain draw (lights): patches use
     // the terrain_lod program, joins and structures the block program. They
     // must outlive the manager's draws.
@@ -189,6 +191,9 @@ class TerrainLodManager {
     std::array<uint8_t, DetailSize * DetailSize * 4> coverage{};
     bgfx::TextureHandle detailMap = BGFX_INVALID_HANDLE;
     ShaderProperty detailUniform, detailOrigin, textureArray, fogUniform;
+    ShaderProperty water;
+    bool underwater = false;
+    bool debugEdges = false;
     // Normal maps: stage 3 in terrain_lod, stage 1 in the block program.
     ShaderProperty patchNormals, joinNormals;
     // Joins use the block program but have no voxel light volume. A 1^3

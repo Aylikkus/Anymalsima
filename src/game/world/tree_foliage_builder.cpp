@@ -59,6 +59,7 @@ class Builder {
     }
 
     FloraMesh run() {
+        markCarriers();
         if (detail == Detail::Distant)
             prisms();
         else
@@ -125,19 +126,47 @@ class Builder {
                              uint16_t(base + 3), uint16_t(base + 2)});
     }
 
+    // Coarser details keep fewer clumps and thin branches; a branch still
+    // carrying a kept clump (or one beyond it) is always drawn, so no clump
+    // floats away from the tree.
+    void markCarriers() {
+        carries.assign(k.segments.size(), 0);
+        if (bare || !leaf || species.foliage.type == TreeFoliageType::Frond)
+            return;
+        size_t index = 0;
+        for (const auto& f : k.foliage) {
+            if (!alive(f) || woodAt(f) > 0) continue;
+            if (index++ % keepEvery()) continue;
+            for (int32_t i = f.segment;
+                 i >= 0 && size_t(i) < k.segments.size() && !carries[size_t(i)];
+                 i = k.segments[size_t(i)].parent)
+                carries[size_t(i)] = 1;
+        }
+    }
+    size_t keepEvery() const {
+        return detail == Detail::Near ? 1 : detail == Detail::Far ? 2 : 6;
+    }
+    bool carried(size_t segment) const {
+        return segment < carries.size() && carries[segment];
+    }
+
     // Branches too thin for blocks, as two crossed strips each.
     void tubes() {
         const FoliagePalette palette = bark ? bark->palette : FoliagePalette{};
-        for (const auto& s : k.segments) {
+        for (size_t i = 0; i < k.segments.size(); ++i) {
+            const auto& s = k.segments[i];
             if (!s.live()) continue;
-            const float visible = k.visible(s, age);
-            if (visible <= 0) continue;
-            const float r0 = k.radius(s, 0, age);
-            // Block wood (step 3) already shows this part.
-            if (k.radius(s, 0.5f * visible, age) >= TreeVoxelRadius) continue;
-            if (detail != Detail::Near && (s.order > 1 || r0 < 0.06f)) continue;
+            const auto span = tubeSpan(k, s, age);
+            if (!span) continue;
+            const auto [start, visible] = *span;
+            const float thin = k.formsWood() ? TreeVoxelRadius : INFINITY;
+            const float r0 = std::min(k.radius(s, start, age), thin);
+            if (detail != Detail::Near && (s.order > 1 || r0 < 0.06f) &&
+                !carried(i))
+                continue;
             if (r0 < 0.004f) continue;
-            const TreeVec a = s.a, b = lerp(s.a, s.b, visible);
+            const TreeVec a = lerp(s.a, s.b, start),
+                          b = lerp(s.a, s.b, visible);
             const TreeVec axis = (b - a).normalized();
             const float r1 = std::max(0.01f, k.radius(s, visible * 0.98f, age));
             const float w0 = std::max(0.02f, r0), w1 = std::max(0.012f, r1);
@@ -171,16 +200,18 @@ class Builder {
     void prisms() {
         const FoliagePalette palette = bark ? bark->palette : FoliagePalette{};
         constexpr int Sides = 6;
-        for (const auto& s : k.segments) {
+        for (size_t i = 0; i < k.segments.size(); ++i) {
+            const auto& s = k.segments[i];
             if (!s.live()) continue;
             const float visible = k.visible(s, age);
             if (visible <= 0) continue;
             float r0 = k.radius(s, 0, age);
             float r1 = k.radius(s, visible * 0.98f, age);
-            const bool block = std::max(r0, r1) >= TreeVoxelRadius;
+            const bool block =
+                k.formsWood() && std::max(r0, r1) >= TreeVoxelRadius;
             // Thin parts only for main axes; blocks always (they carry the
             // silhouette of large trees).
-            if (!block && (s.order > 1 || r0 < 0.15f)) continue;
+            if (!block && (s.order > 1 || r0 < 0.15f) && !carried(i)) continue;
             if (block) {
                 r0 = std::max(0.3f, r0 - 0.6f);
                 r1 = std::max(0.2f, r1 - 0.6f);
@@ -225,7 +256,8 @@ class Builder {
                 ? std::clamp((f.position - s.a).dot(axis) / length2, 0.f, 1.f)
                 : 0.f;
         const float r = k.radius(s, t, age);
-        return r >= TreeVoxelRadius ? std::sqrt(r * r + 0.4f) : 0.f;
+        return k.formsWood() && r >= TreeVoxelRadius ? std::sqrt(r * r + 0.4f)
+                                                     : 0.f;
     }
 
     // Needle and leaf clumps: cards around the site, spherical normals.
@@ -239,9 +271,7 @@ class Builder {
         const float grow = detail == Detail::Near  ? 1.f
                            : detail == Detail::Far ? 1.35f
                                                    : 2.2f;
-        const size_t keep = detail == Detail::Near  ? 1
-                            : detail == Detail::Far ? 2
-                                                    : 6;
+        const size_t keep = keepEvery();
         const Color3 dry =
             leaf->withered.empty() ? leaf->palette.dry : leaf->withered[0];
         size_t index = 0;
@@ -356,10 +386,29 @@ class Builder {
     const FoliageMaterial* bark;
     Rng rng{0};
     float reach = 1;
+    std::vector<uint8_t> carries;  // segments holding up a kept clump
     FloraMesh mesh;
 };
 
 }  // namespace
+
+std::optional<std::pair<float, float>> tubeSpan(const TreeSkeleton& k,
+                                                const TreeSegment& s,
+                                                float age) {
+    const float visible = k.visible(s, age);
+    if (visible <= 0) return std::nullopt;
+    // Block wood shows the part at least a block thick: the strips start
+    // where the segment thins below it (tapering limbs cross it midway).
+    const float thin = k.formsWood() ? TreeVoxelRadius : INFINITY;
+    if (k.radius(s, 0, age) < thin) return std::pair{0.f, visible};
+    if (k.radius(s, visible, age) >= thin) return std::nullopt;
+    float lo = 0, hi = visible;
+    for (int step = 0; step < 12; ++step) {
+        const float mid = 0.5f * (lo + hi);
+        (k.radius(s, mid, age) >= thin ? lo : hi) = mid;
+    }
+    return std::pair{lo, visible};
+}
 
 FloraMesh build(const TreeSkeleton& skeleton, const Tree& species,
                 const DataStorage<FoliageMaterial>& materials, float age,

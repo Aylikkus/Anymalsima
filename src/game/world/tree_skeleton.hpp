@@ -21,7 +21,7 @@
 // Saved per chunk with its wood (TreeStamp): growth is only reconciled into
 // wood made by the same version, so a changed algorithm never grows
 // new-shape wood next to old wood. Bump with any change to their output.
-inline constexpr uint16_t TreeVersion = 1;
+inline constexpr uint16_t TreeVersion = 3;
 
 struct TreeVec {
     float x = 0, y = 0, z = 0;
@@ -116,6 +116,9 @@ struct TreeSkeleton {
     // Full-grown bounds of live wood and foliage, metres from the anchor.
     TreeVec boundsMin, boundsMax;
     bool dead = false;  // cut at the root of a species that does not resprout
+    // Thin trees (trunk thinner than a block) never form wood blocks, root
+    // flare included: stem and branches are all meshes.
+    bool formsWood() const { return trunkRadius >= TreeVoxelRadius; }
     // What regrowth from a cut needs (applyTreeCuts).
     uint32_t seed = 0;
     float headroom = TreeMaxHeight;
@@ -148,6 +151,9 @@ struct TreeSkeleton {
                  float angle = 0) const;
     // Age from which nothing grows any more.
     float matureAge() const;
+    // Start of the latest cut's regrowth (the birth of its root), 0 without
+    // cuts: crown meshes are quantized from here.
+    float growthPhaseStart() const;
 };
 using TreeSkeletonPtr = std::shared_ptr<const TreeSkeleton>;
 

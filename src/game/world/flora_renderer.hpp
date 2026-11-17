@@ -45,7 +45,7 @@ class FloraRenderer {
     // the world clock exists).
     void render(RenderTarget& target, const Camera& camera,
                 const Frustum& frustum, LightRenderer& lights, double now,
-                double today = 0);
+                double today, ShaderProperty& water);
 
     size_t drawnPlants() const { return drawn; }
     size_t drawCalls() const { return calls; }

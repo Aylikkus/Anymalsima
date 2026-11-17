@@ -140,7 +140,7 @@ void FloraRenderer::rebuild(const ChunkCoord& coord, ChunkPlants& cache,
 
 void FloraRenderer::render(RenderTarget& target, const Camera& camera,
                            const Frustum& frustum, LightRenderer& lights,
-                           double now, double today) {
+                           double now, double today, ShaderProperty& water) {
     const auto started = std::chrono::steady_clock::now();
     drawn = calls = 0;
     instances.clear();
@@ -195,7 +195,8 @@ void FloraRenderer::render(RenderTarget& target, const Camera& camera,
             groups[plant.mesh].push_back({&plant, shift});
         }
     }
-    std::vector<ShaderProperty*> base{&albedo, &normals, &eyeUniform, &params};
+    std::vector<ShaderProperty*> base{&albedo, &normals, &eyeUniform, &params,
+                                      &water};
     lights.appendUniforms(base, LightRenderer::Program::Block);
     eyeUniform.setVec4({float(ex), float(ey), float(ez), camera.viewDistance});
     params.setVec4({float(std::fmod(now, 3600.0)), 1, 0, 0});

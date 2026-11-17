@@ -36,6 +36,7 @@ struct Camera {
     float distance = 10;
     float viewDistance = 4096.f;
     bool terrainSky = false;
+    bool underwater = false;
     Vec3 eye() const {
         return {position.x - std::cos(pitch) * std::sin(yaw) * distance,
                 position.y - std::sin(pitch) * distance,

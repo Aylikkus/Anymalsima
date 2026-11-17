@@ -24,6 +24,12 @@ neighbour changes. Selection still keeps 2:1 balance to bound those cracks.
 World edges close down to the floor. Water triangles clip against the terrain
 and use the same level as loaded water tiles.
 
+Inner smooth skirts use their patch's top material and upward shading; their
+outward face normals still determine ownership for the coverage mask.
+Stepped overlap walls use the column's top material for the upper two tiles
+and the original strata underneath. Set `ANYMALSIMA_LOD_DEBUG_EDGES=1` for
+magenta smooth skirts, cyan stepped boundary walls and orange detail joins.
+
 `TerrainLodManager` runs up to `clamp(threads / 2, 2, 6)` CPU jobs on the
 shared pool: root patches at normal priority, the rest low. Each job owns its
 sampler, cancellation flag and result; region inputs (terrain neighbourhoods,
@@ -88,8 +94,13 @@ extends the preset's radius around the detail focus. Loaded chunks retain
 their independent visibility throughout every LOD change.
 
 Terrain shares world-space material mapping, directional/ambient lighting and
-haze with loaded blocks. Sky and haze share the horizon color. Artificial
-light and local sunlight attenuation remain part of block shading.
+haze with loaded blocks. Sky and haze share the horizon color. Terrain and
+proxies without voxel light volumes estimate ocean skylight from depth:
+full at the surface, approximately 7/15 one tile down and zero two tiles
+down, apart from the usual minimum light. Artificial light is unchanged.
+When the camera eye enters water, nearby geometry remains visible and the
+world fades into water-colored fog by 48 tiles. The camera uses loaded water
+tiles when available and the LOD column otherwise.
 
 Gameplay edits are shown at distance (`TerrainEdits`, see
 `src/game/AGENTS.md`). Ground overrides (digging, removed mountains, filled

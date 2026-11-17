@@ -260,8 +260,32 @@ double TerrainSampler::surface(double x, double z) const {
                                   smooth(-coast / TerrainTuning::ShelfWidth));
     const double shore = std::lerp(
         seabed, land, smooth(.5 + coast / (2 * TerrainTuning::BlendWidth)));
-    return std::clamp(
-        shore, 0.0, double(TerrainTuning::surfaceCeiling(owner.land_height_m)));
+    // The ceiling blends across region borders (as soil does): a low land
+    // region caps its beach lower than the sea region beside it, and the
+    // owner's ceiling alone would step the beach along the border.
+    const auto axis = [](double pos, int size) {
+        if (pos < TerrainTuning::SoilHalfWidth)
+            return std::pair{
+                -1, .5 * (1 - smooth(pos / TerrainTuning::SoilHalfWidth))};
+        if (pos > size - TerrainTuning::SoilHalfWidth)
+            return std::pair{
+                1,
+                .5 * (1 - smooth((size - pos) / TerrainTuning::SoilHalfWidth))};
+        return std::pair{0, 0.0};
+    };
+    const auto [dx, wx] = axis(x - double(rx) * sx, sx);
+    const auto [dz, wz] = axis(z - double(rz) * sz, sz);
+    double ceiling = 0;
+    for (int iz = 0; iz < 2; ++iz)
+        for (int ix = 0; ix < 2; ++ix) {
+            const double weight = (ix ? wx : 1 - wx) * (iz ? wz : 1 - wz);
+            if (weight <= 0) continue;
+            ceiling +=
+                weight * TerrainTuning::surfaceCeiling(
+                             data.at(rx + (ix ? dx : 0), rz + (iz ? dz : 0))
+                                 .region.land_height_m);
+        }
+    return std::clamp(shore, 0.0, ceiling);
 }
 
 TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {

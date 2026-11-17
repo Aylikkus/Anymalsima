@@ -125,7 +125,8 @@ void Renderer::beginFrame() {
     if (camera.terrainSky) {
         bgfx::setViewRect(2, 0, 0, uint16_t(res.x), uint16_t(res.y));
         bgfx::setViewClear(2, BGFX_CLEAR_COLOR, 0xaec4d6ff, 1.f, 0);
-        const std::array<float, 4> sky{camera.yaw, camera.pitch, aspect, 0};
+        const std::array<float, 4> sky{camera.yaw, camera.pitch, aspect,
+                                       camera.underwater ? 1.f : 0.f};
         bgfx::setUniform(u_sky_camera, sky.data());
         const auto mesh = std::get<StaticMesh>(rect.get());
         bgfx::setVertexBuffer(0, mesh.vbh);

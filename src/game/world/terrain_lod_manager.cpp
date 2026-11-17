@@ -2,8 +2,10 @@
 
 #include <bx/math.h>
 
+#include <cstdlib>
 #include <iostream>
 #include <ranges>
+#include <string_view>
 
 namespace {
 std::array<int, 3> errorKey(const TerrainLod::Patch& p) {
@@ -68,6 +70,9 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
     shadowDetail.initTexture("u_detail_map", 0, detailMap);
     detailOrigin.initVec4("u_detail_origin", {0, 0, DetailSize * 16, 0});
     fogUniform.initVec4("u_world_eye", {0, 0, 0, quality.viewDistance});
+    const char* debug = std::getenv("ANYMALSIMA_LOD_DEBUG_EDGES");
+    debugEdges = debug && std::string_view(debug) == "1";
+    water.initVec4("u_world_water", {SEA_LEVEL_Y + 1.f, 0, 0, 0});
     patchNormals.initTexture("u_normal_array", 3,
                              assets.getMaterialNormalArray());
     joinNormals.initTexture("u_normal_array", 1,
@@ -649,6 +654,21 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     uploadCoverage();
     const auto eye = camera.eye();
     fogUniform.setVec4({eye.x, eye.y, eye.z, quality.viewDistance});
+    const int x = int(std::floor(eye.x)), y = int(std::floor(eye.y)),
+              z = int(std::floor(eye.z));
+    underwater = false;
+    if (const Tile* tile = chunks.tileAt(x, y, z)) {
+        underwater = tile->liquid == LiquidType::Water;
+    } else if (eye.y < SEA_LEVEL_Y + 1.f && y >= 0 && z >= 0 &&
+               z < detailSampler.depth() &&
+               (world.wrap().enabled() || (x >= 0 && x < detailSampler.width()))) {
+        // The orbit camera can be outside loaded chunks. Use the same
+        // surface (including edits) as distant terrain, not altitude alone.
+        const auto column = detailSampler.column(x, z);
+        underwater = y > column.surfaceY && eye.y < column.waterY;
+    }
+    water.setVec4({SEA_LEVEL_Y + 1.f, underwater ? 1.f : 0.f,
+                   debugEdges ? 1.f : 0.f, 0});
     float view[16], proj[16], vp[16];
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
                   {camera.position.x, camera.position.y, camera.position.z},
@@ -674,7 +694,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
             &textureArray,   &entry.mapUniform,   &entry.patchUniform,
             &detailUniform,  &detailOrigin,       &fogUniform,
             &patchNormals,   &entry.shiftUniform, &entry.coverUniform,
-            &entry.coverInfo};
+            &entry.coverInfo, &water};
         uniforms.insert(uniforms.end(), extraUniforms.begin(),
                         extraUniforms.end());
         target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
@@ -685,7 +705,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         auto transform = relativeTransform(camera, 0, 0, 0);
         std::vector<ShaderProperty*> uniforms{
             &textureArray,  &joinNormals,     &fogUniform,     &joinLightChunk,
-            &joinLightSlot, &joinLightVolume, &joinCoverVolume};
+            &joinLightSlot, &joinLightVolume, &joinCoverVolume, &water};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
         target.drawVertexBuffer(detailJoins.get(), &joinShader,
@@ -701,7 +721,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                   cz = int(camera.position.z) / Chunk::SIZE_Z;
         std::vector<ShaderProperty*> uniforms{
             &textureArray,  &joinNormals,     &fogUniform,     &joinLightChunk,
-            &joinLightSlot, &joinLightVolume, &joinCoverVolume};
+            &joinLightSlot, &joinLightVolume, &joinCoverVolume, &water};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
         structures->draw(

@@ -9,7 +9,8 @@ $output v_position, v_normal, v_uv, v_params, v_color0, v_color1, v_light, v_gro
 //   i_data0: xyz = base relative to the eye, w = yaw (radians)
 //   i_data1: xyz = scale, w = seed in [0, 1)
 //   i_data2: rgb = ground colour under the plant, w = withering 0..1
-//   i_data3: x = sky light, y = block light (0..1), z = fade distance,
+//   i_data3: x = sky light, y = block light (0..1; tree crowns: base and
+//            crown levels, (base * 16 + crown) / 255), z = fade distance,
 //            w = fade-in distance (0: none; far tree billboards)
 // a_texcoord0: uv, texture layer (-1 untextured), height 0 root .. 1 top.
 // a_texcoord1: translucency, hue jitter, value jitter, normal mode.
@@ -51,5 +52,6 @@ void main()
     v_color1 = a_color1;
     v_light = vec4(i_data3.xy, i_data2.w, i_data1.w);
     v_ground = vec4(i_data2.rgb, i_data3.z);
-    v_fade = vec4(i_data3.w, 0.0, 0.0, 0.0);
+    // y: world height of the plant's base (tree block light by height).
+    v_fade = vec4(i_data3.w, i_data0.y + u_world_eye.y, 0.0, 0.0);
 }

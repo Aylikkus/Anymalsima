@@ -7,7 +7,8 @@
 
 namespace trees_codec {
 namespace {
-constexpr uint16_t SectionVersion = 1;
+// v2 adds a flags byte after the headroom (bit 0: removed).
+constexpr uint16_t SectionVersion = 2;
 constexpr uint32_t MaxTrees = 1u << 22;
 constexpr uint16_t MaxCuts = 4096;
 }  // namespace
@@ -31,6 +32,7 @@ Bytes encode(const TreeOverrideMap& trees, const SectionContainer& extra) {
         out.write(int32_t(r->anchor.z));
         out.write(r->birthDay);
         out.write(r->headroom);
+        out.write(uint8_t(r->removed ? 1 : 0));
         out.write(uint16_t(r->cuts.size()));
         for (const auto& cut : r->cuts) {
             out.write(int32_t(cut.segment));
@@ -47,7 +49,7 @@ File decode(ByteView bytes) {
     File file;
     file.extra = SectionContainer::decode(bytes);
     if (const auto* section = file.extra.find("TREE")) {
-        if (section->version != SectionVersion)
+        if (section->version < 1 || section->version > SectionVersion)
             throw SerializationError("unsupported TREE version");
         BinaryReader in(section->data);
         const auto count = in.read<uint32_t>();
@@ -62,6 +64,11 @@ File decode(ByteView bytes) {
             r.anchor.z = in.read<int32_t>();
             r.birthDay = in.read<int32_t>();
             r.headroom = in.read<float>();
+            if (section->version >= 2) {
+                const auto flags = in.read<uint8_t>();
+                if (flags & ~1u) throw SerializationError("bad tree flags");
+                r.removed = flags & 1;
+            }
             const auto cuts = in.read<uint16_t>();
             if (cuts > MaxCuts) throw SerializationError("too many cuts");
             if (r.planted() && r.species == 0)

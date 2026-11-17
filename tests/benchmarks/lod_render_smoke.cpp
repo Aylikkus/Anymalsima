@@ -321,6 +321,7 @@ int main(int argc, char** argv) {
                 lod.update(camera, {1280, 720});
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720});
+                auto& water = lod.waterUniform();
                 if (lights) {
                     static uint64_t lodVersion = 0;
                     if (lod.drawnVersion() != lodVersion) {
@@ -420,7 +421,7 @@ int main(int argc, char** argv) {
                             camera, wx, double(coord.y) * Chunk::SIZE_Y,
                             double(coord.z) * Chunk::SIZE_Z);
                         std::vector<ShaderProperty*> uniforms{&blockTexture,
-                                                              &blockEye};
+                                                              &blockEye, &water};
                         if (lights) {
                             if (!volumes.bind(coord, uniforms, wx)) return;
                             lightRenderer.appendUniforms(
@@ -443,11 +444,11 @@ int main(int argc, char** argv) {
                     bx::mtxMul(viewProj, worldView, worldProj);
                     flora.render(target, camera,
                                  Frustum::fromViewProj(viewProj), lightRenderer,
-                                 frame / 60.0);
+                                 frame / 60.0, 0, water);
                     floraMaxMs = std::max(floraMaxMs, flora.cpuMilliseconds());
                     trees.render(target, camera,
                                  Frustum::fromViewProj(viewProj), lightRenderer,
-                                 frame / 60.0, 0);
+                                 frame / 60.0, 0, water);
                     treesMaxMs = std::max(treesMaxMs, trees.cpuMilliseconds());
                 }
                 float view[16], projection[16];
@@ -465,7 +466,8 @@ int main(int argc, char** argv) {
                 // NO_GLARE=1 renders without glare, for image diffs.
                 if (lights && !std::getenv("NO_GLARE"))
                     lightRenderer.drawGlare(target, camera, {1280, 720});
-                skyCamera.setVec4({camera.yaw, camera.pitch, 1280.f / 720, 0});
+                skyCamera.setVec4({camera.yaw, camera.pitch, 1280.f / 720,
+                                   lod.eyeUnderwater() ? 1.f : 0.f});
                 skyCamera.bind();
                 bgfx::setVertexBuffer(0, sky.vbh);
                 bgfx::setIndexBuffer(sky.ibh);

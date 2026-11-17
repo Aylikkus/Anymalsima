@@ -28,28 +28,43 @@ TreeRenderer::TreeRenderer(ChunkManager& chunks, const IAssets& assets,
 }
 
 TreeRenderer::TreeDraw TreeRenderer::describe(const TreeInstancePtr& tree) {
-    TreeDraw draw{tree, 1, 0, BareGround};
+    TreeDraw draw{tree, 1, 0, 0, BareGround};
     const auto& k = *tree->skeleton;
     const auto& a = tree->anchor;
-    // Light of the crown: the brightest air tile among samples around the
-    // trunk at crown height and just above the crown. A tile that is not
-    // lit yet (its slab arrived before the sunlight sweep) reads 0, so all
-    // zeros means "unknown": full sky until a later gather finds light.
-    const int crown = a.y + 1 + int(k.height * 0.6f);
-    const int above = a.y + 2 + int(std::ceil(k.boundsMax.y));
-    const int r = int(k.crownRadius * 0.6f + k.trunkRadius) + 1;
-    float sun = 0, block = 0;
-    for (const int y : {crown, above})
-        for (const auto [dx, dz] : {std::pair{r, 0}, std::pair{-r, 0},
-                                    std::pair{0, r}, std::pair{0, -r}})
-            if (const Tile* t = chunks.tileAt(a.x + dx, y, a.z + dz);
-                t && t->isAir()) {
-                sun = std::max(sun, t->lightLevel.sun_exposure / 15.f);
-                block = std::max(block, t->lightLevel.artificial_light / 15.f);
-            }
-    if (sun > 0 || block > 0) {
+    // Light of the tree: the brightest air tiles among rings of samples
+    // around the trunk. Sky light from the crown and above it; block light
+    // separately near the ground (by the trunk) and through the crown. New
+    // chunks start with a sky-light estimate (ChunkManager::
+    // estimateSkyLight), so open air reads full sky even before its
+    // sunlight sweep. No air sampled at all means "unknown": full sky until
+    // a later gather finds light.
+    const int height = std::max(2, int(std::ceil(k.boundsMax.y)));
+    const int crownLow = a.y + 1 + std::max(2, int(k.height * 0.4f));
+    const int crownHigh = a.y + 1 + height;
+    const int ring = int(k.crownRadius * 0.6f + k.trunkRadius) + 1;
+    const int near = int(k.trunkRadius) + 1;
+    float sun = 0, blockBase = 0, blockCrown = 0;
+    bool air = false;
+    const auto sample = [&](int y, int r, float& block, bool sky) {
+        for (const auto [dx, dz] :
+             {std::pair{r, 0}, std::pair{-r, 0}, std::pair{0, r},
+              std::pair{0, -r}, std::pair{r, r}, std::pair{-r, r},
+              std::pair{r, -r}, std::pair{-r, -r}}) {
+            const Tile* t = chunks.tileAt(a.x + dx, y, a.z + dz);
+            if (!t || !t->isAir()) continue;
+            air = true;
+            block = std::max(block, t->lightLevel.artificial_light / 15.f);
+            if (sky) sun = std::max(sun, t->lightLevel.sun_exposure / 15.f);
+        }
+    };
+    for (int y = a.y + 1; y <= a.y + 3; ++y) sample(y, near, blockBase, false);
+    for (const int y : {crownLow, (crownLow + crownHigh) / 2, crownHigh})
+        sample(y, ring, blockCrown, true);
+    sample(crownHigh + 1, ring, blockCrown, true);
+    if (air) {
         draw.sun = sun;
-        draw.block = block;
+        draw.blockBase = blockBase;
+        draw.blockCrown = blockCrown;
     }
     // Ground colour under the tree: its cover's climate tint.
     if (const Tile* ground = chunks.tileAt(a.x, a.y, a.z);
@@ -77,7 +92,7 @@ void TreeRenderer::gather(double eyeX, double eyeZ, double viewDistance) {
         const auto* rule = chunks.treeSpecies().find(tree->species);
         const double reach = range + (rule ? rule->species.extent() : 0);
         if (dx * dx + dz * dz > reach * reach) return;
-        auto draw = TreeDraw{tree, 1, 0, BareGround};
+        auto draw = TreeDraw{tree, 1, 0, 0, BareGround};
         // Light and ground come from loaded tiles: only near trees have
         // them (distant ones keep full sky).
         if (dx * dx + dz * dz < double(FadeEnd + 48) * (FadeEnd + 48))
@@ -85,9 +100,61 @@ void TreeRenderer::gather(double eyeX, double eyeZ, double viewDistance) {
         next.insert_or_assign(tree->key, draw);
     };
     chunks.forEachTree([&](const TreeInstancePtr& t) { add(t, DistantEnd); });
+    // Every region whose trees can reach DistantEnd needs its set, built
+    // or not by chunk loading.
+    const auto w = wrap;
+    const int tiles = TerrainTuning::RegionX;
+    const double range = DistantEnd + chunks.treeSpecies().maxExtent();
+    const int reach = int(std::ceil(range / tiles)) + 1;
+    const int64_t ex =
+        int64_t(std::floor((w.enabled() ? w.wrapX(eyeX) : eyeX) / tiles));
+    const int64_t ez = int64_t(std::floor(eyeZ / tiles));
+    std::vector<std::pair<double, Vec2u>> wanted;
+    for (int64_t dz = -reach; dz <= reach; ++dz)
+        for (int64_t dx = -reach; dx <= reach; ++dx) {
+            const int64_t rz = ez + dz;
+            int64_t rx = ex + dx;
+            if (rz < 0 || rz >= chunks.worldHeightRegions()) continue;
+            if (w.enabled())
+                rx = w.wrapRegion(rx);
+            else if (rx < 0 || rx >= w.regions())
+                continue;
+            const double cx = w.deltaX((rx + 0.5) * tiles, eyeX);
+            const double cz = (rz + 0.5) * tiles - eyeZ;
+            const double d = std::sqrt(cx * cx + cz * cz) - tiles * 0.71;
+            if (d > range) continue;
+            wanted.push_back({d, Vec2u{unsigned(rx), unsigned(rz)}});
+        }
+    std::sort(wanted.begin(), wanted.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<Vec2u> regions;
+    regions.reserve(wanted.size());
+    for (const auto& [d, region] : wanted) regions.push_back(region);
+    chunks.wantTreeSets(regions);
     for (const auto& t : chunks.landmarkTrees(eyeX, eyeZ, viewDistance))
         add(t, viewDistance);
     trees = std::move(next);
+}
+
+bool TreeRenderer::woodPending(const TreeInstance& tree) const {
+    if (tree.wood.empty() || !tree.skeleton || !tree.skeleton->formsWood())
+        return false;
+    const auto wrap = chunks.wrap();
+    const auto& b = tree.wood;
+    for (int cy = std::max(0, b.y0 / Chunk::SIZE_Y);
+         cy <= (b.y1 - 1) / Chunk::SIZE_Y && cy < Y_CHUNKS; ++cy)
+        for (int cz = std::max(0, b.z0 / Chunk::SIZE_Z);
+             cz <= (b.z1 - 1) / Chunk::SIZE_Z; ++cz)
+            for (int cx = int(std::floor(double(b.x0) / Chunk::SIZE_X));
+                 cx <= int(std::floor(double(b.x1 - 1) / Chunk::SIZE_X));
+                 ++cx) {
+                const int64_t x = wrap.enabled() ? wrap.wrapChunk(cx) : cx;
+                if (x < 0) continue;
+                if (chunks.meshPending(
+                        {unsigned(x), unsigned(cy), unsigned(cz)}))
+                    return true;
+            }
+    return false;
 }
 
 std::vector<TreeWoodSource> TreeRenderer::landmarkWood(double today) const {
@@ -131,8 +198,11 @@ void TreeRenderer::gatherBillboards(double eyeX, double eyeZ, double range) {
             const double cx = wrap.deltaX((rx + 0.5) * tiles, eyeX);
             const double cz = (rz + 0.5) * tiles - eyeZ;
             const double d = std::sqrt(cx * cx + cz * cz);
-            // Inside 0.8 DistantEnd only meshes show; beyond the range none.
-            if (d + tiles * 0.71 < DistantEnd * 0.8 || d - tiles * 0.71 > range)
+            // Inside 0.8 DistantEnd only meshes show (once the region's
+            // tree set is built); beyond the range none.
+            if (d - tiles * 0.71 > range) continue;
+            if (d + tiles * 0.71 < DistantEnd * 0.8 &&
+                chunks.hasTreeSet({unsigned(rx), unsigned(rz)}))
                 continue;
             order.push_back({d, Vec2u{unsigned(rx), unsigned(rz)}});
         }
@@ -144,7 +214,8 @@ void TreeRenderer::gatherBillboards(double eyeX, double eyeZ, double range) {
         const auto set = chunks.billboards(region);
         if (!set) wishes.push_back(region);
         if (!set || set->empty()) continue;
-        BillboardRegion r{region, set, INFINITY, -INFINITY};
+        BillboardRegion r{region, set, INFINITY, -INFINITY,
+                          !chunks.hasTreeSet(region)};
         for (const auto& b : *set) {
             r.low = std::min(r.low, b.y);
             r.high = std::max(r.high, b.y + b.height * 2);
@@ -228,7 +299,7 @@ void TreeRenderer::drawBillboards(RenderTarget& target, const Camera& camera,
                 1,
                 0,
                 float(end),
-                DistantEnd};
+                r.fallback ? 0.f : DistantEnd};
             out.insert(out.end(), std::begin(data), std::end(data));
         }
     }
@@ -274,7 +345,9 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
     if (!skeleton) return nullptr;
     entry.cpu = tree_foliage::build(
         *skeleton, rule->species, assets.getStorage<FoliageMaterial>(),
-        tree_foliage::bucketAge(bucket, skeleton->matureAge()), detail, bare);
+        tree_foliage::bucketAge(bucket, skeleton->matureAge(),
+                                skeleton->growthPhaseStart()),
+        detail, bare);
     if (entry.cpu.empty()) return nullptr;
     entry.gpu.initStatic(&renderer, entry.cpu.vertices.data(),
                          entry.cpu.vertices.size(), entry.cpu.indices.data(),
@@ -284,7 +357,7 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
 
 void TreeRenderer::render(RenderTarget& target, const Camera& camera,
                           const Frustum& frustum, LightRenderer& lights,
-                          double now, double today) {
+                          double now, double today, ShaderProperty& water) {
     const auto started = std::chrono::steady_clock::now();
     ++frame;
     drawn = calls = 0;
@@ -304,8 +377,11 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
               ecz = int(std::floor(ez / Chunk::SIZE_Z));
     if (ecx != gatheredX || ecz != gatheredZ ||
         frame - gatheredFrame >= GatherInterval ||
-        chunks.treeRevision() != gatheredRevision) {
+        chunks.treeRevision() != gatheredRevision ||
+        (chunks.treeSetsRevision() != gatheredSets &&
+         frame - gatheredFrame >= 10)) {
         gatheredRevision = chunks.treeRevision();
+        gatheredSets = chunks.treeSetsRevision();
         gather(ex, ez, camera.viewDistance);
         billboardsGathered = 0;  // with the trees, below
         gatheredX = ecx;
@@ -371,17 +447,18 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
             continue;
         const double ax = x - ex, az = tree.anchor.z + 0.5 - ez;
         const auto detail =
-            !near ? (voxelLandmarks && rule && rule->landmark
-                         ? tree_foliage::Detail::DistantCrown
-                         : tree_foliage::Detail::Distant)
+            !near || woodPending(tree)
+                ? (voxelLandmarks && rule && rule->landmark && !near
+                       ? tree_foliage::Detail::DistantCrown
+                       : tree_foliage::Detail::Distant)
             : std::sqrt(ax * ax + az * az) < NearDistance + k.crownRadius * 0.5
                 ? tree_foliage::Detail::Near
                 : tree_foliage::Detail::Far;
         const bool bare = age >= k.lifespan || k.dead;
         const float wither = std::clamp(
             (age - 0.97f * k.lifespan) / (0.03f * k.lifespan), 0.f, 1.f);
-        const int bucket =
-            tree_foliage::bucket(tree.growthAge(today), k.matureAge());
+        const int bucket = tree_foliage::bucket(
+            tree.growthAge(today), k.matureAge(), k.growthPhaseStart());
         const uint64_t tail =
             uint64_t(bucket) << 8 | uint64_t(detail) << 1 | uint64_t(bare);
         const uint64_t meshKey =
@@ -401,7 +478,8 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
         requests.try_emplace(meshKey, &tree, bucket, detail, bare);
     }
 
-    std::vector<ShaderProperty*> base{&albedo, &normals, &eyeUniform, &params};
+    std::vector<ShaderProperty*> base{&albedo, &normals, &eyeUniform, &params,
+                                      &water};
     lights.appendUniforms(base, LightRenderer::Program::Block);
     eyeUniform.setVec4({float(ex), float(ey), float(ez), camera.viewDistance});
     // z = 1: tree mode (wind by vertex weight, no root darkening).
@@ -421,22 +499,16 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
             auto* v = reinterpret_cast<float*>(buffer.data +
                                                size_t(i) * InstanceStride);
             const float seed = float(in.draw->tree->seed & 0xFFFF) / 65536.f;
-            const float data[16] = {float(in.x - ex),
-                                    float(in.y - ey),
-                                    float(in.z - ez),
-                                    in.yaw,
-                                    1,
-                                    1,
-                                    1,
-                                    seed,
-                                    in.draw->ground.r,
-                                    in.draw->ground.g,
-                                    in.draw->ground.b,
-                                    in.wither,
-                                    in.draw->sun,
-                                    in.draw->block,
-                                    in.fade,
-                                    0};
+            const float data[16] = {
+                float(in.x - ex), float(in.y - ey), float(in.z - ez), in.yaw, 1,
+                1, 1, seed, in.draw->ground.r, in.draw->ground.g,
+                in.draw->ground.b, in.wither, in.draw->sun,
+                // Base and crown block light, 4 bits
+                // each (foliage.frag, tree mode).
+                float(int(in.draw->blockBase * 15 + .5f) * 16 +
+                      int(in.draw->blockCrown * 15 + .5f)) /
+                    255.f,
+                in.fade, 0};
             std::copy(std::begin(data), std::end(data), v);
         }
         target.drawInstanced(entry->gpu.get(), &shader, std::vector(base), true,

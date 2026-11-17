@@ -1,4 +1,6 @@
 #pragma once
+#include <optional>
+
 #include "composite/dropdown.hpp"
 #include "composite/text_button.hpp"
 #include "game.hpp"
@@ -109,6 +111,9 @@ class GameplayState : public IGameState {
     Signal<const ChunkCoord&>::Connection meshConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     uint64_t shadowLodVersion = 0;
+    // Camera chunk of the last request pass (withdraws stale requests when
+    // it changes).
+    std::optional<ChunkCoord> requestCentre;
     std::chrono::steady_clock::time_point started =
         std::chrono::steady_clock::now();
     // Shadow caster passes of the far lights due this frame.

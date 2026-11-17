@@ -119,7 +119,9 @@ void RegionStore::submitWrite(Vec2u rc, Entry& entry, RegionSnapshot snapshot) {
                 return {merged, false};
             }
         },
-        BS::pr::low);
+        // A resident region's next ready() waits for this write: keep it
+        // out of the low-priority tail that heavy streaming can starve.
+        entry.resident ? BS::pr::normal : BS::pr::low);
 }
 
 void RegionStore::collect(Vec2u rc, Entry& entry) {

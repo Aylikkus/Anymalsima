@@ -71,6 +71,11 @@ void applyCover(vec3 position, vec3 lightCell, vec2 cover, vec3 coverTint,
 
 void main()
 {
+    if (u_world_water.z > 0.5 && u_light_chunk.w < 0.5 &&
+        v_cover.x < -0.5 && v_cover.y > 2.5) {
+        gl_FragColor = vec4(1.0, 0.5, 0.0, 1.0);
+        return;
+    }
     vec3 geometric = normalize(v_normal);
     vec3 color;
     vec3 normal = geometric;
@@ -110,8 +115,12 @@ void main()
         // One light level per block (1/15) counts as fully directional.
         blockDirStrength = clamp(slope * 15.0, 0.0, 1.0);
         blockDir = slope > 0.0001 ? grad / slope : geometric;
+    } else {
+        light.x = surfaceOceanSky(v_position.y);
     }
-    vec3 far = surfaceFarLight(v_position, normal, geometric, light.x,
+    // As on terrain LODs, don't use estimated ocean skylight to gate lamps.
+    float skyGate = u_light_chunk.w > 0.5 ? light.x : 1.0;
+    vec3 far = surfaceFarLight(v_position, normal, geometric, skyGate,
                                u_light_chunk.w);
     // Without a volume (distant joins and structures) small lights come
     // from the coarse distant glow map.

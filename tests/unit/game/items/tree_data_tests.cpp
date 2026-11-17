@@ -184,12 +184,17 @@ TEST(tree_runtime_content) {
                                           "/../materials/" + path + ".png"));
         }
     }
-    // The shipped species cover every size class, from the thin mountain
-    // pine to the massive landmark.
+    // The shipped species range from thin, mesh-only trees (mountain pine,
+    // palm, oak) through voxel trunks to the massive landmark.
     std::array<int, 5> classes{};
     for (const auto& tree : assets.getStorage<Tree>().items)
         ++classes[size_t(tree.sizeClass())];
-    for (size_t c = 0; c < classes.size(); ++c) CHECK(classes[c] > 0);
+    CHECK(classes[size_t(TreeSizeClass::Thin)] > 0);
+    CHECK(classes[size_t(TreeSizeClass::Small)] +
+              classes[size_t(TreeSizeClass::Medium)] +
+              classes[size_t(TreeSizeClass::Large)] >
+          0);
+    CHECK(classes[size_t(TreeSizeClass::Massive)] > 0);
     // Every tree wood block is natural growth, and nothing else is.
     const auto grown = naturalGrowthBlocks(assets.getStorage<Block>().items);
     EQUAL(grown.count(), assets.getStorage<Tree>().items.size(),

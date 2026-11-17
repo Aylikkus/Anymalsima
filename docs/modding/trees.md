@@ -19,23 +19,29 @@ design handoff `docs/handoff/trees.md`.
 | Shape | a recipe of parts (stems, clumps, petals) | a **form** (a growth archetype in code) tuned by numbers |
 | Blocks | never | trunks and branches thicker than 0.5 m radius are **wood blocks** you can break and build on; thinner twigs and leaves are meshes |
 | Size | up to a few metres | from a 3 m mountain pine to a 120 m landmark with a trunk 128 m wide |
-| Life | days to a few years | years to millennia; when a tree dies its wood stays |
+| Life | days to a few years | years to millennia; natural aging can leave standing wood |
 
-A tree's size is continuous: a sapling of any species starts as a thin mesh
-and gains wood blocks as its trunk and limbs thicken past 0.5 m radius.
+A tree's size is continuous: a sapling starts as a thin mesh. A species that
+can grow a trunk at least 0.5 m in radius gains wood blocks where the trunk
+and limbs reach that threshold.
 
 ### Size classes
 
-The class comes from the largest `trunk_radius_m` you allow. It is only a
-label (for budgets and this guide); behaviour follows the numbers.
+The class comes from the largest `trunk_radius_m` you allow. Thin species
+are always mesh-only, and massive species are placed as landmarks.
 
 | Class | Trunk radius (m) | Example | Notes |
 | --- | --- | --- | --- |
-| thin | below 0.5 | `trees.mountain_pine` | never forms blocks |
-| small | 0.5 to 1.5 | `trees.spruce`, `trees.palm` | a trunk one to three blocks wide |
-| medium | 1.5 to 4.5 | `trees.oak` | |
+| thin | below 0.5 | `trees.mountain_pine`, `trees.palm`, `trees.oak` | never forms blocks |
+| small | 0.5 to 1.5 | `trees.spruce` | a trunk one to three blocks wide |
+| medium | 1.5 to 4.5 | no shipped species | |
 | large | 4.5 to 15.5 | `trees.redwood` | a trunk can fill a whole chunk (16 m) |
 | massive | 15.5 to 64 | `trees.elder` | a **landmark**: a handful per continent, spanning several chunks |
+
+To make a mesh-only species, set the maximum `trunk_radius_m` below 0.5.
+Thin trees never create wood blocks, even when the root flare widens the
+mesh. This differs from natural aging: if a tree loses its last ground
+support or a voxel trunk is severed at the base, the tree disappears.
 
 ## Files
 
@@ -204,7 +210,10 @@ and `persistent_sites`.
 ### `cut`
 
 Cutting through a trunk or branch removes everything above the cut (until
-physics exists to fell it), and the tree regrows from the cut. Thin parts
+physics exists to fell it), and the tree regrows from the cut as a young
+tree of its own species standing on the stump. Removing the whole first
+row of a trunk, or the ground under a tree's base, kills the tree and
+removes it from the world. Thin parts
 (up to 2 m radius) are cut by breaking any of their wood; thicker ones only
 once their whole cross-section at that height is broken, so felling a
 giant takes work. Cuts and planted trees are saved in the world's

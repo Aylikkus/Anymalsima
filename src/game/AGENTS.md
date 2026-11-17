@@ -71,7 +71,7 @@ Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/sa
 - `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`; v2 palette entries include ground cover, v1 still decodes), `TOPS` (column ceilings) and `FLOR` (one `flora_codec` blob of plants per saved chunk, same index; a saved chunk without one regrows its generated plants; v3 blobs also carry the chunk's `TreeStamp`, and a chunk without one gets its trees once).
 - `terrain_edits.dat`: `terrain_edits_codec` section `EDIT`, the world-wide index of edited chunk columns that distant terrain shows (`world/terrain_edits.hpp`). It is derived data: region files hold the truth.
 - `light_sources.dat`: `light_sources_codec` section `LITE` (v2: position, block id, open faces), the world-wide index of emissive tiles (see Lighting). Also derived.
-- `trees.dat`: `trees_codec` section `TREE` (cut and planted trees, `TreeOverrideMap`). Not derived: it is the only record of cuts and planted trees, so `GameplayState` writes it whenever it changes.
+- `trees.dat`: `trees_codec` section `TREE` v2 (`TreeOverrideMap`, reads v1). Not derived: it is the only record of cuts, planted trees and generated tree removals, so `GameplayState` writes it whenever it changes.
 
 Every sub-seed derives from `WorldGenSettings::seed` through `WorldGenSettings::fromSeed`. Bump `WorldMeta::GeneratorVersion` when chunk generation output changes.
 

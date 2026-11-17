@@ -30,6 +30,7 @@ ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
     const size_t threads = std::max<size_t>(1, pool.get_thread_count());
     maxGenerationJobs = std::clamp<size_t>(threads * 2, 4, 32);
     maxMeshJobs = std::clamp<size_t>(threads, 2, 16);
+    maxTreeJobs = std::clamp<size_t>(threads / 2, 2, 8);
 }
 
 ChunkManager::~ChunkManager() {
@@ -54,8 +55,29 @@ void ChunkManager::registerChunk(const ChunkCoord& coord,
         regionSoils[region->coord] =
             SoilGenerator::select(*region, *soilAssets, soilSeed);
     const uint64_t column = (uint64_t{coord.x} << 32) | coord.z;
-    columnTopY.try_emplace(
-        column, TerrainTuning::surfaceCeiling(region->land_height_m));
+    // The surface ceiling blends across region borders
+    // (TerrainSampler::surface), so the top bound is the highest ceiling of
+    // the region and its neighbours.
+    int ceiling = TerrainTuning::surfaceCeiling(region->land_height_m);
+    if (!terrainWorld.regions.empty()) {
+        const auto wrapX = wrap();
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int64_t z = int64_t(region->coord.y) + dz;
+                int64_t x = int64_t(region->coord.x) + dx;
+                if (z < 0 || z >= terrainWorld.height) continue;
+                if (wrapX.enabled())
+                    x = wrapX.wrapRegion(x);
+                else if (x < 0 || x >= terrainWorld.width)
+                    continue;
+                ceiling = std::max(
+                    ceiling,
+                    TerrainTuning::surfaceCeiling(
+                        terrainWorld.regions[size_t(z) * terrainWorld.width + x]
+                            .land_height_m));
+            }
+    }
+    columnTopY.try_emplace(column, ceiling);
     ++columnInputs[column].registrations;
     ++regionRegistrations[region->coord];
 }
@@ -251,15 +273,20 @@ void ChunkManager::dispatchBillboards() {
                 [&](const BillboardJob& j) { return j.region == region; }))
             continue;
         billboardJobs.push_back(
-            {region, pool.submit_task(
-                         [world = &terrainWorld, assets = soilAssets,
-                          table = treeTable, region, seed = treeSeed] {
-                             const auto terrain = TerrainNeighborhood::capture(
-                                 *world, region, *assets);
-                             return regionBillboards(
-                                 {table.get(), &terrain, region, seed});
-                         },
-                         BS::pr::low)});
+            {region,
+             pool.submit_task(
+                 [world = &terrainWorld, assets = soilAssets, table = treeTable,
+                  region, seed = treeSeed, near = landmarksNear(region),
+                  overrides = overrides] {
+                     const auto terrain =
+                         TerrainNeighborhood::capture(*world, region, *assets);
+                     RegionTreesInput input{table.get(), &terrain, region, seed,
+                                            &near};
+                     input.overrides = overrides.get();
+                     return regionBillboards(input);
+                 },
+                 BS::pr::low),
+             overrides});
     }
 }
 
@@ -295,7 +322,8 @@ std::vector<TreeInstancePtr> ChunkManager::landmarkTrees(double x, double z,
         const Vec2u region{unsigned(site.x / TerrainTuning::RegionX),
                            unsigned(site.z / TerrainTuning::RegionZ)};
         if (jobs >= 2 || landmarkRegionsBuilt.contains(region)) continue;
-        if (std::none_of(
+        if (!treeRequests.contains(region) &&
+            std::none_of(
                 treeJobs.begin(), treeJobs.end(),
                 [&](const TreeJob& j) { return j.region == region; })) {
             ++jobs;
@@ -325,10 +353,34 @@ void ChunkManager::updateTree(const TreeInstancePtr& tree,
                   [](const auto& a, const auto& b) { return a->key < b->key; });
         it->second = std::move(set);
     }
-    // Columns under the old and new bounds rebuild their tree lists now
+    refreshTreeColumns({&oldBounds, &tree->bounds});
+    ++treeRevision_;
+}
+
+void ChunkManager::removeTree(const TreeInstancePtr& tree) {
+    landmarkCache.erase(tree->key);
+    const Vec2u region{unsigned(tree->anchor.x / TerrainTuning::RegionX),
+                       unsigned(tree->anchor.z / TerrainTuning::RegionZ)};
+    if (const auto it = treeSets.find(region); it != treeSets.end()) {
+        auto set = std::make_shared<TreeSet>(*it->second);
+        std::erase_if(*set, [&](const TreeInstancePtr& t) {
+            return t->key == tree->key;
+        });
+        it->second = std::move(set);
+    }
+    // Its billboard goes too (rebuilt on the renderer's next wish).
+    billboardSets.erase(region);
+    ++billboardRevision_;
+    refreshTreeColumns({&tree->bounds});
+    ++treeRevision_;
+}
+
+void ChunkManager::refreshTreeColumns(
+    std::initializer_list<const TreeTileBox*> boxes) {
+    // Columns under the boxes rebuild their tree lists now
     // (their sets are ready), so column tops rise before sunlight runs.
     const auto wrapX = wrap();
-    for (const auto* box : {&oldBounds, &tree->bounds}) {
+    for (const auto* box : boxes) {
         if (box->empty()) continue;
         for (int64_t cz = box->z0 / Chunk::SIZE_Z;
              cz <= (box->z1 - 1) / Chunk::SIZE_Z; ++cz)
@@ -351,7 +403,6 @@ void ChunkManager::updateTree(const TreeInstancePtr& tree,
                                  handle->second.regionCoord);
             }
     }
-    ++treeRevision_;
 }
 
 TreeStamp ChunkManager::treeStamp(const ChunkCoord& coord) const {
@@ -515,6 +566,8 @@ void ChunkManager::collect() {
         }
         auto job = std::move(billboardJobs[i]);
         billboardJobs.erase(billboardJobs.begin() + i);
+        // A tree was removed meanwhile: the renderer asks again.
+        if (job.overrides != overrides) continue;
         billboardSets[job.region] =
             std::make_shared<const std::vector<TreeBillboard>>(
                 job.future.get());
@@ -541,6 +594,7 @@ void ChunkManager::collect() {
         if (landmarkRegions.contains(job.region))
             landmarkRegionsBuilt.insert(job.region);
         treeSets[job.region] = std::make_shared<const TreeSet>(std::move(set));
+        ++treeSetsRevision_;
     }
     for (size_t i = 0; i < generationJobs.size();) {
         if (generationJobs[i].future.wait_for(0s) !=
@@ -593,6 +647,30 @@ void ChunkManager::collect() {
     }
 }
 
+void ChunkManager::estimateSkyLight(
+    Chunk& chunk, ChunkCoord coord,
+    const std::function<int(int x, int z)>& surface) {
+    const int base = int(coord.y) * Chunk::SIZE_Y;
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            // Open sky above the chunk: its top is above the column's
+            // surface. Water seen from the top keeps the sweep's falloff
+            // (opacity 8: 15, 7, then dark).
+            if (base + Chunk::SIZE_Y - 1 <= surface(x, z)) continue;
+            int value = 15;
+            const Tile& first = chunk.tiles[z][Chunk::SIZE_Y - 1][x];
+            if (first.isLiquid() && base + Chunk::SIZE_Y < SEA_LEVEL_Y - 1)
+                value = 0;
+            for (int y = Chunk::SIZE_Y - 1; y >= 0 && value > 0; --y) {
+                Tile& tile = chunk.tiles[z][y][x];
+                if (tile.isSolid()) break;
+                if (tile.lightLevel.sun_exposure < value)
+                    tile.lightLevel.sun_exposure = uint8_t(value);
+                if (tile.isLiquid()) value = std::max(0, value - 8);
+            }
+        }
+}
+
 void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
                                     GeneratedChunk data) {
     auto it = chunks.find(coord);
@@ -605,6 +683,20 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
             generationQueue.insert(coord);
             return;
         }
+    }
+    // Sunlight sweeps can lag far behind generation (wide chunk radii, fast
+    // travel): start from an estimate so a new chunk never shows unlit
+    // (black) until its sweep arrives; the sweep then refines it.
+    if (data.data) {
+        const uint64_t key = (uint64_t{coord.x} << 32) | coord.z;
+        const auto column = columnInputs.find(key);
+        const auto* inputs =
+            column != columnInputs.end() ? column->second.data.get() : nullptr;
+        const int top = getColumnTopY(coord.x, coord.z);
+        estimateSkyLight(*data.data, coord, [&](int x, int z) {
+            return inputs ? inputs->columns[z * Chunk::SIZE_X + x].surface_y
+                          : top;
+        });
     }
     {
         std::lock_guard<std::mutex> lock(tileAtMutex);
@@ -623,7 +715,7 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
 
 void ChunkManager::dispatchGeneration() {
     if (generationQueue.empty()) return;
-    const auto started = std::chrono::steady_clock::now();
+    auto started = std::chrono::steady_clock::now();
     const auto anchor = [&](ChunkCoord coord) {
         const auto target = pending.at(coord).beneficiary.value_or(coord);
         // A camera moving into a former sky prerequisite must not demote
@@ -633,17 +725,33 @@ void ChunkManager::dispatchGeneration() {
                    ? coord
                    : target;
     };
-    const auto order = generationQueue.ordered(focus, false, anchor);
+    const auto order = generationQueue.nearest(focus, anchor, DispatchWindow);
+    started = std::chrono::steady_clock::now();
     size_t next = 0;
     int air = 0;
-    while (std::chrono::steady_clock::now() - started < DispatchBudget) {
+    // The starvation guard picks the oldest chunk at most once per update
+    // and only among chunks whose tree sets are built: a chunk waiting for
+    // trees would otherwise be picked again and again (generationDispatches
+    // only grows on a submit), spending the whole budget without progress.
+    uint64_t oldestTriedAt = UINT64_MAX;
+    // Past the budget, picks go on until one chunk made progress (while a
+    // job slot is free), so an update never ends empty-handed.
+    bool progressed = false;
+    while (std::chrono::steady_clock::now() - started < dispatchBudget ||
+           (!progressed && generationJobs.size() < maxGenerationJobs)) {
         const bool slots = generationJobs.size() < maxGenerationJobs;
         if (!slots && air >= AirChunksPerUpdate) break;
         std::optional<ChunkCoord> picked;
         bool oldest = false;
-        if (slots && (generationDispatches + 1) % 16 == 0) {
+        if (slots && (generationDispatches + 1) % 16 == 0 &&
+            oldestTriedAt != generationDispatches) {
+            oldestTriedAt = generationDispatches;
             picked = generationQueue.best(
-                focus, true, [](auto) { return true; }, anchor);
+                focus, true,
+                [&](ChunkCoord c) {
+                    return treesReady(c, pending.at(c).region->coord);
+                },
+                anchor);
             oldest = picked.has_value();
         }
         if (!picked) {
@@ -673,6 +781,7 @@ void ChunkManager::dispatchGeneration() {
                                  nullptr};
             empty.trees = stamp;
             publishGenerated(coord, identity, std::move(empty));
+            progressed = true;
             continue;
         }
         if (!slots) continue;
@@ -811,6 +920,32 @@ void ChunkManager::dispatchGeneration() {
         generationJobs.push_back({coord, identity, std::move(future)});
         generationQueue.erase(coord);
         ++generationDispatches;
+        progressed = true;
+    }
+}
+
+void ChunkManager::withdrawOutside(ChunkCoord centre, int radius) {
+    const auto wrapX = wrap();
+    const auto inside = [&](ChunkCoord c) {
+        const int64_t dx = wrapX.enabled() ? wrapX.deltaChunk(c.x, centre.x)
+                                           : int64_t(c.x) - int64_t(centre.x);
+        return std::abs(dx) <= radius &&
+               std::abs(int64_t(c.y) - int64_t(centre.y)) <= radius &&
+               std::abs(int64_t(c.z) - int64_t(centre.z)) <= radius;
+    };
+    std::vector<ChunkCoord> stale;
+    generationQueue.forEach([&](ChunkCoord c) {
+        if (inside(c)) return;
+        const auto& info = pending.at(c);
+        if (info.beneficiary && inside(*info.beneficiary)) return;
+        stale.push_back(c);
+    });
+    for (const auto c : stale) {
+        generationQueue.erase(c);
+        auto& handle = chunks.at(c);
+        if (handle.state == ChunkState::Queued)
+            handle.state = ChunkState::Unloaded;
+        pending.at(c).beneficiary.reset();
     }
 }
 
@@ -864,11 +999,15 @@ void ChunkManager::finishEmptyMesh(ChunkCoord coord) {
 
 void ChunkManager::dispatchMeshes() {
     if (!mesher || meshQueue.empty()) return;
-    const auto started = std::chrono::steady_clock::now();
+    auto started = std::chrono::steady_clock::now();
     const auto eligible = [&](ChunkCoord coord) { return canMesh(coord); };
-    const auto order = meshQueue.ordered(focus, false);
+    const auto order = meshQueue.nearest(
+        focus, [](ChunkCoord coord) { return coord; }, DispatchWindow);
+    started = std::chrono::steady_clock::now();
     size_t next = 0;
-    while (std::chrono::steady_clock::now() - started < DispatchBudget) {
+    bool progressed = false;
+    while (std::chrono::steady_clock::now() - started < dispatchBudget ||
+           (!progressed && meshJobs.size() < maxMeshJobs)) {
         const bool slots = meshJobs.size() < maxMeshJobs;
         std::optional<ChunkCoord> picked;
         if (slots && (meshDispatches + 1) % 16 == 0)
@@ -885,11 +1024,13 @@ void ChunkManager::dispatchMeshes() {
         // not occupy a worker slot.
         if (hasNoGeometry(*picked)) {
             finishEmptyMesh(*picked);
+            progressed = true;
             continue;
         }
         if (!slots) continue;
         submitMesh(*picked);
         ++meshDispatches;
+        progressed = true;
     }
 }
 
@@ -898,6 +1039,7 @@ void ChunkManager::update() {
     meshQueue.setPeriodX(wrap().tiles);
     collect();
     dispatchGeneration();
+    dispatchTreeJobs();
     dispatchMeshes();
 }
 
@@ -945,25 +1087,50 @@ int ChunkManager::generatedSurfaceY(unsigned tileX, unsigned tileZ) {
 const TreeSet* ChunkManager::regionTrees(Vec2u region) {
     if (const auto it = treeSets.find(region); it != treeSets.end())
         return it->second.get();
-    if (std::none_of(treeJobs.begin(), treeJobs.end(), [&](const TreeJob& job) {
-            return job.region == region;
-        })) {
-        std::vector<TreeLandmark> near;
-        const int width = terrainWorld.width;
-        for (const auto& site : landmarks) {
-            const int64_t dx = WorldWrap::delta(site.x / TerrainTuning::RegionX,
-                                                region.x, width);
-            const int64_t dz =
-                site.z / TerrainTuning::RegionZ - int64_t(region.y);
-            if (std::abs(dx) <= 2 && std::abs(dz) <= 2) near.push_back(site);
+    if (std::none_of(treeJobs.begin(), treeJobs.end(),
+                     [&](const TreeJob& job) { return job.region == region; }))
+        treeRequests.insert(region);
+    return nullptr;
+}
+
+void ChunkManager::dispatchTreeJobs() {
+    if (treeRequests.empty()) return;
+    const int width = terrainWorld.width;
+    // Requests no registered region needs any more (the player moved on)
+    // are dropped; landmark regions stay, they are wanted from afar.
+    std::erase_if(treeRequests, [&](Vec2u q) {
+        if (landmarkRegions.contains(q) || treeWishes.contains(q)) return false;
+        for (const auto& [rc, count] : regionRegistrations) {
+            const int64_t dx = WorldWrap::delta(rc.x, q.x, width);
+            const int64_t dz = int64_t(rc.y) - int64_t(q.y);
+            if (std::abs(dx) <= 2 && std::abs(dz) <= 2) return false;
         }
+        return true;
+    });
+    if (treeJobs.size() >= maxTreeJobs || treeRequests.empty()) return;
+    const auto wrapX = wrap();
+    std::vector<std::pair<double, Vec2u>> order;
+    order.reserve(treeRequests.size());
+    for (const Vec2u q : treeRequests) {
+        const double cx = (q.x + 0.5) * TerrainTuning::RegionX;
+        const double cz = (q.y + 0.5) * TerrainTuning::RegionZ;
+        const double dx = wrapX.deltaX(cx, focus.x), dz = cz - focus.z;
+        order.push_back({dx * dx + dz * dz, q});
+    }
+    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.first, a.second.x, a.second.y) <
+               std::tie(b.first, b.second.x, b.second.y);
+    });
+    for (const auto& [distance, region] : order) {
+        if (treeJobs.size() >= maxTreeJobs) break;
+        treeRequests.erase(region);
         // The neighbourhood is captured on the worker: World and assets are
         // read-only while chunks stream.
         treeJobs.push_back(
             {region,
              pool.submit_task(
                  [world = &terrainWorld, assets = soilAssets, table = treeTable,
-                  region, seed = treeSeed, near = std::move(near),
+                  region, seed = treeSeed, near = landmarksNear(region),
                   overrides = overrides] {
                      const auto terrain =
                          TerrainNeighborhood::capture(*world, region, *assets);
@@ -975,7 +1142,52 @@ const TreeSet* ChunkManager::regionTrees(Vec2u region) {
                  BS::pr::high),
              overrides});
     }
-    return nullptr;
+}
+
+std::vector<TreeLandmark> ChunkManager::landmarksNear(Vec2u region) const {
+    std::vector<TreeLandmark> near;
+    for (const auto& site : landmarks) {
+        const int64_t dx = WorldWrap::delta(site.x / TerrainTuning::RegionX,
+                                            region.x, terrainWorld.width);
+        const int64_t dz = site.z / TerrainTuning::RegionZ - int64_t(region.y);
+        if (std::abs(dx) <= 2 && std::abs(dz) <= 2) near.push_back(site);
+    }
+    return near;
+}
+
+std::vector<Vec2u> ChunkManager::treeRegionsAround(Vec2u region) const {
+    std::vector<Vec2u> out;
+    const auto wrapX = wrap();
+    // Ordinary trees reach at most one region from their anchor; landmarks
+    // two (only regions holding one are needed).
+    for (int dz = -2; dz <= 2; ++dz)
+        for (int dx = -2; dx <= 2; ++dx) {
+            const int64_t z = int64_t(region.y) + dz;
+            if (z < 0 || z >= terrainWorld.height) continue;
+            if (!wrapX.enabled() &&
+                (int64_t(region.x) + dx < 0 ||
+                 int64_t(region.x) + dx >= terrainWorld.width))
+                continue;
+            const Vec2u q{unsigned(wrapX.enabled() ? wrapX.wrapRegion(
+                                                         int64_t(region.x) + dx)
+                                                   : int64_t(region.x) + dx),
+                          unsigned(z)};
+            const bool near = std::abs(dx) <= 1 && std::abs(dz) <= 1;
+            if (!near && !landmarkRegions.contains(q)) continue;
+            out.push_back(q);
+        }
+    return out;
+}
+
+bool ChunkManager::treesReady(ChunkCoord coord, Vec2u region) const {
+    if (terrainWorld.regions.empty() || treeTable->empty()) return true;
+    const uint64_t key = (uint64_t{coord.x} << 32) | coord.z;
+    if (const auto it = columnInputs.find(key);
+        it != columnInputs.end() && it->second.trees)
+        return true;
+    for (const Vec2u q : treeRegionsAround(region))
+        if (!treeSets.contains(q)) return false;
+    return true;
 }
 
 std::shared_ptr<const TreeColumn> ChunkManager::prepareTrees(ChunkCoord coord,
@@ -985,29 +1197,14 @@ std::shared_ptr<const TreeColumn> ChunkManager::prepareTrees(ChunkCoord coord,
     const uint64_t key = (uint64_t{coord.x} << 32) | coord.z;
     auto& cache = columnInputs.at(key);
     if (cache.trees) return cache.trees;
-    // Ordinary trees reach at most one region from their anchor; landmarks
-    // two (only regions holding one are needed).
     std::vector<const TreeSet*> sets;
     bool ready = true;
     const auto wrapX = wrap();
-    for (int dz = -2; dz <= 2; ++dz)
-        for (int dx = -2; dx <= 2; ++dx) {
-            const int64_t z = int64_t(region.y) + dz;
-            if (z < 0 || z >= terrainWorld.height) continue;
-            const Vec2u q{unsigned(wrapX.enabled() ? wrapX.wrapRegion(
-                                                         int64_t(region.x) + dx)
-                                                   : int64_t(region.x) + dx),
-                          unsigned(z)};
-            if (!wrapX.enabled() &&
-                (int64_t(region.x) + dx < 0 ||
-                 int64_t(region.x) + dx >= terrainWorld.width))
-                continue;
-            const bool near = std::abs(dx) <= 1 && std::abs(dz) <= 1;
-            if (!near && !landmarkRegions.contains(q)) continue;
-            const auto* set = regionTrees(q);
-            if (!set) ready = false;
-            sets.push_back(set);
-        }
+    for (const Vec2u q : treeRegionsAround(region)) {
+        const auto* set = regionTrees(q);
+        if (!set) ready = false;
+        sets.push_back(set);
+    }
     if (!ready) return nullptr;
     cache.trees = std::make_shared<const TreeColumn>(
         makeTreeColumn(coord.x, coord.z, sets, wrapX.tiles));
@@ -1018,10 +1215,27 @@ std::shared_ptr<const TreeColumn> ChunkManager::prepareTrees(ChunkCoord coord,
     return cache.trees;
 }
 
+void ChunkManager::wantTreeSets(const std::vector<Vec2u>& regions) {
+    treeWishes = {regions.begin(), regions.end()};
+    for (const Vec2u q : regions) regionTrees(q);
+    releaseTreeSets();
+}
+
+bool ChunkManager::meshPending(const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    if (it == chunks.end()) return false;
+    const auto& h = it->second;
+    if (h.state == ChunkState::Queued) return true;
+    if (h.state != ChunkState::Ready || h.uploaded) return false;
+    return h.meshState == MeshState::Queued || canMesh(coord);
+}
+
 void ChunkManager::releaseTreeSets() {
     const int width = terrainWorld.width;
+    const size_t before = treeSets.size();
     std::erase_if(treeSets, [&](const auto& entry) {
         const Vec2u q = entry.first;
+        if (treeWishes.contains(q)) return false;
         for (const auto& [rc, count] : regionRegistrations) {
             const int64_t dx = WorldWrap::delta(rc.x, q.x, width);
             const int64_t dz = int64_t(rc.y) - int64_t(q.y);
@@ -1029,4 +1243,5 @@ void ChunkManager::releaseTreeSets() {
         }
         return true;
     });
+    if (treeSets.size() != before) ++treeSetsRevision_;
 }
