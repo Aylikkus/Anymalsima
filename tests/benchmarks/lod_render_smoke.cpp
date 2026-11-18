@@ -129,6 +129,8 @@ int main(int argc, char** argv) {
         // volumes, like the game).
         FloraRenderer flora(chunks, assets, world, renderer);
         TreeRenderer trees(chunks, assets, world, renderer);
+        flora.setBlockLight(&blockLight);
+        trees.setBlockLight(&blockLight);
         double treesMaxMs = 0;
         double floraMaxMs = 0;
         std::vector<TilePos> lamps;

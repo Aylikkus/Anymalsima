@@ -191,6 +191,9 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         *chunkManager, *context.assets, *this->world, *context.renderer);
     treeRenderer = std::make_unique<TreeRenderer>(
         *chunkManager, *context.assets, *this->world, *context.renderer);
+    // Coloured lamps tint plants and crowns (declared after blockLight).
+    floraRenderer->setBlockLight(blockLight.get());
+    treeRenderer->setBlockLight(blockLight.get());
     treeRenderer->setVoxelLandmarks(terrainLod->drawsTreeWood());
     // Trees hand their wood over to blocks only where render() draws them.
     treeRenderer->setChunkDrawn([this](const ChunkCoord& c) {

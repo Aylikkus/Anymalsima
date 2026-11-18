@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "flora_generator.hpp"
+#include "foliage_light.hpp"
 #include "ground_cover_climate.hpp"
 #include "items/ground_cover.hpp"
 
@@ -104,10 +105,15 @@ void FloraRenderer::rebuild(const ChunkCoord& coord, ChunkPlants& cache,
         plant.y = anchorY + 1;
         const int tx = int(std::floor(plant.x)), tz = int(std::floor(plant.z));
         // Light of the air tile the plant stands in.
-        float sun = 1, block = 0;
+        float sun = 1, block = foliage_light::pack(0, 0, foliage_light::White);
         if (const Tile* above = chunks.tileAt(tx, anchorY + 1, tz)) {
             sun = above->lightLevel.sun_exposure / 15.f;
-            block = above->lightLevel.artificial_light / 15.f;
+            const int level = above->lightLevel.artificial_light;
+            block = foliage_light::pack(
+                level, level,
+                level
+                    ? foliage_light::at(chunks, blockLight, tx, anchorY + 1, tz)
+                    : foliage_light::White);
         }
         // Ground colour: the cover's climate tint, faded to bare soil by
         // its density.

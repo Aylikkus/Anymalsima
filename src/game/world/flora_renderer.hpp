@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "block_light_propagator.hpp"
 #include "chunk_manager.hpp"
 #include "flora_mesh_builder.hpp"
 #include "light_renderer.hpp"
@@ -47,6 +48,12 @@ class FloraRenderer {
                 const Frustum& frustum, LightRenderer& lights, double now,
                 double today, ShaderProperty& water);
 
+    // Source of block light chroma (coloured lamps tint plants); optional,
+    // must outlive the renderer. Without it block light is white.
+    void setBlockLight(const BlockLightPropagator* light) {
+        blockLight = light;
+    }
+
     size_t drawnPlants() const { return drawn; }
     size_t drawCalls() const { return calls; }
     size_t meshCount() const { return meshes.size(); }
@@ -62,8 +69,10 @@ class FloraRenderer {
     struct Plant {
         uint32_t mesh;
         double x, y, z;  // base, world (canonical X)
-        float data[12];  // i_data0.w .. i_data3 except the position
-        float fade;      // fade distance (also data[11])
+        // i_data0.w .. i_data3 except the position; data[10] is the packed
+        // block light (foliage_light::pack).
+        float data[12];
+        float fade;  // fade distance (also data[11])
     };
     struct ChunkPlants {
         std::vector<Plant> plants;
@@ -93,6 +102,7 @@ class FloraRenderer {
         lightConnection, removedConnection;
     std::vector<float> speciesFade;  // by Flora id - 1
     double lastToday = 0;
+    const BlockLightPropagator* blockLight = nullptr;
     size_t drawn = 0, calls = 0;
     double cpuMs = 0;
 };

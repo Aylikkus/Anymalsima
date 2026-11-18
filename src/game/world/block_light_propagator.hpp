@@ -34,6 +34,11 @@ class BlockLightPropagator {
     // Two bytes per cell (Co, Cg relative to luma, 128 = white); see
     // encodeChroma(). Chunks reached only by white light have none.
     using Chroma = std::array<uint8_t, Cells * 2>;
+    // Cell of chunk-local tile (x, y, z) in light and Chroma arrays (two
+    // bytes per cell there).
+    static int index(int x, int y, int z) {
+        return (z * Chunk::SIZE_Y + y) * Chunk::SIZE_X + x;
+    }
 
     // registry: optional; receives far block lights and supplies entity
     // lights. Must outlive the propagator.
@@ -103,9 +108,6 @@ class BlockLightPropagator {
         bool lit = false;  // published light is not all zero
     };
 
-    static int index(int x, int y, int z) {
-        return (z * Chunk::SIZE_Y + y) * Chunk::SIZE_X + x;
-    }
     static Result compute(Input input);
     // Near field of a far light: direct line of sight from the emitter to
     // every cell of the target chunk within `limit`.

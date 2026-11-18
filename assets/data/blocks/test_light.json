@@ -10,10 +10,10 @@
         },
         "light": {
             "enabled": true,
-            "radius": 1024,
+            "radius": 13,
             "falloff": 1.0,
             "intensity": 1.0,
-            "color": [1.0, 0, 0]
+            "color": [1.0, 1.0, 1.0]
         }
     }
 ]

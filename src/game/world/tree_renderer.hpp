@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "block_light_propagator.hpp"
 #include "chunk_manager.hpp"
 #include "light_renderer.hpp"
 #include "render/frustrum.hpp"
@@ -69,6 +70,11 @@ class TreeRenderer {
     // drawn, so the hand-over never shows a gap. Default: an uploaded mesh.
     using ChunkDrawn = std::function<bool(const ChunkCoord&)>;
     void setChunkDrawn(ChunkDrawn drawn) { chunkDrawn = std::move(drawn); }
+    // Source of block light chroma (coloured lamps tint crowns); optional,
+    // must outlive the renderer. Without it block light is white.
+    void setBlockLight(const BlockLightPropagator* light) {
+        blockLight = light;
+    }
     std::vector<TreeWoodSource> landmarkWood(double today) const;
     double cpuMilliseconds() const { return cpuMs; }
 
@@ -86,6 +92,8 @@ class TreeRenderer {
         // lights its lower part, not the whole tree.
         float blockBase = 0, blockCrown = 0;
         Color3 ground;
+        // Chroma of the brightest block light sampled (encodeChroma bytes).
+        std::array<uint8_t, 2> blockChroma{128, 128};
     };
 
     // Collects the trees of the built region sets within DistantEnd of the
@@ -131,6 +139,7 @@ class TreeRenderer {
     // prisms) meanwhile, so leaves never hang over missing wood.
     bool woodPending(const TreeInstance& tree) const;
     ChunkDrawn chunkDrawn;
+    const BlockLightPropagator* blockLight = nullptr;
     size_t drawn = 0, calls = 0;
     double cpuMs = 0;
     bool voxelLandmarks = false;

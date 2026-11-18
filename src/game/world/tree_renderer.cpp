@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 
+#include "foliage_light.hpp"
 #include "ground_cover_climate.hpp"
 #include "items/ground_cover.hpp"
 
@@ -45,6 +46,9 @@ TreeRenderer::TreeDraw TreeRenderer::describe(const TreeInstancePtr& tree) {
     const int near = int(k.trunkRadius) + 1;
     float sun = 0, blockBase = 0, blockCrown = 0;
     bool air = false;
+    // Colour of the brightest block light sampled (one per tree).
+    int brightest = 0;
+    std::array<int, 3> brightestAt{};
     const auto sample = [&](int y, int r, float& block, bool sky) {
         for (const auto [dx, dz] :
              {std::pair{r, 0}, std::pair{-r, 0}, std::pair{0, r},
@@ -53,7 +57,12 @@ TreeRenderer::TreeDraw TreeRenderer::describe(const TreeInstancePtr& tree) {
             const Tile* t = chunks.tileAt(a.x + dx, y, a.z + dz);
             if (!t || !t->isAir()) continue;
             air = true;
-            block = std::max(block, t->lightLevel.artificial_light / 15.f);
+            const int level = t->lightLevel.artificial_light;
+            block = std::max(block, level / 15.f);
+            if (level > brightest) {
+                brightest = level;
+                brightestAt = {a.x + dx, y, a.z + dz};
+            }
             if (sky) sun = std::max(sun, t->lightLevel.sun_exposure / 15.f);
         }
     };
@@ -65,6 +74,10 @@ TreeRenderer::TreeDraw TreeRenderer::describe(const TreeInstancePtr& tree) {
         draw.sun = sun;
         draw.blockBase = blockBase;
         draw.blockCrown = blockCrown;
+        if (brightest > 0)
+            draw.blockChroma =
+                foliage_light::at(chunks, blockLight, brightestAt[0],
+                                  brightestAt[1], brightestAt[2]);
     }
     // Ground colour under the tree: its cover's climate tint.
     if (const Tile* ground = chunks.tileAt(a.x, a.y, a.z);
@@ -297,7 +310,7 @@ void TreeRenderer::drawBillboards(RenderTarget& target, const Camera& camera,
                 BareGround.b,
                 0,
                 1,
-                0,
+                foliage_light::pack(0, 0, foliage_light::White),
                 float(end),
                 r.fallback ? 0.f : DistantEnd};
             out.insert(out.end(), std::begin(data), std::end(data));
@@ -503,11 +516,11 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
                 float(in.x - ex), float(in.y - ey), float(in.z - ez), in.yaw, 1,
                 1, 1, seed, in.draw->ground.r, in.draw->ground.g,
                 in.draw->ground.b, in.wither, in.draw->sun,
-                // Base and crown block light, 4 bits
-                // each (foliage.frag, tree mode).
-                float(int(in.draw->blockBase * 15 + .5f) * 16 +
-                      int(in.draw->blockCrown * 15 + .5f)) /
-                    255.f,
+                // Base and crown block light and its colour
+                // (foliage.vert, tree mode).
+                foliage_light::pack(int(in.draw->blockBase * 15 + .5f),
+                                    int(in.draw->blockCrown * 15 + .5f),
+                                    in.draw->blockChroma),
                 in.fade, 0};
             std::copy(std::begin(data), std::end(data), v);
         }
