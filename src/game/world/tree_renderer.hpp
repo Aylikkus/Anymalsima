@@ -1,6 +1,7 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -62,6 +63,12 @@ class TreeRenderer {
     // prisms. landmarkWood lists them with their wood age, quantized to
     // growth buckets.
     void setVoxelLandmarks(bool on) { voxelLandmarks = on; }
+    // Whether the caller draws this chunk's blocks this frame (detail
+    // coverage, radius and an uploaded mesh, possibly empty). A tree with
+    // voxel wood drops its bark prisms only when every chunk of its wood is
+    // drawn, so the hand-over never shows a gap. Default: an uploaded mesh.
+    using ChunkDrawn = std::function<bool(const ChunkCoord&)>;
+    void setChunkDrawn(ChunkDrawn drawn) { chunkDrawn = std::move(drawn); }
     std::vector<TreeWoodSource> landmarkWood(double today) const;
     double cpuMilliseconds() const { return cpuMs; }
 
@@ -119,10 +126,11 @@ class TreeRenderer {
     int gatheredX = INT_MIN, gatheredZ = INT_MIN;
     uint64_t frame = 0, gatheredFrame = 0, gatheredRevision = ~0ULL,
              gatheredSets = ~0ULL;
-    // True while a detailed tree's wood chunks are still meshing: its
-    // crown is drawn whole (distant mesh with bark prisms) meanwhile, so
-    // leaves never hang over missing wood.
+    // True until every chunk of a detailed tree's wood is drawn (see
+    // setChunkDrawn): its crown is drawn whole (distant mesh with bark
+    // prisms) meanwhile, so leaves never hang over missing wood.
     bool woodPending(const TreeInstance& tree) const;
+    ChunkDrawn chunkDrawn;
     size_t drawn = 0, calls = 0;
     double cpuMs = 0;
     bool voxelLandmarks = false;

@@ -118,6 +118,10 @@ class GameplayState : public IGameState {
         std::chrono::steady_clock::now();
     // Shadow caster passes of the far lights due this frame.
     void renderShadowCasters(RenderTarget& target, double now);
+    // Whether render() draws this chunk's blocks: inside the detail chunk
+    // box around the camera target and in a detailed column (frustum and
+    // mesh aside). Shared by the chunk pass, shadow casters and trees.
+    bool detailChunk(const ChunkCoord& coord) const;
     UIContext* uiContext = nullptr;
     std::optional<Vec2u> focusRegion;
     ShaderProperty u_texture_array;

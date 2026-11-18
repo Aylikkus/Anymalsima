@@ -263,6 +263,10 @@ int main(int argc, char** argv) {
                 world, assets, pool, TerrainLod::Qualities[0],
                 structure || std::getenv("SMOKE_FOREST") ? &edits : nullptr);
             trees.setVoxelLandmarks(lod.drawsTreeWood());
+            // As the handover pass below draws chunks.
+            trees.setChunkDrawn([&](const ChunkCoord& c) {
+                return lod.drawsColumn(c.x, c.z) && chunks.hasUploadedMesh(c);
+            });
             if (lights) {
                 std::vector<ShaderProperty*> patchLights, blockLights;
                 lightRenderer.appendUniforms(patchLights,

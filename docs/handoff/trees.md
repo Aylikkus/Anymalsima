@@ -684,6 +684,13 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   cover a region until its tree set arrives and account for cuts, planting,
   removals and landmark exclusion. Distant meshes keep the branches that
   carry visible foliage and supply bark where voxel wood is not yet uploaded.
+- Wood hand-over: a tree in the detailed chunks keeps its distant mesh (bark
+  prisms) until every chunk of its wood bounds is actually drawn
+  (`TreeRenderer::setChunkDrawn`; in the game `GameplayState::detailChunk`
+  plus an uploaded mesh, the same rule as the chunk pass). It used to switch
+  as soon as no chunk was still meshing, while the terrain detail coverage
+  (enter radius 6, whole column uploaded) had not yet handed the column to
+  blocks, so big trees such as redwoods vanished for a few frames.
 
 
 ### Landmark voxel wood at distance (done)

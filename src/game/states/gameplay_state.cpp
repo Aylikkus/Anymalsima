@@ -192,6 +192,10 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     treeRenderer = std::make_unique<TreeRenderer>(
         *chunkManager, *context.assets, *this->world, *context.renderer);
     treeRenderer->setVoxelLandmarks(terrainLod->drawsTreeWood());
+    // Trees hand their wood over to blocks only where render() draws them.
+    treeRenderer->setChunkDrawn([this](const ChunkCoord& c) {
+        return detailChunk(c) && chunkManager->hasUploadedMesh(c);
+    });
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
     blockLight->watch(*editor);
@@ -755,21 +759,13 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     Frustum frustum = Frustum::fromViewProj(vp);
 
     int camCX = int(camera.position.x) / Chunk::SIZE_X;
-    int camCY = int(camera.position.y) / Chunk::SIZE_Y;
-    int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
     const WorldWrap wrap = world->wrap();
 
     chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
         // Chunks are drawn at their copy nearest the camera, so the X seam
         // is invisible.
+        if (!detailChunk(coord)) return;
         const int64_t deltaX = wrap.deltaChunk(coord.x, camCX);
-        int dx = int(std::abs(deltaX));
-        int dy = std::abs(int(coord.y) - camCY);
-        int dz = std::abs(int(coord.z) - camCZ);
-
-        if (dx > CHUNK_RADIUS || dy > CHUNK_RADIUS || dz > CHUNK_RADIUS ||
-            !terrainLod->drawsColumn(coord.x, coord.z))
-            return;
 
         // Build the AABB for this chunk in world space.
         // X and Z are tile axes, Y is height (slab).
@@ -808,10 +804,17 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     ui_manager->render(target, context);
 }
 
-void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
+bool GameplayState::detailChunk(const ChunkCoord& coord) const {
     const int camCX = int(camera.position.x) / Chunk::SIZE_X;
     const int camCY = int(camera.position.y) / Chunk::SIZE_Y;
     const int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
+    return std::abs(world->wrap().deltaChunk(coord.x, camCX)) <= CHUNK_RADIUS &&
+           std::abs(int(coord.y) - camCY) <= CHUNK_RADIUS &&
+           std::abs(int(coord.z) - camCZ) <= CHUNK_RADIUS &&
+           terrainLod->drawsColumn(coord.x, coord.z);
+}
+
+void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
     const WorldWrap wrap = world->wrap();
     lightRenderer->renderShadows(
         target,
@@ -820,11 +823,7 @@ void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
             // The detailed chunks drawn this frame (render()'s selection),
             // placed at their copy nearest the light.
             chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
-                if (std::abs(wrap.deltaChunk(coord.x, camCX)) > CHUNK_RADIUS ||
-                    std::abs(int(coord.y) - camCY) > CHUNK_RADIUS ||
-                    std::abs(int(coord.z) - camCZ) > CHUNK_RADIUS ||
-                    !terrainLod->drawsColumn(coord.x, coord.z))
-                    return;
+                if (!detailChunk(coord)) return;
                 const double ox = double(coord.x) * Chunk::SIZE_X;
                 const double wx = l[0] + wrap.deltaX(ox + 8, l[0]) - 8;
                 const double lx = wx - l[0];

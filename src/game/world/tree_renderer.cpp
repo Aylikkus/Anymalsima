@@ -150,8 +150,8 @@ bool TreeRenderer::woodPending(const TreeInstance& tree) const {
                  ++cx) {
                 const int64_t x = wrap.enabled() ? wrap.wrapChunk(cx) : cx;
                 if (x < 0) continue;
-                if (chunks.meshPending(
-                        {unsigned(x), unsigned(cy), unsigned(cz)}))
+                const ChunkCoord c{unsigned(x), unsigned(cy), unsigned(cz)};
+                if (chunkDrawn ? !chunkDrawn(c) : !chunks.hasUploadedMesh(c))
                     return true;
             }
     return false;

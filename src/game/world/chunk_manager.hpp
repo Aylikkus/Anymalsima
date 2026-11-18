@@ -183,10 +183,6 @@ class ChunkManager {
     bool hasTreeSet(Vec2u region) const { return treeSets.contains(region); }
     // Increases whenever a region tree set is built or released.
     uint64_t treeSetsRevision() const { return treeSetsRevision_; }
-    // True while a requested chunk is still on its way to a current mesh
-    // (generating, or Ready with a mesh it can build). Chunks nobody
-    // requested, or waiting for unrequested neighbours, are not pending.
-    bool meshPending(const ChunkCoord& coord) const;
     // Far billboards of a region (regionBillboards), or null until built.
     // Cached until releaseBillboards.
     using BillboardSet = std::shared_ptr<const std::vector<TreeBillboard>>;

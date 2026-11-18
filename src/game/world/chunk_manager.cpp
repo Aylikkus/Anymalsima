@@ -1221,15 +1221,6 @@ void ChunkManager::wantTreeSets(const std::vector<Vec2u>& regions) {
     releaseTreeSets();
 }
 
-bool ChunkManager::meshPending(const ChunkCoord& coord) const {
-    const auto it = chunks.find(coord);
-    if (it == chunks.end()) return false;
-    const auto& h = it->second;
-    if (h.state == ChunkState::Queued) return true;
-    if (h.state != ChunkState::Ready || h.uploaded) return false;
-    return h.meshState == MeshState::Queued || canMesh(coord);
-}
-
 void ChunkManager::releaseTreeSets() {
     const int width = terrainWorld.width;
     const size_t before = treeSets.size();
