@@ -411,6 +411,16 @@ const Tile* ChunkManager::tileAt(int x, int y, int z) {
                                 [x % Chunk::SIZE_X]
                  : nullptr;
 }
+const RootVoxel* ChunkManager::rootAt(int x, int y, int z) {
+    x = int(wrap().wrapTile(x));
+    if (x < 0 || y < 0 || z < 0) return nullptr;
+    const auto* chunk =
+        getChunk({unsigned(x / Chunk::SIZE_X), unsigned(y / Chunk::SIZE_Y),
+                  unsigned(z / Chunk::SIZE_Z)});
+    return chunk ? chunk->rootAt(Chunk::cell(
+                       x % Chunk::SIZE_X, y % Chunk::SIZE_Y, z % Chunk::SIZE_Z))
+                 : nullptr;
+}
 void ChunkManager::unregister(const ChunkCoord& coord) {
     const auto found = chunks.find(coord);
     const bool existed = found != chunks.end();
@@ -1155,6 +1165,8 @@ void ChunkManager::dispatchGeneration() {
                         // buildable air the structure's block ID is the
                         // baseline.
                         const auto& grown = treeRules->grown();
+                        const bool reshapeRoots = result->legacyRootShape;
+                        if (reshapeRoots) result->restoreRootSubstrate(grown);
                         bool baselineChanged = !savedBaseline && baseline;
                         if (savedBaseline) {
                             try {
@@ -1183,8 +1195,11 @@ void ChunkManager::dispatchGeneration() {
                                             int(coord.y) * Chunk::SIZE_Y + y;
                                         const Tile& tile =
                                             result->tiles[z][y][x];
+                                        const auto* root = result->rootAt(
+                                            Chunk::cell(x, y, z));
                                         const auto actual =
-                                            grown.test(tile.block_id)
+                                            root ? root->block
+                                            : grown.test(tile.block_id)
                                                 ? 0
                                                 : tile.block_id;
                                         const auto expected =
@@ -1203,16 +1218,27 @@ void ChunkManager::dispatchGeneration() {
                         GeneratedChunk out{result, true, edited, nullptr};
                         out.structuresUsed = structures;
                         out.baselineChanged = baselineChanged;
-                        // Chunks saved before trees existed get whole trees
-                        // once, into their air.
+                        const auto growRoots = [&](double since) {
+                            if (!columns) return false;
+                            const auto roots = treeRootChanges(
+                                *result, coord, *trees, *treeRules, *columns,
+                                since, day);
+                            applyTreeWoodChanges(*result, roots);
+                            return !roots.empty();
+                        };
                         // Chunks saved before trees existed get whole trees
                         // once; later ones catch up on growth and on cuts
                         // made while they were unloaded (only wood of the
                         // same tree generator version).
                         const auto addTrees = [&] {
+                            if (reshapeRoots) {
+                                growRoots(-INFINITY);
+                                out.treesPlaced = true;
+                            }
                             if (!out.trees.placed()) {
                                 placeTreeWood(*result, coord, *trees,
                                               *treeRules, day);
+                                if (!reshapeRoots) growRoots(-INFINITY);
                                 out.trees = stamp;
                                 out.treesPlaced = true;
                                 return;
@@ -1228,8 +1254,10 @@ void ChunkManager::dispatchGeneration() {
                                 treeWoodChanges(*result, coord, *trees,
                                                 *treeRules, out.trees.day, day);
                             applyTreeWoodChanges(*result, changes);
+                            out.treesPlaced = reshapeRoots ||
+                                              growRoots(out.trees.day) ||
+                                              !changes.empty();
                             out.trees.day = day;
-                            out.treesPlaced = !changes.empty();
                         };
                         if (storedFlora) {
                             try {
@@ -1266,6 +1294,11 @@ void ChunkManager::dispatchGeneration() {
                 if (!terrainAir)
                     generator.generateChunk(*result, coord, origin, region,
                                             layers, soil, columns.get());
+                if (columns && !terrainAir)
+                    applyTreeWoodChanges(
+                        *result,
+                        treeRootChanges(*result, coord, *trees, *treeRules,
+                                        *columns, -INFINITY, day));
                 if (stored && !hasOtherKinds)
                     slab = structures->rasterize(coord.y);
                 if (slab) structure_voxels::stamp(*result, *slab);

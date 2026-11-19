@@ -4,7 +4,7 @@ This document organizes the author's goals for the game. It describes the intend
 
 ## 1. The Game in One Paragraph
 
-A single-player, character-centered survival RPG and settlement simulation set in a persistent, autonomous world. The player experiences that world through a character, can travel, establish or join settlements, and potentially rise to political leadership. All living beings share an origin in an unnamed primordial white fox, whose dispersed energy allows life and civilizations to develop. People and animals grow through an isekai-inspired system of levels, stats, skill trees, and procedurally combined abilities; sufficiently developed wild creatures can awaken to human-like sapience. Societies own resources, preserve or lose knowledge, pursue interests, and react to events for understandable reasons. The game combines settlement depth and vertical terrain with personal progression, exploration, and useful delegation, while targeting modest computers.
+A single-player, character-centered survival RPG and settlement simulation set in a persistent, autonomous world. The player experiences that world through a character, can travel, establish or join settlements, and potentially rise to political leadership. An unnamed white fox is one of several primordial beings. Her dispersed energy allows life and civilizations to develop. People and animals grow through an isekai-inspired system of levels, stats, skill trees, and procedurally combined abilities; sufficiently developed wild creatures can awaken to human-like sapience. Societies own resources, preserve or lose knowledge, pursue interests, and react to events for understandable reasons. The game combines settlement depth and vertical terrain with personal progression, exploration, and useful delegation, while targeting modest computers.
 
 ## 2. Inspirations & Desired Experience
 
@@ -82,9 +82,11 @@ The layers should feel distinct in terrain, light, materials, and inhabitants, n
 
 **Proposed technical direction:** treat each layer as its own vertical band with separate save data, lighting, and generation. Leave the empty 1024–2048 gap unstored and only pass through it. Unlike the overworld's height-map terrain, islands and caverns need 3D generation. The underworld is enclosed and likely needs no distant-terrain rendering. Islands need their own. Systems built before these layers exist should avoid assuming a single Y range that starts at zero.
 
-### Primordial fox and the origin of life
+### Primordial beings and the origin of life
 
-**Author's lore premise:** an unnamed, large, white, fluffy fox is a primordial being. She disperses herself and spreads her energy through the world, after which life and societies develop. Humans are one expression of this shared origin, alongside elves, dwarves, goblins, slimes, and other creatures. Wild creatures can accumulate enough energy to become sapient and establish civilizations of their own.
+An unnamed, large, white, fluffy fox is one of several primordial beings. She disperses herself and spreads her energy through the world, after which life and societies develop. Humans are one expression of this shared origin, alongside elves, dwarves, goblins, slimes, and other creatures. Wild creatures can accumulate enough energy to become sapient and establish civilizations of their own.
+
+At the dawn of creation, primordial beings planted the original elder trees. These elders already stand in a newly generated world. The other primordial beings' identities and roles are open.
 
 Clicking “Create World” could represent this dispersal, followed by procedural development and history. Whether the fox is gone, dormant, still conscious, or able to return is undecided. The creation sequence is a lore concept, not a requirement for an expensive animation or a full physical simulation of creation.
 
@@ -200,12 +202,13 @@ Vertical deposits should make excavation and material choice meaningful. Ore can
 
 ### Trees and great trees
 
-Direction from the author (recorded 2026-11-17; technical plan in `docs/handoff/trees.md`):
+The [tree lifecycle handoff](docs/handoff/tree-lifecycle.md) covers roots, growth, and forest renewal.
 
-- **From shrubs to world trees.** Trees range from thin mountain pines to rare world-scale landmarks, a handful per continent, with trunks up to about 128 m wide and heights up to about 120 m. A tree never grows into a ceiling or past the build limit; it spreads instead, so trees also grow indoors and on mountain tops.
+- **From shrubs to world trees.** Trees range from thin mountain pines to rare world-scale landmarks, a handful per continent. An elder can span a kilometre and reach across several regions. When a ceiling or the build limit stops upward growth, a tree spreads outward, so trees can also grow indoors and on mountain tops.
+- **Immortal landmarks.** Elders and other trees above the size limit for natural forest renewal live indefinitely and never seed on their own. A player can raise an elder from a seed with patience and very rare items carrying special energy. The source of those items and the nature of that energy are open.
 - **Trees are terrain.** Trunks and limbs thick enough are blocks that can be cut, climbed, and built upon; leaves and thin twigs are not. Peoples such as elves can make homes on and in great trees.
-- **Cutting and regrowth.** Without physics, cutting a trunk or limb removes what is above the cut, and the tree regrows from the cut. Whether a stump resprouts depends on the species. Once physics exists, a cut tree should fall instead.
-- **Death leaves the wood.** When a tree dies, its leaves fall but all its wood stays. Some peoples (for example elves) may live on great trees and prolong their lives; other species that inhabit tree houses do not care. How a settlement reacts when its tree dies is open.
+- **Cutting and regrowth.** Trees can regrow from cuts, and some species resprout from a surviving stump. A severed elder trunk settles. Its limbs can be cut, and even losing its entire base cannot kill the tree. Ordinary felled trunks and branches can fall once physics supports it.
+- **Forest renewal.** Smaller trees and redwoods can seed new trees nearby and die. A dead tree withers from the crown down to a stump. Elders and redwoods grow roots down through soil and rock. In mortal trees, those roots decay more slowly from the tips inward, returning to soil or rock. How a settlement reacts when a tree it lives in dies is open.
 - **Growth accelerators.** Growth is compressed by size (small trees mature in about a game year, massive ones in centuries). Fertilizers and special abilities can speed up growth and possibly extend a tree's life; details are open.
 
 ### Temperature, fluids, and phase changes

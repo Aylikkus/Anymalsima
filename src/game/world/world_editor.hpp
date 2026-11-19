@@ -28,12 +28,15 @@ struct EditRequest {
     TilePos pos;
     EditMode mode = EditMode::Place;
     uint8_t block = 0;  // ignored by Remove
+    bool treeGrowth = false;
+    uint64_t rootOwner = 0;  // root growth claims natural substrate
 };
 
 struct BlockChange {
     TilePos pos;
     Tile before;
     Tile after;
+    bool wasRoot = false;
 };
 
 // The single entry point for gameplay changes to world tiles: the player,

@@ -105,7 +105,9 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     BlockChange change{pos, {}, {}};
     chunks.withChunkLocked(coord, [&](Chunk& chunk) {
         Tile& tile = chunk.tiles[lz][ly][lx];
+        const auto cell = Chunk::cell(lx, ly, lz);
         change.before = tile;
+        change.wasRoot = chunk.rootAt(cell) != nullptr;
         switch (request.mode) {
             case EditMode::Place:
                 if (tile.isSolid()) {
@@ -124,11 +126,29 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         }
         const uint8_t block =
             request.mode == EditMode::Remove ? 0 : request.block;
+        if (request.rootOwner &&
+            (chunk.legacyRootTerrain || chunk.rootEdited(cell) ||
+             !tile.isSolid() || tile.isLiquid() ||
+             chunks.grownBlocks().test(tile.block_id))) {
+            status = EditStatus::Blocked;
+            return;
+        }
+        if (request.treeGrowth && change.wasRoot) {
+            status = EditStatus::Blocked;
+            return;
+        }
         if (tile.block_id == block &&
             (block == 0 || tile.liquid == LiquidType::None)) {
+            if (!request.treeGrowth && tile.isSolid() && !change.wasRoot &&
+                chunk.markRootEdited(cell))
+                pending.modified.insert(coord);
             status = EditStatus::Unchanged;
             return;
         }
+        if (request.rootOwner)
+            chunk.recordRoot(cell, request.rootOwner, tile);
+        else if (!request.treeGrowth)
+            chunk.markRootEdited(cell);
         tile.block_id = block;
         // A new or removed block never keeps the old block's ground cover.
         tile.clearCover();

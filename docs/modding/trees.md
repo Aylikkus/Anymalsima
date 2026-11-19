@@ -40,8 +40,7 @@ are always mesh-only, and massive species are placed as landmarks.
 
 To make a mesh-only species, set the maximum `trunk_radius_m` below 0.5.
 Thin trees never create wood blocks, even when the root flare widens the
-mesh. This differs from natural aging: if a tree loses its last ground
-support or a voxel trunk is severed at the base, the tree disappears.
+mesh. A thin tree disappears if it loses its last ground support.
 
 ## Files
 
@@ -137,7 +136,8 @@ forests.
 | `crown_radius_m` | 0.2 to 192 (default 3) | horizontal reach of branches and foliage |
 
 **Reach limit.** For every tree except massive ones, the widest extent
-(crown, or flared roots if wider) plus `spacing_m` must stay within 96 m:
+(crown, trunk flare, or underground root reach, whichever is widest) plus
+`spacing_m` must stay within 96 m:
 worlds decide where trees stand chunk by chunk and only look that far
 around. Massive trees are placed from a world-wide list and may extend up to
 192 m from their trunk.
@@ -147,7 +147,7 @@ around. Massive trees are placed from a world-wide list and may extend up to
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `maturity_days` | 365 | game days from germination to full size |
-| `lifespan_days` | 36500 | game days until the tree dies; must be at least `maturity_days` |
+| `lifespan_days` | 36500 | game days until a mortal tree dies. Must be at least `maturity_days`. Massive species are immortal. |
 | `curve` | 2 | growth shape: size fraction `1 - (1 - age/maturity)^curve`; higher grows fast while young and slows toward maturity |
 
 A game day is 72 real minutes, so growth is compressed by class: small trees
@@ -181,6 +181,27 @@ All optional. How each is used depends on the form.
 | --- | --- |
 | `block` | the living wood block (must have `natural_growth`) for parts thicker than 0.5 m radius |
 | `bark` | a foliage material for the thinner branches drawn as meshes; match its palette to the block texture |
+
+### `roots`
+
+Omit this object to disable subsurface roots. Elder and redwood enable it.
+A species can enable roots when its maximum trunk radius reaches 0.5 m.
+Individual trees form root voxels once their sampled trunk can form wood.
+The shallow root base starts at the width of the flared trunk. Tapered
+branches fork outward as the tree matures.
+They use the species' `wood.block` and replace natural soil and rock while
+respecting water, cavities and player edits. `form_params.root_flare`
+independently controls the above-ground buttress.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `depth_m` | 4 | Maximum depth below the base, 2 to 64 m |
+| `reach_m` | 8 | Target horizontal reach from the trunk centre, 1 to 256 m. The roots always cover the width of the trunk base. Ordinary species still use the 96 m reach-plus-spacing limit. |
+| `branches` | 4 | Number of main root branches, each with two forks, 1 to 12 |
+
+Saved slabs with prototype roots are reshaped using their recorded
+substrate. Slabs saved before root tracking keep their ground as-is.
+Newly generated slabs can grow roots, including in an older world.
 
 ### `foliage`
 
@@ -220,7 +241,9 @@ the stump and closes the cut, so the tree stays whole, one block shorter
 (the elder). A settling trunk is cut only once its whole cross-section at
 that height is broken, however thin it is there. Removing the whole first
 row of a trunk (unless it settles), or the ground under a tree's base,
-kills the tree and removes it from the world. Thin parts
+kills a mortal tree. Living roots at the base can support their own tree
+when you excavate around it. Massive trees retain their cuts and survive
+complete base loss. Thin parts
 (up to 2 m radius) are cut by breaking any of their wood; thicker ones only
 once their whole cross-section at that height is broken, so felling a
 giant takes work. A thick branch is cut once its part beyond your slit no

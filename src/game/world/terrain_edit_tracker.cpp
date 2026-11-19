@@ -105,10 +105,12 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     break;
                 }
                 const Tile& tile = chunk->tiles[lz][y % Chunk::SIZE_Y][lx];
+                const auto* root =
+                    chunk->rootAt(Chunk::cell(lx, y % Chunk::SIZE_Y, lz));
                 if (y <= surface && tile.isSolid() &&
-                    !grown.test(tile.block_id)) {
+                    (root || !grown.test(tile.block_id))) {
                     ground = y;
-                    block = tile.block_id;
+                    block = root ? root->block : tile.block_id;
                     break;
                 }
                 if (water < 0 && tile.isLiquid()) water = y + 1;

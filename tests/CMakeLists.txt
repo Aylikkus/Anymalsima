@@ -349,7 +349,9 @@ foreach(case tree_skeleton_deterministic tree_sizes_follow_species
              tree_sets_wanted_by_renderer streaming_progresses_with_huge_queue
              streaming_withdraws_stale_requests tree_regrowth_starts_on_stump
              streaming_new_chunks_sky_lit tree_regrowth_takes_time
-             tree_crown_mesh_never_ahead_of_wood)
+             tree_crown_mesh_never_ahead_of_wood tree_immortal_landmark
+             tree_roots_wrap_and_preserve_substrate
+             tree_live_roots_respect_edits_and_support)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;flora;trees" TIMEOUT 30)

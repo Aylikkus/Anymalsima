@@ -120,6 +120,8 @@ class ChunkManager {
     Chunk* getChunk(const ChunkCoord& coord);
     std::shared_ptr<Chunk> getChunkShared(const ChunkCoord& coord);
     const Tile* tileAt(int tx, int ty, int tz);
+    // Main-thread view of the substrate under a living root.
+    const RootVoxel* rootAt(int x, int y, int z);
     void unregister(const ChunkCoord& coord);
     void markDirty(const ChunkCoord& coord, bool urgent = false);
     void markAllDirty();

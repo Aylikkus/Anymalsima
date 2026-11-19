@@ -48,6 +48,9 @@ class TreeSpeciesTable {
     const FloraSpeciesTable& sites() const { return siteTable; }
     // Living wood block ids (natural_growth).
     const GrownBlockSet& grown() const { return grownBlocks; }
+    bool rootSubstrate(uint8_t block) const {
+        return rootSubstrates.test(block) && !grownBlocks.test(block);
+    }
     // Ordinary (non-landmark) trees: the furthest a tree reaches from its
     // anchor, and the widest spacing between two trees.
     double maxExtent() const { return extent; }
@@ -65,6 +68,7 @@ class TreeSpeciesTable {
     std::vector<int> byId;
     FloraSpeciesTable siteTable;
     GrownBlockSet grownBlocks;
+    std::bitset<256> rootSubstrates;
     double extent = 0, spacing = 0, landmarkExtent = 0;
     std::shared_ptr<TreeSkeletonCache> variants =
         std::make_shared<TreeSkeletonCache>(1024);
@@ -78,6 +82,7 @@ struct TreeInstance {
     TreeAnchor anchor;     // canonical X
     int32_t birthDay = 0;  // game day it germinated (negative: before day 0)
     TreeSkeletonPtr skeleton;  // turned by `rotation`
+    TreeSkeletonPtr roots;     // independent of the crown and its cut indices
     // Shared shape (TreeSpeciesTable::variant) or -1 for a tree of its own
     // (landmarks; trees whose branches the ground prunes).
     int8_t variant = -1;
@@ -85,7 +90,9 @@ struct TreeInstance {
     // Cuts applied to the skeleton (TreeRecord::cuts): chunks loaded later
     // clear the wood of cuts made after their stamp.
     std::vector<TreeCut> cuts;
-    TreeTileBox wood;       // tiles that can hold its wood, full grown
+    TreeTileBox wood;  // tiles that can hold its wood, full grown
+    TreeTileBox rootWood;
+    float rootReach = 0;
     TreeTileBox bounds;     // wood and foliage
     double discRadius = 0;  // trunk with root flare, on the ground
     float age(double day) const { return float(day - double(birthDay)); }
@@ -183,6 +190,7 @@ TreeColumn makeTreeColumn(unsigned chunkX, unsigned chunkZ,
 struct TreeWoodChange {
     int index;
     uint8_t block;
+    uint64_t rootOwner = 0;
 };
 std::vector<TreeWoodChange> treeWoodChanges(const Chunk& chunk,
                                             const ChunkCoord& coord,
@@ -216,10 +224,20 @@ inline void applyTreeWoodChanges(Chunk& chunk,
                                  const std::vector<TreeWoodChange>& changes) {
     for (const auto& c : changes) {
         Tile& tile = (&chunk.tiles[0][0][0])[c.index];
+        if (c.rootOwner) chunk.recordRoot(uint16_t(c.index), c.rootOwner, tile);
         tile.block_id = c.block;
         if (c.block) tile.clearCover();
     }
 }
+
+// Roots replace only eligible natural terrain. A separate path keeps buried
+// wood out of the air-only structure proxy and skylight projections.
+std::vector<TreeWoodChange> treeRootChanges(const Chunk& chunk,
+                                            const ChunkCoord& coord,
+                                            const TreeColumn& column,
+                                            const TreeSpeciesTable& table,
+                                            const ChunkColumnInputs& terrain,
+                                            double since, double today);
 
 // Writes the column's wood at `day` into the air tiles of one chunk.
 // Returns the number of tiles written.

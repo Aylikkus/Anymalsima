@@ -48,19 +48,35 @@ Bytes encode(const Chunk& chunk) {
     for (const auto k : palette)
         for (int b = 0; b < KeyBytes; ++b)
             out.write(uint8_t((k >> 8 * b) & 0xFF));
-    if (palette.size() == 1) return out.take();
-
-    BinaryWriter raw;
-    const bool wide = palette.size() > 256;
-    for (const auto index : indices) {
-        if (wide)
-            raw.write(index);
-        else
-            raw.write(uint8_t(index));
+    if (palette.size() > 1) {
+        BinaryWriter raw;
+        const bool wide = palette.size() > 256;
+        for (const auto index : indices) {
+            if (wide)
+                raw.write(index);
+            else
+                raw.write(uint8_t(index));
+        }
+        const auto packed = compression::compress(raw.bytes());
+        out.write(uint8_t(1));
+        out.writeBlock(packed);
     }
-    const auto packed = compression::compress(raw.bytes());
-    out.write(uint8_t(1));
-    out.writeBlock(packed);
+    if (chunk.legacyRootTerrain || chunk.legacyRootShape || chunk.rootTerrain) {
+        out.write(uint8_t((chunk.legacyRootTerrain ? 1 : 0) |
+                          (chunk.legacyRootShape ? 2 : 0)));
+        static const RootTerrain empty;
+        const auto& data = chunk.rootTerrain ? *chunk.rootTerrain : empty;
+        out.write(uint16_t(data.roots.size()));
+        for (const auto& [cell, root] : data.roots) {
+            out.write(cell);
+            out.write(root.owner);
+            out.write(root.block);
+            out.write(root.cover);
+            out.write(root.coverState);
+        }
+        out.write(uint16_t(data.edited.size()));
+        for (const auto cell : data.edited) out.write(cell);
+    }
     return out.take();
 }
 
@@ -90,27 +106,63 @@ void decode(ByteView data, Chunk& chunk) {
     Tile* tiles = flat(chunk);
     if (count == 1) {
         std::fill(tiles, tiles + Volume, palette[0]);
-        return;
-    }
-    const auto codec = in.read<uint8_t>();
-    const bool wide = count > 256;
-    const size_t rawSize = Volume * (wide ? 2 : 1);
-    const auto stored = in.readBlock();
-    Bytes raw;
-    if (codec == 0) {
-        raw.assign(stored.begin(), stored.end());
-    } else if (codec == 1) {
-        raw = compression::decompress(stored, rawSize);
     } else {
-        throw SerializationError("unknown chunk codec");
+        const auto codec = in.read<uint8_t>();
+        const bool wide = count > 256;
+        const size_t rawSize = Volume * (wide ? 2 : 1);
+        const auto stored = in.readBlock();
+        Bytes raw;
+        if (codec == 0) {
+            raw.assign(stored.begin(), stored.end());
+        } else if (codec == 1) {
+            raw = compression::decompress(stored, rawSize);
+        } else {
+            throw SerializationError("unknown chunk codec");
+        }
+        if (raw.size() != rawSize) throw SerializationError("bad chunk size");
+        BinaryReader indices(raw);
+        for (size_t i = 0; i < Volume; ++i) {
+            const uint16_t index =
+                wide ? indices.read<uint16_t>() : indices.read<uint8_t>();
+            if (index >= count) throw SerializationError("bad palette index");
+            tiles[i] = palette[index];
+        }
     }
-    if (raw.size() != rawSize) throw SerializationError("bad chunk size");
-    BinaryReader indices(raw);
-    for (size_t i = 0; i < Volume; ++i) {
-        const uint16_t index =
-            wide ? indices.read<uint16_t>() : indices.read<uint8_t>();
-        if (index >= count) throw SerializationError("bad palette index");
-        tiles[i] = palette[index];
+    chunk.legacyRootTerrain = version < 3;
+    chunk.legacyRootShape = version == 3;
+    chunk.rootTerrain.reset();
+    if (!in.atEnd()) {
+        if (version < 3) throw SerializationError("trailing chunk data");
+        const auto flags = in.read<uint8_t>();
+        if (flags > (version == 3 ? 1 : 3))
+            throw SerializationError("bad chunk root flags");
+        chunk.legacyRootTerrain = flags & 1;
+        chunk.legacyRootShape |= (flags & 2) != 0;
+        auto data = std::make_shared<RootTerrain>();
+        const auto roots = in.read<uint16_t>();
+        if (roots > Volume || (chunk.legacyRootTerrain && roots))
+            throw SerializationError("bad root count");
+        for (uint16_t i = 0; i < roots; ++i) {
+            const auto cell = in.read<uint16_t>();
+            RootVoxel root{in.read<uint64_t>(), in.read<uint8_t>(),
+                           in.read<uint8_t>(), in.read<uint8_t>()};
+            if (cell >= Volume || !tiles[cell].isSolid() || !root.owner ||
+                !root.block || (!root.cover && root.coverState) ||
+                !data->roots.emplace(cell, root).second)
+                throw SerializationError("bad root provenance");
+        }
+        const auto edits = in.read<uint16_t>();
+        if (size_t(roots) + edits > Volume ||
+            (chunk.legacyRootTerrain && edits))
+            throw SerializationError("bad root edit count");
+        for (uint16_t i = 0; i < edits; ++i) {
+            const auto cell = in.read<uint16_t>();
+            if (cell >= Volume || data->roots.contains(cell) ||
+                !data->edited.insert(cell).second)
+                throw SerializationError("bad root edit cell");
+        }
+        if (!in.atEnd()) throw SerializationError("trailing chunk data");
+        if (roots || edits) chunk.rootTerrain = std::move(data);
     }
 }
 

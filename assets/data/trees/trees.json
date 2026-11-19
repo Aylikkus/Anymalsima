@@ -121,6 +121,7 @@
                          "droop": 0.2, "taper": 0.9, "gnarl": 0.1,
                          "root_flare": 0.5, "branch_orders": 2 },
         "wood": { "block": "blocks.redwood_wood", "bark": "foliage.bark_redwood" },
+        "roots": { "depth_m": 4, "reach_m": 26, "branches": 7 },
         "foliage": { "type": "needle_clump", "material": "foliage.redwood_needles",
                      "clump_size_m": [2, 3], "density": 1.5 },
         "placement": {
@@ -150,6 +151,7 @@
                          "droop": 0.15, "taper": 0.6, "gnarl": 0.3,
                          "root_flare": 0.5, "branch_orders": 3 },
         "wood": { "block": "blocks.elder_wood", "bark": "foliage.bark_elder" },
+        "roots": { "depth_m": 16, "reach_m": 150, "branches": 9 },
         "foliage": { "type": "leaf_clump", "material": "foliage.elder_leaf",
                      "clump_size_m": [5, 8], "density": 1.0 },
         "placement": {

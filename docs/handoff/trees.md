@@ -2,8 +2,9 @@
 
 Status: **steps 1 to 7 done** (data; skeletons and rasterizer; world
 generation; crown rendering; growth and life; cutting and regrowth; distant
-trees). Step 8 (seasons, seeding, wood items, physics, canopy shade, decay,
-growth accelerators) is future work. See [Progress](#progress). How to make tree
+trees). [Tree roots and forest renewal](tree-lifecycle.md) gives the current
+design for landmark immortality, seeding, decay and simulation tiers.
+See [Progress](#progress) for the implemented behavior. How to make tree
 species as a modder: `docs/modding/trees.md`. Trees reuse the flora
 pipeline (`docs/handoff/flora.md`): placement rules, foliage materials,
 the foliage program and the world clock.
@@ -305,9 +306,9 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
    - Tests: a root cut per flag, a mid-trunk cut that regrows from the cut,
      and wounds that do not sever.
 7. **Distant trees:** impostors and the massive voxel proxy.
-8. **Later:** seasons and deciduous trees, seeding and forest renewal, wood
-   items, felling physics, canopy shade, dead-wood decay, growth
-   accelerators.
+8. **Next tree work:** [roots, wood interiors and forest renewal](tree-lifecycle.md).
+   Seasons, wood items, felling physics, canopy shade and general growth
+   accelerators remain future work.
 
 ## Verification per step
 

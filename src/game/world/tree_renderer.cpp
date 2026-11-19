@@ -528,9 +528,8 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
             : std::sqrt(ax * ax + az * az) < NearDistance + k.crownRadius * 0.5
                 ? tree_foliage::Detail::Near
                 : tree_foliage::Detail::Far;
-        const bool bare = age >= k.lifespan || k.dead;
-        const float wither = std::clamp(
-            (age - 0.97f * k.lifespan) / (0.03f * k.lifespan), 0.f, 1.f);
+        const bool bare = !k.alive(age);
+        const float wither = k.withering(age);
         const int bucket = tree_foliage::bucket(
             tree.growthAge(today), k.matureAge(), k.growthPhaseStart());
         const uint64_t tail =

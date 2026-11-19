@@ -166,6 +166,33 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                         anchor.z + int(std::ceil(hi.z)) + 1}
                 .intersect(box);
         if (local.empty()) return;
+        if (s.flags & TreeSegment::RootPlate) {
+            // The flared trunk continues beneath its lowest face, tapering
+            // by layer. A capsule here would create a deep bulb on elders.
+            const int top = std::min(local.y1 - 1, anchor.y);
+            const int bottom =
+                std::max(local.y0, anchor.y + int(std::ceil(s.b.y + 0.5f)));
+            if (top < bottom) return;
+            const bool lobed = skeleton.flare.lobes > 0;
+            for (int z = local.z0; z < local.z1; ++z)
+                for (int x = local.x0; x < local.x1; ++x) {
+                    const auto d = centre(anchor, x, top, z) - s.a;
+                    const float distance2 = d.x * d.x + d.z * d.z;
+                    if (distance2 > rMax * rMax + RadiusSlack2) continue;
+                    const float baseRadius = skeleton.radius(
+                        s, 0, age, lobed ? std::atan2(d.z, d.x) : 0.f);
+                    for (int y = top; y >= bottom; --y) {
+                        const float t = float(anchor.y - y) / (s.a.y - s.b.y);
+                        const float radius =
+                            baseRadius * std::lerp(1.f, s.r1 / s.r0, t);
+                        if (radius < TreeVoxelRadius ||
+                            distance2 > radius * radius + RadiusSlack2)
+                            break;
+                        mask[box.index(x, y, z)] = 1;
+                    }
+                }
+            return;
+        }
         const bool lobed = s.order == 0 && skeleton.flare.lobes > 0 &&
                            !(s.flags & TreeSegment::Sprout);
         const float window = length > 1e-4f ? (rMax + 1) / length : 1;

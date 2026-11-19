@@ -66,6 +66,7 @@ class Builder {
         s.maturity = std::max(1.f, rng.sample(tree.growth.maturity_days));
         s.lifespan =
             std::max(s.maturity, rng.sample(tree.growth.lifespan_days));
+        if (tree.immortal()) s.lifespan = INFINITY;
         const float sampledHeight = rng.sample(tree.size.height_m);
         s.trunkRadius = rng.sample(tree.size.trunk_radius_m);
         s.crownRadius = rng.sample(tree.size.crown_radius_m);
@@ -748,7 +749,7 @@ class Builder {
             const bool root =
                 order == 0 &&
                 cutPoint.y < std::max(1.5f, s.flare.height * 0.5f);
-            if (root && !tree.cut.stump_resprouts) {
+            if (root && !tree.cut.stump_resprouts && !tree.immortal()) {
                 s.dead = true;
                 continue;
             }
@@ -1011,6 +1012,72 @@ float TreeSkeleton::matureAge() const {
 TreeSkeletonPtr buildTreeSkeleton(const Tree& species,
                                   const TreeSkeletonInput& input) {
     return Builder(species, input).run();
+}
+
+TreeSkeletonPtr buildTreeRoots(const Tree& species, const TreeSkeleton& crown,
+                               uint32_t seed) {
+    const auto& rule = species.roots;
+    if (!rule.branches || !crown.formsWood() || crown.segments.empty())
+        return {};
+    Rng rng{seed ^ 0x526f6f74u};
+    auto roots = std::make_shared<TreeSkeleton>();
+    roots->trunkRadius = crown.trunkRadius;
+    roots->curve = crown.curve;
+    const float maturity = crown.maturity;
+    roots->maturity = maturity;
+    roots->flare = crown.flare;
+    const auto basal = std::find_if(
+        crown.segments.begin(), crown.segments.end(), [](const auto& s) {
+            return s.live() && s.order == 0 && s.a.y <= 0 && s.b.y >= 0;
+        });
+    if (basal == crown.segments.end()) return {};
+    const float t = -basal->a.y / std::max(1e-3f, basal->b.y - basal->a.y);
+    const TreeVec base = lerp(basal->a, basal->b, t);
+    const float radius = std::lerp(basal->r0, basal->r1, t);
+    const float born = std::lerp(basal->birthA, basal->birthB, t);
+    const float plateDepth = std::clamp(rule.depth_m * 0.55f, 2.f, 6.f);
+    roots->segments.push_back({{base.x, -0.5f, base.z},
+                               {base.x, 0.5f - plateDepth, base.z},
+                               radius,
+                               radius * 0.58f,
+                               born,
+                               born,
+                               basal->matureAge,
+                               -1,
+                               0,
+                               0,
+                               TreeSegment::RootPlate});
+
+    const float phase = rng.range(0, 2 * Pi);
+    const auto at = [&](float angle, float distance, float depth) {
+        return TreeVec{base.x + std::cos(angle) * distance, -depth,
+                       base.z + std::sin(angle) * distance};
+    };
+    const auto add = [&](TreeVec a, TreeVec b, float r0, float r1,
+                         float startAge, float tipAge, int32_t parent) {
+        roots->segments.push_back({a, b, r0, r1, startAge * maturity,
+                                   tipAge * maturity, maturity, parent, 1, 1});
+    };
+    for (int branch = 0; branch < rule.branches; ++branch) {
+        const float angle = phase + 2 * Pi * float(branch) / rule.branches +
+                            rng.range(-0.18f, 0.18f);
+        const float rim = crown.fullRadius(*basal, t, angle);
+        const float thickness =
+            std::clamp(rim * 0.23f, 0.65f, rule.depth_m * 0.65f);
+        const float reach = std::max(rim, rule.reach_m);
+        const float forkReach = std::lerp(rim * 0.74f, reach, 0.48f);
+        const auto fork =
+            at(angle, forkReach, rule.depth_m * rng.range(0.35f, 0.5f));
+        const auto parent = int32_t(roots->segments.size());
+        add(at(angle, rim * 0.7f, std::min(1.5f, rule.depth_m * 0.3f)), fork,
+            thickness, std::max(0.6f, thickness * 0.52f), 0.2f, 0.56f, 0);
+        for (const float turn : {-0.29f, 0.29f})
+            add(fork,
+                at(angle + turn, reach * rng.range(0.84f, 0.98f),
+                   rule.depth_m * rng.range(0.5f, 0.8f)),
+                std::max(0.54f, thickness * 0.5f), 0.35f, 0.56f, 0.89f, parent);
+    }
+    return roots;
 }
 
 TreeSkeletonPtr applyTreeCuts(const TreeSkeleton& skeleton, const Tree& species,

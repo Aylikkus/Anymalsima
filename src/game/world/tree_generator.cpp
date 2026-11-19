@@ -6,6 +6,8 @@
 #include <unordered_map>
 
 #include "ground_cover_generator.hpp"
+#include "items/rock.hpp"
+#include "items/soil.hpp"
 #include "tree_wood_lod.hpp"
 
 namespace {
@@ -13,6 +15,26 @@ constexpr double Area = 100.0;  // m² of density_per_100m2
 constexpr int RegionTiles = TerrainTuning::RegionX;
 
 uint32_t hash32(double unit) { return uint32_t(unit * 4294967295.0); }
+
+void attachRoots(TreeInstance& tree, const Tree& species) {
+    tree.roots = buildTreeRoots(species, *tree.skeleton, tree.seed);
+    if (!tree.roots) return;
+    tree.rootWood = treeWoodBounds(*tree.roots, tree.anchor);
+    const auto& base = tree.roots->segments.front();
+    tree.rootReach = std::max(species.roots.reach_m,
+                              base.r0 * (1 + tree.roots->flare.amount) +
+                                  std::hypot(base.a.x, base.a.z) + 0.5f);
+    const int reach = int(std::floor(tree.rootReach));
+    const auto& a = tree.anchor;
+    tree.rootWood.x0 = std::max(tree.rootWood.x0, a.x - reach);
+    tree.rootWood.x1 = std::min(tree.rootWood.x1, a.x + reach + 1);
+    tree.rootWood.z0 = std::max(tree.rootWood.z0, a.z - reach);
+    tree.rootWood.z1 = std::min(tree.rootWood.z1, a.z + reach + 1);
+    tree.rootWood.y0 =
+        std::max({0, tree.rootWood.y0,
+                  tree.anchor.y - int(std::ceil(species.roots.depth_m)) + 1});
+    tree.rootWood.y1 = tree.anchor.y + 1;
+}
 }  // namespace
 
 TreeSpeciesTable::TreeSpeciesTable(const IAssets& assets) : siteTable(assets) {
@@ -21,6 +43,19 @@ TreeSpeciesTable::TreeSpeciesTable(const IAssets& assets) : siteTable(assets) {
     if (!assets.hasStorage<Tree>() || !assets.hasStorage<Block>()) return;
     const auto& all = assets.getStorage<Tree>();
     const auto& blocks = assets.getStorage<Block>();
+    const auto addSubstrate = [&](const std::string& name) {
+        if (const auto it = blocks.indexByName.find(name);
+            it != blocks.indexByName.end() && !blocks.items[it->second].light)
+            rootSubstrates.set(blocks.items[it->second].id);
+    };
+    if (assets.hasStorage<Rock>())
+        for (const auto& rock : assets.getStorage<Rock>().items)
+            addSubstrate(rock.block_name);
+    if (assets.hasStorage<Soil>())
+        for (const auto& soil : assets.getStorage<Soil>().items) {
+            addSubstrate(soil.block_name);
+            if (soil.topsoil_block_name) addSubstrate(*soil.topsoil_block_name);
+        }
     byId.assign(all.items.size(), -1);
     for (const auto& tree : all.items) {
         TreeSpeciesRule r;
@@ -39,10 +74,12 @@ TreeSpeciesTable::TreeSpeciesTable(const IAssets& assets) : siteTable(assets) {
             it != blocks.indexByName.end())
             r.woodBlock = blocks.items[it->second].id;
         if (!r.landmark) {
-            extent = std::max(extent, double(tree.extent()));
+            extent = std::max(
+                {extent, double(tree.extent()), double(tree.roots.reach_m)});
             spacing = std::max(spacing, double(tree.spacing_m.max));
         } else {
-            landmarkExtent = std::max(landmarkExtent, double(tree.extent()));
+            landmarkExtent = std::max({landmarkExtent, double(tree.extent()),
+                                       double(tree.roots.reach_m)});
         }
         byId[tree.id - 1] = int(rules.size());
         rules.push_back(std::move(r));
@@ -343,6 +380,7 @@ TreeInstancePtr RegionGenerator::build(const TreeSpeciesRule& r, int64_t x,
         input.ground = ground;
         tree->skeleton = buildTreeSkeleton(r.species, input);
     }
+    attachRoots(*tree, r.species);
     // Cut generated trees: their saved cuts, on their own skeleton.
     if (in.overrides && !in.lightweight)
         if (const auto it = in.overrides->find(key);
@@ -528,6 +566,13 @@ void finishTreeInstance(TreeInstance& tree) {
                        std::max(tree.bounds.x1, tree.wood.x1),
                        std::max(tree.bounds.y1, tree.wood.y1),
                        std::max(tree.bounds.z1, tree.wood.z1)};
+    if (!tree.rootWood.empty())
+        tree.bounds = {std::min(tree.bounds.x0, tree.rootWood.x0),
+                       std::min(tree.bounds.y0, tree.rootWood.y0),
+                       std::min(tree.bounds.z0, tree.rootWood.z0),
+                       std::max(tree.bounds.x1, tree.rootWood.x1),
+                       std::max(tree.bounds.y1, tree.rootWood.y1),
+                       std::max(tree.bounds.z1, tree.rootWood.z1)};
     tree.discRadius = k.trunkRadius * (1 + k.flare.amount) + 0.5;
 }
 
@@ -555,6 +600,7 @@ TreeInstancePtr buildPlantedTree(const TreeSpeciesTable& table,
     input.seed = record.seed;
     input.headroom = record.headroom;
     tree->skeleton = buildTreeSkeleton(rule->species, input);
+    attachRoots(*tree, rule->species);
     if (!record.cuts.empty())
         tree->skeleton =
             applyTreeCuts(*tree->skeleton, rule->species, record.cuts);
@@ -738,7 +784,8 @@ std::vector<TreeWoodChange> filterTreeWood(const Chunk& chunk,
         size_t(Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z));
     std::vector<TreeWoodChange> out;
     for (const auto& c : delta.remove)
-        if (!seen[size_t(c.index)] && tiles[c.index].block_id == c.block) {
+        if (!seen[size_t(c.index)] && tiles[c.index].block_id == c.block &&
+            !chunk.rootAt(uint16_t(c.index))) {
             seen[size_t(c.index)] = 1;
             out.push_back({c.index, 0});
         }
@@ -757,6 +804,65 @@ std::vector<TreeWoodChange> treeWoodChanges(const Chunk& chunk,
                                             double since, double today) {
     return filterTreeWood(chunk,
                           treeWoodDelta(coord, column, table, since, today));
+}
+
+std::vector<TreeWoodChange> treeRootChanges(const Chunk& chunk,
+                                            const ChunkCoord& coord,
+                                            const TreeColumn& column,
+                                            const TreeSpeciesTable& table,
+                                            const ChunkColumnInputs& terrain,
+                                            double since, double today) {
+    std::vector<TreeWoodChange> changes;
+    if (chunk.legacyRootTerrain || since >= today) return changes;
+    constexpr int Side = Chunk::SIZE_X;
+    const int x0 = int(coord.x) * Side, y0 = int(coord.y) * Side,
+              z0 = int(coord.z) * Side;
+    const TreeTileBox slab{x0, y0, z0, x0 + Side, y0 + Side, z0 + Side};
+    std::vector<uint8_t> before, after;
+    std::bitset<Side * Side * Side> claimed;
+    for (const auto& entry : column.trees) {
+        const auto& tree = *entry.tree;
+        if (!tree.roots) continue;
+        const float start = tree.growthAge(since), end = tree.growthAge(today);
+        if (start >= tree.roots->maturity || end <= start) continue;
+        const int shift = entry.anchor.x - tree.anchor.x;
+        auto box = tree.rootWood;
+        box.x0 += shift;
+        box.x1 += shift;
+        box = box.intersect(slab);
+        if (box.empty()) continue;
+        const auto* species = table.find(tree.species);
+        if (!species || !species->woodBlock) continue;
+        const float reach = tree.rootReach;
+        markTreeWood(*tree.roots, entry.anchor, box, end, after);
+        if (std::none_of(after.begin(), after.end(),
+                         [](auto value) { return value; }))
+            continue;
+        markTreeWood(*tree.roots, entry.anchor, box, start, before);
+        for (int z = box.z0; z < box.z1; ++z)
+            for (int x = box.x0; x < box.x1; ++x) {
+                const float dx = float(x - entry.anchor.x);
+                const float dz = float(z - entry.anchor.z);
+                if (dx * dx + dz * dz > reach * reach) continue;
+                const int lx = x - x0, lz = z - z0;
+                const int surface = terrain.columns[lz * Side + lx].surface_y;
+                for (int y = box.y0; y <= std::min(box.y1 - 1, surface); ++y) {
+                    const size_t i = box.index(x, y, z);
+                    if (!after[i] || before[i]) continue;
+                    const int ly = y - y0;
+                    const auto cell = Chunk::cell(lx, ly, lz);
+                    const Tile& tile = chunk.tiles[lz][ly][lx];
+                    if (claimed.test(cell) || !tile.isSolid() ||
+                        tile.isLiquid() ||
+                        !table.rootSubstrate(tile.block_id) ||
+                        chunk.rootEdited(cell))
+                        continue;
+                    claimed.set(cell);
+                    changes.push_back({cell, species->woodBlock, tree.key});
+                }
+            }
+    }
+    return changes;
 }
 
 int placeTreeWood(Chunk& chunk, const ChunkCoord& coord,

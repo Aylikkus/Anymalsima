@@ -5,6 +5,12 @@
 
 // Compact per-chunk encoding for save files.
 //
+// v4: v3 layout with the shallow root shape. Flag bit 1 retains a pending
+//     shape migration if a decoded chunk is encoded before reconciliation.
+// v3: v2 palette and indices, with an optional tail for root terrain.
+//     Tail: u8 flags (bit 0: legacy terrain), u16 rootCount,
+//     {u16 cell, u64 owner, u8 block, u8 cover, u8 coverState} per root,
+//     then u16 editCount and u16 per edited cell.
 // v2: u8 version, u16 paletteCount, palette {block_id, liquid, liquidLevel,
 //     cover, coverState}.
 //     paletteCount == 1 → uniform chunk, nothing follows.
@@ -16,7 +22,7 @@
 // and decoded tiles have zeroed light.
 namespace chunk_codec {
 
-inline constexpr uint8_t Version = 2;
+inline constexpr uint8_t Version = 4;
 inline constexpr uint8_t MinVersion = 1;
 
 Bytes encode(const Chunk& chunk);

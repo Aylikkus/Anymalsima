@@ -96,7 +96,9 @@ void TreeSimulation::applyChanges(const ChunkCoord& coord,
                              int(coord.y) * Chunk::SIZE_Y + ly,
                              int(coord.z) * Chunk::SIZE_Z + lz},
                             EditMode::Replace,
-                            c.block});
+                            c.block,
+                            true,
+                            c.rootOwner});
     }
     applying = true;
     editor.apply(requests);
@@ -115,6 +117,16 @@ void TreeSimulation::update(double now) {
             [&](unsigned cx, unsigned cz, const TreeColumn& column) {
                 int low = INT_MAX, high = INT_MIN;
                 for (const auto& e : column.trees) {
+                    const auto& roots = e.tree->rootWood;
+                    const int shift = e.anchor.x - e.tree->anchor.x;
+                    if (!roots.empty() &&
+                        roots.x0 + shift < int(cx + 1) * Chunk::SIZE_X &&
+                        roots.x1 + shift > int(cx) * Chunk::SIZE_X &&
+                        roots.z0 < int(cz + 1) * Chunk::SIZE_Z &&
+                        roots.z1 > int(cz) * Chunk::SIZE_Z) {
+                        low = std::min(low, roots.y0);
+                        high = std::max(high, roots.y1 - 1);
+                    }
                     if (e.tree->wood.empty()) continue;
                     low = std::min(low, e.tree->wood.y0);
                     high = std::max(high, e.tree->wood.y1 - 1);
@@ -135,8 +147,14 @@ void TreeSimulation::update(double now) {
         const auto column = chunks.treeColumn(coord.x, coord.z);
         const auto tiles = chunks.getChunkShared(coord);
         if (!column || !tiles) continue;
-        const auto changes = treeWoodChanges(
-            *tiles, coord, *column, chunks.treeSpecies(), stamp.day, day);
+        auto changes = treeWoodChanges(*tiles, coord, *column,
+                                       chunks.treeSpecies(), stamp.day, day);
+        if (const auto terrain = chunks.generatedColumns(coord.x, coord.z)) {
+            auto roots =
+                treeRootChanges(*tiles, coord, *column, chunks.treeSpecies(),
+                                *terrain, stamp.day, day);
+            changes.insert(changes.end(), roots.begin(), roots.end());
+        }
         applyChanges(coord, changes);
         chunks.setTreeStamp(coord, {day, TreeVersion}, !changes.empty());
     }
@@ -650,7 +668,7 @@ void TreeSimulation::blockChanged(const BlockChange& change) {
     if (applying || !change.before.block_id ||
         change.after.block_id == change.before.block_id)
         return;
-    woodRemoved(change);
+    if (!change.wasRoot) woodRemoved(change);
     if (change.before.isSolid() && !change.after.isSolid())
         checkBases(change.pos);
 }
@@ -664,6 +682,8 @@ void TreeSimulation::checkBases(TilePos pos) {
     // Copy: killing a tree rebuilds the column.
     std::vector<TreeColumn::Entry> dying;
     for (const auto& entry : column->trees) {
+        const auto* rule = chunks.treeSpecies().find(entry.tree->species);
+        if (!rule || rule->species.immortal()) continue;
         const auto& a = entry.anchor;
         // Only the anchor layer and the first wood row form the base.
         if (pos.y < a.y || pos.y > a.y + 1) continue;
@@ -687,7 +707,12 @@ bool TreeSimulation::baseLost(const TreeColumn::Entry& entry) {
         for (int x = -span; x <= span && !ground; ++x) {
             if (double(x * x + z * z) > radius * radius && (x || z)) continue;
             const Tile* t = chunks.tileAt(a.x + x, a.y, a.z + z);
-            ground = !t || t->isSolid();
+            if (!t) {
+                ground = true;
+            } else if (t->isSolid()) {
+                const auto* root = chunks.rootAt(a.x + x, a.y, a.z + z);
+                ground = !root || root->owner == tree.key;
+            }
         }
     if (!ground) return true;
     // Wood: a trunk cut at the ground leaves no stump to grow from (a
@@ -1018,7 +1043,7 @@ std::string TreeSimulation::describe(TilePos tile, double now) const {
             << " / mature " << int(k.matureAge()) << " days, " << int(k.height)
             << " m";
         if (!tree.cuts.empty()) out << ", " << tree.cuts.size() << " cut(s)";
-        if (k.dead || age >= k.lifespan) out << ", dead";
+        if (!k.alive(age)) out << ", dead";
         if (tree.key & TreeRecord::PlantedBit) out << ", planted";
         return out.str();
     }

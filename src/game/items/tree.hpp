@@ -86,6 +86,12 @@ struct TreeWood {
     std::string bark;   // FoliageMaterial for branches thinner than blocks
 };
 
+struct TreeRoots {
+    float depth_m = 0;
+    float reach_m = 0;
+    int branches = 0;
+};
+
 struct TreeFoliage {
     TreeFoliageType type = TreeFoliageType::LeafClump;
     std::string material;  // FoliageMaterial
@@ -124,6 +130,7 @@ struct Tree {
     TreeGrowthRule growth;
     TreeFormParams form_params;
     TreeWood wood;
+    TreeRoots roots;
     TreeFoliage foliage;
     FloraRules placement;
     ValueRange spacing_m{4};  // minimum distance to other trees
@@ -133,19 +140,22 @@ struct Tree {
         return treeSizeClass(size.trunk_radius_m.max);
     }
     bool landmark() const { return sizeClass() == TreeSizeClass::Massive; }
+    bool immortal() const { return landmark(); }
     // Widest horizontal extent from the anchor: crown or flared roots.
     float extent() const {
         return std::max(size.crown_radius_m.max,
                         size.trunk_radius_m.max * (1 + form_params.root_flare));
     }
-    float reach() const { return extent() + spacing_m.max; }
+    float reach() const {
+        return std::max(extent(), roots.reach_m) + spacing_m.max;
+    }
 };
 
 inline void from_json(const Json& j, Tree& t) {
     using namespace flora_json;
     known(j, "tree",
-          {"name", "form", "size", "growth", "form_params", "wood", "foliage",
-           "placement", "cut"});
+          {"name", "form", "size", "growth", "form_params", "wood", "roots",
+           "foliage", "placement", "cut"});
     t.name = name(j, "name");
     try {
         if (!j.contains("form")) fail("form", "missing tree form");
@@ -230,6 +240,24 @@ inline void from_json(const Json& j, Tree& t) {
             t.foliage.material = name(f, "material");
             range(f, "clump_size_m", t.foliage.clump_size_m, 0.05f, 16);
             t.foliage.density = number(f, "density", 1, 0, 4);
+        }
+
+        if (j.contains("roots")) {
+            const auto& r = j.at("roots");
+            known(r, "roots", {"depth_m", "reach_m", "branches"});
+            if (t.size.trunk_radius_m.max < TreeVoxelRadius)
+                fail("roots", "roots require a voxel trunk");
+            t.roots.depth_m = number(r, "depth_m", 4, 2, 64);
+            t.roots.reach_m = number(r, "reach_m", 8, 1, 256);
+            if (r.contains("branches")) {
+                const auto& n = r.at("branches");
+                if (!n.is_number_integer() || n.get<int64_t>() < 1 ||
+                    n.get<int64_t>() > 12)
+                    fail("branches", "expected an integer in [1, 12]");
+                t.roots.branches = n.get<int>();
+            } else {
+                t.roots.branches = 4;
+            }
         }
 
         if (!j.contains("placement")) fail("placement", "missing placement");

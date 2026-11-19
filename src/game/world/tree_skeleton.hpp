@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -45,9 +46,10 @@ inline TreeVec lerp(TreeVec a, TreeVec b, float t) { return a + (b - a) * t; }
 // One capsule of wood. Ages are tree ages in game days.
 struct TreeSegment {
     enum Flags : uint8_t {
-        Pruned = 1,  // removed by a cut (kept so the cut wood can be found)
-        Sprout = 2,  // regrowth from a cut
-        CutEnd = 4,  // its end is a cut: the wood stops flat at it
+        Pruned = 1,     // removed by a cut (kept so the cut wood can be found)
+        Sprout = 2,     // regrowth from a cut
+        CutEnd = 4,     // its end is a cut: the wood stops flat at it
+        RootPlate = 8,  // flattened layers beneath the flared trunk
     };
     TreeVec a, b;          // metres from the anchor point
     float r0 = 0, r1 = 0;  // full-grown radius at a and b
@@ -145,6 +147,12 @@ struct TreeSkeleton {
     // Full-grown bounds of live wood and foliage, metres from the anchor.
     TreeVec boundsMin, boundsMax;
     bool dead = false;  // cut at the root of a species that does not resprout
+    bool alive(float age) const { return !dead && age < lifespan; }
+    float withering(float age) const {
+        if (!std::isfinite(lifespan)) return 0;
+        return std::clamp((age - 0.97f * lifespan) / (0.03f * lifespan), 0.f,
+                          1.f);
+    }
     // Thin trees (trunk thinner than a block) never form wood blocks, root
     // flare included: stem and branches are all meshes.
     bool formsWood() const { return trunkRadius >= TreeVoxelRadius; }
@@ -188,6 +196,8 @@ using TreeSkeletonPtr = std::shared_ptr<const TreeSkeleton>;
 
 TreeSkeletonPtr buildTreeSkeleton(const Tree& species,
                                   const TreeSkeletonInput& input);
+TreeSkeletonPtr buildTreeRoots(const Tree& species, const TreeSkeleton& crown,
+                               uint32_t seed);
 
 // Applies cuts[first..] to a finished skeleton (pruning and sprouts); cut i
 // is tagged i + 1. A tree cut while the game runs and the same tree rebuilt
