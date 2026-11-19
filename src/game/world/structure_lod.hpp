@@ -3,6 +3,7 @@
 #include <bx/math.h>
 
 #include <bitset>
+#include <functional>
 #include <future>
 #include <memory>
 #include <optional>
@@ -53,13 +54,27 @@ class StructureLod {
     // Returns the uploaded bytes, at most about `budget` (one oversized mesh
     // may use a whole frame).
     size_t upload(IRenderer& renderer, size_t budget);
-    // hidden(coord): the real chunk is drawn instead.
+    // Chunks the detail pass draws (level 0 slabs there need no proxy mesh
+    // while they stay well inside it). Set every frame by the owner; used by
+    // the next update.
+    using Drawn = std::function<bool(const ChunkCoord&)>;
+    void setChunkDrawn(Drawn drawn, ChunkCoord centre, int radius) {
+        chunkDrawn = std::move(drawn);
+        drawnCentre = centre;
+        drawnRadius = radius;
+    }
+    // hidden(coord): the real chunk is drawn instead. Retired proxies (a
+    // level change) stay drawn until all their replacements are drawable;
+    // the replacements wait meanwhile, so a level swap never shows a hole
+    // nor both levels at once.
     template <typename Hidden>
     void draw(RenderTarget& target, const Frustum& frustum,
               const Camera& camera, const std::string* shader,
               const std::vector<ShaderProperty*>& uniforms, Hidden&& hidden) {
+        releaseRetired(hidden);
         const float eyeX = camera.eye().x;
-        for (auto& [coord, proxy] : proxies) {
+        forEachDrawn(hidden, [&](const ChunkCoord& coord, Proxy& p) {
+            auto* proxy = &p;
             const int level = levelOf(coord);
             const auto base = baseOf(coord);
             const double span = spanOf(level);
@@ -68,9 +83,7 @@ class StructureLod {
             AABB bounds = proxy->bounds;
             bounds.maxX += x - bounds.minX;
             bounds.minX = x;
-            if (!proxy->drawable || !proxy->hasMesh ||
-                (level == 0 && hidden(coord)) || !frustum.intersects(bounds))
-                continue;
+            if (!frustum.intersects(bounds)) return;
             // Meshes are slab-local (ChunkMesher, in cells); place them by
             // the eye.
             auto transform =
@@ -80,7 +93,7 @@ class StructureLod {
             target.drawVertexBuffer(proxy->mesh.get(), shader, std::move(bound),
                                     false, std::move(transform),
                                     DrawLayer::GAME);
-        }
+        });
     }
     // Shadow caster pass of one light cube face (LightShadows): slabs inside
     // the light's sphere and the face frustum (light-relative coordinates).
@@ -90,11 +103,9 @@ class StructureLod {
                     const std::string* shader,
                     const std::vector<ShaderProperty*>& uniforms, uint16_t view,
                     Hidden&& hidden) {
-        for (auto& [coord, proxy] : proxies) {
+        forEachDrawn(hidden, [&](const ChunkCoord& coord, Proxy& p) {
+            auto* proxy = &p;
             const int level = levelOf(coord);
-            if (!proxy->drawable || !proxy->hasMesh ||
-                (level == 0 && hidden(coord)))
-                continue;
             const auto base = baseOf(coord);
             const double span = spanOf(level);
             const double x = drawTileX(base.x * span, span, float(light[0]));
@@ -106,19 +117,21 @@ class StructureLod {
             const double hx = lx + (b.maxX - b.minX), hy = b.maxY - light[1],
                          hz = b.maxZ - light[2];
             if (!LightShadowMath::reaches(lx, ly, lz, hx, hy, hz, radius))
-                continue;
+                return;
             if (!frustum.intersects(AABB{float(lx), float(ly), float(lz),
                                          float(hx), float(hy), float(hz)}))
-                continue;
+                return;
             auto transform = LightShadowMath::translation(
                 x - light[0], y - light[1], z - light[2]);
             scale(transform, level);
             target.drawShadowCaster(proxy->mesh.get(), shader,
                                     std::vector(uniforms), false,
                                     std::move(transform), view);
-        }
+        });
     }
-    size_t residentBytes() const { return resident + voxelResident; }
+    size_t residentBytes() const {
+        return resident + voxelResident + retiredBytes;
+    }
     // World X of chunk column cx at its copy nearest refX.
     float drawX(unsigned cx, float refX) const {
         return drawTileX(double(cx) * Chunk::SIZE_X, Chunk::SIZE_X, refX);
@@ -152,6 +165,34 @@ class StructureLod {
         m[10] *= s;
     }
     size_t count() const { return proxies.size(); }
+    size_t retiredCount() const { return retired.size(); }
+    // Debug: structure voxel slabs within `radius` of the eye that show
+    // nothing this frame (no drawn proxy, no drawn chunk): visible holes.
+    template <typename Hidden>
+    size_t gaps(Vec3 eye, float radius, Hidden&& hidden) const {
+        if (!voxels) return 0;
+        size_t out = 0;
+        for (const auto& [coord, slab] : *voxels) {
+            if (slab.enclosed) continue;
+            const int level = levelOf(coord);
+            const auto base = baseOf(coord);
+            const float span = float(spanOf(level));
+            const float x0 = drawTileX(base.x * span, span, eye.x);
+            const float y0 = base.y * span, z0 = base.z * span;
+            const float dx = std::max({x0 - eye.x, 0.f, eye.x - x0 - span});
+            const float dy = std::max({y0 - eye.y, 0.f, eye.y - y0 - span});
+            const float dz = std::max({z0 - eye.z, 0.f, eye.z - z0 - span});
+            if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
+            if (level == 0 && hidden(coord)) continue;
+            // Drawn, or still covered by the retired proxy it replaces.
+            if (shadowedByRetired(coord)) continue;
+            if (const auto it = proxies.find(coord);
+                it != proxies.end() && it->second->drawable)
+                continue;
+            ++out;
+        }
+        return out;
+    }
     // Slabs holding structure voxels, all levels or one (debug).
     size_t voxelSlabCount(int level = -1) const;
     using VoxelSlab = structure_voxels::Slab;
@@ -175,10 +216,87 @@ class StructureLod {
         uint64_t cpuRevision = 0;
         bool stale() const { return builtRevision < staleRevision; }
     };
+
+    // Keys of other levels overlapping `coord`'s box: its coarser parents
+    // and its finer children.
+    template <typename Visit>
+    static void forEachOverlap(const ChunkCoord& coord, Visit&& visit) {
+        const int level = levelOf(coord);
+        const auto base = baseOf(coord);
+        for (int l = level + 1; l <= MaxLevel; ++l) {
+            const int shift = l - level;
+            visit(withLevel({base.x >> shift, base.y >> shift, base.z >> shift},
+                            l));
+        }
+        for (int l = level - 1; l >= 0; --l) {
+            const unsigned n = 1u << (level - l);
+            for (unsigned z = 0; z < n; ++z)
+                for (unsigned y = 0; y < n; ++y)
+                    for (unsigned x = 0; x < n; ++x)
+                        visit(withLevel(
+                            {base.x * n + x, base.y * n + y, base.z * n + z},
+                            l));
+        }
+    }
+    // A wanted proxy whose area a retired proxy still draws.
+    bool shadowedByRetired(const ChunkCoord& coord) const {
+        if (retired.empty()) return false;
+        bool found = false;
+        forEachOverlap(coord, [&](const ChunkCoord& c) {
+            found = found || retired.contains(c);
+        });
+        return found;
+    }
+    // Releases retired proxies whose replacements all draw something (a
+    // proxy, their real chunk, or nothing because they hold no visible
+    // voxels).
+    template <typename Hidden>
+    void releaseRetired(Hidden&& hidden) {
+        for (auto it = retired.begin(); it != retired.end();) {
+            bool ready = true;
+            forEachOverlap(it->first, [&](const ChunkCoord& c) {
+                if (!ready || !voxels) return;
+                const auto slab = voxels->find(c);
+                if (slab == voxels->end() || slab->second.enclosed) return;
+                if (levelOf(c) == 0 && hidden(c)) return;
+                const auto p = proxies.find(c);
+                ready = p != proxies.end() && p->second->drawable;
+            });
+            if (!ready) {
+                ++it;
+                continue;
+            }
+            retiredBytes -= it->second->bytes;
+            it = retired.erase(it);
+        }
+    }
+    // Proxies to draw this frame: current ones not waiting for a retired
+    // proxy over them, then the retired ones.
+    template <typename Hidden, typename Fn>
+    void forEachDrawn(Hidden&& hidden, Fn&& fn) {
+        for (auto& [coord, proxy] : proxies) {
+            if (!proxy->drawable || !proxy->hasMesh ||
+                (levelOf(coord) == 0 && hidden(coord)) ||
+                shadowedByRetired(coord))
+                continue;
+            fn(coord, *proxy);
+        }
+        for (auto& [coord, proxy] : retired) {
+            if (!proxy->hasMesh || (levelOf(coord) == 0 && hidden(coord)))
+                continue;
+            fn(coord, *proxy);
+        }
+    }
     struct Job {
         ChunkCoord slab;
         uint64_t revision;
         std::future<ChunkMesh> future;
+    };
+    // A structure's rasterized slabs, merged with the ones it keeps on the
+    // worker (a massive tree holds thousands).
+    struct Built {
+        std::shared_ptr<const VoxelSlabs> slabs;
+        std::vector<ChunkCoord> changed;  // slabs added, replaced or gone
     };
 
     // One generated structure's voxels, planned per slab around the eye.
@@ -190,14 +308,17 @@ class StructureLod {
         std::unordered_set<ChunkCoord> covered;
         struct Build {
             structure_voxels::SourcePtr source;
-            std::unordered_set<ChunkCoord> plan;
-            std::future<VoxelSlabs> future;
-            // Keys rasterized by the job (empty results included).
-            std::unordered_set<ChunkCoord> rebuilt;
-            // The built slabs outside `rebuilt` stay (same voxels there).
-            bool keep = false;
+            std::shared_ptr<const std::unordered_set<ChunkCoord>> plan;
+            std::future<Built> future;
         };
         std::optional<Build> job;
+        // Where the wanted source may hold voxels, computed on the pool.
+        structure_voxels::SourcePtr occupancyFor;
+        structure_voxels::OccupancyPtr occupancy;
+        std::optional<std::future<structure_voxels::OccupancyPtr>> occupancyJob;
+        // Inputs of the last plan: nothing to do while they are the same.
+        std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
+        structure_voxels::SourcePtr plannedWanted, plannedBuilt;
         // A plan with slabs to rasterize, waiting for a job slot.
         std::vector<structure_voxels::Planned> pending;
         std::unordered_set<ChunkCoord> pendingPlan;
@@ -235,6 +356,18 @@ class StructureLod {
     // Wanted slabs, nearest first.
     std::vector<ChunkCoord> wanted;
     std::unordered_map<ChunkCoord, std::unique_ptr<Proxy>> proxies;
+    // Proxies that left the plan (a level change), drawn until their
+    // replacements are ready. Not counted against the budgets, so they never
+    // block their own replacements.
+    std::unordered_map<ChunkCoord, std::unique_ptr<Proxy>> retired;
+    size_t retiredBytes = 0;
+    Drawn chunkDrawn;
+    ChunkCoord drawnCentre{};
+    int drawnRadius = 0;
+    // Level 0 slabs drawn as real chunks this far inside the detail box get
+    // no proxy mesh (the player must walk this many chunks first).
+    static constexpr int DrawnMargin = 2;
+    bool coveredByChunks(const ChunkCoord& c) const;
     std::vector<Job> jobs;
     uint64_t revision = 1;
     size_t resident = 0;
@@ -248,6 +381,6 @@ class StructureLod {
     size_t budgetOf(const Proxy& proxy) const {
         return proxy.voxels ? voxelBudget : budget;
     }
-    static constexpr size_t MaxJobs = 2;
+    static constexpr size_t MaxJobs = 4;
     static constexpr size_t MaxVoxelJobs = 2;
 };

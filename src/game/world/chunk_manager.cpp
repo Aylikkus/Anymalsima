@@ -437,6 +437,24 @@ bool ChunkManager::isPersistDirty(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);
     return it != chunks.end() && it->second.persistDirty;
 }
+void ChunkManager::snapshotColumn(unsigned cx, unsigned cz,
+                                  RegionSnapshot& out) {
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    for (unsigned y = 0; y < Y_CHUNKS; ++y) {
+        const ChunkCoord coord{cx, y, cz};
+        auto it = chunks.find(coord);
+        if (it == chunks.end() || it->second.state != ChunkState::Ready ||
+            !it->second.persistDirty)
+            continue;
+        it->second.persistDirty = false;
+        const auto index = RegionData::localIndex(coord);
+        out.chunks.emplace_back(index,
+                                std::shared_ptr<const Chunk>(it->second.data));
+        out.flora.emplace_back(index, it->second.flora);
+        out.trees.emplace_back(index, it->second.trees);
+    }
+}
+
 RegionSnapshot ChunkManager::snapshotRegion(Vec2u region, bool copy) {
     RegionSnapshot snapshot;
     const ChunkCoord origin{region.x * CHUNKS_PER_REGION, 0,
@@ -733,6 +751,28 @@ void ChunkManager::dispatchGeneration() {
     };
     const auto order = generationQueue.nearest(focus, anchor, DispatchWindow);
     started = std::chrono::steady_clock::now();
+    // Whether the tree sets around a region are built, once per region and
+    // update: with a landmark in the world a chunk reads sets up to
+    // landmarkRadius regions away (hundreds of lookups), and the queue
+    // holds thousands of chunks of a few regions.
+    struct RegionTrees {
+        bool ready = false, asked = false;
+    };
+    std::unordered_map<uint64_t, RegionTrees> regionReady;
+    const auto regionState = [&](ChunkCoord c, Vec2u region) -> RegionTrees* {
+        const uint64_t column = (uint64_t{c.x} << 32) | c.z;
+        if (const auto it = columnInputs.find(column);
+            it != columnInputs.end() && it->second.trees)
+            return nullptr;  // the column is built
+        const auto [it, inserted] =
+            regionReady.try_emplace((uint64_t{region.x} << 32) | region.y);
+        if (inserted) it->second.ready = treesReady(c, region);
+        return &it->second;
+    };
+    const auto treesReadyMemo = [&](ChunkCoord c, Vec2u region) {
+        const auto* state = regionState(c, region);
+        return !state || state->ready;
+    };
     size_t next = 0;
     int air = 0;
     // The starvation guard picks the oldest chunk at most once per update
@@ -755,7 +795,7 @@ void ChunkManager::dispatchGeneration() {
             picked = generationQueue.best(
                 focus, true,
                 [&](ChunkCoord c) {
-                    return treesReady(c, pending.at(c).region->coord);
+                    return treesReadyMemo(c, pending.at(c).region->coord);
                 },
                 anchor);
             oldest = picked.has_value();
@@ -770,6 +810,15 @@ void ChunkManager::dispatchGeneration() {
         const auto coord = *picked;
         const auto& info = pending.at(coord);
         const auto identity = chunks.at(coord).identity;
+        // Waiting for tree sets: ask for them once per region and move on
+        // before computing the column (a whole window of waiting chunks
+        // used to sample its terrain every update).
+        if (auto* state = regionState(coord, info.region->coord);
+            state && !state->ready) {
+            if (!state->asked) prepareTrees(coord, info.region->coord);
+            state->asked = true;
+            continue;
+        }
         const auto columns = prepareColumns(coord, *info.region);
         // Trees first: a chunk waits until the tree sets of the regions
         // around it are built (it stays queued meanwhile).
@@ -874,8 +923,12 @@ void ChunkManager::dispatchGeneration() {
                                 out.treesPlaced = true;
                                 return;
                             }
+                            // The same day still catches up on cuts: the
+                            // chunk may have been saved earlier that day,
+                            // before the cut (its wood would stay, unseen
+                            // high up, and shade the ground below).
                             if (out.trees.version != TreeVersion ||
-                                out.trees.day >= day)
+                                out.trees.day > day)
                                 return;
                             const auto changes =
                                 treeWoodChanges(*result, coord, *trees,

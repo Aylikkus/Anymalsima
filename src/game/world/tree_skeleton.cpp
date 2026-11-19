@@ -717,6 +717,7 @@ class Builder {
             below.r1 = r;
             below.birthB = birth;
             below.flags |= TreeSegment::CutEnd;
+            below.cutNormal = cut.normal;
             // Surviving children keep their physical attachment point on
             // the shortened parent. Later cuts use this new parameter range.
             for (const int32_t c : children[index]) {
@@ -729,7 +730,10 @@ class Builder {
                     f.pruned = true;
                 } else if (size_t(f.segment) == index &&
                            axis.dot(axis) > 1e-6f &&
-                           (f.position - cutPoint).dot(axis) > 0) {
+                           (f.position - cutPoint)
+                                   .dot(cut.normal.dot(cut.normal) > 0.5f
+                                            ? cut.normal
+                                            : axis) > 0) {
                     f.pruned = true;
                 }
             }

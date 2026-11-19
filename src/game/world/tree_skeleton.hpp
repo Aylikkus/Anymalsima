@@ -63,6 +63,9 @@ struct TreeSegment {
     // (TreeFell::Settle) appears at its cut, replacing the pruned original,
     // so the wood of any day before the cut is still the original's.
     float appear = 0;
+    // With CutEnd: normal of the cut face through b, pointing away from
+    // the stump (zero: along the segment). See TreeCut::normal.
+    TreeVec cutNormal{};
 
     bool live() const { return !(flags & Pruned); }
 };
@@ -84,8 +87,30 @@ struct TreeCut {
     int32_t segment = 0;
     float t = 0;
     float age = 0;
+    // The cut face through the cut point: zero for a plane perpendicular to
+    // the segment (thin parts, trunks, cuts saved before trees.dat v3),
+    // else the unit normal of the face the player sawed, pointing away from
+    // the stump (a grid row, or the plane fitted to a slanted slit). A
+    // sloping limb must end at its slit; a perpendicular plane through it
+    // would leave a wedge of blocks beyond the slit.
+    TreeVec normal{};
     bool operator==(const TreeCut&) const = default;
 };
+// Unit normal of a trees.dat v3 grid plane code (+-1..3: +-x, +-y, +-z;
+// zero for a perpendicular cut).
+inline TreeVec treeCutNormal(int8_t plane) {
+    const float sign = plane < 0 ? -1.f : 1.f;
+    switch (plane < 0 ? -plane : plane) {
+        case 1:
+            return {sign, 0, 0};
+        case 2:
+            return {0, sign, 0};
+        case 3:
+            return {0, 0, sign};
+        default:
+            return {0, 0, 0};
+    }
+}
 
 // Extra radius of the trunk near the ground (root flare and buttresses).
 struct TreeFlare {

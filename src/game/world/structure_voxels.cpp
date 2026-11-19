@@ -19,6 +19,18 @@ void Slab::merge(const Slab& other) {
     bits |= added;
 }
 
+void Occupancy::add(int sx, int sy, int sz) {
+    for (int level = 0; level <= MaxLevel; ++level) {
+        // Floor division by 2^level of possibly negative coordinates.
+        const auto down = [&](int v) { return v >> level; };
+        if (!slabs[size_t(level)]
+                 .insert(packSlab(down(sx), down(sy), down(sz)))
+                 .second &&
+            level > 0)
+            break;  // its parents are listed already
+    }
+}
+
 std::optional<ChunkCoord> keyOf(int level, int sx, int sy, int sz,
                                 const WorldWrap& wrap) {
     if (sy < 0 || sz < 0 || sy * spanOf(level) >= WORLD_HEIGHT_Y)
@@ -52,7 +64,8 @@ TileBox boxOf(const Planned& p) {
 
 std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
                           double eyeZ, const WorldWrap& wrap,
-                          const std::unordered_set<ChunkCoord>& previous) {
+                          const std::unordered_set<ChunkCoord>& previous,
+                          const Occupancy* occupancy) {
     std::vector<Planned> out;
     if (bounds.empty()) return out;
     // Distance from the eye to the part of a cell the structure fills.
@@ -74,6 +87,7 @@ std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
     };
     const auto split = [&](auto&& self, int level, int sx, int sy,
                            int sz) -> void {
+        if (occupancy && !occupancy->contains(level, sx, sy, sz)) return;
         const auto part = bounds.intersect(slabBox(level, sx, sy, sz));
         if (part.empty()) return;
         const float d = distance(part);

@@ -12,6 +12,7 @@
 #include "world/save/region_file.hpp"
 #include "world/save/trees_codec.hpp"
 #include "world/structure_voxels.hpp"
+#include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_edits.hpp"
 #include "world/tree_foliage_builder.hpp"
@@ -1352,7 +1353,7 @@ TEST(trees_codec_roundtrip) {
     TreeOverrideMap map;
     TreeRecord cut;
     cut.key = 1234;
-    cut.cuts = {{12, 0.25f, 400}, {40, 0.5f, 900}};
+    cut.cuts = {{12, 0.25f, 400}, {40, 0.5f, 900, {0.6f, 0, -0.8f}}};
     map[cut.key] = cut;
     TreeRecord planted;
     planted.anchor = {500, 410, 77};
@@ -1390,6 +1391,61 @@ TEST(trees_codec_roundtrip) {
         CHECK(old.trees.size() == 1);
         CHECK(!old.trees.at(1234).removed);
         CHECK(old.trees.at(1234).cuts.size() == 1);
+        // Cuts before v3 are perpendicular.
+        CHECK(old.trees.at(1234).cuts[0].normal == TreeVec{});
+    }
+    // A v3 cut plane outside +-3 is refused.
+    {
+        BinaryWriter w;
+        w.write(uint32_t(1));
+        w.write(uint64_t(5));
+        w.write(uint8_t(0));
+        w.write(uint32_t(0));
+        for (const int v : {1, 2, 3, 0}) w.write(int32_t(v));
+        w.write(1.f);
+        w.write(uint8_t(0));
+        w.write(uint16_t(1));
+        w.write(int32_t(3));
+        w.write(0.5f);
+        w.write(1.f);
+        w.write(int8_t(7));
+        SectionContainer container;
+        container.put("TREE", 3, w.take());
+        test::expectThrows([&] { trees_codec::decode(container.encode()); },
+                           "bad cut plane");
+    }
+    // A v3 grid plane code reads as its normal; v4 refuses non-unit normals.
+    const auto cutRecord = [](uint16_t version, auto writePlane) {
+        BinaryWriter w;
+        w.write(uint32_t(1));
+        w.write(uint64_t(5));
+        w.write(uint8_t(0));
+        w.write(uint32_t(0));
+        for (const int v : {1, 2, 3, 0}) w.write(int32_t(v));
+        w.write(1.f);
+        w.write(uint8_t(0));
+        w.write(uint16_t(1));
+        w.write(int32_t(3));
+        w.write(0.5f);
+        w.write(1.f);
+        writePlane(w);
+        SectionContainer container;
+        container.put("TREE", version, w.take());
+        return container.encode();
+    };
+    {
+        const auto v3 = trees_codec::decode(
+            cutRecord(3, [](BinaryWriter& w) { w.write(int8_t(-2)); }));
+        CHECK(v3.trees.at(5).cuts[0].normal == (TreeVec{0, -1, 0}));
+        test::expectThrows(
+            [&] {
+                trees_codec::decode(cutRecord(4, [](BinaryWriter& w) {
+                    w.write(2.f);
+                    w.write(0.f);
+                    w.write(0.f);
+                }));
+            },
+            "non-unit cut normal");
     }
     // Malformed sections are refused.
     const auto rejects = [](Bytes data, const char* what) {
@@ -1666,17 +1722,240 @@ TEST(tree_cut_angled_branch) {
         CHECK(slice.size() > 10);
         const TilePos tip{a.x + 8 * direction, a.y + 27, a.z + 3 * direction};
         CHECK(f.chunks->tileAt(tip.x, tip.y, tip.z)->block_id == wood);
-        // A support left in the slice keeps the limb attached.
-        for (size_t i = 0; i + 1 < slice.size(); ++i) {
+        // Wood holds by its faces: while a slice tile still joins wood on
+        // both sides of the slit through faces, the limb stays attached.
+        const auto isWood = [&](int x, int y, int z) {
+            const Tile* t = f.chunks->tileAt(x, y, z);
+            return t && t->block_id == wood;
+        };
+        std::vector<bool> bridge;
+        for (const auto& p : slice)
+            bridge.push_back(isWood(p.x - 1, p.y, p.z) &&
+                             isWood(p.x + 1, p.y, p.z));
+        CHECK(std::count(bridge.begin(), bridge.end(), true) > 10);
+        for (size_t i = 0; i < slice.size(); ++i) {
             CHECK(editor.removeBlock(slice[i]) == EditStatus::Applied);
-            EQUAL(sim.cutCount(), size_t(0), "remaining wood supports limb");
+            if (std::find(bridge.begin() + long(i) + 1, bridge.end(), true) !=
+                bridge.end())
+                EQUAL(sim.cutCount(), size_t(0),
+                      "remaining wood supports limb");
         }
-        CHECK(editor.removeBlock(slice.back()) == EditStatus::Applied);
         EQUAL(sim.cutCount(), size_t(1), "one-tile slit severs sloping limb");
         sim.finishClears();
         EQUAL(int(f.chunks->tileAt(tip.x, tip.y, tip.z)->block_id), 0,
               "detached wood removed");
+        // The cut ends at the sawn row, not on a plane across the limb:
+        // nothing is left beyond the slit (a wedge of blocks used to stay
+        // next to it) and the stump keeps the row before it.
+        const auto record = f.chunks->treeOverrides()->find(tree->key);
+        CHECK(record != f.chunks->treeOverrides()->end());
+        if (record != f.chunks->treeOverrides()->end()) {
+            CHECK(!record->second.cuts.empty());
+            if (!record->second.cuts.empty())
+                CHECK(record->second.cuts.back().normal ==
+                      (TreeVec{float(direction), 0, 0}));  // the sawn row
+        }
+        size_t beyond = 0, before = 0;
+        for (int y = a.y + 10; y <= a.y + 40; ++y)
+            for (int z = a.z - 12; z <= a.z + 12; ++z) {
+                for (int k = 1; k <= 18; ++k)
+                    if (const Tile* t =
+                            f.chunks->tileAt(a.x + k * direction, y, z);
+                        t && t->block_id == wood)
+                        ++beyond;
+                if (const Tile* t = f.chunks->tileAt(a.x - direction, y, z);
+                    t && t->block_id == wood)
+                    ++before;
+            }
+        EQUAL(beyond, size_t(0), "no wood left beyond the slit");
+        CHECK(before > 10);
     }
+}
+
+TEST(tree_cut_slanted_slit) {
+    // Slits that are not tile-grid slices: a one-tile staircase on the
+    // plane x + y = c (slanted) or x + z = c (turned about y) through a
+    // 12-block-wide limb along x. The last block of the slit cuts it, and
+    // the cut follows the slit: nothing is left beyond it, the stump keeps
+    // its side.
+    for (const int variant : {0, 1}) {
+        TreeStream f;
+        unsigned cx = 0, cz = 0;
+        const auto found = findTree(f, "trees.test_oak", cx, cz);
+        CHECK(found.has_value());
+        for (unsigned z = cz - 1; z <= cz + 1; ++z)
+            for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
+        const auto a = found->anchor;
+        const uint8_t wood =
+            f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+        auto skeleton = std::make_shared<TreeSkeleton>();
+        skeleton->trunkRadius = 3;
+        skeleton->height = 50;
+        skeleton->lifespan = 1000000;
+        skeleton->headroom = TreeMaxHeight;
+        TreeSegment limb;
+        limb.a = {-14, 22, 0};
+        limb.b = {14, 26, 0};
+        limb.r0 = limb.r1 = 6.f;
+        limb.birthB = limb.matureAge = 1;
+        limb.order = 1;
+        skeleton->segments.push_back(limb);
+        auto tree = std::make_shared<TreeInstance>(*found->tree);
+        tree->skeleton = skeleton;
+        tree->birthDay = -100;
+        finishTreeInstance(*tree);
+        f.chunks->updateTree(tree, found->tree->bounds);
+        TreeColumn column;
+        column.trees.push_back({tree, a});
+        f.chunks->forEachReady([&](const ChunkCoord& coord, Chunk& chunk) {
+            for (auto& slab : chunk.tiles)
+                for (auto& row : slab)
+                    for (auto& tile : row)
+                        if (tile.block_id == wood) tile.block_id = 0;
+            placeTreeWood(chunk, coord, column, f.chunks->treeSpecies(), 0);
+        });
+        WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+        TreeSimulation sim(*f.chunks, editor);
+        sim.update(0);
+        // Slit coordinate s(x, y, z) relative to the anchor: the slit is
+        // s == 0, the far side (toward +x) s > 0.
+        const int y0 = a.y + 24;
+        const auto slitOf = [&](int x, int y, int z) {
+            return variant == 0 ? (x - a.x) + (y - y0) : (x - a.x) + (z - a.z);
+        };
+        std::vector<TilePos> slit;
+        size_t far = 0, near = 0;
+        for (int y = a.y + 10; y <= a.y + 40; ++y)
+            for (int z = a.z - 12; z <= a.z + 12; ++z)
+                for (int x = a.x - 20; x <= a.x + 20; ++x)
+                    if (const Tile* t = f.chunks->tileAt(x, y, z);
+                        t && t->block_id == wood) {
+                        const int s = slitOf(x, y, z);
+                        if (s == 0) slit.push_back({x, y, z});
+                        far += s > 0;
+                        near += s < 0;
+                    }
+        CHECK(slit.size() > 20 && far > 100 && near > 100);
+        // A slit tile bridges while it has wood faces on both sides.
+        const auto isWood = [&](int x, int y, int z) {
+            const Tile* t = f.chunks->tileAt(x, y, z);
+            return t && t->block_id == wood;
+        };
+        std::vector<bool> bridge;
+        for (const auto& p : slit) {
+            bool lo = false, hi = false;
+            for (const auto [dx, dy, dz] :
+                 {std::array{1, 0, 0}, std::array{-1, 0, 0},
+                  std::array{0, 1, 0}, std::array{0, -1, 0},
+                  std::array{0, 0, 1}, std::array{0, 0, -1}}) {
+                if (!isWood(p.x + dx, p.y + dy, p.z + dz)) continue;
+                const int s = slitOf(p.x + dx, p.y + dy, p.z + dz);
+                lo |= s < 0;
+                hi |= s > 0;
+            }
+            bridge.push_back(lo && hi);
+        }
+        CHECK(std::count(bridge.begin(), bridge.end(), true) > 10);
+        for (size_t i = 0; i < slit.size(); ++i) {
+            CHECK(editor.removeBlock(slit[i]) == EditStatus::Applied);
+            if (std::find(bridge.begin() + long(i) + 1, bridge.end(), true) !=
+                bridge.end())
+                EQUAL(sim.cutCount(), size_t(0),
+                      "remaining wood supports limb");
+        }
+        EQUAL(sim.cutCount(), size_t(1), "a slanted slit severs the limb");
+        sim.finishClears();
+        size_t beyond = 0, kept = 0;
+        for (int y = a.y + 10; y <= a.y + 40; ++y)
+            for (int z = a.z - 12; z <= a.z + 12; ++z)
+                for (int x = a.x - 20; x <= a.x + 20; ++x)
+                    if (const Tile* t = f.chunks->tileAt(x, y, z);
+                        t && t->block_id == wood) {
+                        beyond += slitOf(x, y, z) > 0;
+                        kept += slitOf(x, y, z) < 0;
+                    }
+        EQUAL(beyond, size_t(0), "no wood left beyond the slit");
+        // The stump keeps its side (a staircase may lose a few corners).
+        CHECK(kept * 10 >= near * 9);
+    }
+}
+
+TEST(tree_cut_relights_below) {
+    // Sawing a sloping limb off: the air it shaded (down to the ground,
+    // through every loaded slab of those columns) gets full sky again.
+    TreeStream f;
+    SunLightPropagator sunlight(*f.chunks, f.assets.getStorage<Block>(),
+                                f.pool);
+    const auto light = [&] {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        do {
+            f.chunks->update();
+            sunlight.update();
+            f.pool.wait_for(std::chrono::milliseconds(20));
+            CHECK(std::chrono::steady_clock::now() < deadline);
+        } while (!sunlight.isIdle() || f.chunks->hasGenerationWork());
+    };
+    unsigned cx = 0, cz = 0;
+    const auto found = findTree(f, "trees.test_oak", cx, cz);
+    CHECK(found.has_value());
+    for (unsigned z = cz - 1; z <= cz + 1; ++z)
+        for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
+    const auto a = found->anchor;
+    const uint8_t wood =
+        f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+    auto skeleton = std::make_shared<TreeSkeleton>();
+    skeleton->trunkRadius = 3;
+    skeleton->height = 50;
+    skeleton->lifespan = 1000000;
+    skeleton->headroom = TreeMaxHeight;
+    TreeSegment limb;
+    limb.a = {-12, 20, -4};
+    limb.b = {12, 28, 4};
+    limb.r0 = limb.r1 = 6.f;
+    limb.birthB = limb.matureAge = 1;
+    limb.order = 1;
+    skeleton->segments.push_back(limb);
+    auto tree = std::make_shared<TreeInstance>(*found->tree);
+    tree->skeleton = skeleton;
+    tree->birthDay = -100;
+    finishTreeInstance(*tree);
+    f.chunks->updateTree(tree, found->tree->bounds);
+    TreeColumn column;
+    column.trees.push_back({tree, a});
+    std::set<uint64_t> columns;
+    f.chunks->forEachReady([&](const ChunkCoord& coord, Chunk& chunk) {
+        for (auto& slab : chunk.tiles)
+            for (auto& row : slab)
+                for (auto& tile : row)
+                    if (tile.block_id == wood) tile.block_id = 0;
+        placeTreeWood(chunk, coord, column, f.chunks->treeSpecies(), 0);
+        columns.insert(uint64_t{coord.x} << 32 | coord.z);
+    });
+    for (const auto c : columns)
+        sunlight.markColumnDirty(unsigned(c >> 32), unsigned(c));
+    light();
+    // Under the limb's tip half, above the ground: shaded now.
+    const TilePos under{a.x + 6, a.y + 12, a.z + 2};
+    CHECK(f.chunks->tileAt(under.x, under.y, under.z)->isAir());
+    CHECK(f.chunks->tileAt(under.x, under.y, under.z)->lightLevel.sun_exposure <
+          15);
+    WorldEditor editor(*f.chunks, &sunlight, f.assets.getStorage<Block>());
+    TreeSimulation sim(*f.chunks, editor);
+    sim.update(0);
+    for (int y = a.y + 17; y <= a.y + 31; ++y)
+        for (int z = a.z - 9; z <= a.z + 9; ++z)
+            if (const Tile* t = f.chunks->tileAt(a.x, y, z);
+                t && t->block_id == wood)
+                editor.removeBlock({a.x, y, z});
+    EQUAL(sim.cutCount(), size_t(1), "limb sawn off");
+    sim.finishClears();
+    light();
+    EQUAL(int(f.chunks->tileAt(a.x + 8, a.y + 27, a.z + 3)->block_id), 0,
+          "limb gone");
+    EQUAL(int(f.chunks->tileAt(under.x, under.y, under.z)
+                  ->lightLevel.sun_exposure),
+          15, "full sky where the limb was");
 }
 
 TEST(tree_cut_and_regrowth) {
@@ -1900,6 +2179,52 @@ TEST(tree_reload_catches_up) {
     CHECK(g.chunks->treeStamp({cx, unsigned((y + 1) / 16), cz}).day == 1500);
 }
 
+TEST(tree_reload_same_day_cut) {
+    // Chunks saved earlier on the day of a cut (stamp = that whole day)
+    // still lose the cut wood when they load again that day. They used to
+    // keep it: unseen high in a massive crown, it shaded the ground.
+    TreeStream f;
+    unsigned cx = 0, cz = 0;
+    const auto found = findTree(f, "trees.test_oak", cx, cz);
+    CHECK(found.has_value());
+    const auto& tree = *found->tree;
+    const auto a = found->anchor;
+    const uint8_t wood = f.chunks->treeSpecies().find(tree.species)->woodBlock;
+    const int cutY = a.y + 3;
+    CHECK(woodNear(f, a, cutY + 2, cutY + 6, 4, wood) > 0);
+    // Saved before the cut, on day 0.
+    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8}, true);
+    const auto data = region_file::decode(
+        region_file::encode(region_file::merge(RegionData{}, snapshot)));
+    std::map<unsigned, ChunkBlob> stored, plants;
+    for (unsigned sy = TreeStream::Low; sy < TreeStream::High; ++sy) {
+        const auto index = RegionData::localIndex({cx, sy, cz});
+        if (const auto it = data.chunks.find(index); it != data.chunks.end())
+            stored[sy] = it->second;
+        if (const auto it = data.flora.find(index); it != data.flora.end())
+            plants[sy] = it->second;
+    }
+    CHECK(f.chunks->treeStamp({cx, unsigned(cutY / 16), cz}).day == 0);
+    // Cut later the same day.
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+    TreeSimulation sim(*f.chunks, editor);
+    sim.update(0.6);
+    for (int z = a.z - 6; z <= a.z + 6; ++z)
+        for (int x = a.x - 6; x <= a.x + 6; ++x)
+            if (const Tile* t = f.chunks->tileAt(x, cutY, z);
+                t && t->block_id == wood)
+                editor.removeBlock({x, cutY, z});
+    EQUAL(sim.cutCount(), size_t(1), "one cut");
+    // Reload the saved chunks, still on day 0.
+    TreeStream g;
+    g.chunks->setTreeOverrides(f.chunks->treeOverrides());
+    g.chunks->setFloraDay(0);
+    g.load(cx, cz, stored, plants);
+    EQUAL(woodNear(g, a, cutY + 1, cutY + 8, 3, wood), size_t(0),
+          "cut wood gone from chunks saved earlier that day");
+    CHECK(woodNear(g, a, cutY - 3, cutY, 3, wood) > 0);  // the stump stays
+}
+
 TEST(tree_planted_indoors) {
     // A ceiling 5 tiles above the ground: the sapling never grows into it.
     TreeStream f;
@@ -2079,6 +2404,56 @@ TEST(tree_billboards) {
 
 // ---------------------------------------------------------------------------
 // Distant voxel wood of landmarks (StructureLod through tree_wood_lod).
+
+TEST(tree_wood_lod_occupancy) {
+    // Planning visits only the slabs a source may occupy: it must never
+    // miss one the rasterizer fills (any level), and it must be sparse for
+    // a branching crown.
+    auto instance = std::make_shared<TreeInstance>();
+    instance->skeleton = build("trees.redwood");
+    instance->anchor = {300, 300, 700};
+    finishTreeInstance(*instance);
+    const float age = instance->skeleton->matureAge();
+    const auto source = tree_wood_lod::voxels({instance, age, 9});
+    const auto occupancy = source->occupancy();
+    CHECK(occupancy != nullptr);
+    const WorldWrap none{};
+    for (int level = 0; level <= structure_voxels::MaxLevel; ++level) {
+        const auto slabs = structure_voxels::rasterizeAll(*source, level, none);
+        CHECK(!slabs.empty());
+        for (const auto& [key, slab] : slabs) {
+            const auto base = structure_voxels::baseOf(key);
+            CHECK(occupancy->contains(level, int(base.x), int(base.y),
+                                      int(base.z)));
+        }
+    }
+    const auto& b = source->bounds;
+    // A plan with occupancy keeps every filled slab of the plain plan.
+    const auto every = structure_voxels::plan(b, 300, 340, 700, none, {});
+    const auto sparse =
+        structure_voxels::plan(b, 300, 340, 700, none, {}, occupancy.get());
+    CHECK(sparse.size() <= every.size());
+    // A massive crown is sparse in its box (limbs, not a block of wood).
+    {
+        auto elder = std::make_shared<TreeInstance>();
+        elder->skeleton = build("trees.elder");
+        elder->anchor = {4000, 300, 4000};
+        finishTreeInstance(*elder);
+        const auto voxels =
+            tree_wood_lod::voxels({elder, elder->skeleton->matureAge(), 9});
+        const auto& e = voxels->bounds;
+        const size_t box = size_t((e.x1 - e.x0 + 15) / 16) *
+                           size_t((e.y1 - e.y0 + 15) / 16) *
+                           size_t((e.z1 - e.z0 + 15) / 16);
+        CHECK(voxels->occupancy()->slabs[0].size() * 4 < box);
+    }
+    std::unordered_set<ChunkCoord> kept;
+    for (const auto& p : sparse) kept.insert(p.key);
+    for (const auto& p : every)
+        if (source->rasterize(structure_voxels::levelOf(p.key), p.sx, p.sy,
+                              p.sz))
+            CHECK(kept.contains(p.key));
+}
 
 TEST(tree_wood_lod_slabs) {
     // A big trunk standing on the X seam: its slabs wrap to canonical keys.

@@ -18,6 +18,7 @@
 #include "test_assets.hpp"
 #include "world/chunk_manager.hpp"
 #include "world/structure_voxels.hpp"
+#include "world/sunlight_propagator.hpp"
 #include "world/tree_foliage_builder.hpp"
 #include "world/tree_simulation.hpp"
 #include "world/tree_wood_lod.hpp"
@@ -96,6 +97,12 @@ int main(int argc, char** argv) {
     ThreadPool pool(4);
     ChunkMesher mesher(assets);
     ChunkManager chunks(generator, pool, &mesher, world, &assets);
+    // TREE_BENCH_LIMB_LIGHT: sunlight under a sawn limb (created before any
+    // chunk loads, so it knows every chunk).
+    std::unique_ptr<SunLightPropagator> sunlight;
+    if (std::getenv("TREE_BENCH_LIMB_LIGHT"))
+        sunlight = std::make_unique<SunLightPropagator>(
+            chunks, assets.getStorage<Block>(), pool);
     if (chunks.treeLandmarks().empty()) {
         std::cerr << "no landmark placed\n";
         return 1;
@@ -116,10 +123,14 @@ int main(int argc, char** argv) {
                 const ChunkCoord origin{unsigned(c / 8 * 8), 0,
                                         unsigned(d / 8 * 8)};
                 // Slab 0 stands for the column (as LocationManager
-                // registers whole regions).
-                if (!chunks.isRegistered({unsigned(c), 0, unsigned(d)}))
-                    chunks.registerChunk({unsigned(c), 0, unsigned(d)}, origin,
-                                         &region);
+                // registers whole regions); with sunlight every slab is
+                // registered, so it can load the sky slabs it needs.
+                for (int y = 0; y < (sunlight ? Y_CHUNKS : 1); ++y)
+                    if (!chunks.isRegistered(
+                            {unsigned(c), unsigned(y), unsigned(d)}))
+                        chunks.registerChunk(
+                            {unsigned(c), unsigned(y), unsigned(d)}, origin,
+                            &region);
                 for (int y = std::max(0, y0); y <= std::min(y1, Y_CHUNKS - 1);
                      ++y) {
                     const ChunkCoord coord{unsigned(c), unsigned(y),
@@ -131,8 +142,10 @@ int main(int argc, char** argv) {
             }
         do {
             chunks.update();
+            if (sunlight) sunlight->update();
             pool.wait_for(std::chrono::milliseconds(20));
-        } while (chunks.hasGenerationWork());
+        } while (chunks.hasGenerationWork() ||
+                 (sunlight && !sunlight->isIdle()));
         return msSince(started);
     };
 
@@ -171,10 +184,203 @@ int main(int argc, char** argv) {
               << " mature=" << k.matureAge() << '\n';
     print("load_base", baseLoad);
 
-    WorldEditor editor(chunks, nullptr, assets.getStorage<Block>());
+    WorldEditor editor(chunks, sunlight.get(), assets.getStorage<Block>());
     TreeSimulation sim(chunks, editor);
     sim.update(today);
     const uint8_t wood = chunks.treeSpecies().find(tree->species)->woodBlock;
+
+    // 0. TREE_BENCH_LIMB_LIGHT=1: saw through the thickest primary limb near
+    // the trunk with the ground under its middle loaded as in play, then
+    // check that the air it shaded gets full sky (and columns loaded only
+    // afterwards too).
+    if (sunlight) {
+        // The thickest primary limb reaching sideways (not the leader).
+        int32_t limb = -1;
+        for (size_t i = 0; i < k.segments.size(); ++i) {
+            const auto& s = k.segments[i];
+            const TreeVec dir = (s.b - s.a).normalized();
+            if (s.live() && s.order == 1 && s.parent >= 0 &&
+                k.segments[size_t(s.parent)].order == 0 &&
+                std::abs(dir.y) < 0.8f &&
+                (limb < 0 || s.r0 > k.segments[size_t(limb)].r0))
+                limb = int32_t(i);
+        }
+        if (limb < 0) return 1;
+        // Follow the limb's axis outward; saw the first part clear of the
+        // flared trunk, and sample the ground under the parts after it.
+        std::vector<TreeVec> under;
+        // Clear of the trunk at the limb's height.
+        const float clear =
+            k.segments[size_t(k.segments[size_t(limb)].parent)].r0 +
+            k.segments[size_t(limb)].r0;
+        int32_t sawn = -1;
+        for (int32_t at = limb; at >= 0;) {
+            const auto& seg = k.segments[size_t(at)];
+            if (std::getenv("TREE_BENCH_LIMB_CHAIN"))
+                std::cout << "chain seg=" << at << " r0=" << seg.r0
+                          << " a=" << seg.a.x << ',' << seg.a.y << ','
+                          << seg.a.z << " len=" << (seg.b - seg.a).length()
+                          << '\n';
+            if (sawn >= 0)
+                under.push_back(lerp(seg.a, seg.b, 0.5f));
+            else if (std::hypot(seg.a.x, seg.a.z) > clear)
+                sawn = at;
+            int32_t next = -1;
+            for (size_t i = 0; i < k.segments.size(); ++i)
+                if (k.segments[i].parent == at && k.segments[i].attachT >= 1 &&
+                    k.segments[i].live())
+                    next = int32_t(i);
+            at = next;
+        }
+        if (sawn < 0 || under.empty()) return 1;
+        const auto& s = k.segments[size_t(sawn)];
+        const auto groundAt = [&](const TreeVec& p) {
+            return chunks.generatedSurfaceY(unsigned(anchor.x + p.x),
+                                            unsigned(anchor.z + p.z));
+        };
+        // Load like the game: chunk radius 8 around a camera on the ground
+        // under the first sample, up to the limb.
+        const TreeVec near = under[std::min<size_t>(3, under.size() - 1)];
+        const int gy = groundAt(near);
+        std::cout << "limb r0=" << s.r0 << " r1=" << s.r1
+                  << " parts=" << under.size() << " at=" << near.x << ','
+                  << near.y << ',' << near.z << " ground=" << gy
+                  << " limb_y=" << anchor.y + near.y << '\n';
+        load(anchor.x + int(near.x), anchor.z + int(near.z), 8, gy / 16 - 8,
+             gy / 16 + 8);
+        const auto sunUnder = [&](const TreeVec& p) {
+            const int x = anchor.x + int(std::lround(p.x)),
+                      z = anchor.z + int(std::lround(p.z));
+            const int y = groundAt(p) + 3;
+            const Tile* t = chunks.tileAt(x, y, z);
+            return t && t->isAir() ? int(t->lightLevel.sun_exposure) : -1;
+        };
+        for (size_t i = 0; i < under.size(); ++i)
+            std::cout << "before part=" << i << " sun=" << sunUnder(under[i])
+                      << '\n';
+        // Saw through the limb at a quarter of its first segment: every wood
+        // tile in the slice across its dominant axis.
+        const TreeVec dir = (s.b - s.a).normalized();
+        const float d[3]{dir.x, dir.y, dir.z};
+        int dim = 0;
+        for (int i = 1; i < 3; ++i)
+            if (std::abs(d[i]) > std::abs(d[dim])) dim = i;
+        const TreeVec cutAt = lerp(s.a, s.b, 0.5f);
+        const int reach = int(std::ceil(std::max(s.r0, s.r1))) + 4;
+        int c[3]{anchor.x + int(std::lround(cutAt.x)),
+                 anchor.y + int(std::lround(cutAt.y + 0.5f)),
+                 anchor.z + int(std::lround(cutAt.z))};
+        print("load_limb_cut",
+              load(c[0], c[2], reach / 16 + 1, c[1] / 16 - reach / 16 - 1,
+                   c[1] / 16 + reach / 16 + 1));
+        std::vector<TilePos> slice;
+        // TREE_BENCH_SLANT: a slanted slit (normal 35 degrees off the axis)
+        // as a digital plane thick enough to separate through faces.
+        const bool slant = std::getenv("TREE_BENCH_SLANT") != nullptr;
+        TreeVec slitNormal = dir;
+        if (slant) {
+            const TreeVec side = std::abs(dir.y) < 0.9f
+                                     ? dir.cross(TreeVec{0, 1, 0}).normalized()
+                                     : dir.cross(TreeVec{1, 0, 0}).normalized();
+            slitNormal = (dir * 0.82f + side * 0.57f).normalized();
+        }
+        const float thick =
+            0.5f * (std::abs(slitNormal.x) + std::abs(slitNormal.y) +
+                    std::abs(slitNormal.z));
+        // Signed distance past the slit (toward the limb's far side).
+        const auto slitDistance = [&](int x, int y, int z) {
+            const TreeVec q{float(x - c[0]), float(y - c[1]), float(z - c[2])};
+            if (!slant) {
+                const float p[3]{q.x, q.y, q.z};
+                return p[dim] * (d[dim] < 0 ? -1.f : 1.f);
+            }
+            return q.dot(slitNormal);
+        };
+        for (int y = c[1] - 2 * reach; y <= c[1] + 2 * reach; ++y)
+            for (int z = c[2] - 2 * reach; z <= c[2] + 2 * reach; ++z)
+                for (int x = c[0] - 2 * reach; x <= c[0] + 2 * reach; ++x) {
+                    if (!slant) {
+                        const int p[3]{x - c[0], y - c[1], z - c[2]};
+                        if (p[dim] != 0 || std::abs(p[(dim + 1) % 3]) > reach ||
+                            std::abs(p[(dim + 2) % 3]) > reach)
+                            continue;
+                    } else if (std::abs(slitDistance(x, y, z)) > thick) {
+                        continue;
+                    }
+                    if (const Tile* t = chunks.tileAt(x, y, z);
+                        t && t->block_id == wood)
+                        slice.push_back({x, y, z});
+                }
+        const size_t cutsBefore = sim.cutCount();
+        double worst = 0, total = 0;
+        size_t cutBlock = 0, worstBlock = 0;
+        TreeSimulation::BreakTimes worstTimes;
+        std::vector<double> times;
+        for (size_t i = 0; i < slice.size(); ++i) {
+            const auto started = Clock::now();
+            editor.removeBlock(slice[i]);
+            const double ms = msSince(started);
+            total += ms;
+            times.push_back(ms);
+            if (ms > worst) {
+                worst = ms;
+                worstBlock = i + 1;
+                worstTimes = sim.lastBreak();
+            }
+            if (!cutBlock && sim.cutCount() > cutsBefore) cutBlock = i + 1;
+        }
+        std::cout << "limb_saw slant=" << slant << " tiles=" << slice.size()
+                  << " cuts=" << sim.cutCount() - cutsBefore
+                  << " cut_at_block=" << cutBlock << " mean_ms="
+                  << (slice.empty() ? 0 : total / double(slice.size()))
+                  << " worst_ms=" << worst << '\n';
+        std::sort(times.begin(), times.end());
+        if (!times.empty())
+            std::cout << "limb_saw p99_ms=" << times[times.size() * 99 / 100]
+                      << " worst_block=" << worstBlock
+                      << " owner=" << worstTimes.owner
+                      << " severed=" << worstTimes.severed
+                      << " rebuild=" << worstTimes.rebuild
+                      << " commit=" << worstTimes.commit
+                      << " clear=" << worstTimes.clear << '\n';
+        for (int i = 0; i < 4000 && sim.pendingClears(); ++i) {
+            chunks.update();
+            sunlight->update();
+            pool.wait_for(std::chrono::milliseconds(5));
+            sim.finishClears();
+        }
+        load(anchor.x + int(near.x), anchor.z + int(near.z), 8, gy / 16 - 8,
+             gy / 16 + 8);
+        // Wood left beyond the slit around the cut (the limb's far side).
+        size_t beyond = 0;
+        for (int y = c[1] - 2 * reach; y <= c[1] + 2 * reach; ++y)
+            for (int z = c[2] - 2 * reach; z <= c[2] + 2 * reach; ++z)
+                for (int x = c[0] - 2 * reach; x <= c[0] + 2 * reach; ++x)
+                    if (slitDistance(x, y, z) > thick)
+                        if (const Tile* t = chunks.tileAt(x, y, z);
+                            t && t->block_id == wood &&
+                            TreeVec{float(x - c[0]), float(y - c[1]),
+                                    float(z - c[2])}
+                                    .dot(dir) > 0 &&
+                            (TreeVec{float(x - c[0]), float(y - c[1]),
+                                     float(z - c[2])} -
+                             dir * TreeVec{float(x - c[0]), float(y - c[1]),
+                                           float(z - c[2])}
+                                       .dot(dir))
+                                    .length() < float(reach))
+                            ++beyond;
+        std::cout << "limb_wood_beyond_slit=" << beyond << '\n';
+        for (size_t i = 0; i < under.size(); ++i)
+            std::cout << "after part=" << i << " sun=" << sunUnder(under[i])
+                      << '\n';
+        // Columns loaded only now, under the far part of the limb.
+        const TreeVec far = under.back();
+        const int fy = groundAt(far);
+        load(anchor.x + int(far.x), anchor.z + int(far.z), 2, fy / 16 - 2,
+             fy / 16 + 2);
+        std::cout << "later far sun=" << sunUnder(far) << '\n';
+        return 0;
+    }
 
     // 1. One block off the trunk surface, a few tiles up: no cut.
     {
@@ -223,9 +429,11 @@ int main(int argc, char** argv) {
         const auto changed = next->changedSince(*before);
         const TreeVec at =
             lerp(k.segments[size_t(limb)].a, k.segments[size_t(limb)].b, 0.25f);
+        // As StructureLod: only slabs the new revision may occupy.
+        const auto occupancy = next->occupancy();
         const auto planned = structure_voxels::plan(
             next->bounds, anchor.x + at.x, anchor.y + at.y, anchor.z + at.z,
-            world.wrap(), {});
+            world.wrap(), {}, occupancy.get());
         const auto started = Clock::now();
         size_t touched = 0, occupied = 0;
         for (const auto& p : planned) {
@@ -392,6 +600,35 @@ int main(int argc, char** argv) {
         std::cout << "crown_mesh detail=" << int(detail)
                   << " ms=" << msSince(started) << " parts=" << parts.size()
                   << " vertices=" << vertices << '\n';
+    }
+
+    // 3b. Planning the distant voxels near the trunk (StructureLod, main
+    // thread): every slab of the wood box, or only the occupied ones
+    // (structure_voxels::Source::occupancy, built once on the pool).
+    {
+        const auto source = tree_wood_lod::voxels({tree, age, wood});
+        auto started = Clock::now();
+        const auto occupancy = source->occupancy();
+        const double built = msSince(started);
+        started = Clock::now();
+        const auto every =
+            structure_voxels::plan(source->bounds, anchor.x + 300,
+                                   anchor.y + 20, anchor.z, world.wrap(), {});
+        const double plainMs = msSince(started);
+        started = Clock::now();
+        const auto sparse = structure_voxels::plan(
+            source->bounds, anchor.x + 300, anchor.y + 20, anchor.z,
+            world.wrap(), {}, occupancy.get());
+        const double sparseMs = msSince(started);
+        size_t occupied = 0;
+        for (const auto& level : occupancy->slabs) occupied += level.size();
+        std::cout << "voxel_plan occupancy_ms=" << built
+                  << " occupied_slabs=" << occupied
+                  << " planned_all=" << every.size()
+                  << " plan_all_ms=" << plainMs
+                  << " planned_occupied=" << sparse.size()
+                  << " plan_occupied_ms=" << sparseMs << '\n';
+        if (std::getenv("TREE_BENCH_PLAN_ONLY")) return 0;
     }
 
     // 4. Distant voxels: every slab at each level (StructureLod plans a mix).

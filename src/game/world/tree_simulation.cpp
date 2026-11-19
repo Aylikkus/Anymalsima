@@ -4,13 +4,62 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <queue>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace {
 // Segments up to this radius are cut by removing any of their wood.
 constexpr float ThinCut = 2;
 // The growth sweep rebuilds its chunk list this often (updates).
 constexpr size_t SweepListInterval = 600;
+
+// Limits of the connectivity test: the window along the limb (times its
+// radius, plus tiles) and the tiles it may visit.
+constexpr float SlitWindowRadii = 3;
+constexpr float SlitWindowExtra = 4;
+constexpr size_t SlitMaxVisits = 400000;
+
+// Eigenvector of the smallest eigenvalue of a symmetric 3x3 matrix (Jacobi).
+TreeVec smallestEigenvector(std::array<std::array<double, 3>, 3> m) {
+    std::array<std::array<double, 3>, 3> v{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    for (int sweep = 0; sweep < 32; ++sweep) {
+        double off = 0;
+        for (int p = 0; p < 3; ++p)
+            for (int q = p + 1; q < 3; ++q) off += m[p][q] * m[p][q];
+        if (off < 1e-18) break;
+        for (int p = 0; p < 3; ++p)
+            for (int q = p + 1; q < 3; ++q) {
+                if (std::abs(m[p][q]) < 1e-15) continue;
+                const double theta = (m[q][q] - m[p][p]) / (2 * m[p][q]);
+                const double t =
+                    (theta >= 0 ? 1 : -1) /
+                    (std::abs(theta) + std::sqrt(theta * theta + 1));
+                const double c = 1 / std::sqrt(t * t + 1), s = t * c;
+                for (int k = 0; k < 3; ++k) {
+                    const double mkp = m[k][p], mkq = m[k][q];
+                    m[k][p] = c * mkp - s * mkq;
+                    m[k][q] = s * mkp + c * mkq;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const double mpk = m[p][k], mqk = m[q][k];
+                    m[p][k] = c * mpk - s * mqk;
+                    m[q][k] = s * mpk + c * mqk;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    const double vkp = v[k][p], vkq = v[k][q];
+                    v[k][p] = c * vkp - s * vkq;
+                    v[k][q] = s * vkp + c * vkq;
+                }
+            }
+    }
+    int best = 0;
+    for (int i = 1; i < 3; ++i)
+        if (m[i][i] < m[best][best]) best = i;
+    return TreeVec{float(v[0][best]), float(v[1][best]), float(v[2][best])}
+        .normalized();
+}
 
 // Milliseconds since `start`, restarting it.
 double lap(std::chrono::steady_clock::time_point& start) {
@@ -310,10 +359,291 @@ bool TreeSimulation::severed(Owner& o, TilePos removed, bool thin) const {
                 relative[dim] - std::copysign(0.5f, direction[dim]);
             o.t = std::clamp((face - start[dim]) / (direction[dim] * length),
                              0.f, k.visible(s, age));
+            // The stump ends at that face: a plane across the sloping limb
+            // would leave a wedge of blocks beyond the slit.
+            o.normal = treeCutNormal(
+                int8_t((dim + 1) * (direction[dim] < 0 ? -1 : 1)));
             return true;
         }
     }
-    return false;
+    return severedByConnectivity(o, removed);
+}
+
+bool TreeSimulation::severedByConnectivity(Owner& o, TilePos removed) const {
+    const auto& tree = *o.entry.tree;
+    const auto& k = *tree.skeleton;
+    const auto* rule = chunks.treeSpecies().find(tree.species);
+    if (!rule || !rule->woodBlock) return false;
+    const float age = tree.growthAge(today);
+    const auto& s = k.segments[size_t(o.segment)];
+    const auto& a = o.entry.anchor;
+    // The limb's axis: the owning segment and the segments continuing it
+    // (same order, attached at the joint), within the window.
+    const float rCut = std::max(TreeVoxelRadius, k.radius(s, o.t, age));
+    const float window = SlitWindowRadii * rCut + SlitWindowExtra;
+    std::vector<int32_t> next(k.segments.size(), -1);
+    for (size_t i = 0; i < k.segments.size(); ++i) {
+        const auto& c = k.segments[i];
+        if (c.parent >= 0 && c.live() && c.attachT >= 1 &&
+            c.order == k.segments[size_t(c.parent)].order &&
+            k.visible(c, age) > 0)
+            next[size_t(c.parent)] = int32_t(i);
+    }
+    struct Part {
+        int32_t segment;
+        float start, length;
+    };
+    std::vector<Part> chain;
+    const auto lengthOf = [&](int32_t i) {
+        const auto& g = k.segments[size_t(i)];
+        return (g.b - g.a).length();
+    };
+    {
+        std::vector<int32_t> back;
+        float reach = o.t * lengthOf(o.segment);
+        for (int32_t at = o.segment; reach < window + rCut;) {
+            const auto& g = k.segments[size_t(at)];
+            if (g.parent < 0 || g.attachT < 1) break;
+            const auto& p = k.segments[size_t(g.parent)];
+            if (p.order != g.order || !p.live()) break;
+            back.push_back(g.parent);
+            reach += lengthOf(g.parent);
+            at = g.parent;
+        }
+        float start = 0;
+        for (auto it = back.rbegin(); it != back.rend(); ++it) {
+            chain.push_back({*it, start, lengthOf(*it)});
+            start += lengthOf(*it);
+        }
+        const float own = start;
+        chain.push_back({o.segment, start, lengthOf(o.segment)});
+        start += lengthOf(o.segment);
+        for (int32_t at = next[size_t(o.segment)];
+             at >= 0 && start - own - o.t * lengthOf(o.segment) < window + rCut;
+             at = next[size_t(at)]) {
+            chain.push_back({at, start, lengthOf(at)});
+            start += lengthOf(at);
+        }
+    }
+    struct Where {
+        float arc = 0, distance = INFINITY, radius = 0;
+        size_t part = 0;
+    };
+    const auto local = [&](int x, int y, int z) {
+        return TreeVec{float(x - a.x), float(y - a.y) - 0.5f, float(z - a.z)};
+    };
+    const auto where = [&](const TreeVec& q) {
+        Where w;
+        for (size_t i = 0; i < chain.size(); ++i) {
+            const auto& g = k.segments[size_t(chain[i].segment)];
+            const TreeVec axis = g.b - g.a;
+            const float l2 = axis.dot(axis);
+            const float t = l2 > 1e-8f
+                                ? std::clamp((q - g.a).dot(axis) / l2, 0.f, 1.f)
+                                : 0.f;
+            const float d = (q - lerp(g.a, g.b, t)).length();
+            if (d < w.distance) {
+                w.distance = d;
+                w.arc = chain[i].start + t * chain[i].length;
+                w.radius = std::max(TreeVoxelRadius, k.radius(g, t, age));
+                w.part = i;
+            }
+        }
+        return w;
+    };
+    const float chainEnd = chain.back().start + chain.back().length;
+    const Where at = where(local(removed.x, removed.y, removed.z));
+    const float nearLimit = std::max(0.f, at.arc - window);
+    const float farLimit = std::min(chainEnd, at.arc + window);
+    // A removal at the end of the limb leaves nothing hanging beyond it.
+    if (farLimit - at.arc < 1.5f) return false;
+    // Live tiles, read without the per-tile lock (the main thread is the
+    // only writer); unloaded tiles count as wood.
+    std::unordered_map<ChunkCoord, const Chunk*> loaded;
+    const auto wrap = chunks.wrap();
+    const auto wood = [&](int x, int y, int z) {
+        if (y < 0 || y >= WORLD_HEIGHT_Y || z < 0) return false;
+        const int wx = int(wrap.wrapTile(x));
+        if (wx < 0) return false;
+        const ChunkCoord c{unsigned(wx / Chunk::SIZE_X),
+                           unsigned(y / Chunk::SIZE_Y),
+                           unsigned(z / Chunk::SIZE_Z)};
+        auto [it, inserted] = loaded.try_emplace(c, nullptr);
+        if (inserted) it->second = chunks.getChunk(c);
+        if (!it->second) return true;
+        return it->second
+                   ->tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y]
+                          [wx % Chunk::SIZE_X]
+                   .block_id == rule->woodBlock;
+    };
+    const auto inLimb = [&](const Where& w) {
+        return w.distance <= w.radius + 1.5f && w.arc >= nearLimit - 2 &&
+               w.arc <= farLimit + 2;
+    };
+    constexpr int Bias = 1 << 20;
+    const auto key = [](int x, int y, int z) {
+        return uint64_t(uint32_t(x + Bias)) << 42 |
+               uint64_t(uint32_t(y + Bias)) << 21 |
+               uint64_t(uint32_t(z + Bias));
+    };
+    // The seed: the limb's core at its far window end (the wood nearest the
+    // axis there). If it no longer reaches the base, the far piece is off.
+    struct Node {
+        float arc;
+        int x, y, z;
+        bool operator>(const Node& o) const { return arc > o.arc; }
+    };
+    std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open;
+    std::unordered_map<uint64_t, float> far;  // visited: the far piece
+    {
+        // The chain point at farLimit.
+        TreeVec p{};
+        float r = rCut;
+        for (const auto& c : chain)
+            if (farLimit >= c.start && farLimit <= c.start + c.length + 1e-3f) {
+                const auto& g = k.segments[size_t(c.segment)];
+                const float t =
+                    c.length > 1e-6f
+                        ? std::clamp((farLimit - c.start) / c.length, 0.f, 1.f)
+                        : 0.f;
+                p = lerp(g.a, g.b, t);
+                r = std::max(TreeVoxelRadius, k.radius(g, t, age));
+                break;
+            }
+        const int reach = int(std::ceil(r)) + 2;
+        const int px = a.x + int(std::lround(p.x)),
+                  py = a.y + int(std::lround(p.y + 0.5f)),
+                  pz = a.z + int(std::lround(p.z));
+        // Growing shells around that point; the first wood found.
+        for (int shell = 0; shell <= reach && far.empty(); ++shell)
+            for (int y = py - shell; y <= py + shell && far.empty(); ++y)
+                for (int z = pz - shell; z <= pz + shell && far.empty(); ++z)
+                    for (int x = px - shell; x <= px + shell; ++x) {
+                        if (std::max({std::abs(x - px), std::abs(y - py),
+                                      std::abs(z - pz)}) != shell)
+                            continue;
+                        if (!wood(x, y, z)) continue;
+                        const Where w = where(local(x, y, z));
+                        if (!inLimb(w) || w.arc < farLimit - 1.5f) continue;
+                        far.emplace(key(x, y, z), w.arc);
+                        open.push({w.arc, x, y, z});
+                        break;
+                    }
+    }
+    if (far.empty()) return false;
+    // Best first toward the limb's base: an intact limb is found connected
+    // after a short walk; a severed one explores only its far piece.
+    static constexpr int Steps[6][3]{{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                     {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    while (!open.empty()) {
+        const Node n = open.top();
+        open.pop();
+        if (n.arc <= nearLimit + 1) return false;  // still attached
+        if (far.size() > SlitMaxVisits) return false;
+        for (const auto& d : Steps) {
+            const int x = n.x + d[0], y = n.y + d[1], z = n.z + d[2];
+            const uint64_t id = key(x, y, z);
+            if (far.contains(id)) continue;
+            const Where w = where(local(x, y, z));
+            if (!inLimb(w) || !wood(x, y, z)) continue;
+            far.emplace(id, w.arc);
+            open.push({w.arc, x, y, z});
+        }
+    }
+    // Severed. The slit: hollow tiles inside the limb next to the far
+    // piece; its near face: wood next to the slit outside the far piece.
+    std::vector<TreeVec> slit, nearFace;
+    std::unordered_set<uint64_t> seen;
+    const auto unkey = [](uint64_t id, int& x, int& y, int& z) {
+        x = int((id >> 42) & ((1u << 21) - 1)) - Bias;
+        y = int((id >> 21) & ((1u << 21) - 1)) - Bias;
+        z = int(id & ((1u << 21) - 1)) - Bias;
+    };
+    for (const auto& [id, arc] : far) {
+        int x, y, z;
+        unkey(id, x, y, z);
+        for (const auto& d : Steps) {
+            const int sx = x + d[0], sy = y + d[1], sz = z + d[2];
+            const uint64_t sid = key(sx, sy, sz);
+            if (far.contains(sid) || !seen.insert(sid).second) continue;
+            const TreeVec q = local(sx, sy, sz);
+            const Where w = where(q);
+            if (wood(sx, sy, sz) || w.distance > w.radius - 0.5f) continue;
+            slit.push_back(q);
+            for (const auto& e : Steps) {
+                const int nx = sx + e[0], ny = sy + e[1], nz = sz + e[2];
+                if (far.contains(key(nx, ny, nz)) || !wood(nx, ny, nz))
+                    continue;
+                if (inLimb(where(local(nx, ny, nz))))
+                    nearFace.push_back(local(nx, ny, nz));
+            }
+        }
+    }
+    // The axis direction at the removal, pointing toward the far piece.
+    const auto& own = k.segments[size_t(chain[at.part].segment)];
+    const TreeVec axis = (own.b - own.a).normalized();
+    TreeVec normal = axis;
+    if (slit.size() >= 3) {
+        TreeVec c{};
+        for (const auto& q : slit) c = c + q;
+        c = c * (1.f / float(slit.size()));
+        std::array<std::array<double, 3>, 3> m{};
+        for (const auto& q : slit) {
+            const double d[3]{q.x - c.x, q.y - c.y, q.z - c.z};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) m[i][j] += d[i] * d[j];
+        }
+        TreeVec fitted = smallestEigenvector(m);
+        if (fitted.dot(axis) < 0) fitted = fitted * -1.f;
+        // A slit nearly along the limb is no face to cut on.
+        if (fitted.dot(axis) >= 0.35f) normal = fitted;
+    }
+    // Offset: every tile of the far piece beyond the plane; the near face
+    // before it when a plane separates them (a stepped slit may cost the
+    // stump a few corner tiles otherwise).
+    float minFar = INFINITY, maxNear = -INFINITY;
+    for (const auto& [id, arc] : far) {
+        int x, y, z;
+        unkey(id, x, y, z);
+        minFar = std::min(minFar, normal.dot(local(x, y, z)));
+    }
+    for (const auto& q : nearFace) maxNear = std::max(maxNear, normal.dot(q));
+    const float offset =
+        maxNear < minFar ? (maxNear + minFar) * 0.5f : minFar - 0.01f;
+    // Where the plane crosses the limb's axis, nearest the removal.
+    float best = INFINITY;
+    for (const auto& c : chain) {
+        const auto& g = k.segments[size_t(c.segment)];
+        const float denom = normal.dot(g.b - g.a);
+        if (std::abs(denom) < 1e-6f) continue;
+        const float t = (offset - normal.dot(g.a)) / denom;
+        if (t < 0 || t > 1) continue;
+        const float arc = c.start + t * c.length;
+        if (std::abs(arc - at.arc) < best) {
+            best = std::abs(arc - at.arc);
+            o.segment = c.segment;
+            o.t = std::min(t, k.visible(g, age));
+            o.normal = normal;
+        }
+    }
+    if (best == INFINITY) {
+        // The plane misses the axis (a slit off to one side): cut across the
+        // limb just before the far piece.
+        float nearest = INFINITY;
+        for (const auto& [id, arc] : far) nearest = std::min(nearest, arc);
+        for (const auto& c : chain)
+            if (nearest >= c.start && nearest <= c.start + c.length + 1e-3f) {
+                const auto& g = k.segments[size_t(c.segment)];
+                o.segment = c.segment;
+                o.t = c.length > 1e-6f
+                          ? std::clamp((nearest - 0.5f - c.start) / c.length,
+                                       0.f, k.visible(g, age))
+                          : 0.f;
+                o.normal = {};
+                break;
+            }
+    }
+    return true;
 }
 
 void TreeSimulation::blockChanged(const BlockChange& change) {
@@ -585,7 +915,7 @@ void TreeSimulation::cut(const Owner& o) {
         record = it->second;
     record.key = old.key;
     record.cuts = old.cuts;
-    record.cuts.push_back({o.segment, o.t, old.age(today)});
+    record.cuts.push_back({o.segment, o.t, old.age(today), o.normal});
     auto start = std::chrono::steady_clock::now();
     auto tree = std::make_shared<TreeInstance>(old);
     tree->skeleton = applyTreeCuts(*old.skeleton, rule->species, record.cuts,

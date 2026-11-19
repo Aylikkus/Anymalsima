@@ -7,8 +7,10 @@
 
 namespace trees_codec {
 namespace {
-// v2 adds a flags byte after the headroom (bit 0: removed).
-constexpr uint16_t SectionVersion = 2;
+// v2 adds a flags byte after the headroom (bit 0: removed); v3 a cut plane
+// byte after each cut (+-1..3: a grid plane; older cuts are perpendicular);
+// v4 the cut face normal as three floats instead (TreeCut::normal).
+constexpr uint16_t SectionVersion = 4;
 constexpr uint32_t MaxTrees = 1u << 22;
 constexpr uint16_t MaxCuts = 4096;
 }  // namespace
@@ -38,6 +40,9 @@ Bytes encode(const TreeOverrideMap& trees, const SectionContainer& extra) {
             out.write(int32_t(cut.segment));
             out.write(cut.t);
             out.write(cut.age);
+            out.write(cut.normal.x);
+            out.write(cut.normal.y);
+            out.write(cut.normal.z);
         }
     }
     SectionContainer container = extra;
@@ -82,8 +87,21 @@ File decode(ByteView bytes) {
                 cut.segment = in.read<int32_t>();
                 cut.t = in.read<float>();
                 cut.age = in.read<float>();
+                bool badPlane = false;
+                if (section->version >= 4) {
+                    cut.normal.x = in.read<float>();
+                    cut.normal.y = in.read<float>();
+                    cut.normal.z = in.read<float>();
+                    const float n2 = cut.normal.dot(cut.normal);
+                    badPlane = !std::isfinite(n2) ||
+                               (n2 != 0 && std::abs(n2 - 1) > 0.01f);
+                } else if (section->version == 3) {
+                    const auto plane = in.read<int8_t>();
+                    badPlane = plane < -3 || plane > 3;
+                    cut.normal = treeCutNormal(plane);
+                }
                 if (cut.segment < 0 || !std::isfinite(cut.t) || cut.t < 0 ||
-                    cut.t > 1 || !std::isfinite(cut.age))
+                    cut.t > 1 || !std::isfinite(cut.age) || badPlane)
                     throw SerializationError("bad tree cut");
             }
             if (!file.trees.emplace(r.key, std::move(r)).second)

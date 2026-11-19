@@ -70,11 +70,18 @@ void SunLightPropagator::ready(const ChunkCoord& coord) {
 
 void SunLightPropagator::removed(const ChunkCoord& coord) {
     states.erase(coord);
-    columnChunks[columnKey(coord.x, coord.z)].erase(coord);
+    const auto column = columnKey(coord.x, coord.z);
+    columnChunks[column].erase(coord);
     requested.erase(coord);
     pendingIndirect.erase(coord);
     invalidateAround(coord);
-    markColumnDirty(coord.x, coord.z);
+    // Results of sweeps in flight for this column are stale now; the rest
+    // of the column is recomputed on the next update. Unloading a region
+    // removes whole columns slab by slab: marking each time walked every
+    // remaining slab and its neighbours (quadratic, tens of milliseconds
+    // per region border), and an emptied column needs nothing at all.
+    columnRevisions[column] = ++nextRevision;
+    removedColumns.insert(column);
 }
 
 void SunLightPropagator::markColumnDirty(unsigned cx, unsigned cz) {
@@ -97,8 +104,9 @@ void SunLightPropagator::markColumnDirty(unsigned cx, unsigned cz) {
 }
 
 bool SunLightPropagator::isIdle() const {
-    return pendingDirect.empty() && pendingIndirect.empty() &&
-           requested.empty() && directJobs.empty() && indirectJobs.empty();
+    return removedColumns.empty() && pendingDirect.empty() &&
+           pendingIndirect.empty() && requested.empty() && directJobs.empty() &&
+           indirectJobs.empty();
 }
 
 SunLightPropagator::DirectInput SunLightPropagator::snapshotColumn(
@@ -433,6 +441,11 @@ ChunkCoord SunLightPropagator::beneficiary(ChunkCoord slab) const {
 
 void SunLightPropagator::update() {
     pendingIndirect.setPeriodX(chunks.wrap().tiles);
+    // Columns that lost chunks: recompute what remains of them (an emptied
+    // column only drops its pending sweep).
+    for (const auto column : removedColumns)
+        markColumnDirty(unsigned(column >> 32), unsigned(column));
+    removedColumns.clear();
     collect();
     const auto requests = requested;
     for (const auto& coord : requests) {

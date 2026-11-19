@@ -740,6 +740,13 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
             &joinLightSlot, &joinLightVolume, &joinCoverVolume, &water};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
+        // Level 0 slabs the chunks show get no proxy mesh (next update).
+        structures->setChunkDrawn(
+            [this, &chunks](const ChunkCoord& c) {
+                return drawsChunk(c) && chunks.hasUploadedMesh(c);
+            },
+            ChunkCoord{unsigned(cx), unsigned(cy), unsigned(cz)},
+            DETAIL_CHUNK_RADIUS);
         structures->draw(
             target, frustum, camera, &joinShader, std::move(uniforms),
             [&](const ChunkCoord& c) {
@@ -802,6 +809,22 @@ void TerrainLodManager::submitShadowCasters(RenderTarget& target,
                        drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
     }
+}
+
+size_t TerrainLodManager::structureGaps(const ChunkManager& chunks,
+                                        const Camera& camera,
+                                        float radius) const {
+    if (!structures) return 0;
+    const int cx = int(camera.position.x) / Chunk::SIZE_X,
+              cy = int(camera.position.y) / Chunk::SIZE_Y,
+              cz = int(camera.position.z) / Chunk::SIZE_Z;
+    return structures->gaps(camera.eye(), radius, [&](const ChunkCoord& c) {
+        return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
+                   DETAIL_CHUNK_RADIUS &&
+               std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
+               std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
+               drawsChunk(c) && chunks.hasUploadedMesh(c);
+    });
 }
 
 size_t TerrainLodManager::backlog() const {

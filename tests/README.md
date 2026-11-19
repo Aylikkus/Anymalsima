@@ -108,6 +108,35 @@ These tests do not establish full planetary-generation correctness, race-detecto
 coverage, every data catalog/seed, or GPU appearance. Add a `TEST(case_name)`
 function under `unit/` or `integration/` and register its name in CMake.
 
+## Device targets (GPU and display)
+
+`lod_render_smoke` renders real frames through bgfx/Vulkan. It needs a GPU and
+a display session, so it is built only on request (`EXCLUDE_FROM_ALL`) and is
+never registered in CTest. Agents and CI without a display must not run it;
+headless checks of the same logic belong in `world_logic_tests` or
+`tree_benchmark`. Any future device test must stay out of the default suite
+the same way, or carry a `device` CTest label and be excluded from default runs.
+
+```bash
+cmake --build build --target lod_render_smoke
+build/tests/lod_render_smoke /tmp/capture 900 lights
+```
+
+Massive tree approach (`docs/handoff/trees.md`, "Approaching massive trees"):
+one elder in view, the game's chunk radius, the High terrain preset; it walks
+from 1200 m to 40 m and prints per-section frame times and holes in the
+distant tree wood.
+
+```bash
+SMOKE_TERRAIN=2 SMOKE_FOREST=elder SMOKE_ELDER_SPACING=3000 SMOKE_RADIUS=8 \
+  SMOKE_APPROACH="1200 0.5 40" build/tests/lod_render_smoke /tmp/approach 9000 lights
+```
+
+Sunlight under a sawn elder limb: `SMOKE_LIMB_CUT=1` (same variables, no
+`SMOKE_APPROACH`) settles on the thickest sideways limb, saws it, then logs
+`limb_cut` sunlight samples on the ground under it; `SMOKE_LIMB_CUT=walk`
+loads that ground first and stays at the cut.
+
 ## Camera priority and streaming
 
 Gameplay updates both schedulers' focus from the current camera position every

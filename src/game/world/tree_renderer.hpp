@@ -92,7 +92,10 @@ class TreeRenderer {
         std::vector<MeshHandle> gpu;
         std::optional<std::future<std::vector<FloraMesh>>> job;
         uint64_t lastUsed = 0;
-        bool ready() const { return !job && !gpu.empty(); }
+        // Built, possibly empty (a crown with nothing left draws nothing,
+        // rather than the tree's previous mesh).
+        bool built = false;
+        bool ready() const { return !job && built; }
     };
     // Billboards: one small mesh per species, built in place.
     struct BillboardEntry {
@@ -138,7 +141,13 @@ class TreeRenderer {
     // while its next mesh (cut, growth step, detail change) is built.
     std::unordered_map<uint64_t, uint64_t> drawnMesh;
     ThreadPool& pool;
-    size_t meshJobs = 0;
+    // Meshes with a job in flight. Finished jobs are collected every frame
+    // whether or not their key is still drawn: a key left behind by a cut,
+    // a growth step or a detail change used to keep its job slot forever,
+    // and with all slots taken no crown was rebuilt (cut trees kept their
+    // old leaves until a stale key happened to be drawn again).
+    std::vector<uint64_t> building;
+    void collectMeshes();
     struct BillboardRegion {
         Vec2u region;
         ChunkManager::BillboardSet set;

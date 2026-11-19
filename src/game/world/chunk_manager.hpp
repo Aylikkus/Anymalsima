@@ -214,6 +214,9 @@ class ChunkManager {
     // persistDirty flags. copy=false shares the live data and is only valid
     // when the region is unregistered right afterwards.
     RegionSnapshot snapshotRegion(Vec2u region, bool copy);
+    // The same for one chunk column (all slabs), appended to `out`; shares
+    // the live data, so the column must be unregistered right afterwards.
+    void snapshotColumn(unsigned cx, unsigned cz, RegionSnapshot& out);
     int getColumnTopY(unsigned cx, unsigned cz) const;
     void raiseColumnTopY(unsigned cx, unsigned cz, int worldY);
     int generatedSurfaceY(unsigned tileX, unsigned tileZ);

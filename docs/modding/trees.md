@@ -223,8 +223,11 @@ row of a trunk (unless it settles), or the ground under a tree's base,
 kills the tree and removes it from the world. Thin parts
 (up to 2 m radius) are cut by breaking any of their wood; thicker ones only
 once their whole cross-section at that height is broken, so felling a
-giant takes work. Cuts and planted trees are saved in the world's
-`trees.dat`.
+giant takes work. A thick branch is cut once its part beyond your slit no
+longer touches the rest through block faces (blocks meeting only at an
+edge or corner do not hold it), whatever the slit's angle or shape, and
+it ends exactly at that slit. Cuts and planted trees are saved in
+the world's `trees.dat`.
 
 | Field | Default | Meaning |
 | --- | --- | --- |

@@ -250,7 +250,8 @@ foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
 endforeach()
 foreach(case region_save_and_reload region_edit_persists
              region_reload_while_writing region_corrupt_file_regenerates
-             region_unload_while_opening)
+             region_unload_while_opening region_gradual_unload
+             region_reload_while_unloading)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "integration;gameplay;save;threading" TIMEOUT 30)
@@ -308,9 +309,13 @@ foreach(case tree_skeleton_deterministic tree_sizes_follow_species
              tree_saved_chunks_not_edits tree_flora_avoids_trunks
              tree_landmarks tree_rotation_exact tree_foliage_meshes
              trees_codec_roundtrip tree_cuts_incremental tree_repeated_branch_cuts
-             tree_cut_delta_local tree_cut_angled_branch tree_cut_and_regrowth
-             tree_reload_catches_up tree_planted_indoors tree_billboards
-             tree_wood_lod_slabs tree_wood_lod_cut_is_local tree_settle_closes_gap tree_settle_in_world
+             tree_cut_delta_local tree_cut_angled_branch tree_cut_slanted_slit
+             tree_cut_relights_below
+             tree_cut_and_regrowth
+             tree_reload_catches_up tree_reload_same_day_cut
+             tree_planted_indoors tree_billboards
+             tree_wood_lod_slabs tree_wood_lod_occupancy
+             tree_wood_lod_cut_is_local tree_settle_closes_gap tree_settle_in_world
              tree_waiting_chunk_does_not_stall_streaming
              tree_dies_without_ground tree_dies_without_base_wood
              tree_trunk_foliage_on_stem tree_far_crowns_stay_attached
@@ -390,8 +395,9 @@ if(ANYMALSIMA_TEST_SANITIZERS)
     target_link_options(lod_benchmark PRIVATE -fsanitize=address,undefined)
 endif()
 
-# Explicit opt-in: exercises real Vulkan resources and shader programs, without
-# a window or audio device. Kept out of the default headless logic suite.
+# DEVICE TARGET (GPU + display): explicit opt-in, exercises real Vulkan
+# resources and shader programs, without a window or audio device. Never
+# registered in CTest, so the default suite stays headless.
 add_executable(lod_render_smoke EXCLUDE_FROM_ALL benchmarks/lod_render_smoke.cpp)
 target_link_libraries(lod_render_smoke PRIVATE render game)
 target_include_directories(lod_render_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
+#include <mutex>
 
 #include "tree_rasterizer.hpp"
 
@@ -80,7 +82,8 @@ class TreeVoxels final : public structure_voxels::Source {
                    x.birthA == y.birthA && x.birthB == y.birthB &&
                    x.matureAge == y.matureAge && x.parent == y.parent &&
                    x.attachT == y.attachT && x.order == y.order &&
-                   x.flags == y.flags && x.cut == y.cut && x.appear == y.appear;
+                   x.flags == y.flags && x.cut == y.cut &&
+                   x.appear == y.appear && x.cutNormal == y.cutNormal;
         };
         // Tiles a segment may fill (the anchor point is the centre of the
         // anchor tile's top face), with a tile of slack for flare and
@@ -141,8 +144,73 @@ class TreeVoxels final : public structure_voxels::Source {
         return box.intersect(both);
     }
 
+    // Level-0 slabs within reach of a live, born wood segment: spheres
+    // along each segment (at most 8 tiles apart, grown by half the step)
+    // marked against slab boxes. Cut planes and the radius at this age are
+    // ignored, so it only over-approximates the rasterizer.
+    structure_voxels::OccupancyPtr occupancy() const override {
+        std::call_once(occupancyOnce, [&] {
+            auto out = std::make_shared<structure_voxels::Occupancy>();
+            const auto& tree = *wood.tree;
+            if (!tree.skeleton || wood.age <= 0 || tree.wood.empty()) {
+                occupied = std::move(out);
+                return;
+            }
+            const auto& k = *tree.skeleton;
+            const auto& a = tree.anchor;
+            constexpr int Side = structure_voxels::Side;
+            const auto floorDiv = [](int v) {
+                return v >= 0 ? v / Side : -((-v + Side - 1) / Side);
+            };
+            for (const auto& s : k.segments) {
+                if (!s.live() || k.visible(s, wood.age) < 0) continue;
+                const float flare = s.order == 0 ? 1 + k.flare.amount : 1;
+                const float rMax = std::max(s.r0, s.r1) * flare;
+                if (rMax < TreeVoxelRadius) continue;
+                const TreeVec axis = s.b - s.a;
+                const float length = axis.length();
+                const int steps = std::max(1, int(std::ceil(length / 8)));
+                const float step = length / float(steps);
+                // Tile reach of the rasterizer plus the sample spacing.
+                const float reach = rMax + 1.5f + step * 0.5f;
+                for (int i = 0; i <= steps; ++i) {
+                    const TreeVec p = lerp(s.a, s.b, float(i) / float(steps));
+                    // Tile centre (x, y, z) is at (x - a.x, y - a.y - 0.5,
+                    // z - a.z) in skeleton space.
+                    const float px = p.x + float(a.x),
+                                py = p.y + float(a.y) + .5f,
+                                pz = p.z + float(a.z);
+                    const int x0 = floorDiv(int(std::floor(px - reach))),
+                              x1 = floorDiv(int(std::ceil(px + reach))),
+                              y0 = floorDiv(int(std::floor(py - reach))),
+                              y1 = floorDiv(int(std::ceil(py + reach))),
+                              z0 = floorDiv(int(std::floor(pz - reach))),
+                              z1 = floorDiv(int(std::ceil(pz + reach)));
+                    for (int sz = z0; sz <= z1; ++sz)
+                        for (int sy = std::max(0, y0); sy <= y1; ++sy)
+                            for (int sx = x0; sx <= x1; ++sx) {
+                                const auto gap = [](float v, int lo) {
+                                    return std::max({0.f, float(lo) - v,
+                                                     v - float(lo + Side - 1)});
+                                };
+                                const float dx = gap(px, sx * Side),
+                                            dy = gap(py, sy * Side),
+                                            dz = gap(pz, sz * Side);
+                                if (dx * dx + dy * dy + dz * dz <=
+                                    reach * reach)
+                                    out->add(sx, sy, sz);
+                            }
+                }
+            }
+            occupied = std::move(out);
+        });
+        return occupied;
+    }
+
    private:
     tree_wood_lod::Source wood;
+    mutable std::once_flag occupancyOnce;
+    mutable structure_voxels::OccupancyPtr occupied;
 };
 
 }  // namespace

@@ -1,5 +1,11 @@
+// DEVICE TEST: needs a GPU with Vulkan and a display session (it fails with
+// "Authorization required" / no device in headless sandboxes). Not part of
+// CTest; agents without a display must not run it (tests/README.md, "Device
+// targets").
 #include <bx/math.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +29,7 @@
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/tree_renderer.hpp"
+#include "world/tree_simulation.hpp"
 
 int main(int argc, char** argv) {
     const std::string output = argc > 1 ? argv[1] : "build/lod_capture";
@@ -105,7 +112,12 @@ int main(int argc, char** argv) {
                      .items)
                 if (tree.landmark()) {
                     tree.placement.density_per_100m2 = 0.01f;
-                    tree.spacing_m = 600;
+                    // SMOKE_ELDER_SPACING: metres between elders (3000:
+                    // about one in view, like the shipped density).
+                    tree.spacing_m =
+                        std::getenv("SMOKE_ELDER_SPACING")
+                            ? std::stof(std::getenv("SMOKE_ELDER_SPACING"))
+                            : 600.f;
                 }
         ChunkManager chunks(generator, pool, &mesher, world, &assets);
         SunLightPropagator sunlight(chunks, assets.getStorage<Block>(), pool);
@@ -248,6 +260,53 @@ int main(int argc, char** argv) {
                       95};
             std::cout << "elder at " << nearest->x << ' ' << nearest->z << '\n';
         }
+        // SMOKE_APPROACH="start speed stop" (elders, needs a GPU and
+        // display like the whole harness): wait until the view at `start`
+        // metres west of the elder has settled, then walk toward the trunk
+        // at `speed` metres per frame until `stop` metres from it, timing
+        // every frame's sections and counting structure slabs that draw
+        // nothing (holes) near the eye.
+        struct Approach {
+            float start = 0, speed = 0, stop = 0;
+            double targetX = 0, targetZ = 0;
+            int state = 0;  // 0 settling, 1 walking, 2 arrived
+            int frames = 0, gapFrames = 0, gapFrames128 = 0;
+            size_t maxGaps = 0, maxGaps128 = 0;
+            std::vector<std::array<double, 6>> times;  // per section
+        } approach;
+        const bool approaching =
+            elders && std::getenv("SMOKE_APPROACH") &&
+            !chunks.treeLandmarks().empty() &&
+            std::sscanf(std::getenv("SMOKE_APPROACH"), "%f %f %f",
+                        &approach.start, &approach.speed, &approach.stop) == 3;
+        if (approaching) {
+            approach.targetX = camera.position.x;
+            approach.targetZ = camera.position.z;
+            const float x = float(approach.targetX - approach.start);
+            const float z = float(approach.targetZ);
+            camera = {{x, float(surface.height(int(x), int(z))) + 3, z},
+                      bx::kPiHalf,
+                      -.05f,
+                      12};
+        }
+        // SMOKE_LIMB_CUT=1 (elders): stand on the ground under the thickest
+        // sideways limb of the elder in view, saw it through near the trunk
+        // once the view settled, and log the sunlight under it until it is
+        // full sky (the air it shaded must light up).
+        struct LimbCut {
+            // 0 find, 4 walk under the limb first, 1 settle on the limb,
+            // 2 cut, 3 walk under it again
+            int state = 0;
+            std::vector<TilePos> samples;
+            TreeVec cut{};
+            TreeAnchor anchor{};
+            int dim = 0, reach = 0, frame = 0, quiet = 0;
+            size_t visit = 2;  // states 3, 4: the sample walked to
+            Vec3 saved{};
+        } limbCut;
+        const bool cutting = elders && std::getenv("SMOKE_LIMB_CUT");
+        std::unique_ptr<TreeSimulation> treeSim;
+        if (cutting) treeSim = std::make_unique<TreeSimulation>(chunks, editor);
         if (handover)
             locations.loadRegion({unsigned(camera.position.x) / 128,
                                   unsigned(camera.position.z) / 128},
@@ -261,8 +320,14 @@ int main(int argc, char** argv) {
         {
             // Forests track edits like the game: landmark wood is drawn as
             // structure voxels at distance.
+            // SMOKE_TERRAIN=0..2: distant terrain preset (Low by default).
+            const int terrainQuality =
+                std::clamp(std::getenv("SMOKE_TERRAIN")
+                               ? std::atoi(std::getenv("SMOKE_TERRAIN"))
+                               : 0,
+                           0, TerrainLod::QualityCount - 1);
             TerrainLodManager lod(
-                world, assets, pool, TerrainLod::Qualities[0],
+                world, assets, pool, TerrainLod::Qualities[terrainQuality],
                 structure || std::getenv("SMOKE_FOREST") ? &edits : nullptr);
             trees.setVoxelLandmarks(lod.drawsStructureVoxels());
             // As the handover pass below draws chunks.
@@ -290,6 +355,32 @@ int main(int argc, char** argv) {
             }
             for (; frame < maxFrames && scenario != "cancel"; ++frame) {
                 const auto frameStart = std::chrono::steady_clock::now();
+                using SmokeClock = std::chrono::steady_clock;
+                const auto since = [](SmokeClock::time_point t) {
+                    return std::chrono::duration<double, std::milli>(
+                               SmokeClock::now() - t)
+                        .count();
+                };
+                // chunks, lod update, lod render+upload, trees, frame, flush
+                std::array<double, 6> sections{};
+                auto mark = SmokeClock::now();
+                if (approaching && approach.state == 1) {
+                    const double dx = approach.targetX - camera.position.x;
+                    const double dz = approach.targetZ - camera.position.z;
+                    const double d = std::hypot(dx, dz);
+                    if (d <= approach.stop) {
+                        approach.state = 2;
+                    } else {
+                        const double step =
+                            std::min<double>(approach.speed, d - approach.stop);
+                        camera.position.x += float(dx / d * step);
+                        camera.position.z += float(dz / d * step);
+                        camera.position.y =
+                            float(surface.height(int(camera.position.x),
+                                                 int(camera.position.z)) +
+                                  3);
+                    }
+                }
                 if (handover) {
                     const int cx = int(camera.position.x) / 16,
                               cy = int(camera.position.y) / 16,
@@ -297,6 +388,7 @@ int main(int argc, char** argv) {
                     tracker.update();
                     locations.onPlayerRegionChanged(
                         {unsigned(cx) / 8, unsigned(cz) / 8});
+                    locations.update();  // gradual unloading
                     chunks.setFocus(camera.position);
                     sunlight.setFocus(camera.position);
                     blockLight.setFocus(camera.position);
@@ -318,6 +410,8 @@ int main(int argc, char** argv) {
                     chunks.uploadReadyMeshes(renderer);
                     if (lights) volumes.update(camera.position);
                 }
+                sections[0] = since(mark);
+                mark = SmokeClock::now();
                 const double now = std::chrono::duration<double>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count();
@@ -325,8 +419,11 @@ int main(int argc, char** argv) {
                     lightRenderer.update(registry, camera, world.wrap(), now);
                 lod.setStructures(trees.landmarkVoxels(0));
                 lod.update(camera, {1280, 720});
+                sections[1] = since(mark);
+                mark = SmokeClock::now();
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720});
+                sections[2] = since(mark);
                 auto& water = lod.waterUniform();
                 if (lights) {
                     static uint64_t lodVersion = 0;
@@ -452,9 +549,11 @@ int main(int argc, char** argv) {
                                  Frustum::fromViewProj(viewProj), lightRenderer,
                                  frame / 60.0, 0, water);
                     floraMaxMs = std::max(floraMaxMs, flora.cpuMilliseconds());
+                    mark = SmokeClock::now();
                     trees.render(target, camera,
                                  Frustum::fromViewProj(viewProj), lightRenderer,
                                  frame / 60.0, 0, water);
+                    sections[3] = since(mark);
                     treesMaxMs = std::max(treesMaxMs, trees.cpuMilliseconds());
                 }
                 float view[16], projection[16];
@@ -737,8 +836,297 @@ int main(int argc, char** argv) {
                         maxUpload > TerrainLod::UploadBudget)
                         result = 1;
                 }
+                mark = SmokeClock::now();
                 bgfx::frame();
                 renderer.flush();
+                sections[5] = since(mark);
+                sections[4] = since(frameStart);
+                if (cutting) {
+                    treeSim->update(0);
+                    const auto sunAt = [&](const TilePos& p) {
+                        const Tile* t = chunks.tileAt(p.x, p.y, p.z);
+                        return t ? int(t->lightLevel.sun_exposure) : -1;
+                    };
+                    if (limbCut.state == 0) {
+                        for (const auto& tree : chunks.landmarkTrees(
+                                 camera.position.x, camera.position.z, 4000)) {
+                            const auto& k = *tree->skeleton;
+                            int32_t limb = -1;
+                            for (size_t i = 0; i < k.segments.size(); ++i) {
+                                const auto& sg = k.segments[i];
+                                const TreeVec dir = (sg.b - sg.a).normalized();
+                                if (sg.live() && sg.order == 1 &&
+                                    sg.parent >= 0 &&
+                                    k.segments[size_t(sg.parent)].order == 0 &&
+                                    std::abs(dir.y) < 0.8f &&
+                                    (limb < 0 ||
+                                     sg.r0 > k.segments[size_t(limb)].r0))
+                                    limb = int32_t(i);
+                            }
+                            if (limb < 0) continue;
+                            const float clear =
+                                k.segments[size_t(
+                                               k.segments[size_t(limb)].parent)]
+                                    .r0 +
+                                k.segments[size_t(limb)].r0;
+                            int32_t sawn = -1;
+                            const auto a = tree->anchor;
+                            for (int32_t at = limb; at >= 0;) {
+                                const auto& sg = k.segments[size_t(at)];
+                                if (sawn >= 0) {
+                                    const TreeVec m = lerp(sg.a, sg.b, 0.5f);
+                                    const int x = a.x + int(std::lround(m.x)),
+                                              z = a.z + int(std::lround(m.z));
+                                    limbCut.samples.push_back(
+                                        {x, surface.height(x, z) + 3, z});
+                                } else if (std::hypot(sg.a.x, sg.a.z) > clear) {
+                                    sawn = at;
+                                }
+                                int32_t next = -1;
+                                for (size_t i = 0; i < k.segments.size(); ++i)
+                                    if (k.segments[i].parent == at &&
+                                        k.segments[i].attachT >= 1 &&
+                                        k.segments[i].live())
+                                        next = int32_t(i);
+                                at = next;
+                            }
+                            if (sawn < 0 || limbCut.samples.size() < 6) {
+                                limbCut.samples.clear();
+                                continue;
+                            }
+                            const auto& sg = k.segments[size_t(sawn)];
+                            limbCut.cut = lerp(sg.a, sg.b, 0.5f);
+                            limbCut.anchor = a;
+                            const TreeVec dir = (sg.b - sg.a).normalized();
+                            const float d[3]{dir.x, dir.y, dir.z};
+                            for (int i = 1; i < 3; ++i)
+                                if (std::abs(d[i]) > std::abs(d[limbCut.dim]))
+                                    limbCut.dim = i;
+                            limbCut.reach = int(std::ceil(sg.r0)) + 4;
+                            // Every 4th sample, so the log stays short.
+                            std::vector<TilePos> kept;
+                            for (size_t i = 0; i < limbCut.samples.size();
+                                 i += 4)
+                                kept.push_back(limbCut.samples[i]);
+                            limbCut.samples = std::move(kept);
+                            // First on the limb at the cut (sawing needs its
+                            // cross-section loaded), then down to the ground.
+                            camera.position = {
+                                float(a.x + limbCut.cut.x),
+                                float(a.y + limbCut.cut.y + sg.r0 + 2),
+                                float(a.z + limbCut.cut.z)};
+                            std::cout
+                                << "limb_cut found r=" << sg.r0
+                                << " limb_y=" << a.y + limbCut.cut.y
+                                << " ground_y=" << limbCut.samples[1].y - 3
+                                << '\n';
+                            limbCut.state = 1;
+                            // SMOKE_LIMB_CUT=walk: load the ground under the
+                            // whole limb before going up to cut it.
+                            if (std::string(std::getenv("SMOKE_LIMB_CUT")) ==
+                                "walk") {
+                                limbCut.state = 4;
+                                limbCut.saved = camera.position;
+                            }
+                            break;
+                        }
+                    } else if (limbCut.state == 1 &&
+                               (limbCut.quiet = !chunks.hasGenerationWork() &&
+                                                        sunlight.isIdle()
+                                                    ? limbCut.quiet + 1
+                                                    : 0) >= 60) {
+                        const auto& a = limbCut.anchor;
+                        int c[3]{a.x + int(std::lround(limbCut.cut.x)),
+                                 a.y + int(std::lround(limbCut.cut.y + 0.5f)),
+                                 a.z + int(std::lround(limbCut.cut.z))};
+                        std::vector<TilePos> slice;
+                        size_t unloaded = 0;
+                        for (int i = -limbCut.reach; i <= limbCut.reach; ++i)
+                            for (int j = -limbCut.reach; j <= limbCut.reach;
+                                 ++j) {
+                                int q[3]{c[0], c[1], c[2]};
+                                q[(limbCut.dim + 1) % 3] += i;
+                                q[(limbCut.dim + 2) % 3] += j;
+                                const Tile* t = chunks.tileAt(q[0], q[1], q[2]);
+                                if (!t) ++unloaded;
+                                if (t && chunks.grownBlocks().test(t->block_id))
+                                    slice.push_back({q[0], q[1], q[2]});
+                            }
+                        std::cout << "limb_cut before (from the limb) frame="
+                                  << frame;
+                        for (const auto& p : limbCut.samples)
+                            std::cout << ' ' << sunAt(p);
+                        std::cout << '\n';
+                        const size_t cuts = treeSim->cutCount();
+                        for (const auto& p : slice) editor.removeBlock(p);
+                        std::cout << "limb_cut sawn tiles=" << slice.size()
+                                  << " unloaded=" << unloaded
+                                  << " cuts=" << treeSim->cutCount() - cuts
+                                  << '\n';
+                        limbCut.state = 2;
+                        limbCut.frame = frame;
+                        // Walk mode stays at the cut: the ground under the
+                        // far limb was loaded before and is still resident.
+                        if (std::string(std::getenv("SMOKE_LIMB_CUT")) !=
+                            "walk") {
+                            const auto& stand = limbCut.samples[1];
+                            camera.position = {float(stand.x), float(stand.y),
+                                               float(stand.z)};
+                        }
+                    } else if (limbCut.state == 2) {
+                        bool lit = true;
+                        for (const auto& p : limbCut.samples)
+                            lit = lit && sunAt(p) != 0 && sunAt(p) < 15 ? false
+                                                                        : lit;
+                        lit = lit && treeSim->pendingClears() == 0 &&
+                              sunlight.isIdle() && !chunks.hasGenerationWork();
+                        const int since = frame - limbCut.frame;
+                        if (since % 60 == 0 || lit || since >= 3000) {
+                            std::cout
+                                << "limb_cut after frames=" << since
+                                << " clears=" << treeSim->pendingClears()
+                                << " gen_queue=" << chunks.pendingGeneration()
+                                << " sun_idle=" << sunlight.isIdle() << " sun";
+                            for (const auto& p : limbCut.samples)
+                                std::cout << ' ' << sunAt(p);
+                            std::cout << '\n';
+                        }
+                        if (lit || since >= 3000) {
+                            std::cout << "limb_cut settled frames=" << since
+                                      << '\n';
+                            limbCut.state = 3;
+                            limbCut.quiet = 0;
+                        }
+                    } else if (limbCut.state == 4) {
+                        const auto& p = limbCut.samples[limbCut.visit];
+                        camera.position = {float(p.x), float(p.y), float(p.z)};
+                        limbCut.quiet =
+                            !chunks.hasGenerationWork() && sunlight.isIdle()
+                                ? limbCut.quiet + 1
+                                : 0;
+                        if (limbCut.quiet >= 60) {
+                            std::cout << "limb_cut prewalk=" << limbCut.visit
+                                      << " sun=" << sunAt(p) << '\n';
+                            limbCut.quiet = 0;
+                            if (++limbCut.visit >= limbCut.samples.size()) {
+                                limbCut.visit = 2;
+                                limbCut.state = 1;
+                                camera.position = limbCut.saved;
+                            }
+                        }
+                    } else if (limbCut.state == 3) {
+                        // Walk to the far samples (loaded only now).
+                        const auto& p = limbCut.samples[limbCut.visit];
+                        camera.position = {float(p.x), float(p.y), float(p.z)};
+                        limbCut.quiet = !chunks.hasGenerationWork() &&
+                                                sunlight.isIdle() &&
+                                                treeSim->pendingClears() == 0
+                                            ? limbCut.quiet + 1
+                                            : 0;
+                        if (limbCut.quiet >= 60) {
+                            // The sample and a ring around it.
+                            std::cout << "limb_cut visit=" << limbCut.visit
+                                      << " sun=" << sunAt(p) << " ring";
+                            for (const auto [dx, dz] :
+                                 {std::pair{8, 0}, std::pair{-8, 0},
+                                  std::pair{0, 8}, std::pair{0, -8}})
+                                std::cout << ' '
+                                          << sunAt({p.x + dx,
+                                                    surface.height(p.x + dx,
+                                                                   p.z + dz) +
+                                                        3,
+                                                    p.z + dz});
+                            std::cout << '\n';
+                            limbCut.quiet = 0;
+                            if (++limbCut.visit >= limbCut.samples.size()) {
+                                std::cout << "limb_cut done\n";
+                                break;
+                            }
+                        }
+                    }
+                    settled = 0;
+                }
+                if (approaching) {
+                    if (approach.state == 0 &&
+                        ((settled >= 5 && phase == 0) || frame > 6000)) {
+                        approach.state = 1;
+                        std::cout
+                            << "approach_start frame=" << frame << " elapsed_s="
+                            << std::chrono::duration<double>(SmokeClock::now() -
+                                                             begin)
+                                   .count()
+                            << '\n';
+                    }
+                    if (approach.state >= 1) {
+                        const size_t gaps =
+                            lod.structureGaps(chunks, camera, 512);
+                        const size_t near =
+                            lod.structureGaps(chunks, camera, 128);
+                        approach.maxGaps = std::max(approach.maxGaps, gaps);
+                        approach.maxGaps128 =
+                            std::max(approach.maxGaps128, near);
+                        approach.gapFrames += gaps > 0;
+                        approach.gapFrames128 += near > 0;
+                        approach.times.push_back(sections);
+                        const double d =
+                            std::hypot(approach.targetX - camera.position.x,
+                                       approach.targetZ - camera.position.z);
+                        if (approach.frames++ % 30 == 0 || sections[4] > 33)
+                            std::cout
+                                << "approach d=" << int(d)
+                                << " frame_ms=" << sections[4]
+                                << " chunks_ms=" << sections[0]
+                                << " lod_ms=" << sections[1]
+                                << " lod_render_ms=" << sections[2]
+                                << " trees_ms=" << sections[3]
+                                << " flush_ms=" << sections[5]
+                                << " gaps512=" << gaps << " gaps128=" << near
+                                << " backlog=" << lod.backlog()
+                                << " gen_queue=" << chunks.pendingGeneration()
+                                << " gen_jobs=" << chunks.generationInFlight()
+                                << " mesh_jobs=" << chunks.meshInFlight()
+                                << " l0=" << lod.voxelSlabs(0)
+                                << " l1=" << lod.voxelSlabs(1)
+                                << " l2=" << lod.voxelSlabs(2) << '\n';
+                        // Arrived: keep measuring until everything settled.
+                        if (approach.state == 2 && lod.backlog() == 0 &&
+                            !chunks.hasGenerationWork() && gaps == 0) {
+                            const char* names[] = {"chunks",     "lod",
+                                                   "lod_render", "trees",
+                                                   "frame",      "flush"};
+                            for (size_t i = 0; i < 6; ++i) {
+                                std::vector<double> v;
+                                for (const auto& t : approach.times)
+                                    v.push_back(t[i]);
+                                std::sort(v.begin(), v.end());
+                                double sum = 0;
+                                for (double x : v) sum += x;
+                                std::cout
+                                    << "approach_" << names[i]
+                                    << " mean_ms=" << sum / v.size()
+                                    << " p95_ms=" << v[size_t(v.size() * .95)]
+                                    << " p99_ms=" << v[size_t(v.size() * .99)]
+                                    << " max_ms=" << v.back() << '\n';
+                            }
+                            size_t over16 = 0, over33 = 0;
+                            for (const auto& t : approach.times) {
+                                over16 += t[4] > 16.7;
+                                over33 += t[4] > 33.3;
+                            }
+                            std::cout
+                                << "approach_done frames=" << approach.frames
+                                << " frames_over_16ms=" << over16
+                                << " frames_over_33ms=" << over33
+                                << " gap_frames512=" << approach.gapFrames
+                                << " gap_frames128=" << approach.gapFrames128
+                                << " max_gaps512=" << approach.maxGaps
+                                << " max_gaps128=" << approach.maxGaps128
+                                << '\n';
+                            break;
+                        }
+                        settled = 0;  // no phase changes meanwhile
+                    }
+                }
                 maxFrame = std::max(
                     maxFrame, std::chrono::duration<double, std::milli>(
                                   std::chrono::steady_clock::now() - frameStart)

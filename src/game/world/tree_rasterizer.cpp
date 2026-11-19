@@ -10,6 +10,8 @@ namespace {
 // to row instead of a diagonal stair; for thick parts it is negligible.
 constexpr float RadiusSlack2 = 0.4f;
 constexpr float MaxReachPad = 0.71f;
+// Extra reach of a cut's removed wood (see markTreeWood).
+constexpr float CutSampleSlack(float spacing) { return spacing * 0.5f + 0.05f; }
 
 // Tile centre relative to the anchor point (top centre of the anchor tile).
 TreeVec centre(TreeAnchor anchor, int x, int y, int z) {
@@ -50,7 +52,9 @@ std::vector<std::vector<CutPlane>> cutPlanes(const TreeSkeleton& k) {
             axis = p.b - p.a;
         }
         if (axis.dot(axis) < 1e-6f) continue;
-        const CutPlane plane{c.b, axis.normalized()};
+        // A grid cut keeps the face the player sawed.
+        const bool grid = c.cutNormal.dot(c.cutNormal) > 0.5f;
+        const CutPlane plane{c.b, grid ? c.cutNormal : axis.normalized()};
         if (planes.empty()) planes.resize(k.segments.size());
         planes[i].push_back(plane);
         for (size_t s = i; k.segments[s].attachT >= 1;) {
@@ -75,7 +79,17 @@ TreeTileBox woodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
         if ((!s.live() && !includePruned) ||
             maxRadius(skeleton, s) < TreeVoxelRadius)
             continue;
-        const float pad = maxRadius(skeleton, s) + MaxReachPad;
+        float pad = maxRadius(skeleton, s) + MaxReachPad;
+        if (cut)
+            pad +=
+                CutSampleSlack(std::max(0.5f, maxRadius(skeleton, s) * 0.25f));
+        // A cut's wood includes the stump's beyond its (possibly oblique)
+        // cut face, up to a stump radius back from the cut point.
+        if (cut && s.parent >= 0 && s.attachT >= 1) {
+            const auto& stump = skeleton.segments[size_t(s.parent)];
+            if (stump.live() && (stump.flags & TreeSegment::CutEnd))
+                pad += maxRadius(skeleton, stump) * 1.5f;
+        }
         for (const auto& v : {s.a, s.b}) {
             lo = {std::min(lo.x, v.x - pad), std::min(lo.y, v.y - pad),
                   std::min(lo.z, v.z - pad)};
@@ -113,15 +127,15 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                             ? cutPlanes(skeleton)
                             : std::vector<std::vector<CutPlane>>{};
     static const std::vector<CutPlane> noPlanes;
-    for (size_t si = 0; si < skeleton.segments.size(); ++si) {
-        const auto& s = skeleton.segments[si];
-        if (!selected(s, selection)) continue;
-        const auto& clip = planes.empty() ? noPlanes : planes[si];
+    // beyond: only tiles past one of `clip` (the stump's wood a cut took),
+    // else tiles before all of them.
+    const auto raster = [&](const TreeSegment& s,
+                            const std::vector<CutPlane>& clip, bool beyond) {
         // Pruned pieces are rasterized whole (as they were when cut).
         const float visible = selection.cut ? 1 : skeleton.visible(s, age);
-        if (visible < 0) continue;
+        if (visible < 0) return;
         const float rMax = maxRadius(skeleton, s);
-        if (rMax < TreeVoxelRadius) continue;
+        if (rMax < TreeVoxelRadius) return;
         const TreeVec axis = s.b - s.a;
         const float length2 = axis.dot(axis);
         const float length = std::sqrt(length2);
@@ -130,7 +144,12 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
         const float spacing = std::max(0.5f, rMax * 0.25f);
         const int samples = std::max(1, int(std::ceil(length / spacing)));
         const float dt = 1.f / float(samples);
-        const float reach = rMax + MaxReachPad;
+        // A cut's wood was rasterized on the uncut segment's samples; the
+        // pieces sample anew from the cut point, up to half a spacing away
+        // from the old ones. Reach that far, or rim tiles stay behind as
+        // stray blocks (live wood is kept by the caller's `now` test).
+        const float extra = selection.cut ? CutSampleSlack(spacing) : 0.f;
+        const float reach = rMax + MaxReachPad + extra;
         const TreeVec lo{std::min(s.a.x, s.b.x) - reach,
                          std::min(s.a.y, s.b.y) - reach,
                          std::min(s.a.z, s.b.z) - reach};
@@ -145,7 +164,7 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                         anchor.y + int(std::ceil(hi.y + 0.5f)) + 1,
                         anchor.z + int(std::ceil(hi.z)) + 1}
                 .intersect(box);
-        if (local.empty()) continue;
+        if (local.empty()) return;
         const bool lobed = s.order == 0 && skeleton.flare.lobes > 0 &&
                            !(s.flags & TreeSegment::Sprout);
         const float window = length > 1e-4f ? (rMax + 1) / length : 1;
@@ -163,7 +182,7 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                     if (std::any_of(
                             clip.begin(), clip.end(), [&](const CutPlane& p) {
                                 return (q - p.point).dot(p.normal) > 0.f;
-                            }))
+                            }) != beyond)
                         continue;
                     const float t0 = std::max(0.f, tu - window);
                     const float t1 = std::min(visible, tu + window);
@@ -182,11 +201,46 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                                             ? skeleton.fullRadius(s, t, angle)
                                             : skeleton.radius(s, t, age, angle);
                         if (r < TreeVoxelRadius) continue;
-                        if (d.dot(d) <= r * r + RadiusSlack2) {
+                        const float limit =
+                            extra > 0 ? std::sqrt(r * r + RadiusSlack2) + extra
+                                      : 0.f;
+                        if (extra > 0 ? d.dot(d) <= limit * limit
+                                      : d.dot(d) <= r * r + RadiusSlack2) {
                             mask[index] = 1;
                             break;
                         }
                     }
                 }
+    };
+    for (size_t si = 0; si < skeleton.segments.size(); ++si) {
+        const auto& s = skeleton.segments[si];
+        if (!selected(s, selection)) continue;
+        raster(s, planes.empty() ? noPlanes : planes[si], false);
+        // The piece a cut took starts on its stump: the stump's wood past
+        // the cut face went with it (on a sloping limb sawn along a grid
+        // row, a wedge the piece's own capsule does not reach).
+        if (selection.cut && s.parent >= 0 && s.attachT >= 1) {
+            const auto& stump = skeleton.segments[size_t(s.parent)];
+            if (!stump.live() || !(stump.flags & TreeSegment::CutEnd) ||
+                !(stump.b == s.a))
+                continue;
+            const TreeVec axis = stump.b - stump.a;
+            const bool grid = stump.cutNormal.dot(stump.cutNormal) > 0.5f;
+            if (!grid && axis.dot(axis) < 1e-6f) continue;
+            const std::vector<CutPlane> face{
+                {stump.b, grid ? stump.cutNormal : axis.normalized()}};
+            raster(stump, face, true);
+            // And the rounded ends of the same axis below that the face
+            // clips (as cutPlanes does for the live wood).
+            for (const TreeSegment* c = &stump; c->attachT >= 1;) {
+                if (c->parent < 0) break;
+                const auto& p = skeleton.segments[size_t(c->parent)];
+                if (!p.live() || p.order != stump.order) break;
+                if ((stump.b - p.b).length() > maxRadius(skeleton, p) + 1)
+                    break;
+                raster(p, face, true);
+                c = &p;
+            }
+        }
     }
 }

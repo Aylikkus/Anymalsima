@@ -84,6 +84,7 @@ class TreeSimulation {
         TreeColumn::Entry entry;
         int32_t segment = -1;
         float t = 0;
+        TreeVec normal{};  // TreeCut::normal: the sawn face found severed
     };
     void blockChanged(const BlockChange& change);
     void woodRemoved(const BlockChange& change);
@@ -100,6 +101,12 @@ class TreeSimulation {
     // only; other candidates need their whole cross-section broken).
     // Branch cuts update owner.t to the retained face of the cleared row.
     bool severed(Owner& owner, TilePos removed, bool thin) const;
+    // Slits that are not tile-grid slices (slanted, turned, stepped): the
+    // limb is severed when its wood beyond the removal no longer reaches
+    // its wood before it (face-connected, within a window along the limb's
+    // axis; unloaded tiles count as wood). Then owner gets the plane fitted
+    // to the slit, offset so every tile of the far piece lies beyond it.
+    bool severedByConnectivity(Owner& owner, TilePos removed) const;
     void cut(const Owner& owner);
     // Applies tile changes through the editor without reacting to them.
     void applyChanges(const ChunkCoord& coord,

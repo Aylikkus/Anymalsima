@@ -642,9 +642,15 @@ TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
         const float ageNow = tree.growthAge(today),
                     ageThen = tree.growthAge(since);
         markTreeWood(k, entry.anchor, part, ageNow, now);
-        // Cuts made after `since`: clear the wood they took away.
+        // Cuts the chunk's wood may predate: clear the wood they took away.
+        // Stamps are whole days (the day the wood was produced), so a cut
+        // made later on that same day counts, and cut ages are floats (an
+        // elder's is exact to about 1/64 day). Only cuts clearly before the
+        // stamp day began are skipped; clearing a cut again is harmless
+        // (only wood the tree no longer has goes).
         for (size_t i = 0; i < tree.cuts.size(); ++i) {
-            if (double(tree.birthDay) + tree.cuts[i].age <= since) continue;
+            if (double(tree.birthDay) + tree.cuts[i].age < since - 0.1)
+                continue;
             markTreeWood(k, entry.anchor, part, ageNow, cut, {uint16_t(i + 1)});
             for (int y = part.y0; y < part.y1; ++y)
                 for (int z = part.z0; z < part.z1; ++z)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <bitset>
 #include <cstdint>
 #include <memory>
@@ -67,6 +68,26 @@ struct Slab {
 };
 using Slabs = std::unordered_map<ChunkCoord, Slab>;
 
+// Packed unwrapped slab coordinates of one level (each within +-2^20).
+inline uint64_t packSlab(int sx, int sy, int sz) {
+    constexpr int Bias = 1 << 20;
+    return uint64_t(uint32_t(sx + Bias)) << 42 |
+           uint64_t(uint32_t(sy + Bias)) << 21 | uint64_t(uint32_t(sz + Bias));
+}
+// The slabs of each level that may hold voxels (packSlab of unwrapped slab
+// coordinates; a coarse slab is listed when any of its tiles may be).
+// Conservative: a listed slab may turn out empty, an unlisted one never
+// holds voxels.
+struct Occupancy {
+    std::array<std::unordered_set<uint64_t>, MaxLevel + 1> slabs;
+    bool contains(int level, int sx, int sy, int sz) const {
+        return slabs[size_t(level)].contains(packSlab(sx, sy, sz));
+    }
+    // Adds a level-0 slab and its coarser parents.
+    void add(int sx, int sy, int sz);
+};
+using OccupancyPtr = std::shared_ptr<const Occupancy>;
+
 // A structure's voxels. Immutable: a structure that changes (growth, damage,
 // building) is described by a new Source with the same key and another
 // revision. Implementations must be safe to call from any thread.
@@ -93,6 +114,11 @@ class Source {
         (void)older;
         return std::nullopt;
     }
+    // Where voxels may be (null: anywhere in `bounds`). Planning visits only
+    // these slabs, so a sparse structure in a huge box (a massive tree's
+    // limbs) is not planned and rasterized slab by empty slab. May be
+    // costly: StructureLod calls it on the pool, once per source object.
+    virtual OccupancyPtr occupancy() const { return nullptr; }
 };
 using SourcePtr = std::shared_ptr<const Source>;
 
@@ -114,9 +140,11 @@ struct Planned {
 // Tiles of a planned slab (unwrapped X).
 TileBox boxOf(const Planned& planned);
 
+// occupancy: only these slabs are planned (null: every slab of bounds).
 std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
                           double eyeZ, const WorldWrap& wrap,
-                          const std::unordered_set<ChunkCoord>& previous);
+                          const std::unordered_set<ChunkCoord>& previous,
+                          const Occupancy* occupancy = nullptr);
 
 // Canonical key of unwrapped slab coordinates (std::nullopt: outside a
 // world that does not wrap).

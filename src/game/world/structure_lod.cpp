@@ -28,8 +28,10 @@ StructureLod::~StructureLod() {
             std::cerr << "Structure LOD shutdown: " << e.what() << '\n';
         }
     }
-    for (auto& [key, structure] : structures)
+    for (auto& [key, structure] : structures) {
         if (structure.job) structure.job->future.wait();
+        if (structure.occupancyJob) structure.occupancyJob->wait();
+    }
 }
 
 void StructureLod::setStructures(
@@ -53,19 +55,54 @@ void StructureLod::setStructures(
 }
 
 void StructureLod::planStructures(Vec3 eye) {
+    using namespace std::chrono_literals;
     const std::array<int, 3> cell{int(eye.x) / 32, int(eye.y) / 32,
                                   int(eye.z) / 32};
+    // Occupancy of new sources arrives from the pool.
+    for (auto& [key, structure] : structures)
+        if (structure.occupancyJob &&
+            structure.occupancyJob->wait_for(0s) == std::future_status::ready) {
+            try {
+                structure.occupancy = structure.occupancyJob->get();
+            } catch (const std::exception& e) {
+                std::cerr << "Structure occupancy failed: " << e.what() << '\n';
+                structure.occupancy = nullptr;
+            }
+            structure.occupancyJob.reset();
+            replan = true;
+        }
     if (!replan && cell == plannedCell) return;
     replan = false;
     plannedCell = cell;
     for (auto& [key, structure] : structures) {
+        if (!structure.wanted || structure.job) continue;
+        // Its occupancy first (once per source object, on the pool); the
+        // built slabs stay drawn meanwhile.
+        if (structure.occupancyFor != structure.wanted) {
+            if (structure.occupancyJob) continue;  // for an older source
+            structure.occupancyFor = structure.wanted;
+            structure.occupancy = nullptr;
+            structure.occupancyJob = pool.submit_task(
+                [source = structure.wanted] { return source->occupancy(); },
+                BS::pr::low);
+            continue;
+        }
+        if (structure.occupancyJob) continue;
+        // Same eye cell, source and built slabs as the last plan: the same
+        // plan (its pending slabs, if any, are still listed).
+        if (structure.plannedCell == cell &&
+            structure.plannedWanted == structure.wanted &&
+            structure.plannedBuilt == structure.built)
+            continue;
+        structure.plannedCell = cell;
+        structure.plannedWanted = structure.wanted;
+        structure.plannedBuilt = structure.built;
         structure.pending.clear();
         structure.pendingPlan.clear();
-        if (!structure.wanted || structure.job) continue;
         const auto& source = *structure.wanted;
-        auto planned =
-            structure_voxels::plan(source.bounds, eye.x, eye.y, eye.z,
-                                   world.wrap(), structure.covered);
+        auto planned = structure_voxels::plan(
+            source.bounds, eye.x, eye.y, eye.z, world.wrap(), structure.covered,
+            structure.occupancy.get());
         structure.distance = planned.empty() ? 0 : planned.front().distance;
         const bool same =
             structure.built && structure.built->revision == source.revision;
@@ -111,21 +148,51 @@ void StructureLod::requestStructures() {
     for (auto* next : order) {
         if (running >= MaxVoxelJobs) break;
         auto& structure = *next;
-        std::unordered_set<ChunkCoord> rebuilt;
-        for (const auto& p : structure.pending) rebuilt.insert(p.key);
+        auto plan = std::make_shared<const std::unordered_set<ChunkCoord>>(
+            std::move(structure.pendingPlan));
+        // The worker rasterizes the missing slabs and merges them with the
+        // built ones still planned (a massive tree has thousands: copying
+        // and re-marking them used to take milliseconds of the main thread).
         auto future = pool.submit_task(
-            [source = structure.wanted, slabs = std::move(structure.pending)] {
-                VoxelSlabs out;
+            [source = structure.wanted, slabs = std::move(structure.pending),
+             plan, keep = structure.pendingKeep, old = structure.slabs,
+             wrap = world.wrap()] {
+                Built out;
+                auto next = std::make_shared<VoxelSlabs>();
+                std::unordered_set<ChunkCoord> rebuilt;
+                for (const auto& p : slabs) rebuilt.insert(p.key);
+                if (keep && old) {
+                    // Slabs still in the plan stay; rebuilt ones go.
+                    for (const auto& [coord, slab] : *old)
+                        if (plan->contains(coord) && !rebuilt.contains(coord))
+                            next->emplace(coord, slab);
+                        else
+                            out.changed.push_back(coord);
+                } else if (old) {
+                    for (const auto& [coord, slab] : *old)
+                        out.changed.push_back(coord);
+                }
                 for (const auto& p : slabs)
-                    if (auto slab =
-                            source->rasterize(levelOf(p.key), p.sx, p.sy, p.sz))
-                        out[p.key] = std::move(*slab);
+                    if (auto slab = source->rasterize(levelOf(p.key), p.sx,
+                                                      p.sy, p.sz)) {
+                        out.changed.push_back(p.key);
+                        (*next)[p.key] = std::move(*slab);
+                    }
+                // Enclosure depends on the neighbours: slabs whose flag
+                // flips change too.
+                std::unordered_map<ChunkCoord, bool> before;
+                for (const auto& [coord, slab] : *next)
+                    before.emplace(coord, slab.enclosed);
+                structure_voxels::markEnclosed(*next, wrap);
+                for (const auto& [coord, slab] : *next)
+                    if (before.at(coord) != slab.enclosed)
+                        out.changed.push_back(coord);
+                out.slabs = std::move(next);
                 return out;
             },
             BS::pr::low);
-        structure.job = Structure::Build{
-            structure.wanted, std::move(structure.pendingPlan),
-            std::move(future), std::move(rebuilt), structure.pendingKeep};
+        structure.job = Structure::Build{structure.wanted, std::move(plan),
+                                         std::move(future)};
         structure.pending.clear();
         structure.pendingPlan.clear();
         ++running;
@@ -146,33 +213,18 @@ void StructureLod::collectStructures() {
             auto job = std::move(*structure.job);
             structure.job.reset();
             replan = true;
-            std::optional<VoxelSlabs> built;
+            std::optional<Built> built;
             try {
                 built = job.future.get();
             } catch (const std::exception& e) {
                 std::cerr << "Structure voxels failed: " << e.what() << '\n';
             }
             if (built) {
-                auto next = std::make_shared<VoxelSlabs>();
-                if (job.keep && structure.slabs) {
-                    // Slabs still in the plan stay; rebuilt ones go.
-                    for (const auto& [coord, slab] : *structure.slabs)
-                        if (job.plan.contains(coord) &&
-                            !job.rebuilt.contains(coord))
-                            next->emplace(coord, slab);
-                        else
-                            changed.push_back(coord);
-                } else {
-                    touched(structure.slabs);
-                }
-                for (auto& [coord, slab] : *built) {
-                    changed.push_back(coord);
-                    (*next)[coord] = std::move(slab);
-                }
-                structure_voxels::markEnclosed(*next, world.wrap());
-                structure.slabs = std::move(next);
+                changed.insert(changed.end(), built->changed.begin(),
+                               built->changed.end());
+                structure.slabs = std::move(built->slabs);
                 structure.built = std::move(job.source);
-                structure.covered = std::move(job.plan);
+                structure.covered = *job.plan;
             }
         }
         // Out of view: its slabs go once no job uses the entry.
@@ -187,14 +239,22 @@ void StructureLod::collectStructures() {
 }
 
 void StructureLod::mergeVoxels(const std::vector<ChunkCoord>& changed) {
-    auto merged = std::make_shared<VoxelSlabs>();
+    // One structure in view (the usual case): share its slabs as they are.
+    std::vector<const Structure*> holding;
     for (const auto& [key, structure] : structures)
-        if (structure.slabs && structure.wanted)
-            for (const auto& [coord, slab] : *structure.slabs) {
+        if (structure.slabs && structure.wanted && !structure.slabs->empty())
+            holding.push_back(&structure);
+    if (holding.size() == 1) {
+        voxels = holding.front()->slabs;
+    } else {
+        auto merged = std::make_shared<VoxelSlabs>();
+        for (const auto* structure : holding)
+            for (const auto& [coord, slab] : *structure->slabs) {
                 auto [it, inserted] = merged->try_emplace(coord, slab);
                 if (!inserted) it->second.merge(slab);
             }
-    voxels = merged->empty() ? nullptr : std::move(merged);
+        voxels = merged->empty() ? nullptr : std::move(merged);
+    }
     // Border faces look into the neighbours: they change too.
     std::unordered_set<ChunkCoord> stale;
     for (const auto& c : changed)
@@ -298,14 +358,58 @@ void StructureLod::choose(Vec3 eye) {
     for (const auto& c : candidates) {
         wanted.push_back(c.coord);
         keep.insert(c.coord);
+        // Wanted again before its replacements were ready: back in use.
+        if (const auto it = retired.find(c.coord);
+            it != retired.end() && !proxies.contains(c.coord)) {
+            retiredBytes -= it->second->bytes;
+            residentOf(*it->second) += it->second->bytes;
+            proxies.emplace(c.coord, std::move(it->second));
+            retired.erase(it);
+        }
     }
-    // Removed structures and slabs out of view release their meshes.
+    // Removed structures and slabs out of view release their meshes. A
+    // drawn structure slab replaced by another level (the eye moved) is
+    // retired instead: drawn until its replacements are (see draw).
     for (auto it = proxies.begin(); it != proxies.end();)
         if (!keep.contains(it->first)) {
-            residentOf(*it->second) -= it->second->bytes;
+            auto& proxy = *it->second;
+            residentOf(proxy) -= proxy.bytes;
+            bool replaced = false;
+            if (proxy.voxels && proxy.drawable && proxy.hasMesh && voxels)
+                forEachOverlap(it->first, [&](const ChunkCoord& c) {
+                    replaced = replaced || keep.contains(c);
+                });
+            if (replaced) {
+                retiredBytes += proxy.bytes;
+                retired[it->first] = std::move(it->second);
+            }
             it = proxies.erase(it);
         } else
             ++it;
+    // Retired proxies whose area left the view entirely go too.
+    for (auto it = retired.begin(); it != retired.end();) {
+        bool replaced = false;
+        forEachOverlap(it->first, [&](const ChunkCoord& c) {
+            replaced = replaced || keep.contains(c);
+        });
+        if (replaced) {
+            ++it;
+            continue;
+        }
+        retiredBytes -= it->second->bytes;
+        it = retired.erase(it);
+    }
+}
+
+bool StructureLod::coveredByChunks(const ChunkCoord& c) const {
+    if (!chunkDrawn || levelOf(c) != 0) return false;
+    const int inner = drawnRadius - DrawnMargin;
+    const int64_t dx = world.wrap().enabled()
+                           ? world.wrap().deltaChunk(c.x, drawnCentre.x)
+                           : int64_t(c.x) - int64_t(drawnCentre.x);
+    return std::abs(dx) <= inner &&
+           std::abs(int(c.y) - int(drawnCentre.y)) <= inner &&
+           std::abs(int(c.z) - int(drawnCentre.z)) <= inner && chunkDrawn(c);
 }
 
 void StructureLod::collect() {
@@ -347,6 +451,9 @@ void StructureLod::request() {
                 return j.slab == coord && j.revision >= proxy.staleRevision;
             });
         if (current || building) continue;
+        // Its real chunk is drawn, well inside the detail box: no proxy
+        // needed until the player walks away (DrawnMargin chunks).
+        if (!proxy.drawable && coveredByChunks(coord)) continue;
         // New proxies only while the budget has room; rebuilds always.
         if (!proxy.drawable && residentOf(proxy) >= budgetOf(proxy)) continue;
         auto future = pool.submit_task(

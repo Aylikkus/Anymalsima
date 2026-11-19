@@ -72,6 +72,10 @@ class TerrainLodManager {
     size_t structureCount() const {
         return structures ? structures->count() : 0;
     }
+    // Debug: structure voxel slabs within `radius` of the eye that draw
+    // nothing this frame (neither a proxy nor their real chunk).
+    size_t structureGaps(const ChunkManager& chunks, const Camera& camera,
+                         float radius) const;
     size_t patchCount() const { return drawn.size(); }
     size_t jobCount() const { return jobs.size(); }
     size_t backlog() const;

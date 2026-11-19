@@ -358,28 +358,12 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
                                                   int bucket,
                                                   tree_foliage::Detail detail,
                                                   bool bare, int& starts) {
-    using namespace std::chrono_literals;
     if (auto it = meshes.find(key); it != meshes.end()) {
         auto& entry = it->second;
         entry.lastUsed = frame;
-        if (entry.job && entry.job->wait_for(0s) == std::future_status::ready) {
-            --meshJobs;
-            try {
-                entry.cpu = entry.job->get();
-            } catch (const std::exception&) {
-                entry.cpu.clear();
-            }
-            entry.job.reset();
-            for (const auto& part : entry.cpu) {
-                if (part.empty()) continue;
-                entry.gpu.emplace_back().initStatic(
-                    &renderer, part.vertices.data(), part.vertices.size(),
-                    part.indices.data(), part.indices.size());
-            }
-        }
         return entry.ready() ? &entry : nullptr;
     }
-    if (starts <= 0 || meshJobs >= MaxMeshJobs) return nullptr;
+    if (starts <= 0 || building.size() >= MaxMeshJobs) return nullptr;
     const auto& table = chunks.treeSpecies();
     const auto* rule = table.find(tree.species);
     auto& entry = meshes[key];
@@ -391,7 +375,7 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
                               : tree.skeleton;
     if (!skeleton) return nullptr;
     --starts;
-    ++meshJobs;
+    building.push_back(key);
     // The species table and materials outlive the renderer, which waits
     // for its jobs.
     entry.job = pool.submit_task(
@@ -408,6 +392,30 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
     return nullptr;
 }
 
+void TreeRenderer::collectMeshes() {
+    using namespace std::chrono_literals;
+    std::erase_if(building, [&](uint64_t key) {
+        const auto it = meshes.find(key);
+        if (it == meshes.end() || !it->second.job) return true;
+        auto& entry = it->second;
+        if (entry.job->wait_for(0s) != std::future_status::ready) return false;
+        try {
+            entry.cpu = entry.job->get();
+        } catch (const std::exception&) {
+            entry.cpu.clear();
+        }
+        entry.job.reset();
+        entry.built = true;
+        for (const auto& part : entry.cpu) {
+            if (part.empty()) continue;
+            entry.gpu.emplace_back().initStatic(
+                &renderer, part.vertices.data(), part.vertices.size(),
+                part.indices.data(), part.indices.size());
+        }
+        return true;
+    });
+}
+
 void TreeRenderer::render(RenderTarget& target, const Camera& camera,
                           const Frustum& frustum, LightRenderer& lights,
                           double now, double today, ShaderProperty& water) {
@@ -415,6 +423,7 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
     ++frame;
     drawn = calls = 0;
     instances.clear();
+    collectMeshes();
     if (chunks.treeSpecies().empty() ||
         !bgfx::isValid(assets.getFoliageAlbedoArray())) {
         cpuMs = 0;
@@ -559,6 +568,7 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
     params.setVec4({float(std::fmod(now, 3600.0)), 1, 1, 0});
     for (const auto& [key, list] : groups) {
         const auto& entry = meshes.at(key);
+        if (entry.gpu.empty()) continue;  // nothing left of the crown
         const auto count = bgfx::getAvailInstanceDataBuffer(
             uint32_t(list.size()), InstanceStride);
         if (!count) break;

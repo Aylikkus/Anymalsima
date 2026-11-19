@@ -124,6 +124,8 @@ class SunLightPropagator {
     std::unordered_map<uint64_t, uint64_t> columnRevisions;
     std::unordered_map<uint64_t, std::unordered_set<ChunkCoord>> columnChunks;
     std::unordered_set<uint64_t> pendingDirect;
+    // Columns that lost a chunk since the last update (see removed()).
+    std::unordered_set<uint64_t> removedColumns;
     CameraWorkQueue pendingIndirect;
     std::unordered_set<ChunkCoord> requested;
     std::vector<DirectJob> directJobs;

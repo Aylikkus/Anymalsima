@@ -150,6 +150,56 @@ TEST(region_edit_persists) {
     }
 }
 
+TEST(region_gradual_unload) {
+    // Crossing a region border unloads a few columns per update. An edit
+    // made after the unload began, to a column not yet gone, is saved.
+    const auto world = flatWorld();
+    const auto dir = scratch("gradual");
+    {
+        Session s(world, dir);
+        s.locations.loadRegion({0, 0}, 0);
+        s.ready(Surface);
+        s.ready(Deep);
+        s.locations.unloadDistant({2, 2}, 0, true);
+        CHECK(s.locations.isUnloading({0, 0}));
+        CHECK(!s.locations.isLoaded({0, 0}));
+        CHECK(s.chunks.isRegistered(Surface));  // nothing gone yet
+        CHECK(s.chunks.withChunkLocked(
+            Surface, [](Chunk& c) { c.tiles[1][15][2].block_id = 77; }));
+        s.chunks.markModified(Surface);
+        s.pumpUntil([&] { return !s.locations.isUnloading({0, 0}); });
+        CHECK(!s.chunks.isRegistered(Surface));
+        CHECK(!s.chunks.isRegistered(Deep));
+        s.store.flush();
+        EQUAL(s.store.failedWrites(), size_t(0), "write failures");
+    }
+    {
+        Session s(world, dir);
+        s.locations.loadRegion({0, 0}, 0);
+        EQUAL(int(s.ready(Surface).tiles[1][15][2].block_id), 77,
+              "edit made while unloading");
+        s.ready(Deep);
+    }
+}
+
+TEST(region_reload_while_unloading) {
+    // Turning back before a gradual unload finished: the region is finished
+    // and saved first, then loaded again with its edits.
+    const auto world = flatWorld();
+    const auto dir = scratch("unload_back");
+    Session s(world, dir);
+    s.locations.loadRegion({0, 0}, 0);
+    s.ready(Surface);
+    CHECK(s.chunks.withChunkLocked(
+        Surface, [](Chunk& c) { c.tiles[1][15][2].block_id = 66; }));
+    s.chunks.markModified(Surface);
+    s.locations.unloadDistant({2, 2}, 0, true);
+    s.locations.loadRegion({0, 0}, 0);
+    CHECK(!s.locations.isUnloading({0, 0}));
+    EQUAL(int(s.ready(Surface).tiles[1][15][2].block_id), 66,
+          "edit kept across the reload");
+}
+
 TEST(region_reload_while_writing) {
     const auto world = flatWorld();
     const auto dir = scratch("ordering");

@@ -14,6 +14,12 @@ void LocationManager::loadRegion(const Vec2u& regionCoord, int radius) {
             if (x < 0 || z < 0 || x >= world.width || z >= world.height)
                 continue;
             Vec2u rc{unsigned(x), unsigned(z)};
+            // Back before it finished unloading: finish (and save) it first,
+            // then load it like any other region.
+            if (const auto it = unloading.find(rc); it != unloading.end()) {
+                advanceUnload(rc, it->second, std::nullopt);
+                unloading.erase(it);
+            }
             if (loadedRegions.count(rc) || opening.count(rc)) continue;
 
             if (!store) {
@@ -29,7 +35,39 @@ void LocationManager::loadRegion(const Vec2u& regionCoord, int radius) {
     update();
 }
 
+bool LocationManager::advanceUnload(
+    const Vec2u& rc, Unloading& state,
+    std::optional<std::chrono::steady_clock::time_point> deadline) {
+    const ChunkCoord origin = regionOriginChunk(rc);
+    // Whole columns: sunlight then finds each column empty instead of
+    // recomputing it once per slab.
+    while (state.column < CHUNKS_PER_REGION * CHUNKS_PER_REGION) {
+        if (deadline && std::chrono::steady_clock::now() >= *deadline)
+            return false;
+        const unsigned c = unsigned(state.column++);
+        const unsigned cx = origin.x + c % CHUNKS_PER_REGION,
+                       cz = origin.z + c / CHUNKS_PER_REGION;
+        if (store) chunks.snapshotColumn(cx, cz, state.snapshot);
+        for (unsigned y = 0; y < Y_CHUNKS; ++y) chunks.unregister({cx, y, cz});
+    }
+    if (store) store->store(rc, std::move(state.snapshot), true);
+    return true;
+}
+
+bool LocationManager::continueUnloading(
+    std::optional<std::chrono::steady_clock::time_point> deadline) {
+    for (auto it = unloading.begin(); it != unloading.end();) {
+        if (!advanceUnload(it->first, it->second, deadline)) return false;
+        it = unloading.erase(it);
+    }
+    return true;
+}
+
+void LocationManager::finishUnloading() { continueUnloading(std::nullopt); }
+
 void LocationManager::update() {
+    if (!unloading.empty())
+        continueUnloading(std::chrono::steady_clock::now() + UnloadBudget);
     if (!store || opening.empty()) return;
     store->update();
     for (auto it = opening.begin(); it != opening.end();) {
@@ -44,7 +82,8 @@ void LocationManager::update() {
     }
 }
 
-void LocationManager::unloadDistant(const Vec2u& centre, int keepRadius) {
+void LocationManager::unloadDistant(const Vec2u& centre, int keepRadius,
+                                    bool gradual) {
     auto distant = [&](const Vec2u& rc) {
         const int dx = int(std::abs(world.wrap().deltaRegion(rc.x, centre.x)));
         const int dy = std::abs(int(rc.y) - int(centre.y));
@@ -54,7 +93,14 @@ void LocationManager::unloadDistant(const Vec2u& centre, int keepRadius) {
     std::vector<Vec2u> toRemove;
     for (const auto& rc : loadedRegions)
         if (distant(rc)) toRemove.push_back(rc);
-    for (const auto& rc : toRemove) unloadRegion(rc);
+    for (const auto& rc : toRemove) {
+        if (!gradual) {
+            unloadRegion(rc);
+            continue;
+        }
+        loadedRegions.erase(rc);
+        unloading.emplace(rc, Unloading{});
+    }
 
     for (auto it = opening.begin(); it != opening.end();) {
         if (!distant(*it)) {
@@ -85,6 +131,8 @@ void LocationManager::saveRegion(const Vec2u& rc) {
 }
 
 void LocationManager::saveAll(bool unload) {
+    // Regions half unloaded are saved as they finish.
+    finishUnloading();
     if (unload) {
         const auto regions = loaded();
         for (const auto& rc : regions) unloadRegion(rc);

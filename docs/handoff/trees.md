@@ -572,7 +572,8 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   seed, anchor, birth day, headroom; any tree: its cuts; generated trees:
   a persistent removal marker) in a
   `TreeOverrideMap`, the truth for trees that differ from generation.
-  `save/trees_codec` writes it to `trees.dat` (fourcc `TREE` v2, reads v1);
+  `save/trees_codec` writes it to `trees.dat` (fourcc `TREE` v3, reads v1
+  and v2; v3 adds `TreeCut::plane`, see "Approaching massive trees");
   `save_catalog::readTrees`/`writeTrees`. `GameplayState` loads it before
   regions register and writes it as soon as it changes (and on exit).
 - Cuts on existing skeletons: `applyTreeCuts(skeleton, species, cuts,
@@ -847,3 +848,153 @@ physics, and today still lose the part above.
 - `TreeVersion` was not bumped (only cuts of settling species change, and a
   bump stops growth in every saved chunk): elders cut before this change
   keep wood without their top in chunks saved then.
+
+### Approaching massive trees (2026-11-19)
+
+Walking up to an elder dropped the frame rate and parts of the tree
+vanished and "built themselves". Measured with the smoke harness's
+approach mode (needs a GPU and display: `tests/README.md`, "Device
+targets"): one elder in view, chunk radius 8, from 1200 m to 40 m at
+0.5 m per frame.
+
+| Per frame, near the tree | Before | Now |
+| --- | --- | --- |
+| `StructureLod::update` (main thread) | 20-30 ms, up to 77 ms | 0.5-1 ms, at most 10 ms |
+| Frames over 33 ms | 883 of the walk | 8 (all region unloads, see below) |
+| Distant wood showing nothing within 512 m | up to 536 slabs, never recovered at Low | at most 2 slabs, for a few frames |
+| Chunk dispatch (`ChunkManager::update`) | 25-50 ms with a full queue | below 8 ms (p99) |
+
+What cost the time, and the fixes:
+
+- **Planning every empty slab.** `structure_voxels::plan` split the whole
+  1.5 x 0.6 x 1.7 km wood box (about 131000 slabs, almost all air), and
+  every finished voxel job asked for a new plan, so it ran nearly every
+  frame (9-20 ms). Sources now report where they may hold voxels
+  (`Source::occupancy`; trees mark slabs within reach of their wood
+  segments, about 2.7 ms once per source on the pool) and the plan visits
+  only those (5000 slabs, 0.9 ms). A structure is not planned again while
+  its eye cell, source and built slabs are unchanged. Rasterizing only
+  occupied slabs also makes the large-limb cut rebuild 1849 slabs instead
+  of 23684 (0.9 s of worker time instead of 1.6 s).
+- **Merging on the main thread.** Each finished job copied and merged all
+  slabs and re-marked enclosure (2.5-5 ms). The job now returns the merged
+  map and the changed keys; one structure's map is shared as is.
+- **Holes while levels change.** A coarse proxy was deleted as soon as the
+  plan wanted finer slabs, which were then meshed two at a time, nearest
+  first, and at Low could not fit in the tree budget at all. Proxies that
+  leave the plan are now *retired*: drawn until every replacement is
+  drawable or shown by its real chunk, while the replacements under them
+  wait, so a level swap never shows a hole or two levels at once. Retired
+  bytes do not count against the budget (they would block their own
+  replacements). Level 0 slabs whose chunk is drawn at least
+  `DrawnMargin` (2) chunks inside the detail box get no proxy mesh, and
+  four mesh jobs run instead of two.
+- **Tree readiness per queued chunk.** With a landmark in the world a
+  chunk reads tree sets up to `landmarkRadius` (about 9) regions away; the
+  starvation guard checked 361 regions for each of thousands of queued
+  chunks, and chunks waiting for tree sets computed their column inputs
+  first (41 ms for a 1024-chunk window). Readiness is now memoized per
+  region and update, and checked before the column inputs.
+- **Region unloading** (fixed 2026-11-19, see below): crossing a region
+  border unloaded about three regions (12000 chunk handles and their
+  `removed` listeners) in one frame, 100-140 ms with or without trees.
+
+Why the tree looked like it was building itself: distant wood comes in
+three levels (full tiles within 512 m, 2- and 4-tile cells farther). As the
+eye moved, slabs switched to a finer level; the old coarse mesh was dropped
+before the new one existed, and the whole tree's batch of new slabs had to
+be rasterized before any was shown.
+
+Bugs fixed in the same pass:
+
+- **Leaves left in the air after a cut.** A crown mesh job was collected
+  only when its own key was drawn again. A key left behind by a cut, a
+  growth step or a detail change kept its job slot forever; with all 8
+  slots taken no crown was rebuilt and cut trees kept drawing their old
+  crown (`drawnMesh`) until a stale key happened to be drawn again.
+  `TreeRenderer` now collects every finished job each frame, and an empty
+  finished crown draws nothing instead of the previous one.
+- **Blocks left beyond a sawn limb.** `TreeSimulation` finds a thick
+  branch severed on a tile-grid slice (the row the player sawed), but the
+  cut used a plane perpendicular to the branch: on a sloping limb a wedge
+  beyond the slit stayed stump wood. `TreeCut::plane` now records the
+  grid plane (+-x, +-y, +-z; 0 is the old perpendicular plane, used for
+  thin parts, trunks and cuts saved before), stored in `trees.dat` v3, and
+  the stump keeps it as `TreeSegment::cutNormal`. A cut's removed wood
+  also takes the stump's wood beyond its face and reaches half a sample
+  spacing further (the pruned piece samples anew from the cut point; rim
+  tiles of the original raster stayed as stray blocks). `TreeVersion` is
+  unchanged: existing cuts rasterize as before. Test:
+  `tree_cut_angled_branch` (18 blocks were left beyond the slit).
+
+Tests: `tree_wood_lod_occupancy` (occupancy never misses a filled slab at
+any level, the elder's is sparse), `trees_codec_roundtrip` (v3 plane, v1/v2
+read as perpendicular, bad planes refused). Benchmarks:
+`TREE_BENCH_PLAN_ONLY=1 build/tests/tree_benchmark` (occupancy and plan
+costs), `TREE_BENCH_LARGE_CUT=1` (now with occupancy).
+
+### Region borders and cut wood in saved chunks (2026-11-19)
+
+- **Freeze at every region border.** Unloading three regions in one frame
+  cost 100-140 ms. Most of it was `SunLightPropagator::removed`: each
+  removed slab marked its column dirty, walking every remaining slab of the
+  column and its neighbours (quadratic). It now only bumps the column's
+  revision and recomputes the column once on the next update (an emptied
+  column costs nothing). That halved the stall; the rest was per-chunk
+  work, so play now unloads gradually: `LocationManager::onPlayerRegionChanged`
+  hands distant regions to `update()`, which unregisters whole chunk
+  columns within `UnloadBudget` (2 ms) per frame, snapshotting each column
+  as it goes (edits to the rest are kept) and storing the region after its
+  last column. Loading a region back while it unloads, or `saveAll`,
+  finishes it first. `unloadDistant` without `gradual` is unchanged.
+  Approach run (elder, High): worst chunk section 130 ms -> 16 ms, frames
+  over 33 ms 8 -> 1. Tests: `region_gradual_unload`,
+  `region_reload_while_unloading`.
+- **Shadow under a sawn limb, far from the cut.** Chunk stamps are whole
+  days (`floraDay`), and a saved chunk skipped catching up when its stamp
+  day equalled today, and cuts made during the stamp's own day. A limb's
+  far chunks saved earlier the same day (a region unloaded before the cut)
+  came back with the cut wood: high above the detailed slabs and absent
+  from the distant voxels (built from the cut skeleton), so invisible, but
+  it shaded the ground (sun 12-13). Catch-up now runs on the stamp's own
+  day, and only cuts made before the stamp day began (with float slack)
+  are skipped; clearing a cut again is harmless. Test:
+  `tree_reload_same_day_cut` (47 cut tiles came back before).
+- Sunlight under a sawn limb in loaded or later-loaded chunks was already
+  right: `tree_cut_relights_below` (CTest), `TREE_BENCH_LIMB_LIGHT=1
+  build/tests/tree_benchmark` (the elder's thickest sideways limb, ground
+  0-4 before, 15 after) and the device scenario `SMOKE_LIMB_CUT=1|walk` of
+  `lod_render_smoke` keep it covered.
+
+### Slanted and stepped cuts (2026-11-19)
+
+Thick branches were cut only when a whole tile-grid slice (x, y or z
+constant) through the removed block was empty, so slanted, turned or
+stair-stepped slits never cut, and the cut plane could only be +-x/y/z.
+
+- `TreeSimulation::severedByConnectivity` (after the grid slices fail): the
+  limb's axis chain (the owning segment and those continuing it) within a
+  window of 3 radii + 4 tiles each way; from the limb's core at the far
+  window end, a best-first search toward the base through wood tiles
+  (face-connected, within radius + 1.5 of the chain; unloaded tiles count
+  as wood, at most 400000 visits). Reaching the base: attached. Otherwise
+  the far piece is off: the plane is fitted (least squares) to the hollow
+  tiles inside the limb next to it, oriented along the limb, and offset so
+  every far tile lies beyond it (midway to the near face when a plane
+  separates them, else just before the far piece; a stepped slit may cost
+  the stump a few corners). Slits nearly along the limb, or planes missing
+  the axis, fall back to a cut across the limb before the far piece.
+- Blocks hold by faces: a limb whose last contact across the slit is an
+  edge or a corner falls. `tree_cut_angled_branch` now expects the cut when
+  the last face bridge goes, not the last block of the slice.
+- `TreeCut::normal` (any unit vector, zero = perpendicular) replaces the
+  grid code; `trees.dat` `TREE` v4 writes it as three floats, v3 codes and
+  older cuts still load. A cut's removed wood also takes the clipped end
+  caps of the stump's axis below (as `cutPlanes` clips the live wood).
+- Measured (`TREE_BENCH_LIMB_LIGHT=1 TREE_BENCH_SLANT=1
+  build/tests/tree_benchmark`: the elder's thickest sideways limb, a slit
+  35 degrees off its axis, 1818 blocks): cut at the last block, nothing
+  left beyond; 0.45 ms per block on average, p99 1.6 ms; the block that
+  cuts costs about 28 ms (18 ms search and fit, 7.5 ms commit).
+- Test: `tree_cut_slanted_slit` (x + y = c and x + z = c staircases).
+
