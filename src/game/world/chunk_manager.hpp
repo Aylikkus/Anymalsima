@@ -18,7 +18,10 @@
 #include "location_generator.hpp"
 #include "render/ui_context.hpp"
 #include "save/region_file.hpp"
-#include "tree_generator.hpp"
+#include "structure_overrides.hpp"
+#include "tree_wood_lod.hpp"
+
+class WorldEditor;
 
 enum class ChunkState { Unloaded, Queued, Ready };
 enum class MeshState { None, Queued, Built };
@@ -42,6 +45,9 @@ struct ChunkHandle {
     // Loaded from disk with solid/air different from generated terrain
     // (an earlier gameplay edit).
     bool edited = false;
+    // Generated structure voxels at the revision used to prepare this chunk.
+    // Tree wood is reconciled separately through TreeStamp.
+    std::shared_ptr<const structure_voxels::Slab> structureBaseline;
     // Plants anchored in this chunk (null: none). Replaced, never mutated.
     FloraLayerPtr flora;
     // When its tree wood was last brought up to date (saved with plants).
@@ -76,30 +82,33 @@ class ChunkManager {
     // The plants of a Ready chunk changed (setFlora). Chunks becoming
     // ready announce their plants through becameReady.
     Signal<const ChunkCoord&> floraChanged;
-    // A chunk column's tree list was rebuilt (a tree changed, was cut,
-    // planted or removed): column key (x << 32 | z).
-    Signal<uint64_t> columnTreesChanged;
+    // Generated structures changed in a column: key (x << 32 | z).
+    Signal<uint64_t> columnStructuresChanged;
+    Signal<const ChunkCoord&> structureRebased;
     // A chunk column's last chunk was unregistered: column key.
     Signal<uint64_t> columnReleased;
     void setFocus(Vec3 value) { focus = value; }
     // X wrapping of the world this manager streams (disabled without a map).
     WorldWrap wrap() const { return terrainWorld.wrap(); }
-    void update();
+    void update(WorldEditor* editor = nullptr);
     // stored: saved chunk payload; the chunk is decoded instead of generated.
     // storedFlora: its saved plants; a saved chunk without them regrows its
     // generated plants.
     void registerChunk(const ChunkCoord& coord, const ChunkCoord& regionOrigin,
                        const Region* region, ChunkBlob stored = nullptr,
-                       ChunkBlob storedFlora = nullptr);
+                       ChunkBlob storedFlora = nullptr,
+                       ChunkBlob storedBaseline = nullptr);
     Chunk* request(const ChunkCoord& coord);
     Chunk* requestLighting(const ChunkCoord& coord, ChunkCoord beneficiary);
     bool isRegistered(const ChunkCoord& coord) const;
     bool isReady(const ChunkCoord& coord) const;
     // Requested and waiting for (or running) its generation job.
     bool isQueued(const ChunkCoord& coord) const;
-    // Ready, read from a save, and its solid tiles differ from what the
-    // generator makes there (see LocationGenerator).
+    // Ready and read from a save whose terrain or structure voxels differ
+    // from the generated content.
     bool isEdited(const ChunkCoord& coord) const;
+    const structure_voxels::Slab* structureBaseline(
+        const ChunkCoord& coord) const;
     // Generated surface inputs of a registered chunk column, or null for an
     // unregistered column or a world without a map (fixtures).
     std::shared_ptr<const ChunkColumnInputs> generatedColumns(unsigned chunkX,
@@ -142,12 +151,13 @@ class ChunkManager {
     std::shared_ptr<const TreeColumn> treeColumn(unsigned chunkX,
                                                  unsigned chunkZ) const;
     // What a registered chunk column's generated content comes from:
-    // terrain inputs and its trees. Prepared on demand (terrain sampling,
-    // tree set jobs); std::nullopt until the trees are ready, for
+    // terrain inputs and structure voxels. Prepared on demand (terrain
+    // sampling, tree set jobs); std::nullopt until the trees are ready, for
     // unregistered columns and without a world map. Main thread.
     struct ColumnSources {
         std::shared_ptr<const ChunkColumnInputs> terrain;
-        std::shared_ptr<const TreeColumn> trees;
+        structure_voxels::ColumnPtr structures;
+        bool hasTrees = false;
     };
     std::optional<ColumnSources> columnSources(unsigned chunkX,
                                                unsigned chunkZ);
@@ -157,6 +167,18 @@ class ChunkManager {
     // The returned work may generate missing tree sets on a worker.
     std::function<ColumnSources()> snapshotColumnSources(unsigned cx,
                                                          unsigned cz);
+    // Replace the generated indexes for kinds other than trees. This affects
+    // generation, sky and landmarks. Live tile changes go through WorldEditor.
+    void setGeneratedStructureKinds(std::vector<structure_voxels::Kind> kinds);
+    void appendStructureLandmarks(
+        std::vector<structure_voxels::SourcePtr>& sources, const Vec3& eye,
+        float range) const;
+    void setStructureOverrides(structure_voxels::Overrides overrides);
+    const structure_voxels::Overrides& structureOverrides() const {
+        return savedStructures;
+    }
+    uint64_t structureOverrideRevision() const { return overrideRevision; }
+    uint64_t generatedStructureRevision() const { return structureRevision; }
     // Tree stamp of a Ready chunk.
     TreeStamp treeStamp(const ChunkCoord& coord) const;
     // Records that a Ready chunk's wood is up to date with `stamp`.
@@ -169,8 +191,8 @@ class ChunkManager {
     // Seed of tree placement (RegionTreesInput::seed).
     uint32_t treePlacementSeed() const { return treeSeed; }
     // Replaces (or adds) one tree in the set of the region holding its
-    // anchor and rebuilds the tree columns it covers (old and new bounds),
-    // raising their tops. Chunk jobs that used an older column are redone.
+    // anchor and rebuilds the tree columns it covers (old and new bounds).
+    // Chunk jobs that used an older column are redone.
     void updateTree(const TreeInstancePtr& tree,
                     const TreeTileBox& oldBounds = {});
     // Takes a tree out of the world (it died): its region set, landmark
@@ -240,6 +262,7 @@ class ChunkManager {
     // the live data, so the column must be unregistered right afterwards.
     void snapshotColumn(unsigned cx, unsigned cz, RegionSnapshot& out);
     int getColumnTopY(unsigned cx, unsigned cz) const;
+    int getStructureTopY(unsigned cx, unsigned cz) const;
     void raiseColumnTopY(unsigned cx, unsigned cz, int worldY);
     int generatedSurfaceY(unsigned tileX, unsigned tileZ);
     size_t cachedColumnInputs() const { return columnInputs.size(); }
@@ -298,6 +321,9 @@ class ChunkManager {
         return !generationQueue.empty() || !generationJobs.empty() ||
                !treeJobs.empty() || !treeRequests.empty();
     }
+    bool hasStructureWork() const {
+        return !rebaseQueue.empty() || !structureJobs.empty();
+    }
     size_t generationInFlight() const { return generationJobs.size(); }
     // Region tree-set jobs running, and regions waiting for a job slot.
     size_t treeJobsInFlight() const { return treeJobs.size(); }
@@ -353,6 +379,7 @@ class ChunkManager {
         std::optional<ChunkCoord> beneficiary;
         ChunkBlob stored;
         ChunkBlob storedFlora;
+        ChunkBlob storedBaseline;
     };
     struct GeneratedChunk {
         std::shared_ptr<Chunk> data;
@@ -364,8 +391,10 @@ class ChunkManager {
         TreeStamp trees = {};
         // Tree wood was added to a saved chunk: save it.
         bool treesPlaced = false;
-        // The tree column the job used; a newer one makes the result stale.
-        const TreeColumn* treesUsed = nullptr;
+        bool baselineChanged = false;
+        // The source snapshot the job used; a replacement makes it stale.
+        structure_voxels::ColumnPtr structuresUsed = {};
+        std::shared_ptr<const structure_voxels::Slab> structureBaseline = {};
     };
     struct GenerationJob {
         ChunkCoord coord;
@@ -394,13 +423,17 @@ class ChunkManager {
         size_t registrations = 0;
         std::shared_ptr<const ChunkColumnInputs> data;
         std::shared_ptr<const TreeColumn> trees;
+        structure_voxels::ColumnPtr structures;
+        int32_t structuresDay = -1;
     };
     std::shared_ptr<const ChunkColumnInputs> prepareColumns(
         ChunkCoord coord, const Region& region);
     // Trees of a column once every region tree set it needs is ready
-    // (starting the missing jobs); raises the column top to its wood.
+    // (starting the missing jobs).
     std::shared_ptr<const TreeColumn> prepareTrees(ChunkCoord coord,
                                                    Vec2u region);
+    structure_voxels::ColumnPtr prepareStructures(ChunkCoord coord,
+                                                  const TreeColumn& trees);
     // Region tree set, or null while its job runs (requested if missing:
     // dispatchTreeJobs starts the nearest requests).
     const TreeSet* regionTrees(Vec2u region);
@@ -457,6 +490,28 @@ class ChunkManager {
         regionTerrain;
     std::shared_ptr<const FloraSpeciesTable> floraTable;
     std::shared_ptr<const TreeSpeciesTable> treeTable;
+    using StructureKinds = std::vector<structure_voxels::Kind>;
+    std::shared_ptr<const StructureKinds> structureKinds =
+        std::make_shared<const StructureKinds>();
+    void installStructureKinds(std::shared_ptr<const StructureKinds> kinds);
+    StructureKinds generatedKinds;
+    structure_voxels::Overrides savedStructures;
+    uint64_t overrideRevision = 0;
+    void updateStructureBaselines(WorldEditor* editor);
+    struct StructureJob {
+        ChunkCoord coord;
+        uint64_t identity, revision;
+        std::future<std::shared_ptr<const structure_voxels::Slab>> future;
+    };
+    CameraWorkQueue rebaseQueue;
+    std::vector<StructureJob> structureJobs;
+    uint64_t structureRevision = 0;
+    struct CachedTreeVoxels {
+        const TreeInstance* tree = nullptr;
+        float age = 0;
+        std::weak_ptr<const structure_voxels::Source> source;
+    };
+    std::unordered_map<uint64_t, CachedTreeVoxels> treeVoxels;
     std::vector<TreeLandmark> landmarks;
     std::unordered_set<Vec2u> landmarkRegions;
     // Regions around a chunk where a landmark anchor can still reach it

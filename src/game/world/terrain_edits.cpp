@@ -3,6 +3,140 @@
 #include <algorithm>
 
 #include "save/chunk_codec.hpp"
+#include "structure_voxels.hpp"
+
+namespace {
+using namespace structure_voxels;
+
+// Keep the generated source intact for comparisons with actual chunk tiles.
+// This view is used for the landmark's distant geometry and sky projection.
+class MaskedStructure final : public Source {
+   public:
+    MaskedStructure(SourcePtr source, EditMap masks, WorldWrap wrap,
+                    uint64_t editRevision)
+        : source(std::move(source)), masks(std::move(masks)), wrap(wrap) {
+        key = this->source->key;
+        bounds = this->source->bounds;
+        revision = this->source->revision ^
+                   ((editRevision + 1) * 0x9e3779b97f4a7c15ULL);
+    }
+
+    OccupancyPtr occupancy() const override { return source->occupancy(); }
+
+    std::optional<Slab> rasterize(int level, int sx, int sy,
+                                  int sz) const override {
+        auto out = source->rasterize(level, sx, sy, sz);
+        if (!out) return out;
+        const int scale = 1 << level;
+        const int x0 = sx * scale, y0 = sy * scale, z0 = sz * scale;
+        for (int dz = 0; dz < scale; ++dz)
+            for (int dx = 0; dx < scale; ++dx) {
+                const auto* edit = editAt((x0 + dx) * Side, (z0 + dz) * Side);
+                if (!edit) continue;
+                for (int dy = 0; dy < scale; ++dy) {
+                    const auto* cells = edit->removals(uint16_t(y0 + dy));
+                    if (!cells) continue;
+                    if (!level) {
+                        for (const auto cell : *cells) out->bits.reset(cell);
+                        continue;
+                    }
+                    adjustCoarse(*out, *cells, level, x0 + dx, y0 + dy, z0 + dz,
+                                 dx, dy, dz);
+                }
+            }
+        return out->bits.any() ? std::move(out) : std::nullopt;
+    }
+
+    void skyTops(const TileBox& columns,
+                 std::vector<int>& tops) const override {
+        source->skyTops(columns, tops);
+        if (columns.empty()) return;
+        std::vector<int> next;
+        for (int z = columns.z0; z < columns.z1; ++z)
+            for (int x = columns.x0; x < columns.x1; ++x) {
+                const auto* edit = editAt(x, z);
+                if (!edit) continue;
+                auto& top = tops[size_t(z - columns.z0) * columns.sizeX() +
+                                 size_t(x - columns.x0)];
+                const int lx = int(WorldWrap::mod(x, Side)), lz = z % Side;
+                while (top >= 0 && edit->suppresses(lx, top, lz)) {
+                    source->skyTops({x, columns.y0, z, x + 1, top, z + 1},
+                                    next);
+                    top = next.empty() ? INT_MIN : next[0];
+                }
+            }
+    }
+
+    std::optional<TileBox> changedSince(const Source& older) const override {
+        const auto* masked = dynamic_cast<const MaskedStructure*>(&older);
+        if (masked && masks == masked->masks) {
+            if (source->revision == masked->source->revision) return TileBox{};
+            return source->changedSince(*masked->source);
+        }
+        return std::nullopt;
+    }
+
+   private:
+    const ColumnEdit* editAt(int x, int z) const {
+        const auto wx = wrap.wrapTile(x);
+        if (wx < 0 || z < 0) return nullptr;
+        const auto found =
+            masks.find(editKey(unsigned(wx / Side), unsigned(z / Side)));
+        return found == masks.end() ? nullptr : found->second.get();
+    }
+
+    void adjustCoarse(Slab& coarse, const std::vector<uint16_t>& cells,
+                      int level, int sx, int sy, int sz, int dx, int dy,
+                      int dz) const {
+        const int scale = 1 << level;
+        const auto exact = source->rasterize(0, sx, sy, sz);
+        if (!exact) return;
+        auto remaining = exact->bits;
+        std::bitset<Cells> touched;
+        for (const int cell : cells) {
+            remaining.reset(size_t(cell));
+            touched.set(cellIndex((dx * Side + cell % Side) / scale,
+                                  (dy * Side + cell / Side % Side) / scale,
+                                  (dz * Side + cell / (Side * Side)) / scale));
+        }
+        const int cellsPerAxis = Side / scale;
+        for (int z = 0; z < Side; z += scale)
+            for (int y = 0; y < Side; y += scale)
+                for (int x = 0; x < Side; x += scale) {
+                    const auto coarseCell =
+                        cellIndex(dx * cellsPerAxis + x / scale,
+                                  dy * cellsPerAxis + y / scale,
+                                  dz * cellsPerAxis + z / scale);
+                    if (!touched.test(coarseCell) ||
+                        !coarse.bits.test(coarseCell))
+                        continue;
+                    int count = 0;
+                    uint8_t block = 0;
+                    for (int lz = z; lz < z + scale; ++lz)
+                        for (int ly = y; ly < y + scale; ++ly)
+                            for (int lx = x; lx < x + scale; ++lx) {
+                                const auto i = cellIndex(lx, ly, lz);
+                                if (!remaining.test(i)) continue;
+                                ++count;
+                                if (!block || exact->blockAt(i) ==
+                                                  coarse.blockAt(coarseCell))
+                                    block = exact->blockAt(i);
+                            }
+                    if (count * 4 < scale * scale * scale) {
+                        coarse.bits.reset(coarseCell);
+                    } else if (block != coarse.blockAt(coarseCell)) {
+                        if (coarse.blocks.empty())
+                            coarse.blocks.assign(Cells, coarse.block);
+                        coarse.blocks[coarseCell] = block;
+                    }
+                }
+    }
+
+    SourcePtr source;
+    EditMap masks;
+    WorldWrap wrap;
+};
+}  // namespace
 
 void ColumnEdit::finish() {
     std::sort(structure.begin(), structure.end(),
@@ -25,26 +159,79 @@ const ChunkBlob* ColumnEdit::slab(uint16_t slabY) const {
     return it != structure.end() && it->first == slabY ? &it->second : nullptr;
 }
 
+const std::vector<uint16_t>* ColumnEdit::removals(uint16_t slabY) const {
+    const auto it = std::lower_bound(
+        removed.begin(), removed.end(), slabY,
+        [](const auto& entry, uint16_t y) { return entry.first < y; });
+    return it != removed.end() && it->first == slabY ? &it->second : nullptr;
+}
+
+bool ColumnEdit::suppresses(int x, int y, int z) const {
+    const auto* cells = removals(uint16_t(y / Chunk::SIZE_Y));
+    return cells && std::binary_search(
+                        cells->begin(), cells->end(),
+                        structure_voxels::cellIndex(x, y % Chunk::SIZE_Y, z));
+}
+
 std::shared_ptr<const ColumnEdit> TerrainEdits::find(uint64_t key) const {
     const auto it = map->find(key);
     return it == map->end() ? nullptr : it->second;
 }
 
+TerrainEdits::TerrainEdits(EditMap initial)
+    : map(std::make_shared<const EditMap>(std::move(initial))) {
+    for (const auto& [key, edit] : *map)
+        if (!edit->removed.empty()) ++columnsWithRemovals;
+}
+
 void TerrainEdits::set(uint64_t key, std::shared_ptr<const ColumnEdit> edit) {
+    const auto old = find(key);
+    const bool hadRemovals = old && !old->removed.empty();
+    const bool hasRemovals = !edit->removed.empty();
     auto next = std::make_shared<EditMap>(*map);
     (*next)[key] = std::move(edit);
     map = std::move(next);
+    columnsWithRemovals = columnsWithRemovals - hadRemovals + hasRemovals;
+    maskedStructures.clear();
     ++rev;
     dirty = true;
     changed.emit(key);
 }
 
 void TerrainEdits::erase(uint64_t key) {
-    if (!map->contains(key)) return;
+    const auto old = find(key);
+    if (!old) return;
     auto next = std::make_shared<EditMap>(*map);
     next->erase(key);
     map = std::move(next);
+    if (!old->removed.empty()) --columnsWithRemovals;
+    maskedStructures.clear();
     ++rev;
     dirty = true;
     changed.emit(key);
+}
+
+structure_voxels::SourcePtr TerrainEdits::maskStructure(
+    const structure_voxels::SourcePtr& source, const WorldWrap& wrap) const {
+    if (!columnsWithRemovals) return source;
+    auto& cached = maskedStructures[source->key];
+    if (cached.source && cached.source->revision == source->revision)
+        return cached.result;
+    EditMap masks;
+    const auto& b = source->bounds;
+    for (const auto& [key, edit] : *map) {
+        if (edit->removed.empty()) continue;
+        const int64_t z = int64_t(uint32_t(key)) * Chunk::SIZE_Z;
+        if (z >= b.z1 || z + Chunk::SIZE_Z <= b.z0) continue;
+        const int64_t x = int64_t(key >> 32) * Chunk::SIZE_X;
+        const auto from = wrap.enabled() ? wrap.wrapTile(x - b.x0) : x - b.x0;
+        if ((from < b.sizeX() && from + Chunk::SIZE_X > 0) ||
+            (wrap.enabled() && wrap.tiles - from < Chunk::SIZE_X))
+            masks.emplace(key, edit);
+    }
+    auto result = masks.empty() ? source
+                                : std::make_shared<const MaskedStructure>(
+                                      source, std::move(masks), wrap, rev);
+    cached = {source, result};
+    return result;
 }

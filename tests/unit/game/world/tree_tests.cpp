@@ -784,8 +784,6 @@ TEST(tree_column_wraps_seam) {
     EQUAL(last.trees.size(), size_t(1), "seen in its own column");
     EQUAL(first.trees[0].anchor.x, -2, "nearest copy");
     EQUAL(last.trees[0].anchor.x, 510, "canonical copy");
-    // Wood tops are per column: only the trunk's column has block wood.
-    CHECK(last.woodTop > 400);
     // Wood placed on both sides of the seam joins up: the trunk column is
     // in the last chunk (x 510), the chunk at x 0 sees the same tree.
     Chunk a, b;
@@ -982,9 +980,37 @@ TEST(tree_chunks_air_and_tops) {
                                 highest = std::max(highest, int(y) * 16 + ty);
             }
             if (wood) {
-                // Sunlight sees the wood: the column top covers it, and so
-                // does the tree column's bound.
-                CHECK(column->woodTop >= highest);
+                const int top = f.chunks->getStructureTopY(cx, cz);
+                CHECK(top >= highest);
+                // Elder limbs may top the column beyond TreeStream's
+                // normal load window. Generate the predicted top slab too.
+                if (top >= int(TreeStream::High) * Chunk::SIZE_Y) {
+                    const ChunkCoord coord{cx, unsigned(top / Chunk::SIZE_Y),
+                                           cz};
+                    const auto& region =
+                        f.world
+                            .regions[(cz / CHUNKS_PER_REGION) * f.world.width +
+                                     cx / CHUNKS_PER_REGION];
+                    f.chunks->registerChunk(
+                        coord,
+                        {region.coord.x * CHUNKS_PER_REGION, 0,
+                         region.coord.y * CHUNKS_PER_REGION},
+                        &region);
+                    f.chunks->request(coord);
+                    f.chunks->update();
+                    CHECK(f.pool.wait_for(std::chrono::seconds(5)));
+                    f.chunks->update();
+                    const auto* c = f.chunks->getChunk(coord);
+                    CHECK(c != nullptr);
+                    for (int z = 0; z < 16; ++z)
+                        for (int y = 0; y < 16; ++y)
+                            for (int x = 0; x < 16; ++x)
+                                if (f.chunks->grownBlocks().test(
+                                        c->tiles[z][y][x].block_id))
+                                    highest = std::max(highest,
+                                                       int(coord.y) * 16 + y);
+                }
+                EQUAL(top, highest, "projected top matches the stamped wood");
                 CHECK(f.chunks->getColumnTopY(cx, cz) >= highest);
             }
         }

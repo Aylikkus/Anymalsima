@@ -166,7 +166,18 @@ int main(int argc, char** argv) {
         // Plants, in the lights scenario (the only one binding light
         // volumes, like the game).
         FloraRenderer flora(chunks, assets, world, renderer);
-        TreeRenderer trees(chunks, assets, world, renderer, pool);
+        // SMOKE_TERRAIN=0..2: distant terrain preset (Low by default).
+        const int terrainQuality =
+            std::clamp(std::getenv("SMOKE_TERRAIN")
+                           ? std::atoi(std::getenv("SMOKE_TERRAIN"))
+                           : 0,
+                       0, TerrainLod::QualityCount - 1);
+        auto terrainSettings = TerrainLod::Qualities[terrainQuality];
+        if (const char* radius = std::getenv("SMOKE_RADIUS"))
+            terrainSettings.chunkRadius =
+                std::clamp(std::atoi(radius), 1, TerrainLod::MaxChunkRadius);
+        TreeRenderer trees(chunks, assets, world, renderer, pool,
+                           terrainSettings.chunkRadius);
         flora.setBlockLight(&blockLight);
         flora.setSkyLight(skyMap);
         trees.setSkyLight(skyMap);
@@ -357,14 +368,8 @@ int main(int argc, char** argv) {
         {
             // Forests track edits like the game: landmark wood is drawn as
             // structure voxels at distance.
-            // SMOKE_TERRAIN=0..2: distant terrain preset (Low by default).
-            const int terrainQuality =
-                std::clamp(std::getenv("SMOKE_TERRAIN")
-                               ? std::atoi(std::getenv("SMOKE_TERRAIN"))
-                               : 0,
-                           0, TerrainLod::QualityCount - 1);
             TerrainLodManager lod(
-                world, assets, pool, TerrainLod::Qualities[terrainQuality],
+                world, assets, pool, terrainSettings,
                 structure || std::getenv("SMOKE_FOREST") ? &edits : nullptr);
             trees.setVoxelLandmarks(lod.drawsStructureVoxels());
             // As the handover pass below draws chunks.
@@ -429,12 +434,7 @@ int main(int argc, char** argv) {
                     chunks.setFocus(camera.position);
                     sunlight.setFocus(camera.position);
                     blockLight.setFocus(camera.position);
-                    // SMOKE_RADIUS: chunks requested around the target
-                    // (default 3; the game uses DETAIL_CHUNK_RADIUS).
-                    static const int reach =
-                        std::getenv("SMOKE_RADIUS")
-                            ? std::atoi(std::getenv("SMOKE_RADIUS"))
-                            : 3;
+                    const int reach = terrainSettings.chunkRadius;
                     for (int z = cz - reach; z <= cz + reach; ++z)
                         for (int x = cx - reach; x <= cx + reach; ++x)
                             for (int y = cy - reach; y <= cy + reach; ++y)
@@ -508,7 +508,7 @@ int main(int argc, char** argv) {
                                     LightShadowMath::translation(lx, ly, lz),
                                     face.view);
                             });
-                            lod.submitShadowCasters(t, face, chunks, camera);
+                            lod.submitShadowCasters(t, face, chunks);
                         },
                         now);
                     // renderShadows applied the game's order; the smoke
@@ -519,16 +519,16 @@ int main(int argc, char** argv) {
                     const int cx = int(camera.position.x) / 16,
                               cy = int(camera.position.y) / 16,
                               cz = int(camera.position.z) / 16;
+                    const int keepRadius = terrainSettings.chunkRadius - 1;
                     for (const auto& [x, z] : previousVisible) {
                         const int y =
                             std::max(surface.height(x * 16 + 8, z * 16 + 8),
                                      SEA_LEVEL_Y) /
                             16;
-                        if (std::abs(x - cx) >
-                                TerrainLod::DetailCoverage::KeepRadius ||
-                            std::abs(z - cz) >
-                                TerrainLod::DetailCoverage::KeepRadius ||
-                            std::abs(y - cy) > 6 ||
+                        if (std::abs(world.wrap().deltaChunk(x, cx)) >
+                                keepRadius ||
+                            std::abs(z - cz) > keepRadius ||
+                            std::abs(y - cy) >= keepRadius ||
                             !chunks.hasUploadedMesh(
                                 {unsigned(x), unsigned(y), unsigned(z)}))
                             continue;
@@ -1249,11 +1249,9 @@ int main(int argc, char** argv) {
                                     size_t n = 0;
                                     for (const auto& [c, first] :
                                          approach.seenAt) {
-                                        const auto trees =
-                                            chunks.treeColumn(c.x, c.z);
-                                        if ((trees && trees->woodTop >
-                                                          int(c.y) * 16 + 48) !=
-                                            tall)
+                                        const int top =
+                                            chunks.getStructureTopY(c.x, c.z);
+                                        if ((top > int(c.y) * 16 + 48) != tall)
                                             continue;
                                         ++n;
                                         if (const auto it = after.find(c);

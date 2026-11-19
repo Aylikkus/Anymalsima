@@ -6,8 +6,8 @@
 
 #include "light_sources_codec.hpp"
 #include "sky_codec.hpp"
+#include "structures_codec.hpp"
 #include "terrain_edits_codec.hpp"
-#include "trees_codec.hpp"
 #include "world/world.hpp"
 #include "world_meta.hpp"
 
@@ -51,10 +51,10 @@ void writeLightSources(const SaveSlot& slot,
 sky_codec::File readSky(const SaveSlot& slot);
 void writeSky(const SaveSlot& slot, const sky::Overrides& overrides,
               const SectionContainer& extra = {});
-// trees.dat (cut and planted trees): empty when the file does not exist
-// yet. Throws on corrupt data.
-trees_codec::File readTrees(const SaveSlot& slot);
-void writeTrees(const SaveSlot& slot, const TreeOverrideMap& trees,
-                const SectionContainer& extra = {});
+// structures.dat takes precedence. A missing file imports legacy trees.dat.
+structures_codec::File readStructures(const SaveSlot& slot);
+void writeStructures(const SaveSlot& slot, const TreeOverrideMap& trees,
+                     const structure_voxels::Overrides& voxels,
+                     const SectionContainer& extra = {});
 
 }  // namespace save_catalog

@@ -39,6 +39,7 @@ add_library(game
     world/tree_skeleton.cpp
     world/tree_rasterizer.cpp
     world/structure_voxels.cpp
+    world/structure_overrides.cpp
     world/tree_wood_lod.cpp
     world/tree_generator.cpp
     world/flora_renderer.cpp
@@ -53,6 +54,7 @@ add_library(game
     world/save/terrain_edits_codec.cpp
     world/save/light_sources_codec.cpp
     world/save/trees_codec.cpp
+    world/save/structures_codec.cpp
     world/save/sky_codec.cpp
     items/soil.hpp
     items/soil_validation.hpp

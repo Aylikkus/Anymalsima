@@ -6,7 +6,6 @@
 
 #include "light_volume.hpp"
 #include "sunlight_propagator.hpp"
-#include "tree_rasterizer.hpp"
 #include "world_editor.hpp"
 
 namespace {
@@ -16,55 +15,19 @@ constexpr size_t MaxJobs = 4;
 
 struct BuildInputs {
     std::shared_ptr<const ChunkColumnInputs> terrain;
-    std::shared_ptr<const TreeColumn> trees;
+    structure_voxels::ColumnPtr structures;
     std::shared_ptr<const ColumnEdit> edit;
     std::shared_ptr<const sky::OpacityTable> opacity;
-    const TreeSpeciesTable* species = nullptr;
-    unsigned cx = 0, cz = 0;
-    int32_t day = 0;
 };
 
 sky::Tile buildTile(const BuildInputs& in) {
     sky::TileInputs tile;
     tile.edit = in.edit;
     tile.opacity = in.opacity.get();
-    for (int i = 0; i < sky::Tile::Size; ++i) {
+    for (int i = 0; i < sky::Tile::Size; ++i)
         tile.surface[size_t(i)] = in.terrain->columns[size_t(i)].surface_y;
-        tile.structureTop[size_t(i)] = INT_MIN;
-    }
-    // Trees, as placeTreeWood places them (anchors at the copy nearest the
-    // column).
-    const TreeTileBox box{int(in.cx) * Chunk::SIZE_X,
-                          0,
-                          int(in.cz) * Chunk::SIZE_Z,
-                          int(in.cx + 1) * Chunk::SIZE_X,
-                          WORLD_HEIGHT_Y,
-                          int(in.cz + 1) * Chunk::SIZE_Z};
-    std::vector<int> tops;
-    if (in.trees && in.species)
-        for (const auto& entry : in.trees->trees) {
-            const auto& tree = *entry.tree;
-            const auto* rule = in.species->find(tree.species);
-            if (!rule || !rule->woodBlock || !tree.skeleton) continue;
-            const int shift = entry.anchor.x - tree.anchor.x;
-            TreeTileBox wood = tree.wood;
-            wood.x0 += shift;
-            wood.x1 += shift;
-            const auto part = wood.intersect(box);
-            if (part.empty()) continue;
-            const float age = tree.growthAge(in.day);
-            if (age <= 0) continue;
-            treeWoodTops(*tree.skeleton, entry.anchor, part, age, tops);
-            const int width = part.x1 - part.x0;
-            for (int z = part.z0; z < part.z1; ++z)
-                for (int x = part.x0; x < part.x1; ++x) {
-                    const int top =
-                        tops[size_t(z - part.z0) * width + size_t(x - part.x0)];
-                    int& slot = tile.structureTop[size_t(
-                        sky::Tile::index(x - box.x0, z - box.z0))];
-                    slot = std::max(slot, top);
-                }
-        }
+    tile.structureTop =
+        in.edit ? in.structures->skyTops(*in.edit) : in.structures->skyTops();
     return sky::build(tile);
 }
 }  // namespace
@@ -79,7 +42,7 @@ SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
     opacity = std::move(table);
     editsConnection =
         edits.changed.connect([this](uint64_t key) { invalidate(key); });
-    treesConnection = chunks.columnTreesChanged.connect(
+    structuresConnection = chunks.columnStructuresChanged.connect(
         [this](uint64_t key) { invalidate(key); });
     releasedConnection = chunks.columnReleased.connect([this](uint64_t key) {
         if (entries.erase(key)) ++revision;
@@ -100,7 +63,7 @@ SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
 SkyHeightMap::~SkyHeightMap() {
     if (editor) editor->blockChanged.disconnect(editConnection);
     edits.changed.disconnect(editsConnection);
-    chunks.columnTreesChanged.disconnect(treesConnection);
+    chunks.columnStructuresChanged.disconnect(structuresConnection);
     chunks.columnReleased.disconnect(releasedConnection);
     chunks.becameReady.disconnect(readyConnection);
     for (auto& job : jobs) job.future.wait();
@@ -191,8 +154,10 @@ void SkyHeightMap::update() {
         for (const auto& [key, entry] : entries)
             if (entry.hasTrees) invalidate(key);
     }
-    if (treeRevision != chunks.treeRevision()) {
+    if (treeRevision != chunks.treeRevision() ||
+        structureRevision != chunks.generatedStructureRevision()) {
         treeRevision = chunks.treeRevision();
+        structureRevision = chunks.generatedStructureRevision();
         for (const auto& [key, entry] : entries)
             if (entry.queried) invalidate(key);
     }
@@ -224,18 +189,17 @@ void SkyHeightMap::dispatch() {
             if (!source) continue;
             e.generation = ++nextGeneration;
             e.hasTrees = !chunks.treeSpecies().empty();
-            jobs.push_back(
-                {key, e.generation,
-                 pool.submit_task(
-                     [source = std::move(source), edit = edits.find(key),
-                      opacity = opacity, species = &chunks.treeSpecies(),
-                      cx = coord.x, cz = coord.z, day = day] {
-                         auto inputs = source();
-                         return buildTile({inputs.terrain, inputs.trees, edit,
-                                           opacity, species, cx, cz, day});
-                     },
-                     BS::pr::low),
-                 true});
+            jobs.push_back({key, e.generation,
+                            pool.submit_task(
+                                [source = std::move(source),
+                                 edit = edits.find(key), opacity = opacity] {
+                                    auto inputs = source();
+                                    return buildTile({inputs.terrain,
+                                                      inputs.structures, edit,
+                                                      opacity});
+                                },
+                                BS::pr::low),
+                            true});
             continue;
         }
         // Waits (stays queued) until terrain and trees are ready.
@@ -243,10 +207,9 @@ void SkyHeightMap::dispatch() {
         if (!sources || !sources->terrain) continue;
         queue.erase(coord);
         e.generation = ++nextGeneration;
-        e.hasTrees = !sources->trees->trees.empty();
-        BuildInputs inputs{
-            sources->terrain,      sources->trees, edits.find(key), opacity,
-            &chunks.treeSpecies(), coord.x,        coord.z,         day};
+        e.hasTrees = sources->hasTrees;
+        BuildInputs inputs{sources->terrain, sources->structures,
+                           edits.find(key), opacity};
         jobs.push_back(
             {key, e.generation,
              pool.submit_task(

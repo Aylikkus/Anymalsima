@@ -4,6 +4,7 @@
 #include <iostream>
 
 #include "serialization/file_io.hpp"
+#include "trees_codec.hpp"
 #include "world_map_codec.hpp"
 
 namespace save_catalog {
@@ -13,6 +14,7 @@ constexpr const char* MetaFile = "world.json";
 constexpr const char* MapFile = "world_map.dat";
 constexpr const char* EditsFile = "terrain_edits.dat";
 constexpr const char* LightsFile = "light_sources.dat";
+constexpr const char* StructuresFile = "structures.dat";
 constexpr const char* TreesFile = "trees.dat";
 constexpr const char* SkyFile = "sky.dat";
 
@@ -132,17 +134,21 @@ void writeSky(const SaveSlot& slot, const sky::Overrides& overrides,
                              sky_codec::encode(overrides, extra));
 }
 
-trees_codec::File readTrees(const SaveSlot& slot) {
-    const auto path = slot.directory / TreesFile;
-    std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return {};
-    return trees_codec::decode(FileIO::readBytes(path));
+structures_codec::File readStructures(const SaveSlot& slot) {
+    const auto path = slot.directory / StructuresFile;
+    if (std::filesystem::exists(path))
+        return structures_codec::decode(FileIO::readBytes(path));
+    const auto legacy = slot.directory / TreesFile;
+    if (!std::filesystem::exists(legacy)) return {};
+    auto trees = trees_codec::decode(FileIO::readBytes(legacy));
+    return {std::move(trees.trees), {}, std::move(trees.extra), true};
 }
 
-void writeTrees(const SaveSlot& slot, const TreeOverrideMap& trees,
-                const SectionContainer& extra) {
-    FileIO::writeBytesAtomic(slot.directory / TreesFile,
-                             trees_codec::encode(trees, extra));
+void writeStructures(const SaveSlot& slot, const TreeOverrideMap& trees,
+                     const structure_voxels::Overrides& voxels,
+                     const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(slot.directory / StructuresFile,
+                             structures_codec::encode(trees, voxels, extra));
 }
 
 }  // namespace save_catalog

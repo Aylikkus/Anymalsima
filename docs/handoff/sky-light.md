@@ -105,17 +105,12 @@ Columns are packed per chunk column (`sky::Tile`, 16x16) and built by
 - **Terrain:** the generated surface (`ChunkColumnInputs::surface_y`,
   through `ChunkManager::columnSources`): solid up to it, sea water (opacity
   8) above it up to `SEA_LEVEL_Y`. No chunk is generated for it.
-- **Structures:** their highest voxel per column, treated as opaque.
-  - Trees: `treeWoodTops` (`tree_rasterizer.hpp`) projects the skeleton at
-    `ChunkManager::woodDay`, for every tree of the column's `TreeColumn`
-    (landmarks included), as `placeTreeWood` would place it. It solves each
-    sample sphere for its top in closed form and checks the result with
-    `markTreeWood`'s own test, so it matches the rasterizer tile for tile
-    without scanning any volume.
-  - Any structure kind: `structure_voxels::Source::skyTops(columns)`. The
-    default rasterizes level-0 slabs from the top down (slow for tall
-    structures); trees override it with `treeWoodTops`. Kinds added later
-    feed the heightmap through it (not wired yet: only trees exist).
+- **Structures:** `structure_voxels::Column` shares its exact voxel tops with
+  chunk generation. The highest structure voxel of each tile column counts
+  as opaque. The default `Source::skyTops` rasterizes occupied level-zero
+  slabs from the top down. Trees override it with `treeWoodTops`, which
+  projects the skeleton at `ChunkManager::woodDay` and checks each top with
+  `markTreeWood`'s voxel test.
 - **Edits:** `TerrainEdits` already records every edited column world-wide
   and saves it (`terrain_edits.dat`): the ground override (topmost solid
   tile at or below the generated surface), water above it, and every solid
@@ -193,9 +188,9 @@ everywhere.
 - `treeWoodTops` (`tree_rasterizer.{hpp,cpp}`) and
   `structure_voxels::Source::skyTops` (default plus the tree override in
   `tree_wood_lod.cpp`).
-- `ChunkManager`: `columnSources(cx, cz)` (terrain inputs and trees of a
+- `ChunkManager`: `columnSources(cx, cz)` (terrain inputs and structure sources of a
   registered column, prepared on demand), `woodDay()`, and the signals
-  `columnTreesChanged` (a column's tree list was rebuilt) and
+  `columnStructuresChanged` (a column's structure sources changed) and
   `columnReleased` (its last chunk was unregistered).
 - `SkyHeightMap` (`world/sky_height_map.{hpp,cpp}`), main thread:
   - `request(cx, cz)` keeps a chunk column built while it is registered.
@@ -261,10 +256,9 @@ everywhere.
     its spread lands (`isEstimated` is true until then, so light volumes
     shade it with the occlusion map). The direct lower bound has no bounce
     and is black under a wide limb, so it is no longer shown.
-- Without a heightmap (headless fixtures without a world map) the old path
-  is unchanged: sweep from the column top, missing slabs requested and
-  blind chunks keeping their light. `ChunkManager::requestLighting` and the
-  tree column tops serve only that path now.
+- The legacy sweep used in headless fixtures starts at the column top.
+  `ChunkManager::requestLighting` asks for missing slabs, and blind chunks
+  keep their light while those requests are pending.
 - Test: `sky_sunlight_without_upper_slabs`. A forest lit from slabs 20 to
   39 with the heightmap matches, cell for cell, one lit the old way with
   every slab up to the sky loaded. The top slab, which light from unloaded

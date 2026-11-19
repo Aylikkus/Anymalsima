@@ -3,8 +3,11 @@
 #include <map>
 
 #include "test.hpp"
+#include "world/save/chunk_codec.hpp"
+#include "world/sky_height_map.hpp"
 #include "world/sky_occlusion_map.hpp"
 #include "world/structure_voxels.hpp"
+#include "world_fixture.hpp"
 
 // Distant structure voxels (docs/handoff/structures.md): per-slab level
 // planning and multi-block slabs.
@@ -151,6 +154,128 @@ TEST(structure_voxels_slab_merge) {
     a.merge(b);
     CHECK(a.blocks.empty());
     CHECK(a.bits.test(5));
+}
+
+namespace {
+// Two separated levels with an empty slab in between. The bounds are
+// deliberately conservative in Y and the void is absent from occupancy.
+class SparseStructure final : public Source {
+   public:
+    SparseStructure(uint64_t id, uint64_t version, int x, uint8_t block)
+        : sx(x / Side), block(block) {
+        key = id;
+        revision = version;
+        bounds = {x, 640, 0, x + 2, 900, 1};
+        auto out = std::make_shared<Occupancy>();
+        out->add(sx, 40, 0);
+        out->add(sx, 50, 0);
+        occupied = std::move(out);
+    }
+    OccupancyPtr occupancy() const override { return occupied; }
+    std::optional<Slab> rasterize(int level, int x, int y,
+                                  int z) const override {
+        CHECK(level == 0);
+        if (x != sx || z != 0) return std::nullopt;
+        CHECK(y == 40 || y == 50);
+        Slab slab;
+        const size_t a = cellIndex(0, 0, 0), b = cellIndex(1, 7, 0);
+        slab.bits.set(a);
+        slab.bits.set(b);
+        slab.blocks.assign(Cells, block);
+        slab.blocks[b] = 1;
+        return slab;
+    }
+
+   private:
+    int sx;
+    uint8_t block;
+    OccupancyPtr occupied;
+};
+}  // namespace
+
+TEST(structure_chunk_stamping) {
+    test::WorldFixture f;
+    f.world.width = 4;
+    f.world.height = 1;
+    f.world.regions.assign(4, test::regionAt(SEA_LEVEL_Y + 24));
+    for (unsigned x = 0; x < 4; ++x) f.world.regions[x].coord = {x, 0};
+    const auto& region = f.world.regions.front();
+    const auto acrossSeam = std::make_shared<SparseStructure>(1, 1, 512, 5);
+    const auto local = std::make_shared<SparseStructure>(2, 1, 0, 6);
+    f.chunks.setGeneratedStructureKinds(
+        {Kind(1, {{local, 0, 0}}), Kind(256, {{acrossSeam, 257, 0, true}})});
+    std::vector<SourcePtr> landmarks;
+    f.chunks.appendStructureLandmarks(landmarks, {0, 640, 0}, 16);
+    EQUAL(landmarks.size(), size_t(1), "only the landmark across the seam");
+    EQUAL(landmarks.front()->key, acrossSeam->key, "landmark source");
+
+    const ChunkCoord lower{0, 40, 0}, gap{0, 45, 0}, upper{0, 50, 0};
+    for (const auto coord : {ChunkCoord{0, 0, 0}, lower, gap, upper})
+        f.chunks.registerChunk(coord, {}, &region);
+    f.chunks.request(lower);
+    f.chunks.update();
+    f.wait();
+    f.chunks.update();
+    CHECK(f.chunks.isReady(lower));
+    EQUAL(f.tile(0, 640, 0).block_id, 5, "lowest key wins across kinds");
+    EQUAL(f.tile(1, 647, 0).block_id, 1, "per-cell block id");
+    EQUAL(f.chunks.getColumnTopY(0, 0), 807, "highest occupied tile");
+
+    f.chunks.request(gap);
+    f.chunks.update();
+    CHECK(f.chunks.isReady(gap));
+    EQUAL(f.chunks.generationInFlight(), size_t(0), "known air uses no job");
+    CHECK(f.tile(0, 720, 0).isAir());
+
+    // Update after a worker has read the old revision but before collection.
+    f.chunks.request(upper);
+    f.chunks.update();
+    f.wait();
+    const auto revised = std::make_shared<SparseStructure>(1, 2, 512, 4);
+    f.chunks.setGeneratedStructureKinds({Kind(256, {{revised, 257, 0, true}})});
+    f.chunks.update();
+    CHECK(!f.chunks.isReady(upper));
+    f.wait();
+    f.chunks.update();
+    CHECK(f.chunks.isReady(upper));
+    EQUAL(f.tile(0, 800, 0).block_id, 4, "retried against the new source");
+
+    TerrainEdits edits;
+    SkyHeightMap sky(f.chunks, edits, f.assets.getStorage<Block>(), f.pool);
+    sky.request(0, 0);
+    sky.update();
+    f.wait();
+    sky.update();
+    EQUAL(sky.top(0, 0).value_or(INT_MIN), 800, "first tile's top");
+    EQUAL(sky.top(1, 0).value_or(INT_MIN), 807, "neighbour's own top");
+
+    // Saved chunks remain authoritative, including air where the source
+    // still has blocks. Stage 4 will decide which edits to save.
+    Chunk saved;
+    saved.tiles[0][0][0].block_id = 1;
+    f.chunks.registerChunk(
+        upper, {}, &region,
+        std::make_shared<const Bytes>(chunk_codec::encode(saved)));
+    f.chunks.request(upper);
+    f.chunks.update();
+    f.wait();
+    f.chunks.update();
+    EQUAL(f.tile(0, 800, 0).block_id, 1, "saved tile wins");
+    CHECK(f.tile(1, 807, 0).isAir());
+}
+
+TEST(structure_stamp_only_fills_air) {
+    Chunk chunk;
+    chunk.tiles[0][0][0].block_id = 1;
+    chunk.tiles[0][0][1].liquid = LiquidType::Water;
+    Slab slab;
+    slab.block = 5;
+    for (int x = 0; x < 3; ++x) slab.bits.set(cellIndex(x, 0, 0));
+    EQUAL(stamp(chunk, slab), 1, "only one air tile");
+    EQUAL(chunk.tiles[0][0][0].block_id, 1, "keeps existing terrain");
+    CHECK(chunk.tiles[0][0][1].isLiquid());
+    EQUAL(chunk.tiles[0][0][1].block_id, 0, "keeps liquid");
+    EQUAL(chunk.tiles[0][0][2].block_id, 5, "fills air");
 }
 
 // Footprints and sky occlusion (docs/handoff/structures.md, step 2).

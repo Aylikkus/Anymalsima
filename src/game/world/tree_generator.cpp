@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "ground_cover_generator.hpp"
+#include "tree_wood_lod.hpp"
 
 namespace {
 constexpr double Area = 100.0;  // m² of density_per_100m2
@@ -589,24 +590,6 @@ TreeColumn makeTreeColumn(unsigned chunkX, unsigned chunkZ,
                 b.z0 >= cz1)
                 continue;
             column.trees.push_back({tree, anchor});
-            // Highest wood over this column, from segments crossing it.
-            const auto& k = *tree->skeleton;
-            if (!k.formsWood()) continue;
-            for (const auto& s : k.segments) {
-                if (!s.live()) continue;
-                const float flare = s.order == 0 ? 1 + k.flare.amount : 1;
-                const float r = std::max(s.r0, s.r1) * flare;
-                if (r < TreeVoxelRadius) continue;
-                const float pad = r + 0.71f;
-                const float sx0 = std::min(s.a.x, s.b.x) - pad + anchor.x,
-                            sx1 = std::max(s.a.x, s.b.x) + pad + anchor.x;
-                const float sz0 = std::min(s.a.z, s.b.z) - pad + anchor.z,
-                            sz1 = std::max(s.a.z, s.b.z) + pad + anchor.z;
-                if (sx1 < cx0 || sx0 > cx1 || sz1 < cz0 || sz0 > cz1) continue;
-                const int top =
-                    anchor.y + 1 + int(std::ceil(std::max(s.a.y, s.b.y) + pad));
-                column.woodTop = std::max(column.woodTop, top);
-            }
         }
     }
     std::sort(
@@ -779,35 +762,8 @@ std::vector<TreeWoodChange> treeWoodChanges(const Chunk& chunk,
 int placeTreeWood(Chunk& chunk, const ChunkCoord& coord,
                   const TreeColumn& column, const TreeSpeciesTable& table,
                   double day) {
-    const TreeTileBox box{
-        int(coord.x) * Chunk::SIZE_X,     int(coord.y) * Chunk::SIZE_Y,
-        int(coord.z) * Chunk::SIZE_Z,     int(coord.x + 1) * Chunk::SIZE_X,
-        int(coord.y + 1) * Chunk::SIZE_Y, int(coord.z + 1) * Chunk::SIZE_Z};
-    int placed = 0;
-    std::vector<uint8_t> mask;
-    for (const auto& entry : column.trees) {
-        const auto& tree = *entry.tree;
-        const auto* rule = table.find(tree.species);
-        if (!rule || !rule->woodBlock) continue;
-        const int shift = entry.anchor.x - tree.anchor.x;
-        TreeTileBox wood = tree.wood;
-        wood.x0 += shift;
-        wood.x1 += shift;
-        const auto part = wood.intersect(box);
-        if (part.empty()) continue;
-        const float age = tree.growthAge(day);
-        if (age <= 0) continue;
-        markTreeWood(*tree.skeleton, entry.anchor, part, age, mask);
-        for (int y = part.y0; y < part.y1; ++y)
-            for (int z = part.z0; z < part.z1; ++z)
-                for (int x = part.x0; x < part.x1; ++x) {
-                    if (!mask[part.index(x, y, z)]) continue;
-                    Tile& tile =
-                        chunk.tiles[z - box.z0][y - box.y0][x - box.x0];
-                    if (!tile.isAir()) continue;
-                    tile.block_id = rule->woodBlock;
-                    ++placed;
-                }
-    }
-    return placed;
+    const auto structures =
+        tree_wood_lod::columnVoxels(coord.x, coord.z, column, table, day, {});
+    const auto slab = structures->rasterize(coord.y);
+    return slab ? structure_voxels::stamp(chunk, *slab) : 0;
 }

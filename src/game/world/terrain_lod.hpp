@@ -14,7 +14,7 @@
 namespace TerrainLod {
 inline constexpr int Cells = 32;
 inline constexpr int RootSpacing = 64;
-// Player-selectable distant terrain detail ("terrainDetail" setting).
+// Player-selectable terrain detail ("terrainDetail" setting).
 struct Quality {
     size_t gpuBudget;     // resident LOD meshes and material maps
     size_t uploadBudget;  // LOD bytes uploaded per frame
@@ -22,13 +22,15 @@ struct Quality {
     float exactRadius;    // stepped (spacing 1) patches around the camera
     float pixelError;     // projected error that splits a patch
     int materialMap;      // smooth patch material texels per side
+    int chunkRadius;      // detailed voxel streaming and draw radius
 };
 inline constexpr Quality Qualities[] = {
-    {64u << 20, 2u << 20, 4096, 128, 2.0f, 32},   // Low
-    {128u << 20, 3u << 20, 6144, 192, 1.4f, 64},  // Medium (2x budget)
-    {256u << 20, 4u << 20, 8192, 256, 1.0f, 64},  // High (4x budget)
+    {64u << 20, 2u << 20, 4096, 128, 2.0f, 32, 4},   // Low
+    {128u << 20, 3u << 20, 6144, 192, 1.4f, 64, 6},  // Medium (2x budget)
+    {256u << 20, 4u << 20, 8192, 256, 1.0f, 64, 8},  // High (4x budget)
 };
 inline constexpr int QualityCount = int(std::size(Qualities));
+inline constexpr int MaxChunkRadius = Qualities[QualityCount - 1].chunkRadius;
 // Low preset defaults; also the smallest per-frame upload of any preset.
 inline constexpr float ViewDistance = Qualities[0].viewDistance;
 inline constexpr size_t GpuBudget = Qualities[0].gpuBudget;

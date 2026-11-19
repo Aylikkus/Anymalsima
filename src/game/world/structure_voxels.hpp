@@ -1,10 +1,14 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <bitset>
+#include <climits>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -12,8 +16,11 @@
 #include "chunk.hpp"
 #include "chunk_coord.hpp"
 #include "consts.hpp"
+#include "core/geometry.hpp"
 #include "tile_box.hpp"
 #include "world_wrap.hpp"
+
+struct ColumnEdit;
 
 // Voxels of structures at distance (docs/handoff/structures.md): any kind of
 // structure (massive trees today; towns and castles later) describes its
@@ -61,6 +68,9 @@ struct Slab {
 
     uint8_t blockAt(size_t cell) const {
         return blocks.empty() ? block : blocks[cell];
+    }
+    uint8_t tileAt(size_t cell) const {
+        return bits.test(cell) ? blockAt(cell) : 0;
     }
     // Adds `other`'s cells where this slab is empty (overlapping structures:
     // the first one keeps its cells).
@@ -129,6 +139,72 @@ class Source {
     virtual void skyTops(const TileBox& columns, std::vector<int>& tops) const;
 };
 using SourcePtr = std::shared_ptr<const Source>;
+
+// One immutable input to chunk generation. Anchors use canonical world X.
+// Keys are unique across kinds and the lowest key wins overlapping voxels.
+struct Instance {
+    SourcePtr source;
+    int anchorX, anchorZ;
+    bool landmark = false;
+};
+
+// The region index of one structure kind. Reach is measured in tiles
+// from the anchor along either horizontal axis.
+class Kind {
+   public:
+    Kind(int reach, std::vector<Instance> instances, std::string id = {});
+    const std::string& id() const { return kindId; }
+    int reachTiles() const { return reach; }
+    std::vector<Instance> instances() const;
+    void addTo(class Column& column, const WorldWrap& wrap) const;
+    void appendLandmarks(std::vector<SourcePtr>& sources, const WorldWrap& wrap,
+                         const Vec3& eye, float range) const;
+
+   private:
+    int reach;
+    std::string kindId;
+    std::unordered_map<Vec2i, std::vector<Instance>> regions;
+    std::vector<SourcePtr> landmarks;
+};
+
+// Sources overlapping one chunk column, with each X image resolved once.
+// Build on the main thread, then share read-only with generation and sky jobs.
+class Column {
+   public:
+    Column(unsigned cx, unsigned cz);
+    void add(const Instance& instance, const WorldWrap& wrap);
+    // The caller has already resolved the source's X shift into this column.
+    void add(const SourcePtr& source, int shiftX);
+    void orderByKey();
+    bool empty() const { return entries.empty(); }
+    // Cheap bounds check before dispatch; workers also check occupancy.
+    bool mayContain(unsigned cy) const;
+    std::optional<Slab> rasterize(unsigned cy) const;
+    using Tops = std::array<int, Side * Side>;
+    const Tops& skyTops() const;
+    Tops skyTops(const ColumnEdit& edit) const;
+    // The projection is published by a worker. Empty columns are known
+    // without a projection.
+    std::optional<int> projectedTop() const;
+
+   private:
+    friend class Kind;
+    struct Entry {
+        SourcePtr source;
+        int sx;
+    };
+    TileBox box;
+    std::vector<Entry> entries;
+    mutable std::once_flag topsOnce;
+    mutable Tops tops;
+    mutable std::bitset<Y_CHUNKS> occupied;
+    // Publishing this also publishes the occupancy mask to the dispatcher.
+    mutable std::atomic<int> highest{INT_MAX};
+};
+using ColumnPtr = std::shared_ptr<const Column>;
+
+// Fill air from a level-0 slab. Returns the number of tiles written.
+int stamp(Chunk& chunk, const Slab& slab);
 
 // Distances (tiles) where slabs coarsen: level 0 below Limits[0], level 1
 // below Limits[1], level 2 beyond; with Margin of hysteresis.

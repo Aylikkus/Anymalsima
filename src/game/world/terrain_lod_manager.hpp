@@ -48,11 +48,11 @@ class TerrainLodManager {
     // structure slabs drawn last frame that reach into the face.
     void submitShadowCasters(RenderTarget& target,
                              const LightShadows::Face& face,
-                             ChunkManager& chunks, const Camera& camera);
+                             ChunkManager& chunks);
     bool drawsColumn(unsigned x, unsigned z) const;
-    // Whether the chunk's blocks are drawn instead of distant terrain and
-    // structure voxels: a detailed column, or any chunk above the column's
-    // surface band (distant terrain has nothing there).
+    // Inside this frame's chunk radius, whether blocks draw instead of distant
+    // terrain and structure voxels: a detailed column, or any chunk above the
+    // column's surface band (distant terrain has nothing there).
     bool drawsChunk(const ChunkCoord& c) const;
     // Generated structures drawn as voxels at distance (massive trees today;
     // StructureLod::setStructures); ignored without edit tracking (no
@@ -172,6 +172,7 @@ class TerrainLodManager {
     SurfaceSampler detailSampler;
     // Built structures at distance; present when edits are tracked.
     std::unique_ptr<StructureLod> structures;
+    ChunkCoord detailCentre{};
     TerrainLod::DetailCoverage detailCoverage;
     TerrainLod::DetailCoverage::Columns surfaceBands;
     std::vector<TerrainLod::Patch> joinedLayout;

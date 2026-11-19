@@ -51,7 +51,8 @@ class TreeRenderer {
     // pool: crown meshes are built on it (a massive crown takes tens of
     // milliseconds); the previous mesh of a tree is drawn meanwhile.
     TreeRenderer(ChunkManager& chunks, const IAssets& assets,
-                 const World& world, IRenderer& renderer, ThreadPool& pool);
+                 const World& world, IRenderer& renderer, ThreadPool& pool,
+                 int chunkRadius);
     ~TreeRenderer();
     TreeRenderer(const TreeRenderer&) = delete;
     TreeRenderer& operator=(const TreeRenderer&) = delete;
@@ -147,6 +148,7 @@ class TreeRenderer {
     // while its next mesh (cut, growth step, detail change) is built.
     std::unordered_map<uint64_t, uint64_t> drawnMesh;
     ThreadPool& pool;
+    const int chunkRadius;
     // Meshes with a job in flight. Finished jobs are collected every frame
     // whether or not their key is still drawn: a key left behind by a cut,
     // a growth step or a detail change used to keep its job slot forever,

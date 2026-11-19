@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <stdexcept>
+
+#include "terrain_edits.hpp"
 
 namespace structure_voxels {
 
@@ -58,6 +61,205 @@ TileBox slabBox(int level, int sx, int sy, int sz) {
 }
 
 }  // namespace
+
+Kind::Kind(int reach, std::vector<Instance> instances, std::string id)
+    : reach(reach), kindId(std::move(id)) {
+    if (reach < 0) throw std::invalid_argument("Negative structure reach");
+    for (auto& instance : instances) {
+        if (!instance.source || instance.source->bounds.empty()) continue;
+        const auto& b = instance.source->bounds;
+        if (std::max({int64_t(instance.anchorX) - b.x0,
+                      int64_t(b.x1) - 1 - instance.anchorX,
+                      int64_t(instance.anchorZ) - b.z0,
+                      int64_t(b.z1) - 1 - instance.anchorZ}) > reach)
+            throw std::invalid_argument("Structure extends beyond its reach");
+        if (instance.landmark) landmarks.push_back(instance.source);
+        regions[{floorDiv(instance.anchorX, WorldWrap::RegionSize),
+                 floorDiv(instance.anchorZ, WorldWrap::RegionSize)}]
+            .push_back(std::move(instance));
+    }
+}
+
+std::vector<Instance> Kind::instances() const {
+    std::vector<Instance> out;
+    for (const auto& [region, entries] : regions)
+        out.insert(out.end(), entries.begin(), entries.end());
+    return out;
+}
+
+void Kind::addTo(Column& column, const WorldWrap& wrap) const {
+    constexpr int region = WorldWrap::RegionSize;
+    const auto& b = column.box;
+    const int x0 = floorDiv(b.x0 - reach, region);
+    int x1 = floorDiv(b.x1 - 1 + reach, region);
+    if (wrap.enabled()) x1 = std::min(x1, x0 + wrap.regions() - 1);
+    const int z0 = floorDiv(b.z0 - reach, region);
+    const int z1 = floorDiv(b.z1 - 1 + reach, region);
+    if (uint64_t(x1 - x0 + 1) * uint64_t(z1 - z0 + 1) > regions.size()) {
+        for (const auto& [anchor, entries] : regions) {
+            const int64_t dx =
+                WorldWrap::mod(int64_t(anchor.x) - x0, wrap.regions());
+            if (dx < 0 || dx > x1 - x0 || anchor.y < z0 || anchor.y > z1)
+                continue;
+            for (const auto& instance : entries) column.add(instance, wrap);
+        }
+        return;
+    }
+    for (int z = z0; z <= z1; ++z)
+        for (int x = x0; x <= x1; ++x)
+            if (const auto found = regions.find({int(wrap.wrapRegion(x)), z});
+                found != regions.end())
+                for (const auto& instance : found->second)
+                    column.add(instance, wrap);
+}
+
+void Kind::appendLandmarks(std::vector<SourcePtr>& sources,
+                           const WorldWrap& wrap, const Vec3& eye,
+                           float range) const {
+    for (const auto& source : landmarks) {
+        const auto& b = source->bounds;
+        const double halfX = b.sizeX() * 0.5;
+        const double dx =
+            std::max(0.0, std::abs(wrap.deltaX(b.x0 + halfX, eye.x)) - halfX);
+        const double dz =
+            std::max({0.0, double(b.z0) - eye.z, double(eye.z) - b.z1});
+        if (dx * dx + dz * dz <= double(range) * range)
+            sources.push_back(source);
+    }
+}
+
+Column::Column(unsigned cx, unsigned cz)
+    : box{int(cx) * Side, 0,
+          int(cz) * Side, int(cx + 1) * Side,
+          WORLD_HEIGHT_Y, int(cz + 1) * Side} {}
+
+void Column::add(const Instance& instance, const WorldWrap& wrap) {
+    if (!instance.source) return;
+    if (!wrap.enabled()) {
+        add(instance.source, 0);
+        return;
+    }
+    const auto& b = instance.source->bounds;
+    const int first = floorDiv(box.x0 - b.x1, wrap.tiles) + 1;
+    const int last = floorDiv(box.x1 - 1 - b.x0, wrap.tiles);
+    for (int copy = first; copy <= last; ++copy)
+        add(instance.source, copy * wrap.tiles);
+}
+
+void Column::add(const SourcePtr& source, int shiftX) {
+    if (!source) return;
+    auto image = box;
+    image.x0 -= shiftX;
+    image.x1 -= shiftX;
+    if (!source->bounds.intersect(image).empty())
+        entries.push_back({source, image.x0 / Side});
+}
+
+void Column::orderByKey() {
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const Entry& a, const Entry& b) {
+                         return a.source->key < b.source->key;
+                     });
+}
+
+bool Column::mayContain(unsigned cy) const {
+    if (empty() || cy >= Y_CHUNKS) return false;
+    if (projectedTop()) return occupied.test(cy);
+    const int base = int(cy) * Side;
+    return std::any_of(entries.begin(), entries.end(), [&](const Entry& e) {
+        return base < e.source->bounds.y1 && base + Side > e.source->bounds.y0;
+    });
+}
+
+std::optional<Slab> Column::rasterize(unsigned cy) const {
+    if (!mayContain(cy)) return std::nullopt;
+    std::optional<Slab> result;
+    const int sy = int(cy), sz = box.z0 / Side;
+    for (const auto& entry : entries) {
+        if (entry.source->bounds.intersect(slabBox(0, entry.sx, sy, sz))
+                .empty())
+            continue;
+        const auto occupancy = entry.source->occupancy();
+        if (occupancy && !occupancy->contains(0, entry.sx, sy, sz)) continue;
+        auto slab = entry.source->rasterize(0, entry.sx, sy, sz);
+        if (!slab || slab->bits.none()) continue;
+        if (result)
+            result->merge(*slab);
+        else
+            result = std::move(slab);
+        if (result->bits.all()) break;
+    }
+    return result;
+}
+
+const Column::Tops& Column::skyTops() const {
+    std::call_once(topsOnce, [&] {
+        tops.fill(INT_MIN);
+        occupied.reset();
+        std::vector<int> projected;
+        for (const auto& entry : entries) {
+            auto image = box;
+            image.x0 = entry.sx * Side;
+            image.x1 = image.x0 + Side;
+            entry.source->skyTops(image, projected);
+            for (size_t i = 0; i < tops.size(); ++i)
+                tops[i] = std::max(tops[i], projected[i]);
+            const int top =
+                *std::max_element(projected.begin(), projected.end());
+            if (top == INT_MIN) continue;
+            const auto occupancy = entry.source->occupancy();
+            const int first =
+                std::max(0, floorDiv(entry.source->bounds.y0, Side));
+            for (int sy = first; sy <= top / Side; ++sy)
+                if (!occupancy ||
+                    occupancy->contains(0, entry.sx, sy, box.z0 / Side))
+                    occupied.set(size_t(sy));
+        }
+        highest = *std::max_element(tops.begin(), tops.end());
+    });
+    return tops;
+}
+
+std::optional<int> Column::projectedTop() const {
+    if (empty()) return INT_MIN;
+    const int top = highest.load();
+    return top == INT_MAX ? std::nullopt : std::optional{top};
+}
+
+Column::Tops Column::skyTops(const ColumnEdit& edit) const {
+    auto result = skyTops();
+    if (edit.removed.empty()) return result;
+    std::vector<int> projected;
+    for (int z = 0; z < Side; ++z)
+        for (int x = 0; x < Side; ++x) {
+            auto& top = result[size_t(z) * Side + x];
+            while (top >= 0 && edit.suppresses(x, top, z)) {
+                int next = INT_MIN;
+                for (const auto& entry : entries) {
+                    const int wx = entry.sx * Side + x, wz = box.z0 + z;
+                    entry.source->skyTops({wx, 0, wz, wx + 1, top, wz + 1},
+                                          projected);
+                    if (!projected.empty()) next = std::max(next, projected[0]);
+                }
+                top = next;
+            }
+        }
+    return result;
+}
+
+int stamp(Chunk& chunk, const Slab& slab) {
+    int placed = 0;
+    for (int z = 0; z < Side; ++z)
+        for (int y = 0; y < Side; ++y)
+            for (int x = 0; x < Side; ++x) {
+                const size_t i = cellIndex(x, y, z);
+                auto& tile = chunk.tiles[z][y][x];
+                if (!slab.bits.test(i) || !tile.isAir()) continue;
+                tile.block_id = slab.blockAt(i);
+                ++placed;
+            }
+    return placed;
+}
 
 TileBox boxOf(const Planned& p) {
     return slabBox(levelOf(p.key), p.sx, p.sy, p.sz);
@@ -153,6 +355,7 @@ void Source::skyTops(const TileBox& columns, std::vector<int>& tops) const {
     tops.assign(columns.empty() ? 0 : size_t(width) * size_t(depth), INT_MIN);
     const TileBox box = columns.intersect(bounds);
     if (box.empty()) return;
+    const auto occupied = occupancy();
     const auto floorDiv = [](int a) {
         return a >= 0 ? a / Side : -((-a + Side - 1) / Side);
     };
@@ -166,6 +369,7 @@ void Source::skyTops(const TileBox& columns, std::vector<int>& tops) const {
             int open = (tx1 - tx0) * (tz1 - tz0);
             for (int sy = floorDiv(box.y1 - 1); sy >= floorDiv(box.y0) && open;
                  --sy) {
+                if (occupied && !occupied->contains(0, sx, sy, sz)) continue;
                 const auto slab = rasterize(0, sx, sy, sz);
                 if (!slab) continue;
                 for (int z = tz0; z < tz1; ++z)

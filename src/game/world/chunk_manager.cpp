@@ -6,6 +6,114 @@
 #include "ground_cover_climate.hpp"
 #include "save/chunk_codec.hpp"
 #include "save/flora_codec.hpp"
+#include "world_editor.hpp"
+
+namespace {
+using StructureSlab = std::shared_ptr<const structure_voxels::Slab>;
+
+StructureSlab structureBaselineFor(std::optional<structure_voxels::Slab> slab,
+                                   ChunkCoord coord,
+                                   const ChunkColumnInputs* terrain,
+                                   const GrownBlockSet& grown) {
+    if (!slab) return nullptr;
+    using namespace structure_voxels;
+    for (int z = 0; z < Side; ++z)
+        for (int y = 0; y < Side; ++y)
+            for (int x = 0; x < Side; ++x) {
+                const auto i = cellIndex(x, y, z);
+                if (!slab->bits.test(i)) continue;
+                const int ceiling =
+                    terrain ? std::max(SEA_LEVEL_Y,
+                                       terrain->columns[z * Side + x].surface_y)
+                            : SEA_LEVEL_Y;
+                if (int(coord.y) * Side + y <= ceiling ||
+                    grown.test(slab->blockAt(i)))
+                    slab->bits.reset(i);
+            }
+    return slab->bits.any() ? std::make_shared<const Slab>(std::move(*slab))
+                            : nullptr;
+}
+
+StructureSlab decodeStructureBaseline(ByteView blob) {
+    if (blob.empty()) return nullptr;
+    Chunk chunk;
+    chunk_codec::decode(blob, chunk);
+    using namespace structure_voxels;
+    auto result = std::make_shared<Slab>();
+    result->blocks.resize(Cells);
+    for (int z = 0; z < Side; ++z)
+        for (int y = 0; y < Side; ++y)
+            for (int x = 0; x < Side; ++x) {
+                const auto block = chunk.tiles[z][y][x].block_id;
+                if (!block) continue;
+                const auto i = cellIndex(x, y, z);
+                result->bits.set(i);
+                result->blocks[i] = block;
+            }
+    return result->bits.any() ? result : nullptr;
+}
+
+template <typename Apply>
+bool reconcileStructure(Chunk& chunk, const structure_voxels::Slab* previous,
+                        const structure_voxels::Slab* current, Apply apply) {
+    if (!previous && !current) return false;
+    using namespace structure_voxels;
+    bool changed = false;
+    for (int z = 0; z < Side; ++z)
+        for (int y = 0; y < Side; ++y)
+            for (int x = 0; x < Side; ++x) {
+                const auto i = cellIndex(x, y, z);
+                const uint8_t old = previous ? previous->tileAt(i) : 0;
+                const uint8_t next = current ? current->tileAt(i) : 0;
+                if (old == next) continue;
+                changed = true;
+                auto& tile = chunk.tiles[z][y][x];
+                if (old ? tile.block_id == old : tile.isAir())
+                    apply(x, y, z, tile, next);
+            }
+    return changed;
+}
+
+bool rebaseStructure(Chunk& chunk, const structure_voxels::Slab* previous,
+                     const structure_voxels::Slab* current) {
+    return reconcileStructure(chunk, previous, current,
+                              [](int, int, int, Tile& tile, uint8_t block) {
+                                  tile.block_id = block;
+                                  tile.clearCover();
+                              });
+}
+
+std::vector<TileBox> changedStructureBoxes(
+    const std::vector<structure_voxels::Kind>& older,
+    const std::vector<structure_voxels::Kind>& current) {
+    std::unordered_map<uint64_t, structure_voxels::SourcePtr> before;
+    for (const auto& kind : older)
+        for (const auto& entry : kind.instances())
+            before.emplace(entry.source->key, entry.source);
+    std::vector<TileBox> changed;
+    for (const auto& kind : current)
+        for (const auto& entry : kind.instances()) {
+            const auto& source = *entry.source;
+            const auto old = before.find(source.key);
+            if (old == before.end()) {
+                changed.push_back(source.bounds);
+                continue;
+            }
+            if (source.revision != old->second->revision ||
+                source.bounds != old->second->bounds) {
+                if (auto local = source.changedSince(*old->second)) {
+                    if (!local->empty()) changed.push_back(*local);
+                } else {
+                    changed.push_back(old->second->bounds);
+                    changed.push_back(source.bounds);
+                }
+            }
+            before.erase(old);
+        }
+    for (const auto& [key, source] : before) changed.push_back(source->bounds);
+    return changed;
+}
+}  // namespace
 
 ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
                            const ChunkMesher* mesher, const World& world,
@@ -43,18 +151,24 @@ ChunkManager::~ChunkManager() {
     for (auto& job : generationJobs) job.future.wait();
     for (auto& job : meshJobs) job.future.wait();
     for (auto& job : treeJobs) job.future.wait();
+    for (auto& job : structureJobs) job.future.wait();
     for (auto& job : billboardJobs) job.future.wait();
 }
 
 void ChunkManager::registerChunk(const ChunkCoord& coord,
                                  const ChunkCoord& origin, const Region* region,
-                                 ChunkBlob stored, ChunkBlob storedFlora) {
+                                 ChunkBlob stored, ChunkBlob storedFlora,
+                                 ChunkBlob storedBaseline) {
     if (chunks.contains(coord)) unregister(coord);
     auto& handle = chunks[coord];
     handle.identity = ++nextIdentity;
     handle.regionCoord = region->coord;
-    pending[coord] = {origin, region, std::nullopt, std::move(stored),
-                      std::move(storedFlora)};
+    pending[coord] = {origin,
+                      region,
+                      std::nullopt,
+                      std::move(stored),
+                      std::move(storedFlora),
+                      std::move(storedBaseline)};
     if (!regionLayers.contains(region->coord))
         regionLayers[region->coord] = layersGenerator.get(*region);
     if (!regionSoils.contains(region->coord))
@@ -126,6 +240,11 @@ bool ChunkManager::isEdited(const ChunkCoord& coord) const {
     return it != chunks.end() && it->second.state == ChunkState::Ready &&
            it->second.edited;
 }
+const structure_voxels::Slab* ChunkManager::structureBaseline(
+    const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    return it == chunks.end() ? nullptr : it->second.structureBaseline.get();
+}
 std::optional<ChunkManager::ColumnSources> ChunkManager::columnSources(
     unsigned chunkX, unsigned chunkZ) {
     if (terrainWorld.regions.empty()) return std::nullopt;
@@ -136,7 +255,65 @@ std::optional<ChunkManager::ColumnSources> ChunkManager::columnSources(
     auto trees = prepareTrees({chunkX, 0, chunkZ}, rc);
     if (!trees) return std::nullopt;
     return ColumnSources{prepareColumns({chunkX, 0, chunkZ}, region),
-                         std::move(trees)};
+                         prepareStructures({chunkX, 0, chunkZ}, *trees),
+                         !trees->trees.empty()};
+}
+
+void ChunkManager::setGeneratedStructureKinds(StructureKinds kinds) {
+    auto effective = std::make_shared<const StructureKinds>(
+        structure_voxels::applyOverrides(kinds, savedStructures));
+    generatedKinds = std::move(kinds);
+    installStructureKinds(std::move(effective));
+}
+
+void ChunkManager::setStructureOverrides(structure_voxels::Overrides value) {
+    if (savedStructures == value) return;
+    auto effective = std::make_shared<const StructureKinds>(
+        structure_voxels::applyOverrides(generatedKinds, value));
+    savedStructures = std::move(value);
+    ++overrideRevision;
+    installStructureKinds(std::move(effective));
+}
+
+void ChunkManager::installStructureKinds(
+    std::shared_ptr<const StructureKinds> kinds) {
+    const auto changed = changedStructureBoxes(*structureKinds, *kinds);
+    structureKinds = std::move(kinds);
+    ++structureRevision;
+    if (changed.empty()) return;
+    const auto wrapX = wrap();
+    const auto overlaps = [&](const TileBox& box, unsigned cx, unsigned cz) {
+        const int x = int(cx) * Chunk::SIZE_X, z = int(cz) * Chunk::SIZE_Z;
+        if (box.z0 >= z + Chunk::SIZE_Z || box.z1 <= z) return false;
+        if (!wrapX.enabled()) return box.x0 < x + Chunk::SIZE_X && box.x1 > x;
+        const auto dx = wrapX.wrapTile(int64_t(box.x0) - x);
+        return dx < Chunk::SIZE_X || dx + box.sizeX() > wrapX.tiles;
+    };
+    for (auto& [key, column] : columnInputs) {
+        const auto cx = unsigned(key >> 32), cz = unsigned(key);
+        bool dirty = false;
+        for (const auto& box : changed) {
+            if (!overlaps(box, cx, cz)) continue;
+            dirty = true;
+            const int begin = std::max(0, box.y0 / Chunk::SIZE_Y);
+            const int end = std::min(
+                Y_CHUNKS, (box.y1 + Chunk::SIZE_Y - 1) / Chunk::SIZE_Y);
+            for (int y = begin; y < end; ++y) {
+                const ChunkCoord coord{cx, unsigned(y), cz};
+                if (isReady(coord)) rebaseQueue.insert(coord);
+            }
+        }
+        if (!dirty) continue;
+        column.structures.reset();
+        columnStructuresChanged.emit(key);
+    }
+}
+
+void ChunkManager::appendStructureLandmarks(
+    std::vector<structure_voxels::SourcePtr>& sources, const Vec3& eye,
+    float range) const {
+    for (const auto& kind : *structureKinds)
+        kind.appendLandmarks(sources, wrap(), eye, range);
 }
 
 std::function<ChunkManager::ColumnSources()>
@@ -163,7 +340,7 @@ ChunkManager::snapshotColumnSources(unsigned cx, unsigned cz) {
         }
     return [world = &terrainWorld, assets = soilAssets, table = treeTable,
             seed = treeSeed, overrides = overrides, inputs = std::move(inputs),
-            region, cx, cz]() mutable {
+            kinds = structureKinds, day = floraDay, region, cx, cz]() mutable {
         const auto terrain =
             TerrainNeighborhood::capture(*world, region, *assets);
         std::vector<const TreeSet*> sets;
@@ -179,10 +356,12 @@ ChunkManager::snapshotColumnSources(unsigned cx, unsigned cz) {
             }
             sets.push_back(input.set.get());
         }
-        return ColumnSources{std::make_shared<const ChunkColumnInputs>(
-                                 TerrainSampler(terrain).columns(cx, cz)),
-                             std::make_shared<const TreeColumn>(makeTreeColumn(
-                                 cx, cz, sets, world->wrap().tiles))};
+        return ColumnSources{
+            std::make_shared<const ChunkColumnInputs>(
+                TerrainSampler(terrain).columns(cx, cz)),
+            tree_wood_lod::columnVoxels(
+                cx, cz, makeTreeColumn(cx, cz, sets, world->wrap().tiles),
+                *table, day, world->wrap(), *kinds)};
     };
 }
 
@@ -255,6 +434,7 @@ void ChunkManager::unregister(const ChunkCoord& coord) {
     }
     pending.erase(coord);
     generationQueue.erase(coord);
+    rebaseQueue.erase(coord);
     meshQueue.erase(coord);
     // Submitted jobs own all their inputs. Their identities prevent publication
     // into a replacement chunk, and unloading never waits for a worker.
@@ -444,8 +624,7 @@ void ChunkManager::removeTree(const TreeInstancePtr& tree) {
 
 void ChunkManager::refreshTreeColumns(
     std::initializer_list<const TreeTileBox*> boxes) {
-    // Columns under the boxes rebuild their tree lists now
-    // (their sets are ready), so column tops rise before sunlight runs.
+    // Rebuild the tree lists while their region sets are ready.
     const auto wrapX = wrap();
     for (const auto* box : boxes) {
         if (box->empty()) continue;
@@ -463,12 +642,13 @@ void ChunkManager::refreshTreeColumns(
                 if (column == columnInputs.end() || !column->second.trees)
                     continue;
                 column->second.trees.reset();
+                column->second.structures.reset();
                 const auto handle =
                     chunks.find({unsigned(wx), 0, unsigned(cz)});
                 if (handle != chunks.end())
                     prepareTrees({unsigned(wx), 0, unsigned(cz)},
                                  handle->second.regionCoord);
-                columnTreesChanged.emit(key);
+                columnStructuresChanged.emit(key);
             }
     }
 }
@@ -514,6 +694,8 @@ void ChunkManager::snapshotColumn(unsigned cx, unsigned cz,
                                 std::shared_ptr<const Chunk>(it->second.data));
         out.flora.emplace_back(index, it->second.flora);
         out.trees.emplace_back(index, it->second.trees);
+        out.structureBaselines.emplace_back(index,
+                                            it->second.structureBaseline);
     }
 }
 
@@ -540,6 +722,8 @@ RegionSnapshot ChunkManager::snapshotRegion(Vec2u region, bool copy) {
                 // Layers are immutable: sharing is a snapshot.
                 snapshot.flora.emplace_back(index, it->second.flora);
                 snapshot.trees.emplace_back(index, it->second.trees);
+                snapshot.structureBaselines.emplace_back(
+                    index, it->second.structureBaseline);
             }
     return snapshot;
 }
@@ -549,7 +733,15 @@ void ChunkManager::markAllDirty() {
 }
 int ChunkManager::getColumnTopY(unsigned x, unsigned z) const {
     auto it = columnTopY.find((uint64_t{x} << 32) | z);
-    return it == columnTopY.end() ? Y_CHUNKS * Chunk::SIZE_Y - 1 : it->second;
+    return it == columnTopY.end()
+               ? WORLD_HEIGHT_Y - 1
+               : std::max(it->second, getStructureTopY(x, z));
+}
+int ChunkManager::getStructureTopY(unsigned x, unsigned z) const {
+    const auto it = columnInputs.find((uint64_t{x} << 32) | z);
+    return it == columnInputs.end() || !it->second.structures
+               ? INT_MIN
+               : it->second.structures->projectedTop().value_or(INT_MIN);
 }
 void ChunkManager::raiseColumnTopY(unsigned x, unsigned z, int y) {
     auto& top = columnTopY[(uint64_t{x} << 32) | z];
@@ -761,11 +953,11 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
                                     GeneratedChunk data) {
     auto it = chunks.find(coord);
     if (it == chunks.end() || it->second.identity != identity) return;
-    // A tree changed while the job ran (a cut, a planted tree): redo it
-    // with the new column rather than publish wood of the old tree.
-    if (data.treesUsed) {
-        const auto current = treeColumn(coord.x, coord.z);
-        if (current && current.get() != data.treesUsed) {
+    const uint64_t key = (uint64_t{coord.x} << 32) | coord.z;
+    const auto column = columnInputs.find(key);
+    if (data.structuresUsed) {
+        if (column == columnInputs.end() ||
+            column->second.structures != data.structuresUsed) {
             generationQueue.insert(coord);
             return;
         }
@@ -774,8 +966,6 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
     // travel): start from an estimate so a new chunk never shows unlit
     // (black) until its sweep arrives; the sweep then refines it.
     if (data.data) {
-        const uint64_t key = (uint64_t{coord.x} << 32) | coord.z;
-        const auto column = columnInputs.find(key);
         const auto* inputs =
             column != columnInputs.end() ? column->second.data.get() : nullptr;
         const int top = getColumnTopY(coord.x, coord.z);
@@ -788,15 +978,17 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
         std::lock_guard<std::mutex> lock(tileAtMutex);
         it->second.data = std::move(data.data);
         it->second.state = ChunkState::Ready;
-        it->second.persistDirty =
-            !data.fromDisk || data.floraRegrown || data.treesPlaced;
+        it->second.persistDirty = !data.fromDisk || data.floraRegrown ||
+                                  data.treesPlaced || data.baselineChanged;
         it->second.edited = data.edited;
+        it->second.structureBaseline = std::move(data.structureBaseline);
         it->second.flora = std::move(data.flora);
         it->second.trees = data.trees;
     }
     pending.erase(coord);
     markDirty(coord);
     becameReady.emit(coord);
+    if (data.baselineChanged) structureRebased.emit(coord);
 }
 
 void ChunkManager::dispatchGeneration() {
@@ -886,9 +1078,12 @@ void ChunkManager::dispatchGeneration() {
         // around it are built (it stays queued meanwhile).
         const auto trees = prepareTrees(coord, info.region->coord);
         if (!trees) continue;
+        const auto structures = prepareStructures(coord, *trees);
         const TreeStamp stamp{floraDay, TreeVersion};
-        if (!info.stored && columns &&
-            generator.isAirChunk(coord, *columns, trees->woodTop)) {
+        const bool terrainAir =
+            columns && generator.isAirChunk(coord, *columns);
+        if (!info.stored && terrainAir && !structures->mayContain(coord.y) &&
+            structures->projectedTop()) {
             // The oldest pick always proceeds so the starvation guard cannot
             // spin on an air chunk.
             if (air >= AirChunksPerUpdate && !oldest) continue;
@@ -919,9 +1114,22 @@ void ChunkManager::dispatchGeneration() {
              region = *info.region,
              layers = regionLayers.at(info.region->coord),
              soil = regionSoils.at(info.region->coord), stored = info.stored,
-             storedFlora = info.storedFlora, terrain, rules = floraTable,
+             storedFlora = info.storedFlora,
+             savedBaseline = info.storedBaseline, terrain, rules = floraTable,
              seed = floraSeed_, day = floraDay, trees, treeRules = treeTable,
+             structures, hasOtherKinds = !structureKinds->empty(), terrainAir,
              stamp] {
+                // The first worker for this column computes its actual top
+                // before any chunk is published. Sky jobs share the projection.
+                if (!structures->empty()) structures->skyTops();
+                auto slab = !stored || hasOtherKinds
+                                ? structures->rasterize(coord.y)
+                                : std::optional<structure_voxels::Slab>{};
+                const auto baseline =
+                    hasOtherKinds
+                        ? structureBaselineFor(slab, coord, columns.get(),
+                                               treeRules->grown())
+                        : nullptr;
                 const auto plants = [&](const Chunk* tiles) -> FloraLayerPtr {
                     if (!terrain) return nullptr;
                     FloraGenerationInput input{rules.get(),
@@ -943,10 +1151,24 @@ void ChunkManager::dispatchGeneration() {
                 if (stored) {
                     try {
                         chunk_codec::decode(*stored, *result);
-                        // Generated tiles are solid exactly up to the
-                        // surface (plus tree wood, which only grows into
-                        // air); anything else is an earlier edit.
+                        // Terrain retains its solid/air comparison. In
+                        // buildable air the structure's block ID is the
+                        // baseline.
                         const auto& grown = treeRules->grown();
+                        bool baselineChanged = !savedBaseline && baseline;
+                        if (savedBaseline) {
+                            try {
+                                const auto previous =
+                                    decodeStructureBaseline(*savedBaseline);
+                                baselineChanged = rebaseStructure(
+                                    *result, previous.get(), baseline.get());
+                            } catch (const SerializationError& e) {
+                                std::cerr << "Ignoring unreadable structure "
+                                             "baseline: "
+                                          << e.what() << '\n';
+                                baselineChanged = true;
+                            }
+                        }
                         bool edited = false;
                         if (columns)
                             for (int z = 0; z < Chunk::SIZE_Z && !edited; ++z)
@@ -961,16 +1183,26 @@ void ChunkManager::dispatchGeneration() {
                                             int(coord.y) * Chunk::SIZE_Y + y;
                                         const Tile& tile =
                                             result->tiles[z][y][x];
-                                        const bool solid =
-                                            tile.isSolid() &&
-                                            !grown.test(tile.block_id);
-                                        if (solid != (worldY <= surface)) {
+                                        const auto actual =
+                                            grown.test(tile.block_id)
+                                                ? 0
+                                                : tile.block_id;
+                                        const auto expected =
+                                            baseline
+                                                ? baseline->tileAt(
+                                                      structure_voxels::
+                                                          cellIndex(x, y, z))
+                                                : 0;
+                                        if (worldY <= surface
+                                                ? actual == 0
+                                                : actual != expected) {
                                             edited = true;
                                             break;
                                         }
                                     }
                         GeneratedChunk out{result, true, edited, nullptr};
-                        out.treesUsed = trees.get();
+                        out.structuresUsed = structures;
+                        out.baselineChanged = baselineChanged;
                         // Chunks saved before trees existed get whole trees
                         // once, into their air.
                         // Chunks saved before trees existed get whole trees
@@ -1008,6 +1240,7 @@ void ChunkManager::dispatchGeneration() {
                                         std::make_shared<const FloraLayer>(
                                             std::move(layer));
                                 addTrees();
+                                out.structureBaseline = baseline;
                                 return out;
                             } catch (const std::exception& e) {
                                 std::cerr << "Saved plants of chunk " << coord.x
@@ -1022,6 +1255,7 @@ void ChunkManager::dispatchGeneration() {
                         // ground still allows them.
                         out.flora = plants(result.get());
                         out.floraRegrown = out.flora != nullptr;
+                        out.structureBaseline = baseline;
                         return out;
                     } catch (const std::exception& e) {
                         std::cerr << "Saved chunk " << coord.x << ',' << coord.y
@@ -1029,12 +1263,16 @@ void ChunkManager::dispatchGeneration() {
                                   << e.what() << "); regenerating\n";
                     }
                 }
-                generator.generateChunk(*result, coord, origin, region, layers,
-                                        soil, columns.get());
-                placeTreeWood(*result, coord, *trees, *treeRules, day);
+                if (!terrainAir)
+                    generator.generateChunk(*result, coord, origin, region,
+                                            layers, soil, columns.get());
+                if (stored && !hasOtherKinds)
+                    slab = structures->rasterize(coord.y);
+                if (slab) structure_voxels::stamp(*result, *slab);
                 GeneratedChunk out{result, false, false, plants(nullptr)};
                 out.trees = stamp;
-                out.treesUsed = trees.get();
+                out.structuresUsed = structures;
+                out.structureBaseline = baseline;
                 return out;
             },
             info.beneficiary ? BS::pr::high : BS::pr::normal);
@@ -1155,12 +1393,95 @@ void ChunkManager::dispatchMeshes() {
     }
 }
 
-void ChunkManager::update() {
+void ChunkManager::updateStructureBaselines(WorldEditor* editor) {
+    using namespace std::chrono_literals;
+    using namespace structure_voxels;
+    for (size_t i = 0; i < structureJobs.size();) {
+        if (structureJobs[i].future.wait_for(0s) != std::future_status::ready) {
+            ++i;
+            continue;
+        }
+        auto job = std::move(structureJobs[i]);
+        structureJobs.erase(structureJobs.begin() + i);
+        const auto found = chunks.find(job.coord);
+        if (found == chunks.end() || found->second.identity != job.identity)
+            continue;
+        if (job.revision != structureRevision) {
+            rebaseQueue.insert(job.coord);
+            continue;
+        }
+        StructureSlab baseline;
+        try {
+            baseline = job.future.get();
+        } catch (const std::exception& error) {
+            std::cerr << "Structure revision failed: " << error.what() << '\n';
+            rebaseQueue.insert(job.coord);
+            continue;
+        }
+        const auto& old = found->second.structureBaseline;
+        if (!old && !baseline) continue;
+        std::vector<EditRequest> edits;
+        bool changed = false;
+        withChunkLocked(job.coord, [&](Chunk& chunk) {
+            changed = reconcileStructure(
+                chunk, old.get(), baseline.get(),
+                [&](int x, int y, int z, Tile& tile, uint8_t block) {
+                    if (editor) {
+                        edits.push_back({{int(job.coord.x) * Side + x,
+                                          int(job.coord.y) * Side + y,
+                                          int(job.coord.z) * Side + z},
+                                         EditMode::Replace,
+                                         block});
+                    } else {
+                        tile.block_id = block;
+                        tile.clearCover();
+                    }
+                });
+        });
+        if (!changed) continue;
+        found->second.structureBaseline = std::move(baseline);
+        markModified(job.coord);
+        if (editor && !edits.empty()) editor->apply(edits);
+        structureRebased.emit(job.coord);
+    }
+
+    if (rebaseQueue.empty() || structureJobs.size() >= 2) return;
+    rebaseQueue.setPeriodX(wrap().tiles);
+    for (const auto& coord : rebaseQueue.ordered(focus, false)) {
+        if (structureJobs.size() >= 2) break;
+        const auto found = chunks.find(coord);
+        if (found == chunks.end() || found->second.state != ChunkState::Ready) {
+            rebaseQueue.erase(coord);
+            continue;
+        }
+        const auto trees = prepareTrees(coord, found->second.regionCoord);
+        if (!trees) continue;
+        const auto column = prepareStructures(coord, *trees);
+        const auto terrain =
+            columnInputs.at((uint64_t{coord.x} << 32) | coord.z).data;
+        rebaseQueue.erase(coord);
+        if (!found->second.structureBaseline &&
+            (structureKinds->empty() || !column->mayContain(coord.y)))
+            continue;
+        structureJobs.push_back(
+            {coord, found->second.identity, structureRevision,
+             pool.submit_task([column, coord, terrain, table = treeTable,
+                               hasKinds = !structureKinds->empty()] {
+                 return hasKinds ? structureBaselineFor(
+                                       column->rasterize(coord.y), coord,
+                                       terrain.get(), table->grown())
+                                 : nullptr;
+             })});
+    }
+}
+
+void ChunkManager::update(WorldEditor* editor) {
     generationQueue.setPeriodX(wrap().tiles);
     meshQueue.setPeriodX(wrap().tiles);
     collect();
     dispatchGeneration();
     dispatchTreeJobs();
+    updateStructureBaselines(editor);
     dispatchMeshes();
 }
 
@@ -1279,9 +1600,13 @@ std::vector<TreeLandmark> ChunkManager::landmarksNear(Vec2u region) const {
 
 std::vector<Vec2u> ChunkManager::treeRegionsAround(Vec2u region) const {
     std::vector<Vec2u> out;
+    std::unordered_set<Vec2u> seen;
     const auto wrapX = wrap();
-    // Ordinary trees reach at most one region from their anchor; landmarks
-    // landmarkRadius (only regions holding one are needed).
+    // Ordinary trees reach one region from their anchor, including the
+    // plant exclusion margin. Farther sets must hold a landmark.
+    constexpr int ordinaryRadius =
+        int((TreeMaxReach + TreeDiscMargin + WorldWrap::RegionSize - 1) /
+            WorldWrap::RegionSize);
     for (int dz = -landmarkRadius; dz <= landmarkRadius; ++dz)
         for (int dx = -landmarkRadius; dx <= landmarkRadius; ++dx) {
             const int64_t z = int64_t(region.y) + dz;
@@ -1294,9 +1619,12 @@ std::vector<Vec2u> ChunkManager::treeRegionsAround(Vec2u region) const {
                                                          int64_t(region.x) + dx)
                                                    : int64_t(region.x) + dx),
                           unsigned(z)};
-            const bool near = std::abs(dx) <= 1 && std::abs(dz) <= 1;
+            const bool near = std::abs(dx) <= ordinaryRadius &&
+                              std::abs(dz) <= ordinaryRadius;
             if (!near && !landmarkRegions.contains(q)) continue;
-            out.push_back(q);
+            if (!wrapX.enabled() || wrapX.regions() > 2 * landmarkRadius ||
+                seen.insert(q).second)
+                out.push_back(q);
         }
     return out;
 }
@@ -1330,11 +1658,26 @@ std::shared_ptr<const TreeColumn> ChunkManager::prepareTrees(ChunkCoord coord,
     if (!ready) return nullptr;
     cache.trees = std::make_shared<const TreeColumn>(
         makeTreeColumn(coord.x, coord.z, sets, wrapX.tiles));
-    // Sunlight must see the wood before any slab of the column is lit.
-    if (cache.trees->woodTop > INT_MIN)
-        raiseColumnTopY(coord.x, coord.z,
-                        std::min(cache.trees->woodTop, WORLD_HEIGHT_Y - 1));
     return cache.trees;
+}
+
+structure_voxels::ColumnPtr ChunkManager::prepareStructures(
+    ChunkCoord coord, const TreeColumn& trees) {
+    auto& cache = columnInputs.at((uint64_t{coord.x} << 32) | coord.z);
+    if (!cache.structures || cache.structuresDay != floraDay) {
+        cache.structures = tree_wood_lod::columnVoxels(
+            coord.x, coord.z, trees, *treeTable, floraDay, wrap(),
+            *structureKinds, [this](const tree_wood_lod::Source& tree) {
+                auto& cached = treeVoxels[tree.tree->key];
+                if (cached.tree == tree.tree.get() && cached.age == tree.age)
+                    if (const auto source = cached.source.lock()) return source;
+                auto source = tree_wood_lod::voxels(tree);
+                cached = {tree.tree.get(), tree.age, source};
+                return source;
+            });
+        cache.structuresDay = floraDay;
+    }
+    return cache.structures;
 }
 
 void ChunkManager::wantTreeSets(const std::vector<Vec2u>& regions) {
@@ -1359,5 +1702,10 @@ void ChunkManager::releaseTreeSets() {
         }
         return true;
     });
-    if (treeSets.size() != before) ++treeSetsRevision_;
+    if (treeSets.size() != before) {
+        ++treeSetsRevision_;
+        std::erase_if(treeVoxels, [](const auto& entry) {
+            return entry.second.source.expired();
+        });
+    }
 }

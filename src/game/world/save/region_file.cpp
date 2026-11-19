@@ -6,6 +6,7 @@
 
 #include "chunk_codec.hpp"
 #include "flora_codec.hpp"
+#include "world/structure_voxels.hpp"
 
 uint16_t RegionData::localIndex(const ChunkCoord& coord) {
     return uint16_t(coord.y * Columns +
@@ -75,6 +76,9 @@ Bytes encode(const RegionData& data) {
     if (!data.flora.empty())
         writeBlobs(container, "FLOR", FloraSectionVersion, data.flora);
 
+    if (!data.structureBaselines.empty())
+        writeBlobs(container, "STRB", 1, data.structureBaselines);
+
     BinaryWriter tops;
     for (const auto top : data.tops) tops.write(top);
     container.put("TOPS", TopsSectionVersion, tops.take());
@@ -87,6 +91,7 @@ RegionData decode(ByteView bytes) {
 
     readBlobs(data.extra, "CHNK", ChunkSectionVersion, data.chunks);
     readBlobs(data.extra, "FLOR", FloraSectionVersion, data.flora);
+    readBlobs(data.extra, "STRB", 1, data.structureBaselines);
     if (const auto* section = data.extra.find("TOPS")) {
         if (section->version != TopsSectionVersion)
             throw SerializationError("unsupported TOPS version");
@@ -97,6 +102,7 @@ RegionData decode(ByteView bytes) {
     data.extra.remove("CHNK");
     data.extra.remove("TOPS");
     data.extra.remove("FLOR");
+    data.extra.remove("STRB");
     return data;
 }
 
@@ -120,6 +126,17 @@ RegionData merge(const RegionData& base, const RegionSnapshot& snapshot) {
         result.flora[index] = std::make_shared<const Bytes>(flora_codec::encode(
             layer ? *layer : FloraLayer{},
             stamp != stamps.end() ? stamp->second : TreeStamp{}));
+    }
+    static const auto empty = std::make_shared<const Bytes>();
+    for (const auto& [index, slab] : snapshot.structureBaselines) {
+        if (!slab) {
+            result.structureBaselines[index] = empty;
+            continue;
+        }
+        Chunk baseline;
+        structure_voxels::stamp(baseline, *slab);
+        result.structureBaselines[index] =
+            std::make_shared<const Bytes>(chunk_codec::encode(baseline));
     }
     return result;
 }

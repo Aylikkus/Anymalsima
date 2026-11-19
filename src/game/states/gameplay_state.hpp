@@ -104,11 +104,11 @@ class GameplayState : public IGameState {
     std::unique_ptr<FloraSimulation> floraSim;
     // Tree growth, cuts and planting; listens to editor (declared after it).
     std::unique_ptr<TreeSimulation> treeSim;
-    // trees.dat sections this build does not know, written back unchanged.
-    SectionContainer treesExtra;
-    // Writes trees.dat (cuts and planted trees: not derived data, so it is
-    // written as soon as it changes).
-    void saveTrees();
+    SectionContainer structuresExtra;
+    uint64_t savedStructureOverrideRevision = 0;
+    bool importLegacyStructures = false;
+    std::chrono::steady_clock::time_point nextStructureSave{};
+    void saveStructures(bool force = false);
     TextButton* plantButton = nullptr;
     size_t plantSpecies = 0;  // index into treeSpecies().species()
     std::string lastTreeAction;
@@ -131,7 +131,6 @@ class GameplayState : public IGameState {
     // Whether render() draws this chunk's blocks: inside the detail chunk
     // box around the camera target and in a detailed column (frustum and
     // mesh aside). Shared by the chunk pass, shadow casters and trees.
-    bool detailChunk(const ChunkCoord& coord) const;
     UIContext* uiContext = nullptr;
     std::optional<Vec2u> focusRegion;
     ShaderProperty u_texture_array;

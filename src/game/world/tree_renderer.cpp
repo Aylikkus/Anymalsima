@@ -23,12 +23,13 @@ constexpr float QuarterTurn = 1.57079632679f;
 
 TreeRenderer::TreeRenderer(ChunkManager& chunks, const IAssets& assets,
                            const World& world, IRenderer& renderer,
-                           ThreadPool& pool)
+                           ThreadPool& pool, int chunkRadius)
     : chunks(chunks),
       assets(assets),
       world(world),
       renderer(renderer),
-      pool(pool) {
+      pool(pool),
+      chunkRadius(chunkRadius) {
     albedo.initTexture("u_texture_array", 0, assets.getFoliageAlbedoArray());
     normals.initTexture("u_normal_array", 1, assets.getFoliageNormalArray());
     eyeUniform.initVec4("u_world_eye", {0, 0, 0, 4096});
@@ -478,8 +479,7 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
                                ? wrap.deltaChunk(a.x / Chunk::SIZE_X, tcx)
                                : int64_t(a.x / Chunk::SIZE_X) - tcx;
         const int64_t dz = int64_t(a.z / Chunk::SIZE_Z) - tcz;
-        return std::abs(dx) <= DETAIL_CHUNK_RADIUS &&
-               std::abs(dz) <= DETAIL_CHUNK_RADIUS;
+        return std::abs(dx) <= chunkRadius && std::abs(dz) <= chunkRadius;
     };
 
     struct Instance {

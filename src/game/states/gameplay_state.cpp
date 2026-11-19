@@ -9,7 +9,6 @@
 #include "render/frustrum.hpp"
 
 // How many chunks out from the camera chunk to request and draw.
-static constexpr int CHUNK_RADIUS = DETAIL_CHUNK_RADIUS;
 
 GameplayState::GameplayState(Game& game, UIContext& context,
                              std::unique_ptr<World>&& world, SaveSlot saveSlot)
@@ -168,16 +167,19 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     chunkManager = std::make_unique<ChunkManager>(
         *generator, context.threadPool, mesher.get(), *this->world.get(),
         context.assets);
-    // Cut and planted trees, before any region registers (tree jobs read
-    // them).
+    // World-wide sources must be installed before any chunk is requested.
     try {
-        auto file = save_catalog::readTrees(slot);
-        treesExtra = std::move(file.extra);
+        auto file = save_catalog::readStructures(slot);
+        chunkManager->setStructureOverrides(std::move(file.voxels));
         chunkManager->setTreeOverrides(
             std::make_shared<const TreeOverrideMap>(std::move(file.trees)));
+        structuresExtra = std::move(file.extra);
+        importLegacyStructures = file.migratedTrees;
+        savedStructureOverrideRevision =
+            chunkManager->structureOverrideRevision();
     } catch (const std::exception& e) {
-        std::cerr << "trees.dat unreadable (" << e.what()
-                  << "); cut and planted trees are lost\n";
+        throw std::runtime_error(std::string("Structure save unreadable: ") +
+                                 e.what());
     }
     skyMap = std::make_unique<SkyHeightMap>(*chunkManager, *edits,
                                             context.assets->getStorage<Block>(),
@@ -209,7 +211,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         *chunkManager, *context.assets, *this->world, *context.renderer);
     treeRenderer = std::make_unique<TreeRenderer>(
         *chunkManager, *context.assets, *this->world, *context.renderer,
-        context.threadPool);
+        context.threadPool, quality.chunkRadius);
     // Coloured lamps tint plants and crowns (declared after blockLight).
     floraRenderer->setBlockLight(blockLight.get());
     floraRenderer->setSkyLight(*skyMap);
@@ -218,7 +220,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     treeRenderer->setVoxelLandmarks(terrainLod->drawsStructureVoxels());
     // Trees hand their wood over to blocks only where render() draws them.
     treeRenderer->setChunkDrawn([this](const ChunkCoord& c) {
-        return detailChunk(c) && chunkManager->hasUploadedMesh(c);
+        return terrainLod->drawsChunk(c) && chunkManager->hasUploadedMesh(c);
     });
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
@@ -302,26 +304,37 @@ GameplayState::~GameplayState() {
     try {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();
+        saveStructures(true);
         locationMgr->saveAll(true);
         regionStore->flush();
         saveTerrainEdits(true);
         saveLightSources(true);
         saveSky(true);
-        saveTrees();
         writeMeta();
     } catch (const std::exception& e) {
         std::cerr << "Saving world failed: " << e.what() << '\n';
     }
 }
 
-void GameplayState::saveTrees() {
+void GameplayState::saveStructures(bool force) {
     if (!treeSim) return;
-    treeSim->clearDirty();
+    const auto revision = chunkManager->structureOverrideRevision();
+    if (!importLegacyStructures && !treeSim->dirty() &&
+        revision == savedStructureOverrideRevision)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < nextStructureSave) return;
     try {
-        save_catalog::writeTrees(slot, *chunkManager->treeOverrides(),
-                                 treesExtra);
+        save_catalog::writeStructures(slot, *chunkManager->treeOverrides(),
+                                      chunkManager->structureOverrides(),
+                                      structuresExtra);
+        treeSim->clearDirty();
+        savedStructureOverrideRevision = revision;
+        importLegacyStructures = false;
+        nextStructureSave = {};
     } catch (const std::exception& e) {
-        std::cerr << "Saving trees.dat failed: " << e.what() << '\n';
+        nextStructureSave = now + std::chrono::seconds(1);
+        std::cerr << "Saving structures.dat failed: " << e.what() << '\n';
     }
 }
 
@@ -678,25 +691,37 @@ void GameplayState::update(Game& game, float dt) {
     locationMgr->update();
     regionStore->update();
     updateAutosave(dt);
-    terrainLod->setStructures(treeRenderer->landmarkVoxels(clock.days()));
+    std::vector<structure_voxels::SourcePtr> generatedLandmarks;
+    chunkManager->appendStructureLandmarks(generatedLandmarks, camera.eye(),
+                                           camera.viewDistance);
+    auto landmarks = treeRenderer->landmarkVoxels(clock.days());
+    landmarks.insert(landmarks.end(), generatedLandmarks.begin(),
+                     generatedLandmarks.end());
+    for (auto& source : landmarks)
+        source = edits->maskStructure(source, chunkManager->wrap());
+    terrainLod->setStructures(std::move(landmarks));
     terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
     blockLight->setFocus(camera.position);
     requestChunksAroundCamera();
-    chunkManager->update();
+    chunkManager->update(editor.get());
     skyMap->setFocus(camera.position);
     skyMap->update();
-    skyMap->updateOcclusion(
-        camera.eye(),
-        treeRenderer->landmarkVoxels(chunkManager->woodDay(), false), *world,
-        *uiContext->assets);
+    auto skyLandmarks =
+        treeRenderer->landmarkVoxels(chunkManager->woodDay(), false);
+    skyLandmarks.insert(skyLandmarks.end(), generatedLandmarks.begin(),
+                        generatedLandmarks.end());
+    for (auto& source : skyLandmarks)
+        source = edits->maskStructure(source, chunkManager->wrap());
+    skyMap->updateOcclusion(camera.eye(), std::move(skyLandmarks), *world,
+                            *uiContext->assets);
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
     floraSim->update(clock.days());
     treeSim->update(clock.days());
-    if (treeSim->dirty()) saveTrees();
+    saveStructures();
     if (timeButton) {
         const double t = clock.timeOfDay() * 24;
         char label[64];
@@ -846,7 +871,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
         // Chunks are drawn at their copy nearest the camera, so the X seam
         // is invisible.
-        if (!detailChunk(coord)) return;
+        if (!terrainLod->drawsChunk(coord)) return;
         const int64_t deltaX = wrap.deltaChunk(coord.x, camCX);
 
         // Build the AABB for this chunk in world space.
@@ -886,16 +911,6 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     ui_manager->render(target, context);
 }
 
-bool GameplayState::detailChunk(const ChunkCoord& coord) const {
-    const int camCX = int(camera.position.x) / Chunk::SIZE_X;
-    const int camCY = int(camera.position.y) / Chunk::SIZE_Y;
-    const int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
-    return std::abs(world->wrap().deltaChunk(coord.x, camCX)) <= CHUNK_RADIUS &&
-           std::abs(int(coord.y) - camCY) <= CHUNK_RADIUS &&
-           std::abs(int(coord.z) - camCZ) <= CHUNK_RADIUS &&
-           terrainLod->drawsChunk(coord);
-}
-
 void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
     const WorldWrap wrap = world->wrap();
     lightRenderer->renderShadows(
@@ -905,7 +920,7 @@ void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
             // The detailed chunks drawn this frame (render()'s selection),
             // placed at their copy nearest the light.
             chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
-                if (!detailChunk(coord)) return;
+                if (!terrainLod->drawsChunk(coord)) return;
                 const double ox = double(coord.x) * Chunk::SIZE_X;
                 const double wx = l[0] + wrap.deltaX(ox + 8, l[0]) - 8;
                 const double lx = wx - l[0];
@@ -926,7 +941,7 @@ void GameplayState::renderShadowCasters(RenderTarget& target, double now) {
                     mesh->get(), face.shader, std::vector(face.chunkUniforms),
                     false, LightShadowMath::translation(lx, ly, lz), face.view);
             });
-            terrainLod->submitShadowCasters(t, face, *chunkManager, camera);
+            terrainLod->submitShadowCasters(t, face, *chunkManager);
         },
         now);
 }
@@ -937,8 +952,7 @@ void GameplayState::requestChunksAroundCamera() {
     int camCY = int(camera.position.y) / Chunk::SIZE_Y;
     int camCZ = int(camera.position.z) / Chunk::SIZE_Z;
 
-    // Calculate max distance squared for bounds
-    int maxDist = CHUNK_RADIUS;
+    const int radius = terrainLod->settings().chunkRadius;
 
     // Chunks still queued from earlier camera positions leave the queue:
     // fast travel would otherwise pile up requests nobody needs.
@@ -947,23 +961,17 @@ void GameplayState::requestChunksAroundCamera() {
                             unsigned(std::max(0, camCZ))};
     if (requestCentre != centre) {
         requestCentre = centre;
-        chunkManager->withdrawOutside(centre, CHUNK_RADIUS);
+        chunkManager->withdrawOutside(centre, radius);
     }
 
     // Iterate by distance from camera
-    for (int d = 0; d <= maxDist; ++d) {
+    for (int d = 0; d <= radius; ++d) {
         for (int dz = -d; dz <= d; ++dz) {
             for (int dx = -d; dx <= d; ++dx) {
                 for (int dy = -d; dy <= d; ++dy) {
                     // Skip if not on the outer shell of current distance
                     if (std::abs(dx) != d && std::abs(dy) != d &&
                         std::abs(dz) != d)
-                        continue;
-
-                    // Ensure we're within the radius
-                    if (std::abs(dx) > CHUNK_RADIUS ||
-                        std::abs(dy) > CHUNK_RADIUS ||
-                        std::abs(dz) > CHUNK_RADIUS)
                         continue;
 
                     // X wraps around the world.

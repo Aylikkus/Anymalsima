@@ -37,21 +37,24 @@ class TreeVoxels final : public structure_voxels::Source {
         if (part.empty()) return {};
         std::vector<uint8_t> mask;
         markTreeWood(*tree.skeleton, tree.anchor, part, wood.age, mask);
-        if (std::none_of(mask.begin(), mask.end(),
-                         [](uint8_t m) { return m != 0; }))
-            return {};
-        // A cell is wood when at least a quarter of its tiles are.
-        const int needed = std::max(1, s * s * s / 4);
-        std::vector<uint16_t> counts(structure_voxels::Cells, 0);
-        for (int y = part.y0; y < part.y1; ++y)
-            for (int z = part.z0; z < part.z1; ++z)
-                for (int x = part.x0; x < part.x1; ++x)
-                    if (mask[part.index(x, y, z)])
-                        ++counts[structure_voxels::cellIndex(
-                            (x - slab.x0) / s, (y - slab.y0) / s,
-                            (z - slab.z0) / s)];
         structure_voxels::Slab result;
         result.block = wood.block;
+        // Level zero is also the chunk stamping path. Count samples only
+        // when several tiles contribute to a coarse cell.
+        std::vector<uint16_t> counts(level ? structure_voxels::Cells : 0);
+        for (int y = part.y0; y < part.y1; ++y)
+            for (int z = part.z0; z < part.z1; ++z)
+                for (int x = part.x0; x < part.x1; ++x) {
+                    if (!mask[part.index(x, y, z)]) continue;
+                    const size_t i = structure_voxels::cellIndex(
+                        (x - slab.x0) / s, (y - slab.y0) / s,
+                        (z - slab.z0) / s);
+                    if (level)
+                        ++counts[i];
+                    else
+                        result.bits.set(i);
+                }
+        const int needed = std::max(1, s * s * s / 4);
         for (size_t i = 0; i < counts.size(); ++i)
             if (counts[i] >= needed) result.bits.set(i);
         if (result.bits.none()) return {};
@@ -240,6 +243,26 @@ class TreeVoxels final : public structure_voxels::Source {
 structure_voxels::SourcePtr voxels(const Source& source) {
     if (!source.tree) return nullptr;
     return std::make_shared<TreeVoxels>(source);
+}
+
+structure_voxels::ColumnPtr columnVoxels(
+    unsigned cx, unsigned cz, const TreeColumn& trees,
+    const TreeSpeciesTable& table, double day, const WorldWrap& wrap,
+    const std::vector<structure_voxels::Kind>& kinds,
+    const VoxelFactory& make) {
+    auto column = std::make_shared<structure_voxels::Column>(cx, cz);
+    for (const auto& kind : kinds) kind.addTo(*column, wrap);
+    for (const auto& entry : trees.trees) {
+        const auto& tree = *entry.tree;
+        const auto* rule = table.find(tree.species);
+        if (!rule || !rule->woodBlock || tree.wood.empty()) continue;
+        const float age = tree.growthAge(day);
+        if (age <= 0) continue;
+        const Source input{entry.tree, age, rule->woodBlock};
+        column->add(make(input), entry.anchor.x - tree.anchor.x);
+    }
+    column->orderByKey();
+    return column;
 }
 
 std::shared_ptr<const Slabs> rasterize(const Source& source, int level,

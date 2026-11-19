@@ -149,7 +149,7 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
     `TerrainNeighborhood` halo is valid only for the centre region ±1.
 - **Massive landmarks:** a world-scope list computed once per world from
   coarse `Region` data (biome, humidity, land), with a deterministic seed. It
-  is stored in `trees.dat` as derived data and recomputable. It is not part
+  is recomputed from the world seed. It is not part
   of per-chunk candidates.
 - **No storage for untouched trees:** they are never epoch-resampled.
   Generated birth days are spread into the past; massive trees are centuries
@@ -157,19 +157,13 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
 - **`TreeColumn` cache:** a list of tree references per chunk column (trees
   whose xz bounds hit it, with Y ranges). It is built in `prepareColumns`
   (`chunk_manager.cpp` ~660) on the main thread next to `columnInputs`,
-  refcounted by registration and erased in `unregister`. It is the source for
-  `isAirChunk`, the job inputs, column tops and the `TreeIndex`. Chunk jobs do
-  **not** return tree ids, because air chunks never run a job.
-- **Chunk job** (`chunk_manager.cpp` ~450–546):
-  - `isAirChunk` takes the column's wood top.
-  - The terrain neighbourhood is captured when the slab meets a tree.
-  - The job captures the tree list and the overrides snapshot.
-  - Fresh chunks rasterize after `generateChunk`; decoded chunks reconcile
-    after decode.
-  - Results are marked for saving like `floraRegrown`.
-- **Column tops:** `raiseColumnTopY(cx, cz, woodTop)` is called when the
-  `TreeColumn` is built, before any sweep. Otherwise missing upper slabs are
-  treated as open sky and light the trunk.
+  refcounted by registration and erased in `unregister`. It supplies tree
+  simulation, trunk discs for flora, and sources for the structure column.
+- **Chunk job:** fresh chunks stamp level-zero structure voxels after terrain
+  generation. Decoded chunks reconcile their tree stamps after decode.
+- **Column tops:** the structure column projects exact wood tops for sunlight
+  and combines structure occupancy with the terrain air check. See
+  [structure stamping](structures.md#step-3-chunk-stamping-done).
 - **Flora:** candidates inside any tree's 2D trunk/root disc are excluded.
   This is pure, so border agreement holds. Live seeding already refuses
   non-air headroom.
@@ -195,7 +189,7 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
     chunk jobs.
   - In `publishGenerated`, a revision change since dispatch re-runs reconcile
     for that chunk.
-- **`trees.dat` (fourcc `TREE`, world scope):** loaded before the first
+- **`structures.dat` (fourcc `TREE`, world scope):** loaded before the first
   region registers.
   - Unlike `terrain_edits.dat`, it is truth, not derived data. It is written
     (tmp file, then rename) whenever it is dirty and a region is saved or
@@ -453,21 +447,16 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
     ground pruning reads the region's terrain sampler.
   - `makeTreeColumn`: trees whose bounds (wood or foliage) meet a chunk
     column, with anchors moved to the copy nearest the column (X seam),
-    trunk discs within `TreeDiscMargin` (32) for plants, and the column's
-    wood top from block-thick segments crossing it.
-  - `placeTreeWood`: rasterizes the column's trees into the air tiles of a
-    chunk (key order, so overlapping trees agree).
+    and trunk discs within `TreeDiscMargin` (32) for plants.
+  - `placeTreeWood` uses the shared structure stamp for legacy backfill.
 - `ChunkManager`:
   - Region tree sets are worker jobs (`regionTrees`, the neighbourhood is
     captured on the worker). `prepareTrees` builds a column's `TreeColumn`
-    once the sets of the 3x3 regions around it (and of regions within two
-    holding a landmark) are ready; meanwhile its chunks stay queued.
-    Building it raises the column top to the wood (`raiseColumnTopY`), so
-    sunlight never treats a tree's slabs as open sky. Sets are released
-    when no registered region lies within two regions.
-  - `isAirChunk` takes the column's wood top. Fresh chunks get wood after
-    `generateChunk`; plants avoid trunk discs (`FloraGenerationInput::
-    treeDiscs`, also in `regenerateFlora`).
+    once the sets of the 3x3 regions around it and any landmark regions
+    within reach are ready. Chunks stay queued until then.
+  - Fresh chunks stamp wood through the shared structure column, whose
+    occupancy can bypass generation in known-air slabs. Plants avoid trunk
+    discs (`FloraGenerationInput::treeDiscs`, also in `regenerateFlora`).
   - Per-chunk `TreeStamp` (`ChunkHandle::trees`): day and `TreeVersion` of
     its wood, saved in the FLOR blob header (`flora_codec` v3; v1/v2 decode
     as `Never`) through `RegionSnapshot::trees`. A saved chunk without a
@@ -572,13 +561,12 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   seed, anchor, birth day, headroom; any tree: its cuts; generated trees:
   a persistent removal marker) in a
   `TreeOverrideMap`, the truth for trees that differ from generation.
-  `save/trees_codec` writes it to `trees.dat` (fourcc `TREE` v3, reads v1
-  and v2; v3 adds `TreeCut::plane`, see "Approaching massive trees");
-  `save_catalog::readTrees`/`writeTrees`. `GameplayState` loads it before
-  regions register and writes it as soon as it changes (and on exit).
+  `save/trees_codec` writes `TREE` v4 and reads v1 through v4.
+  `GameplayState` loads the section through `save_catalog::readStructures`
+  before regions register and saves changes through `writeStructures`.
 - Cuts on existing skeletons: `applyTreeCuts(skeleton, species, cuts,
   first)`; `buildTreeSkeleton` applies `input.cuts` the same way after the
-  rotation, so a tree cut in play and one rebuilt from `trees.dat` are
+  rotation, so a tree cut in play and one rebuilt from the saved tree section are
   identical (`tree_cuts_incremental`). Skeletons keep `seed`, `headroom`,
   `clumpSize`, `windAzimuth` for that. The part below a cut gets
   `TreeSegment::CutEnd`: its wood stops flat at the cut plane.
@@ -687,10 +675,10 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   carry visible foliage and supply bark where voxel wood is not yet uploaded.
 - Wood hand-over: a tree in the detailed chunks keeps its distant mesh (bark
   prisms) until every chunk of its wood bounds is actually drawn
-  (`TreeRenderer::setChunkDrawn`; in the game `GameplayState::detailChunk`
+  (`TreeRenderer::setChunkDrawn`; in the game `TerrainLodManager::drawsChunk`
   plus an uploaded mesh, the same rule as the chunk pass). It used to switch
   as soon as no chunk was still meshing, while the terrain detail coverage
-  (enter radius 6, whole column uploaded) had not yet handed the column to
+  (the preset’s enter radius, with the whole column uploaded) had not yet handed the column to
   blocks, so big trees such as redwoods vanished for a few frames.
 
 
@@ -805,7 +793,7 @@ its distant voxels. Measured with a 1000 m crown, 500 m tall, 64 m trunk
   `tree_cut_angled_branch` checks a 12-block-wide sloping limb with a
   one-tile slit and one last support; `TREE_BENCH_SAW_ONLY=1` runs the elder
   trunk sawing benchmark without full-tree distant rasterization afterward.
-- Open: falling branches (physics); withering of massive trees;
+- Open: falling branches (physics, planned in `physics.md`); withering of massive trees;
   `refreshTreeColumns` after a cut (about 5 ms with the elder's loaded
   columns) and `applyTreeCuts` are the main-thread cost of a cut.
 
@@ -992,7 +980,7 @@ stair-stepped slits never cut, and the cut plane could only be +-x/y/z.
   edge or a corner falls. `tree_cut_angled_branch` now expects the cut when
   the last face bridge goes, not the last block of the slice.
 - `TreeCut::normal` (any unit vector, zero = perpendicular) replaces the
-  grid code; `trees.dat` `TREE` v4 writes it as three floats, v3 codes and
+  grid code; the `TREE` v4 section writes it as three floats, v3 codes and
   older cuts still load. A cut's removed wood also takes the clipped end
   caps of the stump's axis below (as `cutPlanes` clips the live wood).
 - Measured (`TREE_BENCH_LIMB_LIGHT=1 TREE_BENCH_SLANT=1

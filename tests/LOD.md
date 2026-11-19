@@ -1,7 +1,7 @@
 # Distant terrain
 
-Gameplay renders generated land and opaque water to 4,096 tiles. Local terrain
-still loads within the existing chunk radius. Region registration follows the
+Gameplay renders generated land and opaque water to 4,096–8,192 tiles.
+The terrain preset also sets the detailed chunk radius. Region registration follows the
 camera and releases generation caches as regions unload.
 
 ## Representation and ownership
@@ -54,8 +54,9 @@ slabs must initially have current uploaded meshes and ready neighbors. After
 handover, chunk visibility belongs to a separate coverage tracker. Already
 uploaded meshes remain visible through distant LOD changes and queued lighting
 remeshes, until their chunks unload or leave the keep radius. New columns enter
-within six chunks; existing columns remain through seven chunks to avoid
-boundary oscillation. Surface summaries are cached independently of the distant
+two chunks inside the preset radius. Existing columns remain through the
+next ring. The outer ring supplies mesh neighbors and distant terrain takes
+over as columns leave the retained ring. Surface summaries are cached independently of the distant
 mesh layout, with at most four new summaries sampled per frame.
 
 A coverage texture masks all LOD resolutions under detailed chunks, including
@@ -70,11 +71,11 @@ work.
 Presets are `TerrainLod::Qualities` in `src/game/world/terrain_lod.hpp`,
 selected by the `terrainDetail` setting (main menu, applied on world load):
 
-| Preset | GPU budget | Upload/frame | View distance | Exact radius | Pixel error | Material map |
-|--------|-----------:|-------------:|--------------:|-------------:|------------:|-------------:|
-| Low    | 64 MiB     | 2 MiB        | 4096          | 128          | 2.0         | 32           |
-| Medium | 128 MiB    | 3 MiB        | 6144          | 192          | 1.4         | 64           |
-| High   | 256 MiB    | 4 MiB        | 8192          | 256          | 1.0         | 64           |
+| Preset | GPU budget | Upload/frame | View distance | Exact radius | Pixel error | Material map | Chunk radius |
+|--------|-----------:|-------------:|--------------:|-------------:|------------:|-------------:|-------------:|
+| Low    | 64 MiB     | 2 MiB        | 4096          | 128          | 2.0         | 32           | 4            |
+| Medium | 128 MiB    | 3 MiB        | 6144          | 192          | 1.4         | 64           | 6            |
+| High   | 256 MiB    | 4 MiB        | 8192          | 256          | 1.0         | 64           | 8            |
 
 The view distance also drives fog and the far plane. The residency budget
 reserves 2 MiB for detail-to-LOD joins; joins are rebuilt in the frame their
@@ -113,7 +114,7 @@ slab (`StructureLod`), fully sky-lit and capped at 1/8 of the preset's GPU
 budget. Their border faces read the neighbouring slabs, so structures may
 span chunks and regions without seam faces. A proxy slab is hidden exactly
 when `GameplayState` draws its real chunk (detailed column, uploaded mesh,
-inside `DETAIL_CHUNK_RADIUS`). Vegetation, cave interiors, coarse structure
+inside the preset chunk radius). Vegetation, cave interiors, coarse structure
 meshes for very distant towns, water reflections and new river/lake
 generation are outside this version.
 Coverage changes are atomic geometry replacements; there is no temporal
@@ -132,7 +133,7 @@ build/tests/lod_render_smoke build/lod_handover 1600 handover
 build/tests/lod_render_smoke build/lod_coast 1600 coast
 build/tests/lod_render_smoke build/lod_elevated 1600 elevated
 build/tests/lod_render_smoke build/lod_travel 2400 travel
-build/tests/lod_render_smoke build/lod_boundary 2000 handover_walk
+SMOKE_TERRAIN=0 build/tests/lod_render_smoke build/lod_boundary 2000 handover_walk
 build/tests/lod_render_smoke build/lod_wrap 1500 wrap
 build/tests/lod_render_smoke build/lod_cancel 1 cancel
 build/tests/lod_render_smoke build/lod_structure 3000 structure
@@ -145,7 +146,8 @@ material assets and compiled shaders. It writes PPM captures under the given
 prefix and prints residency, upload, draw and completion counters. Travel
 captures three destinations, including a 512-tile move and a longer teleport.
 The handover scenario streams and lights local chunks and draws their uploaded
-meshes. The boundary scenario walks across a region boundary and back, forces
+meshes. `SMOKE_RADIUS` overrides the preset radius for streaming and handover. The
+boundary scenario walks across a region boundary and back, forces
 mesh revisions, and checks every frame that drawable columns remain visible;
 it also captures a coarse-to-fine transition. The structure scenario digs a
 pit and builds a pillar with an overhanging platform through `WorldEditor`,

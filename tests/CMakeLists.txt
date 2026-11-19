@@ -28,6 +28,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_skeleton.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_rasterizer.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/structure_voxels.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/structure_overrides.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_wood_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_foliage_builder.cpp
@@ -40,6 +41,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/save/terrain_edits_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/light_sources_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/trees_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/structures_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/sky_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/binary_stream.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/compression.cpp
@@ -161,7 +163,8 @@ list(APPEND world_cases
     edit_structure_overhang
     edit_structure_crosses_region
     edit_unloaded_slab_keeps_structure
-    edit_detected_from_save
+    edit_detected_from_save edit_generated_castle_damage edit_generated_castle_revision
+    structure_revision_rebases_saved_and_ready_chunks
 )
 foreach(case IN LISTS world_cases)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
@@ -247,6 +250,7 @@ foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
              region_file_roundtrip world_seed_derivation world_map_roundtrip
              save_catalog_slots region_index_covers_world_height
              terrain_edits_roundtrip terrain_edits_rejects_corrupt
+             structure_save_migrates_trees
              light_sources_roundtrip light_sources_rejects_corrupt
              light_sources_versions)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
@@ -294,7 +298,7 @@ endforeach()
 # Distant structure voxels (docs/handoff/structures.md).
 foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
              structure_voxels_plan_wraps structure_voxels_plan_chunk_handover
-             structure_voxels_slab_merge
+             structure_voxels_slab_merge structure_stamp_only_fills_air
              structure_footprint_tops structure_footprint_incremental
              sky_occlusion_matches_sunlight sky_occlusion_by_height
              sky_occlusion_wraps)
@@ -302,6 +306,10 @@ foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;structures" TIMEOUT 10)
 endforeach()
+add_test(NAME game.world.structure_chunk_stamping
+    COMMAND world_logic_tests structure_chunk_stamping)
+set_tests_properties(game.world.structure_chunk_stamping PROPERTIES
+    LABELS "integration;gameplay;world;structures" TIMEOUT 10)
 # Sky heightmap (docs/handoff/sky-light.md).
 foreach(case sky_column_scan_and_direct sky_tile_build_sources
              sky_tile_overrides sky_codec_roundtrip tree_wood_tops_match_raster
@@ -396,7 +404,8 @@ foreach(case lod_surface_matches_chunks lod_geology_order_independent
              lod_stepped_boundary_walls lod_water_and_bounds
              lod_selection_coverage_balance lod_cover_fallback lod_edits_lower_ground
              lod_loaded_water_mesh lod_detail_survives_refresh
-             lod_detail_hysteresis lod_mesh_height_matches_triangles
+             lod_detail_hysteresis lod_detail_low_handoff_wraps
+             lod_mesh_height_matches_triangles
              lod_detail_coarse_joins)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES

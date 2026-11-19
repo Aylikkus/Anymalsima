@@ -135,7 +135,7 @@ class SkyHeightMap {
     WorldEditor* editor = nullptr;
     Signal<const BlockChange&>::Connection editConnection;
     Signal<uint64_t>::Connection editsConnection;
-    Signal<uint64_t>::Connection treesConnection;
+    Signal<uint64_t>::Connection structuresConnection;
     Signal<uint64_t>::Connection releasedConnection;
     Signal<const ChunkCoord&>::Connection readyConnection;
     std::unordered_map<uint64_t, Entry> entries;
@@ -149,6 +149,7 @@ class SkyHeightMap {
     uint64_t nextGeneration = 0;
     uint64_t queryClock = 0;
     uint64_t treeRevision = 0;
+    uint64_t structureRevision = 0;
     uint64_t revision = 0;
     uint64_t occlusionRevision = 0;
     uint64_t occlusionEditRevision = 0;

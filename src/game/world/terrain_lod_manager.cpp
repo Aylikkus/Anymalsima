@@ -46,8 +46,8 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
       quality(quality),
       edits(edits),
       inputs(std::make_shared<SurfaceInputCache>()),
-      detailSampler(world, assets, inputs,
-                    edits ? edits->snapshot() : nullptr) {
+      detailSampler(world, assets, inputs, edits ? edits->snapshot() : nullptr),
+      detailCoverage(quality.chunkRadius) {
     if (edits) {
         // Structures get their own cap next to the patch budget.
         structures = std::make_unique<StructureLod>(world, assets, pool, inputs,
@@ -335,14 +335,14 @@ void TerrainLodManager::update(const Camera& camera, Vec2 viewport) {
     if (structures) {
         // Keep full voxels through the real chunk draw box and for two
         // slabs beyond it, so an approaching camera has time to refine.
-        constexpr int Radius = DETAIL_CHUNK_RADIUS + 2;
+        const int radius = quality.chunkRadius + 2;
         const int x = int(camera.position.x) / Chunk::SIZE_X;
         const int y = int(camera.position.y) / Chunk::SIZE_Y;
         const int z = int(camera.position.z) / Chunk::SIZE_Z;
         const TileBox detail{
-            (x - Radius) * Chunk::SIZE_X,     (y - Radius) * Chunk::SIZE_Y,
-            (z - Radius) * Chunk::SIZE_Z,     (x + Radius + 1) * Chunk::SIZE_X,
-            (y + Radius + 1) * Chunk::SIZE_Y, (z + Radius + 1) * Chunk::SIZE_Z};
+            (x - radius) * Chunk::SIZE_X,     (y - radius) * Chunk::SIZE_Y,
+            (z - radius) * Chunk::SIZE_Z,     (x + radius + 1) * Chunk::SIZE_X,
+            (y + radius + 1) * Chunk::SIZE_Y, (z + radius + 1) * Chunk::SIZE_Z};
         structures->update(camera.eye(), detail, edits->snapshot());
     }
 }
@@ -506,6 +506,11 @@ bool TerrainLodManager::drawsColumn(unsigned x, unsigned z) const {
     return detailCoverage.contains(int(x), int(z));
 }
 bool TerrainLodManager::drawsChunk(const ChunkCoord& c) const {
+    if (std::abs(world.wrap().deltaChunk(c.x, detailCentre.x)) >
+            quality.chunkRadius ||
+        std::abs(int(c.y) - int(detailCentre.y)) > quality.chunkRadius ||
+        std::abs(int(c.z) - int(detailCentre.z)) > quality.chunkRadius)
+        return false;
     if (detailCoverage.contains(int(c.x), int(c.z))) return true;
     // Above the column's whole surface band distant terrain draws nothing
     // (structure voxels hand over per chunk), so the chunk can be drawn
@@ -519,7 +524,8 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
     const int cx = int(camera.position.x) / 16,
               cy = int(camera.position.y) / 16,
               cz = int(camera.position.z) / 16;
-    constexpr int keep = TerrainLod::DetailCoverage::KeepRadius;
+    detailCentre = {unsigned(cx), unsigned(cy), unsigned(cz)};
+    const int keep = detailCoverage.keepRadius();
     const WorldWrap wrap{periodX};
     // Chunk-column distance in X, across the seam when the world wraps.
     const auto distX = [&](int x) {
@@ -543,9 +549,8 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
     int newBands = 0;
     chunks.forEachMeshed([&](const ChunkCoord& coord) {
         const int x = int(coord.x), z = int(coord.z);
-        if (newBands >= 4 ||
-            distX(x) > TerrainLod::DetailCoverage::EnterRadius ||
-            std::abs(z - cz) > TerrainLod::DetailCoverage::EnterRadius ||
+        if (newBands >= 4 || distX(x) > detailCoverage.enterRadius() ||
+            std::abs(z - cz) > detailCoverage.enterRadius() ||
             surfaceBands.contains({x, z}) || !chunks.isMeshUploaded(coord))
             return;
         int low = Y_CHUNKS * Chunk::SIZE_Y, high = 0;
@@ -576,7 +581,7 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         return true;
     };
     detailCoverage.update(
-        {unsigned(cx), unsigned(cy), unsigned(cz)}, candidates, current,
+        detailCentre, candidates, current,
         [&](ChunkCoord coord) { return chunks.hasUploadedMesh(coord); },
         wrap.chunks());
     detailX = cx - DetailSize / 2;
@@ -601,7 +606,7 @@ void TerrainLodManager::uploadCoverage() {
 void TerrainLodManager::uploadJoins(IRenderer& renderer) {
     // With at most a 15x15 column window, even a checkerboard of visible
     // columns has fewer than 2 MiB of indexed one-tile boundary quads.
-    constexpr size_t side = TerrainLod::DetailCoverage::KeepRadius * 2 + 1;
+    constexpr size_t side = TerrainLod::MaxChunkRadius * 2 - 1;
     constexpr size_t quads = 2 * side * (side + 1) * Chunk::SIZE_X;
     static_assert(quads * (4 * sizeof(BlockVertex) + 6 * sizeof(uint32_t)) <=
                   JoinBudget);
@@ -664,19 +669,12 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     if (uploaded) ++drawnRevision;
     if (structures) {
         // The same hand-over to real chunks as the draw below.
-        const int cx = int(camera.position.x) / Chunk::SIZE_X,
-                  cy = int(camera.position.y) / Chunk::SIZE_Y,
-                  cz = int(camera.position.z) / Chunk::SIZE_Z;
         const size_t bytes = structures->upload(
             renderer,
             quality.uploadBudget > uploaded ? quality.uploadBudget - uploaded
                                             : 0,
             [&](const ChunkCoord& c) {
-                return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
-                           DETAIL_CHUNK_RADIUS &&
-                       std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
-                       std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
-                       drawsChunk(c) && chunks.hasUploadedMesh(c);
+                return drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
         uploaded += bytes;
         if (bytes) ++drawnRevision;
@@ -755,9 +753,6 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         // A structure slab hands over to its real chunk exactly when
         // GameplayState draws that chunk: drawsChunk, uploaded mesh,
         // inside the detail chunk box.
-        const int cx = int(camera.position.x) / Chunk::SIZE_X,
-                  cy = int(camera.position.y) / Chunk::SIZE_Y,
-                  cz = int(camera.position.z) / Chunk::SIZE_Z;
         std::vector<ShaderProperty*> uniforms{
             &textureArray,  &joinNormals,     &fogUniform,      &joinLightChunk,
             &joinLightSlot, &joinLightVolume, &joinCoverVolume, &water};
@@ -768,24 +763,17 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
             [this, &chunks](const ChunkCoord& c) {
                 return drawsChunk(c) && chunks.hasUploadedMesh(c);
             },
-            ChunkCoord{unsigned(cx), unsigned(cy), unsigned(cz)},
-            DETAIL_CHUNK_RADIUS);
-        structures->draw(
-            target, frustum, camera, &joinShader, std::move(uniforms),
-            [&](const ChunkCoord& c) {
-                return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
-                           DETAIL_CHUNK_RADIUS &&
-                       std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
-                       std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
-                       drawsChunk(c) && chunks.hasUploadedMesh(c);
-            });
+            detailCentre, quality.chunkRadius);
+        structures->draw(target, frustum, camera, &joinShader,
+                         std::move(uniforms), [&](const ChunkCoord& c) {
+                             return drawsChunk(c) && chunks.hasUploadedMesh(c);
+                         });
     }
     ++frame;
 }
 void TerrainLodManager::submitShadowCasters(RenderTarget& target,
                                             const LightShadows::Face& face,
-                                            ChunkManager& chunks,
-                                            const Camera& camera) {
+                                            ChunkManager& chunks) {
     const auto& l = face.light;
     std::vector<ShaderProperty*> lodUniforms = face.lodUniforms;
     lodUniforms.push_back(&shadowDetail);
@@ -819,17 +807,10 @@ void TerrainLodManager::submitShadowCasters(RenderTarget& target,
             face.view);
     if (structures) {
         // The same hand-over to real chunks as render().
-        const int cx = int(camera.position.x) / Chunk::SIZE_X,
-                  cy = int(camera.position.y) / Chunk::SIZE_Y,
-                  cz = int(camera.position.z) / Chunk::SIZE_Z;
         structures->drawShadow(
             target, face.frustum, l, face.radius, face.shader,
             face.chunkUniforms, face.view, [&](const ChunkCoord& c) {
-                return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
-                           DETAIL_CHUNK_RADIUS &&
-                       std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
-                       std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
-                       drawsChunk(c) && chunks.hasUploadedMesh(c);
+                return drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
     }
 }
@@ -838,15 +819,8 @@ size_t TerrainLodManager::structureGaps(const ChunkManager& chunks,
                                         const Camera& camera,
                                         float radius) const {
     if (!structures) return 0;
-    const int cx = int(camera.position.x) / Chunk::SIZE_X,
-              cy = int(camera.position.y) / Chunk::SIZE_Y,
-              cz = int(camera.position.z) / Chunk::SIZE_Z;
     return structures->gaps(camera.eye(), radius, [&](const ChunkCoord& c) {
-        return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
-                   DETAIL_CHUNK_RADIUS &&
-               std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
-               std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
-               drawsChunk(c) && chunks.hasUploadedMesh(c);
+        return drawsChunk(c) && chunks.hasUploadedMesh(c);
     });
 }
 

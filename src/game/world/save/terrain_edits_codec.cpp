@@ -6,7 +6,8 @@
 
 namespace terrain_edits_codec {
 namespace {
-constexpr uint16_t EditSectionVersion = 1;
+constexpr uint16_t EditSectionVersion = 2;
+constexpr uint16_t TilesPerSlab = Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
 constexpr uint32_t MaxColumns = 1u << 24;
 }  // namespace
 
@@ -30,6 +31,12 @@ Bytes encode(const EditMap& columns, const SectionContainer& extra) {
             out.write(slabY);
             out.writeBlock(*blob);
         }
+        out.write(uint16_t(edit.removed.size()));
+        for (const auto& [slabY, cells] : edit.removed) {
+            out.write(slabY);
+            out.write(uint16_t(cells.size()));
+            for (const auto cell : cells) out.write(cell);
+        }
     }
     SectionContainer container = extra;
     container.put("EDIT", EditSectionVersion, out.take());
@@ -40,7 +47,7 @@ File decode(ByteView bytes) {
     File file;
     file.extra = SectionContainer::decode(bytes);
     if (const auto* section = file.extra.find("EDIT")) {
-        if (section->version != EditSectionVersion)
+        if (section->version != 1 && section->version != EditSectionVersion)
             throw SerializationError("unsupported EDIT version");
         BinaryReader in(section->data);
         const auto count = in.read<uint32_t>();
@@ -72,6 +79,30 @@ File decode(ByteView bytes) {
                 edit->structure.emplace_back(
                     slabY,
                     std::make_shared<const Bytes>(blob.begin(), blob.end()));
+            }
+            if (section->version >= 2) {
+                const auto removedSlabs = in.read<uint16_t>();
+                if (removedSlabs > Y_CHUNKS)
+                    throw SerializationError("too many removal slabs");
+                for (uint16_t s = 0; s < removedSlabs; ++s) {
+                    const auto y = in.read<uint16_t>();
+                    const auto count = in.read<uint16_t>();
+                    if (y >= Y_CHUNKS || !count || count > TilesPerSlab ||
+                        (!edit->removed.empty() &&
+                         y <= edit->removed.back().first))
+                        throw SerializationError("invalid removal slab");
+                    auto& cells =
+                        edit->removed.emplace_back(y, std::vector<uint16_t>{})
+                            .second;
+                    cells.reserve(count);
+                    for (uint16_t c = 0; c < count; ++c) {
+                        const auto cell = in.read<uint16_t>();
+                        if (cell >= TilesPerSlab ||
+                            (!cells.empty() && cell <= cells.back()))
+                            throw SerializationError("invalid removed voxel");
+                        cells.push_back(cell);
+                    }
+                }
             }
             // Decodes every blob, so corrupt payloads are rejected here.
             edit->finish();

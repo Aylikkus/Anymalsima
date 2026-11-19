@@ -217,8 +217,8 @@ TEST(lod_stepped_boundary_walls) {
         bool foundBottom = false, foundSurface = false;
         CHECK(column.material != sampler.materialAt(320, top - 2, z));
         for (const auto& v : mesh.vertices)
-            if (v.v == 2 && v.nx == -1 && v.x == 320 &&
-                v.z >= z && v.z <= z + 1 && v.u == top) {
+            if (v.v == 2 && v.nx == -1 && v.x == 320 && v.z >= z &&
+                v.z <= z + 1 && v.u == top) {
                 if (close(v.y, bottom) &&
                     v.layer == sampler.materialAt(320, int(bottom), z))
                     foundBottom = true;
@@ -362,7 +362,7 @@ TEST(lod_loaded_water_mesh) {
 }
 
 TEST(lod_detail_survives_refresh) {
-    TerrainLod::DetailCoverage coverage;
+    TerrainLod::DetailCoverage coverage(TerrainLod::Qualities[0].chunkRadius);
     const std::array bands{TerrainLod::SurfaceBand{7, 7, 26, 28}};
     bool current = true, drawable = true;
     auto latest = [&](ChunkCoord) { return current; };
@@ -389,20 +389,48 @@ TEST(lod_detail_survives_refresh) {
     CHECK(coverage.contains(7, 7));
 }
 TEST(lod_detail_hysteresis) {
-    TerrainLod::DetailCoverage coverage;
-    const std::array bands{TerrainLod::SurfaceBand{13, 7, 26, 28}};
-    auto ready = [](ChunkCoord) { return true; };
-    coverage.update({7, 28, 7}, bands, ready, ready);
-    CHECK(coverage.contains(13, 7));
-    coverage.update({6, 28, 7}, bands, ready, ready);
-    CHECK(coverage.contains(13, 7));
-    coverage.update({5, 28, 7}, bands, ready, ready);
-    CHECK(!coverage.contains(13, 7));
-    coverage.update({6, 28, 7}, bands, ready, ready);
-    CHECK(!coverage.contains(13, 7));
-    coverage.update({7, 28, 7}, bands, ready, ready);
-    CHECK(coverage.contains(13, 7));
+    constexpr std::array radii{4, 6, 8};
+    for (size_t i = 0; i < radii.size(); ++i) {
+        const int radius = TerrainLod::Qualities[i].chunkRadius;
+        EQUAL(radius, radii[i], "voxel radius for terrain preset");
+        TerrainLod::DetailCoverage coverage(radius);
+        const std::array bands{TerrainLod::SurfaceBand{20, 7, 26, 28}};
+        const auto ready = [](ChunkCoord) { return true; };
+        const unsigned enter = unsigned(20 + radius - 2);
+        coverage.update({enter, 28, 7}, bands, ready, ready);
+        CHECK(coverage.contains(20, 7));
+        coverage.update({enter + 1, 28, 7}, bands, ready, ready);
+        CHECK(coverage.contains(20, 7));
+        // Walk beyond the detailed chunk box while the old mesh still
+        // exists. Distant terrain must be visible when looking back.
+        coverage.update({enter + 2, 28, 7}, bands, ready, ready);
+        CHECK(!coverage.contains(20, 7));
+        coverage.update({enter + 3, 28, 7}, bands, ready, ready);
+        CHECK(!coverage.contains(20, 7));
+        coverage.update({enter + 1, 28, 7}, bands, ready, ready);
+        CHECK(!coverage.contains(20, 7));
+        coverage.update({enter, 28, 7}, bands, ready, ready);
+        CHECK(coverage.contains(20, 7));
+
+        // Moving above the old surface band has the same handoff.
+        coverage.update({enter, unsigned(26 + radius), 7}, bands, ready, ready);
+        CHECK(!coverage.contains(20, 7));
+    }
 }
+
+TEST(lod_detail_low_handoff_wraps) {
+    TerrainLod::DetailCoverage coverage(TerrainLod::Qualities[0].chunkRadius);
+    const std::array bands{TerrainLod::SurfaceBand{63, 7, 26, 28}};
+    const auto ready = [](ChunkCoord) { return true; };
+    coverage.update({1, 28, 7}, bands, ready, ready, 64);
+    CHECK(coverage.contains(63, 7));
+    coverage.update({2, 28, 7}, bands, ready, ready, 64);
+    CHECK(coverage.contains(63, 7));
+    // Beyond the retained ring across the wrapping seam.
+    coverage.update({3, 28, 7}, bands, ready, ready, 64);
+    CHECK(!coverage.contains(63, 7));
+}
+
 TEST(lod_mesh_height_matches_triangles) {
     test::Assets assets;
     auto world = worldForLod();

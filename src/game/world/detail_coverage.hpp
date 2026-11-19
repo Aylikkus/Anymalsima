@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <span>
 
@@ -12,8 +13,12 @@ namespace TerrainLod {
 // layout nor a pending lighting remesh may demote an already drawable column.
 class DetailCoverage {
    public:
-    static constexpr int EnterRadius = 6;
-    static constexpr int KeepRadius = 7;
+    explicit DetailCoverage(int chunkRadius)
+        : keep(std::max(0, chunkRadius - 1)) {}
+    // Leave a ring for mesh neighbours, plus one chunk of horizontal
+    // hysteresis so crossing a boundary does not immediately hide a column.
+    int keepRadius() const { return keep; }
+    int enterRadius() const { return std::max(0, keep - 1); }
     using Key = std::pair<int, int>;
     using Columns = std::map<Key, SurfaceBand>;
 
@@ -26,8 +31,8 @@ class DetailCoverage {
             return std::abs(WorldWrap::delta(band.x, int(focus.x),
                                              periodChunks)) <= radius &&
                    std::abs(band.z - int(focus.z)) <= radius &&
-                   band.minY >= int(focus.y) - KeepRadius &&
-                   band.maxY <= int(focus.y) + KeepRadius;
+                   band.minY >= int(focus.y) - keep &&
+                   band.maxY <= int(focus.y) + keep;
         };
         const auto ready = [](const SurfaceBand& band, auto&& predicate) {
             for (int y = band.minY; y <= band.maxY; ++y)
@@ -37,14 +42,13 @@ class DetailCoverage {
             return true;
         };
         for (auto it = next.begin(); it != next.end();)
-            if (!inRange(it->second, KeepRadius) ||
-                !ready(it->second, drawable))
+            if (!inRange(it->second, keep) || !ready(it->second, drawable))
                 it = next.erase(it);
             else
                 ++it;
         for (const auto& band : candidates)
             if (!next.contains({band.x, band.z}) &&
-                inRange(band, EnterRadius) && ready(band, current))
+                inRange(band, enterRadius()) && ready(band, current))
                 next[{band.x, band.z}] = band;
         if (next != visible) {
             visible = std::move(next);
@@ -56,6 +60,7 @@ class DetailCoverage {
     uint64_t version() const { return revision; }
 
    private:
+    const int keep;
     Columns visible;
     uint64_t revision = 0;
 };

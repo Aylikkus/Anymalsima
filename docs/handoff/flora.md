@@ -84,7 +84,8 @@ with the ground around them.
   - Distant terrain (`terrain_lod`) uses a patch material map with RG = surface
     layer and BA = rock layer; the texel is full.
 - **Camera:** orbit / top-down, 10–150 m from the target. Detailed voxels
-  reach about 128 tiles (`DETAIL_CHUNK_RADIUS = 8`); LOD covers the rest.
+  reach about 64, 96 or 128 tiles from the target on Low, Medium or High.
+  LOD covers the rest.
 - **No world clock or calendar** exists yet.
 
 ## 1. Three-layer model

@@ -8,6 +8,9 @@
 //              {u32 chunkX, u32 chunkZ, 256 x i16 groundY,
 //               256 x u8 groundBlock, 256 x i16 waterY,
 //               u16 slabCount, {u16 slabY, u32 size, chunk_codec blob}...}
+//   "EDIT" v2: adds {u16 removalSlabCount,
+//               {u16 slabY, u16 voxelCount, u16 voxelIndex...}...} to each
+//              column record. Voxel indices use structure_voxels::cellIndex.
 // It mirrors edits stored in region files so distant terrain can show them
 // for regions that are not loaded. Unknown sections are kept in `extra`.
 namespace terrain_edits_codec {

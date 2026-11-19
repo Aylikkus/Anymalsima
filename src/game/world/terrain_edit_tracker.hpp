@@ -42,7 +42,7 @@ class TerrainEditTracker {
     bool detect;
     WorldEditor* editor = nullptr;
     Signal<const BlockChange&>::Connection editConnection;
-    Signal<const ChunkCoord&>::Connection readyConnection;
+    Signal<const ChunkCoord&>::Connection readyConnection, rebaseConnection;
     std::unordered_set<uint64_t> dirty;
     // Columns checked this session; a later chunk arrival needs no recheck.
     std::unordered_set<uint64_t> verified;

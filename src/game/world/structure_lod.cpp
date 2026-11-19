@@ -251,6 +251,11 @@ void StructureLod::mergeVoxels(const std::vector<ChunkCoord>& changed) {
     if (holding.size() == 1) {
         voxels = holding.front()->slabs;
     } else {
+        // Match the material precedence of the detailed chunk.
+        std::sort(holding.begin(), holding.end(),
+                  [](const auto* a, const auto* b) {
+                      return a->wanted->key < b->wanted->key;
+                  });
         auto merged = std::make_shared<VoxelSlabs>();
         for (const auto* structure : holding)
             for (const auto& [coord, slab] : *structure->slabs) {

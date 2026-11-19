@@ -169,7 +169,6 @@ struct TreeColumn {
     };
     std::vector<Entry> trees;     // bounds (wood or foliage) meet the column
     std::vector<TreeDisc> discs;  // trunks near the column (plants avoid)
-    int woodTop = INT_MIN;        // highest tile that can hold wood
 };
 // Plant generation looks this far around a chunk for trunks.
 inline constexpr int TreeDiscMargin = 32;

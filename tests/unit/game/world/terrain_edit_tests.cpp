@@ -5,6 +5,8 @@
 #include "test_assets.hpp"
 #include "world/location_manager.hpp"
 #include "world/save/chunk_codec.hpp"
+#include "world/save/structures_codec.hpp"
+#include "world/sky_height_map.hpp"
 #include "world/terrain_edit_tracker.hpp"
 
 namespace {
@@ -233,4 +235,190 @@ TEST(edit_detected_from_save) {
     CHECK(edit != nullptr);
     EQUAL(int(edit->groundY[ColumnEdit::index(8, 8)]), s - 1,
           "detected dug tile");
+}
+
+namespace {
+class CastleSource final : public structure_voxels::Source {
+   public:
+    explicit CastleSource(bool tower = false) : tower(tower) {
+        key = 701;
+        revision = tower ? 2 : 1;
+        bounds = {40, 478, 40, 44, tower ? 517 : 481, 41};
+    }
+    std::optional<structure_voxels::Slab> rasterize(int level, int sx, int sy,
+                                                    int sz) const override {
+        using namespace structure_voxels;
+        const int span = spanOf(level), scale = 1 << level;
+        const TileBox slab{sx * span,       sy * span,       sz * span,
+                           (sx + 1) * span, (sy + 1) * span, (sz + 1) * span};
+        Slab out;
+        out.block = 1;
+        std::array<int, Cells> counts{};
+        const auto add = [&](int x, int y) {
+            if (slab.intersect({x, y, 40, x + 1, y + 1, 41}).empty()) return;
+            const size_t i =
+                cellIndex((x - slab.x0) / scale, (y - slab.y0) / scale,
+                          (40 - slab.z0) / scale);
+            if (++counts[i] * 4 >= scale * scale * scale) out.bits.set(i);
+        };
+        add(40, 478);
+        add(41, 480);
+        if (tower)
+            add(40, 516);
+        else
+            add(40, 480);
+        add(42, 480);
+        add(43, 480);
+        return out.bits.any() ? std::optional{std::move(out)} : std::nullopt;
+    }
+
+   private:
+    bool tower;
+};
+}  // namespace
+
+TEST(edit_generated_castle_damage) {
+    using namespace structure_voxels;
+    EditFixture f;
+    const auto castle = std::make_shared<const CastleSource>();
+    f.chunks.setGeneratedStructureKinds({Kind(4, {{castle, 40, 40, true}})});
+    const uint64_t key = editKey(2, 2);
+    const ChunkCoord roof{2, 30, 2};
+    f.load(2, 2, 2, 2, f.surface(40, 40) - 16, 526);
+    const auto reload = [&](const Chunk& saved) {
+        f.chunks.registerChunk(
+            roof, {}, &f.world.regions.front(),
+            std::make_shared<const Bytes>(chunk_codec::encode(saved)));
+        f.load(2, 2, 2, 2, 480, 480);
+        f.tracker.update();
+    };
+    const Chunk original = *f.chunks.getChunk(roof);
+    reload(original);
+    CHECK(!f.chunks.isEdited(roof));
+    f.tracker.markDirty(2, 2);
+    f.tracker.update();
+    CHECK(!f.edits.contains(key));
+
+    CHECK(f.editor.removeBlock({40, 480, 40}) == EditStatus::Applied);
+    CHECK(f.editor.removeBlock({42, 480, 40}) == EditStatus::Applied);
+    CHECK(f.editor.placeBlock({42, 480, 40}, 2) == EditStatus::Applied);
+    f.tracker.update();
+    const auto edit = f.edits.find(key);
+    CHECK(edit && edit->suppresses(8, 480, 8));
+    CHECK(edit->suppresses(10, 480, 8));
+    CHECK(!edit->suppresses(9, 480, 8));
+    CHECK((f.structureTiles() == std::set<Tile3>{{42, 480, 40}}));
+
+    const auto masked = f.edits.maskStructure(castle, f.chunks.wrap());
+    const auto exact = masked->rasterize(0, 2, 30, 2);
+    CHECK(exact && !exact->bits.test(cellIndex(8, 0, 8)));
+    CHECK(exact->bits.test(cellIndex(9, 0, 8)));
+    const auto coarse = masked->rasterize(1, 1, 15, 1);
+    CHECK(!coarse);
+    std::vector<int> tops;
+    masked->skyTops(castle->bounds, tops);
+    EQUAL(tops[0], 478, "removed roof exposes the floor below");
+
+    const Chunk damaged = *f.chunks.getChunk(roof);
+    f.chunks.unregister(roof);
+    f.tracker.markDirty(2, 2);
+    f.tracker.update();
+    CHECK(f.edits.find(key)->suppresses(8, 480, 8));
+    reload(damaged);
+    CHECK(f.chunks.isEdited(roof));
+    SkyHeightMap map(f.chunks, f.edits, f.assets.getStorage<Block>(), f.pool);
+    map.request(2, 2);
+    map.update();
+    CHECK(f.pool.wait_for(std::chrono::seconds(3)));
+    map.update();
+    EQUAL(map.top(40, 40).value_or(-1), 478, "streamed sky follows damage");
+    EQUAL(map.top(41, 40).value_or(-1), 480, "adjacent roof stays");
+    CHECK(f.editor.placeBlock({40, 480, 40}, 1) == EditStatus::Applied);
+    CHECK(f.editor.removeBlock({42, 480, 40}) == EditStatus::Applied);
+    CHECK(f.editor.placeBlock({42, 480, 40}, 1) == EditStatus::Applied);
+    f.tracker.update();
+    CHECK(!f.edits.contains(key));
+}
+
+TEST(edit_generated_castle_revision) {
+    using namespace structure_voxels;
+    EditFixture f;
+    const auto castle = std::make_shared<const CastleSource>();
+    const auto tower = std::make_shared<const CastleSource>(true);
+    f.chunks.setGeneratedStructureKinds({Kind(4, {{castle, 40, 40, true}})});
+    f.load(2, 2, 2, 2, f.surface(40, 40) - 16, 526);
+    const ChunkCoord roof{2, 30, 2}, upper{2, 32, 2};
+    f.chunks.unregister(roof);
+    f.chunks.unregister(upper);
+    f.chunks.setGeneratedStructureKinds({Kind(4, {{tower, 40, 40, true}})});
+    // With no stored chunk, this column now uses the settlement's revision.
+    for (const auto coord : {roof, upper})
+        f.chunks.registerChunk(coord, {}, &f.world.regions.front());
+    f.load(2, 2, 2, 2, 480, 526);
+    CHECK(f.chunks.tileAt(40, 480, 40)->isAir());
+    EQUAL(f.chunks.tileAt(40, 516, 40)->block_id, 1, "new watchtower");
+    f.tracker.markDirty(2, 2);
+    f.tracker.update();
+    CHECK(!f.edits.contains(editKey(2, 2)));
+}
+
+TEST(structure_revision_rebases_saved_and_ready_chunks) {
+    using namespace structure_voxels;
+    EditFixture f;
+    const auto castle = std::make_shared<const CastleSource>();
+    f.chunks.setGeneratedStructureKinds(
+        {Kind(4, {{castle, 40, 40, true}}, "castle")});
+    f.load(2, 2, 2, 2, f.surface(40, 40) - 16, 526);
+    const ChunkCoord roof{2, 30, 2}, tower{2, 32, 2};
+    // Keep a player replacement where the NPCs are about to remove the roof.
+    CHECK(f.editor.setBlock({42, 480, 40}, 2) == EditStatus::Applied);
+    f.tracker.update();
+
+    const auto before = region_file::decode(region_file::encode(
+        region_file::merge({}, f.chunks.snapshotRegion({0, 0}, true))));
+    const auto roofIndex = RegionData::localIndex(roof);
+    const auto towerIndex = RegionData::localIndex(tower);
+    CHECK(!before.structureBaselines.at(roofIndex)->empty());
+    CHECK(before.structureBaselines.at(towerIndex)->empty());
+    f.chunks.unregister(roof);
+
+    // The tower slab is resident; the roof slab stays on disk while the
+    // settlement changes both. Restore the override as a new session would.
+    Overrides overrides;
+    overrides["castle"][castle->key] = {
+        OverrideMode::Patch,
+        2,
+        40,
+        40,
+        true,
+        {{{40, 480, 40}, 0}, {{42, 480, 40}, 0}, {{40, 516, 40}, 1}}};
+    f.chunks.setStructureOverrides(
+        structures_codec::decode(structures_codec::encode({}, overrides))
+            .voxels);
+    for (int pass = 0; f.chunks.hasStructureWork(); ++pass) {
+        CHECK(pass < 100);
+        f.chunks.update(&f.editor);
+        CHECK(f.pool.wait_for(std::chrono::seconds(3)));
+    }
+    EQUAL(f.chunks.tileAt(40, 516, 40)->block_id, 1, "tower applied live");
+    CHECK(!f.chunks.isRegistered(roof));
+
+    f.chunks.registerChunk(
+        roof, {}, &f.world.regions.front(), before.chunks.at(roofIndex),
+        before.flora.at(roofIndex), before.structureBaselines.at(roofIndex));
+    f.load(2, 2, 2, 2, 480, 480);
+    CHECK(f.chunks.tileAt(40, 480, 40)->isAir());
+    EQUAL(f.chunks.tileAt(42, 480, 40)->block_id, 2, "player replacement");
+    CHECK(f.chunks.isPersistDirty(roof));
+    f.tracker.update();
+    const auto edit = f.edits.find(editKey(2, 2));
+    CHECK(edit && edit->removed.empty());
+    CHECK((f.structureTiles() == std::set<Tile3>{{42, 480, 40}}));
+
+    f.chunks.registerChunk(
+        tower, {}, &f.world.regions.front(), before.chunks.at(towerIndex),
+        before.flora.at(towerIndex), before.structureBaselines.at(towerIndex));
+    f.load(2, 2, 2, 2, 516, 516);
+    EQUAL(f.chunks.tileAt(40, 516, 40)->block_id, 1, "tower applied at reload");
+    CHECK(!f.chunks.isEdited(tower));
 }

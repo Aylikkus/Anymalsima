@@ -6,6 +6,7 @@
 #include "world/save/region_file.hpp"
 #include "world/save/save_catalog.hpp"
 #include "world/save/terrain_edits_codec.hpp"
+#include "world/save/trees_codec.hpp"
 #include "world/save/world_map_codec.hpp"
 
 namespace {
@@ -260,6 +261,68 @@ TEST(region_index_covers_world_height) {
     CHECK(RegionData::worldCoord(region, index) == top);
 }
 
+TEST(structure_save_migrates_trees) {
+    using namespace structure_voxels;
+    const SaveSlot slot{scratch("structures"), {}};
+    CHECK(save_catalog::readStructures(slot).trees.empty());
+    // TREE v2 used a removed flag and omitted the cut plane.
+    BinaryWriter old;
+    old.write(uint32_t(1));
+    old.write(uint64_t(11));
+    old.write(uint8_t(0));
+    old.write(uint32_t(9));
+    for (const int coord : {20, 430, 19, 0}) old.write(int32_t(coord));
+    old.write(100.f);
+    old.write(uint8_t(1));
+    old.write(uint16_t(1));
+    old.write(int32_t(2));
+    old.write(.5f);
+    old.write(10.f);
+    SectionContainer legacy;
+    legacy.put("TREE", 2, old.take());
+    legacy.put("KEEP", 5, Bytes{std::byte{9}});
+    FileIO::writeBytesAtomic(slot.directory / "trees.dat", legacy.encode());
+
+    auto file = save_catalog::readStructures(slot);
+    CHECK(file.migratedTrees);
+    CHECK(file.trees.at(11).removed);
+    EQUAL(file.trees.at(11).cuts.front().segment, 2, "v2 cut");
+    file.voxels["castle"][20] = {OverrideMode::Patch,
+                                 2,
+                                 20,
+                                 24,
+                                 true,
+                                 {{{20, 431, 24}, 0}, {{21, 432, 24}, 1}}};
+    file.voxels["castle"][21] = {OverrideMode::Removed, 3, 0, 0, false, {}};
+    file.voxels["settlement"][22] = {OverrideMode::Replace, 1, 15, 2, true,
+                                     {{{-1, 500, 2}, 1}}};
+    save_catalog::writeStructures(slot, file.trees, file.voxels, file.extra);
+    const auto saved = save_catalog::readStructures(slot);
+    CHECK(!saved.migratedTrees);
+    CHECK(saved.trees == file.trees);
+    CHECK(saved.voxels == file.voxels);
+    CHECK(saved.extra.find("KEEP") && saved.extra.find("KEEP")->version == 5);
+    CHECK(std::filesystem::exists(slot.directory / "trees.dat"));
+    Column column(15, 0);
+    for (const auto& kind : applyOverrides({}, saved.voxels))
+        kind.addTo(column, WorldWrap{256});
+    const auto planted = column.rasterize(500 / Side);
+    CHECK(planted && planted->tileAt(cellIndex(15, 500 % Side, 2)) == 1);
+    // A later save may deliberately remove the final tree record. The old
+    // copy must never resurrect it.
+    save_catalog::writeStructures(slot, {}, saved.voxels, saved.extra);
+    CHECK(save_catalog::readStructures(slot).trees.empty());
+    auto invalid = saved.voxels;
+    invalid.at("castle").at(20).voxels[{0, WORLD_HEIGHT_Y, 0}] = 1;
+    CHECK(throwsSerialization([&] { structures_codec::encode({}, invalid); }));
+    SectionContainer unsupported;
+    unsupported.put("VOXL", 99, {});
+    FileIO::writeBytesAtomic(slot.directory / "structures.dat",
+                             unsupported.encode());
+    CHECK(throwsSerialization([&] { save_catalog::readStructures(slot); }));
+    std::filesystem::remove_all(slot.directory);
+}
+
 TEST(terrain_edits_roundtrip) {
     auto edit = std::make_shared<ColumnEdit>();
     for (int i = 0; i < ColumnEdit::Tiles; ++i) {
@@ -274,6 +337,7 @@ TEST(terrain_edits_roundtrip) {
     edit->structure = {
         {26, std::make_shared<const Bytes>(chunk_codec::encode(upper))},
         {25, std::make_shared<const Bytes>(chunk_codec::encode(lower))}};
+    edit->removed = {{26, {1, 4095}}, {27, {2}}};
     edit->finish();
     EQUAL(edit->structureTopY(), 26 * 16 + 9, "structure top");
     CHECK(edit->structure.front().first == 25);  // sorted
@@ -288,12 +352,31 @@ TEST(terrain_edits_roundtrip) {
     CHECK(back.groundY == edit->groundY);
     CHECK(back.groundBlock == edit->groundBlock);
     CHECK(back.waterY == edit->waterY);
+    CHECK(back.removed == edit->removed);
     EQUAL(back.structureTopY(), edit->structureTopY(), "decoded top");
     Chunk decoded;
     chunk_codec::decode(**back.slab(26), decoded);
     CHECK(sameTiles(decoded, upper));
     CHECK(back.slab(24) == nullptr);
     CHECK(file.extra.find("FUTR") != nullptr);  // unknown section kept
+
+    BinaryWriter old;
+    old.write(uint32_t(1));
+    old.write(uint32_t(41));
+    old.write(uint32_t(7));
+    for (const auto y : edit->groundY) old.write(y);
+    for (const auto block : edit->groundBlock) old.write(block);
+    for (const auto y : edit->waterY) old.write(y);
+    old.write(uint16_t(1));
+    old.write(uint16_t(26));
+    old.writeBlock(chunk_codec::encode(upper));
+    SectionContainer legacy;
+    legacy.put("EDIT", 1, old.take());
+    const auto oldFile = terrain_edits_codec::decode(legacy.encode());
+    const auto& oldColumn = *oldFile.columns.at(editKey(41, 7));
+    CHECK(oldColumn.removed.empty());
+    chunk_codec::decode(**oldColumn.slab(26), decoded);
+    CHECK(sameTiles(decoded, upper));
 }
 
 TEST(terrain_edits_rejects_corrupt) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 
 #include "structure_voxels.hpp"
@@ -24,6 +25,15 @@ struct Source {
 // The tree's wood as structure voxels: key = TreeInstance::key, revision
 // from the age, the skeleton (cuts rebuild it) and the block.
 structure_voxels::SourcePtr voxels(const Source& source);
+
+// Combine ordinary tree and landmark wood with the other kinds that have
+// voxels in the column. A factory can reuse a tree source across columns.
+using VoxelFactory = std::function<structure_voxels::SourcePtr(const Source&)>;
+structure_voxels::ColumnPtr columnVoxels(
+    unsigned cx, unsigned cz, const TreeColumn& trees,
+    const TreeSpeciesTable& table, double day, const WorldWrap& wrap,
+    const std::vector<structure_voxels::Kind>& kinds = {},
+    const VoxelFactory& make = voxels);
 
 // Every slab of the tree's wood at one level (tests). periodTiles: world
 // width when X wraps (keys canonical), else 0.

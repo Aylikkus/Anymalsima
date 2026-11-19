@@ -14,6 +14,10 @@
 #include "world/consts.hpp"
 #include "world/flora.hpp"
 
+namespace structure_voxels {
+struct Slab;
+}
+
 // Immutable, encoded chunk payload (see chunk_codec.hpp).
 using ChunkBlob = std::shared_ptr<const Bytes>;
 
@@ -31,6 +35,8 @@ struct RegionData {
 
     std::unordered_map<uint16_t, ChunkBlob> chunks;
     std::unordered_map<uint16_t, ChunkBlob> flora;
+    // CHNK-format voxel baseline. Empty payload means known empty.
+    std::unordered_map<uint16_t, ChunkBlob> structureBaselines;
     std::array<int32_t, Columns> tops;
     SectionContainer extra;
 
@@ -51,6 +57,9 @@ struct RegionSnapshot {
     std::vector<std::pair<uint16_t, FloraLayerPtr>> flora;
     // Tree stamps of the same chunks, saved in their FLOR blobs.
     std::vector<std::pair<uint16_t, TreeStamp>> trees;
+    std::vector<
+        std::pair<uint16_t, std::shared_ptr<const structure_voxels::Slab>>>
+        structureBaselines;
     bool empty() const { return chunks.empty(); }
 };
 

@@ -1,6 +1,6 @@
 # Handoff: generated structures (megastructures)
 
-Status: steps 1 and 2 done (see Progress); step 3 next. Trees (`docs/handoff/trees.md`) are the first
+Status: steps 1–5 done (see Progress). Trees (`docs/handoff/trees.md`) are the first
 generated structure. Towns, castles and other megastructures will reuse what
 trees built, without billboards. This plan names the pieces that are
 tree-specific today and the general API they move into.
@@ -23,6 +23,17 @@ tree-specific today and the general API they move into.
 - **Landmark is a role, not a kind or a size class.** Today "landmark" means a massive tree from the world-wide list (`Tree::landmark()`, `TreeSizeClass::Massive`). In general a landmark is any structure in the world-wide index: known and drawn to the view distance, kept while its regions are unloaded, and given its own reach radius. Generated or built, tree or town, any structure can hold the role.
 - **Open (maintainer):** whether and how player-built or NPC-built structures become landmarks (size, significance, fame, a lore rule). The API only needs promote/demote to exist; the rule comes later.
 
+For an NPC settlement that adds a watchtower and retires a castle wing, the
+settlement owns the castle revision. It publishes a new source under the
+castle's existing key, with `changedSince` covering the tower and wing. The
+landmark mesh and shade can update while the region is unloaded, and newly
+generated chunks use that revision. Reconciliation for existing chunks needs
+the previously applied revision, the new source, and the voxel edits. Tiles
+that still match the previous baseline can follow the new revision. Conflicts
+with damage or player construction preserve the actual voxel when it differs
+from the previous baseline. Step 5 stores that baseline with the saved slab
+so the comparison also works after loading.
+
 ## Known limits found while scaling elders (2026-11-18)
 
 - **Fixed:** chunk mesh upload crashed (`bgfx::update` on handle `0xffff`) once bgfx ran out of dynamic buffer handles (4096). Every chunk, LOD patch, structure slab and tree-wood slab holds one. Limits are now 16384 (root `CMakeLists.txt`); failed creations are skipped and retried, and `IRenderer::failedDynamicMeshes` counts them.
@@ -37,7 +48,7 @@ tree-specific today and the general API they move into.
 How a chunk gets its sky light, in order:
 
 1. **Estimate** (`ChunkManager::estimateSkyLight`, when generation publishes the chunk): full sky down to the first solid tile, for chunks above the column's *terrain* surface. It knows nothing about structures.
-2. **Direct sweep** (`SunLightPropagator::sweep`, one job per chunk column): sunlight falls from the column top (`ChunkManager::getColumnTopY`) down through every slab. Structures raise the column top before any slab of the column is lit (trees: `TreeColumn::woodTop` in `prepareTrees`), so the sweep sees their voxels.
+2. **Direct sweep** (`SunLightPropagator::sweep`, one job per chunk column): sunlight falls from the column top (`ChunkManager::getColumnTopY`) down through every slab. This used a conservative tree column top before the sky heightmap and shared structure projection were introduced.
 3. **Spread** (indirect light, one job per chunk, needs the direct light of its 26 neighbours): the final value.
 
 The bug: a sweep that reaches a slab that is not generated yet does not invent sky through it. It used to publish zero for every chunk below it as their "lower bound". Under an elder the column top is up to about 1000, so a column needs up to 60 slabs above the ground, generated as sky prerequisites (`requestLighting`). Until the last one arrived, the ground chunks were black, and the spread jobs of their neighbours used those zeros too.
@@ -59,9 +70,7 @@ headless fixtures without a world map still use this path).
 
 These come from the light pipeline and chunk loading. They decide how far a structure kind can push height, footprint and edit rate.
 
-- **Column top and sky prerequisites** (for sunlight, solved by the sky heightmap, `sky-light.md` step 2: sunlight no longer requests these slabs; they still cost generation wherever something needs them). Raising a column top makes every slab from the ground up to that top a prerequisite of the column's sunlight. Cost grows with height times footprint, and every one of those slabs runs full generation and stamping. An elder costs up to about 60 slabs per column over its whole crown. Towns are cheap; towers, bridges and arches are expensive; the planned sky islands at Y of about 2048 are expensive too. Step 3 (chunk stamping) should:
-  - give the column top per column from the structure's real occupancy, not its bounding box (`Source::occupancy` already knows which slabs can hold voxels);
-  - let slabs that a source reports empty over a column skip generation (known air), so the sweep can pass through them without generating anything.
+- **Column top and sky prerequisites.** The sky heightmap seeds sunlight without requesting overhead slabs (see `sky-light.md` step 2). When gameplay requests those slabs, the column projects its actual voxel tops and uses `Source::occupancy` to skip terrain generation and structure rasterization in known air (step 3).
 - **Tree sets before slabs.** A slab under a landmark is generated only once every region tree set it needs is built (`treesReady`, landmark reach up to `TreeMaxLandmarkReach`). Kinds with world-wide reach should have their per-region data cheap and ready before chunk generation asks for it.
 - **The estimate ignores structures.** Until the sweep lands, structure shade comes only from the sky occlusion map. The map holds wood only (no crowns), at 4-tile texels, within 2 km. Its footprint takes about 3 s per elder, and until a footprint exists an estimated chunk under it is fully lit, so the shade appears later. Sky light step 4 now projects wood directly from its source and replaces the footprint input.
 - **Edits in a blind column.** Opacity edits to a chunk whose column is still blind do not change its sky light until the missing slabs arrive (the chunk keeps its estimate or old light). This is harmless at walking pace. A structure that edits itself quickly near the player (a growing settlement, collapse) needs its columns' slabs generated first.
@@ -124,3 +133,58 @@ Known limits:
 - The map covers 2 km around the camera; beyond it structures cast nothing (view distance is up to 8 km on High).
 - Footprint cost: a source could compute its footprint directly (trees: project segments top-down) instead of through `rasterize`, if 3 s per elder per revision shows up in play. `Source::skyTops` (sky heightmap, `sky-light.md`) now does exactly that at full resolution in about 0.1 s per elder; step 4 there now builds the occlusion map from it. A tree's growth step (a new revision without `changedSince`) recomputes the whole footprint.
 - The upload could be limited to the changed rectangle.
+
+### Step 3: chunk stamping (done)
+
+- `structure_voxels::Column` combines the level-zero sources in one chunk column. It resolves their X images, merges overlaps in ascending source-key order, and stamps the resulting block IDs into air. Terrain and liquid take precedence. Structure LOD uses the same key order for overlapping slabs.
+- `structure_voxels::Kind` indexes a kind's instances by the region holding their anchors. Give it the kind's horizontal reach in tiles. `ChunkManager::setGeneratedStructureKinds` installs these indexes for new kinds. Trees continue to obtain their instances from the existing asynchronous region tree sets, with separate reach for ordinary trees and landmarks. Both routes feed the same column stamping path. Marking an indexed instance as a landmark also supplies its source to distant rendering and sky occlusion within view distance.
+- Workers project and cache each column's exact voxel tops with `Source::skyTops`. The streamed sky heightmap shares that projection. The projection and conservative slab occupancy let the dispatcher publish known-air chunks without a job once the column is prepared. Without an occupancy index, the source's bounds and projected top bound the work. As in step 2, projected structure tops represent opaque voxels for sunlight.
+- Replacing a source snapshot while generation runs discards and retries its result. Ready chunks and saved tiles retain their contents. Legacy saves still get their one-time tree stamp, and tree growth and cut catch-up still use their existing tree records. Steps 4 and 5 cover generated-versus-edited comparisons and generalized persistence.
+- Tests cover sparse multi-block stamping across the X seam, per-kind reach, overlap priority, exact sky tops, the known-air shortcut, stale worker results, and saved tile precedence.
+
+### Step 4: generated versus edited (done)
+
+- Chunk jobs compare saved voxel material IDs against the expected structure
+  slab above the generated terrain and water. The terrain comparison still
+  uses solidity. Tree wood uses the existing tree cut and growth records.
+- The edit tracker compares loaded slabs with the baseline they were prepared
+  against. It indexes only added or replaced blocks and the positions where
+  an expected structure block was suppressed. Restoring the baseline removes
+  the derived edit. Unloaded slabs keep their last known differences.
+- Landmark proxies apply the suppression masks at full resolution and
+  recalculate affected coarse voxel cells. The streamed and far sky
+  projections look for the next intact occluder below a suppressed top.
+- `terrain_edits.dat` stores suppression masks in EDIT v2. EDIT v1 still
+  loads with additions only. Region CHNK data supplies the actual tiles for
+  the reconciliation in step 5.
+
+
+### Step 5: structure persistence (done)
+
+- `structures.dat` stores the authoritative `TREE` and `VOXL` sections.
+  `TREE` writes v4 and reads v1 through v4. The save catalog imports
+  `trees.dat` when `structures.dat` is absent. It leaves the legacy file
+  intact and prefers the new file after the first successful write. Unknown
+  sections survive migration and subsequent saves.
+- `VOXL` v1 groups records by stable kind ID and source key. A record can
+  remove a source, patch its voxels (block ID zero clears a cell), or supply
+  all voxels of a rebuilt or newly planted source. Patch records apply
+  after their kind registers the generated source. Replacement records can
+  introduce a source and set its landmark role. Register procedural
+  instances with the same kind ID on each load and advance the override's
+  revision when editing it. Use `ChunkManager::setStructureOverrides` on
+  the main thread to publish the new records.
+- Region `STRB` v1 stores the previous generated structure baseline with
+  each saved slab. An empty payload records a known empty baseline.
+  Reconciliation compares old generated blocks, actual tiles, and the new
+  generated blocks. An unchanged tile follows the source revision. Player
+  damage, replacement blocks and occupied cells survive where they differ
+  from the old baseline. Legacy chunks without `STRB` keep their saved
+  tiles on first load. Tree wood still uses `TreeStamp` for growth and cuts.
+- A revised source updates the landmark and shade without streaming the
+  region. Resident slabs reconcile in bounded jobs, and saved slabs
+  reconcile on request. The world file is written atomically, with
+  failed writes retried while the records are dirty.
+- Tests cover TREE v2 migration and file precedence, preserved unknown
+  sections, override round trips, a planted model across the wrap seam,
+  and the watchtower revision with one slab resident and one saved.

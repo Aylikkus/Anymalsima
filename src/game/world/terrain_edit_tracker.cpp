@@ -7,7 +7,8 @@
 namespace {
 bool sameEdit(const ColumnEdit& a, const ColumnEdit& b) {
     if (a.groundY != b.groundY || a.groundBlock != b.groundBlock ||
-        a.waterY != b.waterY || a.structure.size() != b.structure.size())
+        a.waterY != b.waterY || a.structure.size() != b.structure.size() ||
+        a.removed != b.removed)
         return false;
     for (size_t i = 0; i < a.structure.size(); ++i)
         if (a.structure[i].first != b.structure[i].first ||
@@ -23,18 +24,20 @@ TerrainEditTracker::TerrainEditTracker(ChunkManager& chunks,
     : chunks(chunks), edits(edits), detect(detectSavedEdits) {
     readyConnection = chunks.becameReady.connect([this](const ChunkCoord& c) {
         const auto key = editKey(c.x, c.z);
-        if (incomplete.contains(key)) {
+        if (incomplete.contains(key) || (detect && this->chunks.isEdited(c))) {
             dirty.insert(key);
             return;
         }
         if (verified.contains(key)) return;
-        if ((detect && this->chunks.isEdited(c)) || this->edits.contains(key))
-            dirty.insert(key);
+        if (this->edits.contains(key)) dirty.insert(key);
     });
+    rebaseConnection = chunks.structureRebased.connect(
+        [this](const ChunkCoord& c) { markDirty(c.x, c.z); });
 }
 
 TerrainEditTracker::~TerrainEditTracker() {
     chunks.becameReady.disconnect(readyConnection);
+    chunks.structureRebased.disconnect(rebaseConnection);
     if (editor) editor->blockChanged.disconnect(editConnection);
 }
 
@@ -117,41 +120,65 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 surface < SEA_LEVEL_Y ? SEA_LEVEL_Y + 1 : -1;
             generated &= ground == surface && water == generatedWater;
         }
-    // Structure: every solid tile above its generated surface, except tree
-    // wood.
-    const int top = std::min(chunks.getColumnTopY(cx, cz), WORLD_HEIGHT_Y - 1);
-    for (int slab = std::max(0, lowestSurface / Chunk::SIZE_Y);
-         slab <= top / Chunk::SIZE_Y; ++slab) {
-        const auto* chunk = chunks.getChunk({cx, unsigned(slab), cz});
+    // Compare each loaded slab with the source snapshot it was built against.
+    int top = chunks.getColumnTopY(cx, cz);
+    if (old) {
+        top = std::max(top, old->structureTopY());
+        if (!old->removed.empty())
+            top = std::max(top, int(old->removed.back().first) * Chunk::SIZE_Y);
+    }
+    top = std::min(top, WORLD_HEIGHT_Y - 1);
+    for (int slab = std::max(0, lowestSurface / Chunk::SIZE_Y); slab < Y_CHUNKS;
+         ++slab) {
+        const ChunkCoord coord{cx, unsigned(slab), cz};
+        const auto* chunk = chunks.getChunk(coord);
         if (!chunk) {
+            if (slab > top / Chunk::SIZE_Y) continue;
             if (old) {
                 if (const auto* blob = old->slab(uint16_t(slab)))
                     next->structure.emplace_back(uint16_t(slab), *blob);
+                if (const auto* cells = old->removals(uint16_t(slab)))
+                    next->removed.emplace_back(uint16_t(slab), *cells);
             } else {
                 complete = false;
             }
             continue;
         }
         Chunk part;
+        std::vector<uint16_t> removed;
+        const auto* baseline = chunks.structureBaseline(coord);
         bool any = false;
         for (int z = 0; z < Chunk::SIZE_Z; ++z)
             for (int y = 0; y < Chunk::SIZE_Y; ++y)
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {
                     const auto& tile = chunk->tiles[z][y][x];
-                    if (!tile.isSolid() || grown.test(tile.block_id) ||
-                        slab * Chunk::SIZE_Y + y <=
-                            inputs->columns[ColumnEdit::index(x, z)].surface_y)
-                        continue;
-                    part.tiles[z][y][x].block_id = tile.block_id;
-                    any = true;
+                    const int worldY = slab * Chunk::SIZE_Y + y;
+                    const int surface =
+                        inputs->columns[ColumnEdit::index(x, z)].surface_y;
+                    if (worldY <= surface) continue;
+                    const auto cell = structure_voxels::cellIndex(x, y, z);
+                    auto expected = baseline && worldY > SEA_LEVEL_Y
+                                        ? baseline->tileAt(cell)
+                                        : 0;
+                    if (grown.test(expected)) expected = 0;
+                    const auto actual =
+                        grown.test(tile.block_id) ? 0 : tile.block_id;
+                    if (actual == expected) continue;
+                    if (expected) removed.push_back(uint16_t(cell));
+                    if (actual) {
+                        part.tiles[z][y][x].block_id = actual;
+                        any = true;
+                    }
                 }
+        if (!removed.empty())
+            next->removed.emplace_back(uint16_t(slab), std::move(removed));
         if (any)
             next->structure.emplace_back(
                 uint16_t(slab),
                 std::make_shared<const Bytes>(chunk_codec::encode(part)));
     }
     next->finish();
-    if (generated && next->structure.empty())
+    if (generated && next->structure.empty() && next->removed.empty())
         edits.erase(key);
     else if (!old || !sameEdit(*old, *next))
         edits.set(key, std::move(next));
