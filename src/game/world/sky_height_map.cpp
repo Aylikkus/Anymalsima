@@ -179,7 +179,8 @@ void SkyHeightMap::dispatch() {
             {key, e.generation,
              pool.submit_task(
                  [inputs = std::move(inputs)] { return buildTile(inputs); },
-                 BS::pr::normal)});
+                 // Short, and every sweep of the column waits for it.
+                 BS::pr::high)});
     }
 }
 

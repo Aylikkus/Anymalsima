@@ -1,6 +1,6 @@
 # Handoff: sky light
 
-Status: **steps 1 and 2 done** (see Progress); step 3 next.
+Status: **steps 1 to 3 done** (see Progress); step 4 next.
 Agreed with the maintainer on 2026-11-19.
 This replaces the way sky light reaches the ground today: a top-down sweep
 through every generated chunk slab. Instead, a saved sky heightmap that
@@ -170,15 +170,7 @@ service, never `Tile::lightLevel` directly.
 
 1. **Heightmap service (done).** See Progress.
 2. **Direct light from the heightmap (done).** See Progress.
-3. **Spread without waiting.**
-   - A missing neighbour's halo is filled from the heightmap (15 above
-     `top`, opaque below) instead of being waited for; its arrival refines
-     the result (`invalidateAround` already does).
-   - Halo snapshots move off the main thread, using immutable per-chunk
-     opacity snapshots shared with the workers, as `BlockLightPropagator`
-     does.
-   - Measure: ready-to-lit latency, aiming at one generation job plus one
-     spread job.
+3. **Spread without waiting (done).** See Progress.
 4. **Far and gameplay.**
    - Build `SkyOcclusionMap` from the heightmap.
    - Move plant growth, `foliage_light` and the `LightQuery` sky part onto
@@ -295,7 +287,57 @@ everywhere.
   `sky_check`: 14.3M cells of fully lit chunks, no mismatch. Ground under
   the elder now lights about as fast as anywhere else. What remains (median
   50-70 frames, unlit chunks at the rim) is the spread waiting for queued
-  neighbours: step 3.
+  neighbours (step 3, which found the real limit elsewhere).
+
+### Step 3: spread without waiting (done 2026-11-19)
+
+- Halos are assembled on the workers. `State::opacity` is the chunk's
+  opacity as of its last sweep snapshot, shared as an immutable array; every
+  opacity change goes through `markColumnDirty` (`WorldEditor`) and sweeps
+  the column again before any spread may use it. `IndirectInput` carries,
+  per neighbour, its opacity and a copy of its direct light, or (sky mode,
+  neighbour not loaded) its column's heightmap tile. `spread()` builds the
+  44³ halo from those. A missing neighbour's cells are exact from the sky
+  down to its column's highest opaque tile (open sky, translucent runs)
+  and opaque padding below. `spreadIsIdentity` reads the snapshots too and
+  refuses while a face neighbour's sweep is pending.
+- Sweeps reuse each chunk's snapshot unless it is stale (new chunk, edit:
+  `State::opacityStale`), so a column sweep reads only new or edited
+  chunks (sky mode; the old path still scans every slab for its column
+  top).
+- Waiting: with a heightmap, a chunk not lit yet spreads at once, even next
+  to neighbours still being generated. A lit chunk keeps its light until
+  its queued neighbours have arrived, so it respreads once rather than once
+  per arrival. A spread result made outdated by an arrival is still shown
+  for a chunk never lit (it is queued again anyway), so heavy streaming
+  cannot outdate every attempt.
+- The real limit, found with `SunLightPropagator::waitingOn` (printed as
+  `approach_waits` by the smoke harness): most unlit chunks sat queued, not
+  waiting on anything. At most 8 light jobs were in flight, collected once
+  per frame, while each arriving chunk queues a spread for itself and its 26
+  neighbours. With a heightmap the cap is 3 jobs per pool thread (24 at
+  most; sweeps take at most half); spreads of chunks still showing their
+  estimate run at high priority, respreads at normal. Heightmap builds run
+  at high priority (short, and the column's sweeps wait for them).
+- Test: `sky_spread_without_waiting`. A column next to one held in the
+  generation queue is fully lit with the heightmap and still waits without
+  one.
+- Measured (elder approach smoke), frames from ready to full light for
+  ground chunks near the walking eye:
+
+  | | Old sweep | Step 2 | Step 3 |
+  | --- | --- | --- | --- |
+  | Elsewhere: p50 / p90 / max | 46 / 144 / 534 | 50 / 140 / 501 | 13 / 24 / 144 |
+  | Elsewhere: unlit at the end | 170 of 1190 | 111 of 1190 | 1 of 1190 |
+  | Under the elder: p50 / p90 / max | 204 / 318 / 592 | 67 / 134 / 216 | 20 / 59 / 150 |
+  | Under the elder: unlit at the end | 215 of 340 | 84 of 340 | 16 of 340 |
+
+  `sky_check`: 26.2M cells of fully lit chunks, no mismatch. Main-thread
+  chunk section (`approach_chunks`) mean 3.7 ms (4.5 ms before snapshot
+  reuse); mean frame 12.9 ms. Under the elder the rest is generation: its
+  wood chunks arrive slowly, and each arrival sweeps its column again
+  (`approach_waits` splits the waits roughly evenly between sweeps,
+  neighbours' sweeps and the queue).
 
 ## Open questions
 

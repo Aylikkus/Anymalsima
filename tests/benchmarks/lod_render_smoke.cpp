@@ -300,6 +300,9 @@ int main(int argc, char** argv) {
             // Ground chunks near the eye: frame first seen ready, and
             // frames until full light (isComplete, not estimated).
             std::unordered_map<ChunkCoord, int> seenAt, litAfter;
+            // Frames until full light was first shown (not estimated; with
+            // the old sweep the direct lower bound already counts).
+            std::unordered_map<ChunkCoord, int> shownAfter;
             std::vector<std::array<double, 6>> times;  // per section
         } approach;
         const bool approaching =
@@ -1148,11 +1151,27 @@ int main(int argc, char** argv) {
                                 const int first =
                                     approach.seenAt.try_emplace(c, frame)
                                         .first->second;
+                                if (!approach.shownAfter.contains(c) &&
+                                    !sunlight.isEstimated(c))
+                                    approach.shownAfter[c] = frame - first;
                                 if (!approach.litAfter.contains(c) &&
                                     sunlight.isComplete(c) &&
                                     !sunlight.isEstimated(c))
                                     approach.litAfter[c] = frame - first;
                             }
+                        // What the unlit ground chunks near the eye wait
+                        // on (SunLightPropagator::Wait), every 30 frames.
+                        if (approach.frames % 30 == 0) {
+                            std::array<int, 8> waits{};
+                            for (const auto& [c, first] : approach.seenAt)
+                                if (!approach.litAfter.contains(c) &&
+                                    std::abs(int(c.x) - cx0) <= 8 &&
+                                    std::abs(int(c.z) - cz0) <= 8)
+                                    ++waits[size_t(sunlight.waitingOn(c))];
+                            std::cout << "approach_waits";
+                            for (const int w : waits) std::cout << ' ' << w;
+                            std::cout << '\n';
+                        }
                         approach.maxBlack = std::max(approach.maxBlack, black);
                         approach.blackFrames += black > 0;
                         if (approach.frames++ % 30 == 0 || sections[4] > 33)
@@ -1210,34 +1229,40 @@ int main(int argc, char** argv) {
                                 << " max_black=" << approach.maxBlack << '\n';
                             // Ready to full light, under tall structures
                             // (wood 48+ tiles above the chunk) and elsewhere.
-                            for (const bool tall : {false, true}) {
-                                std::vector<int> v;
-                                size_t n = 0;
-                                for (const auto& [c, first] : approach.seenAt) {
-                                    const auto trees =
-                                        chunks.treeColumn(c.x, c.z);
-                                    if ((trees &&
-                                         trees->woodTop > int(c.y) * 16 + 48) !=
-                                        tall)
-                                        continue;
-                                    ++n;
-                                    if (const auto it =
-                                            approach.litAfter.find(c);
-                                        it != approach.litAfter.end())
-                                        v.push_back(it->second);
+                            for (const bool tall : {false, true})
+                                for (const bool shown : {false, true}) {
+                                    const auto& after =
+                                        shown ? approach.shownAfter
+                                              : approach.litAfter;
+                                    std::vector<int> v;
+                                    size_t n = 0;
+                                    for (const auto& [c, first] :
+                                         approach.seenAt) {
+                                        const auto trees =
+                                            chunks.treeColumn(c.x, c.z);
+                                        if ((trees && trees->woodTop >
+                                                          int(c.y) * 16 + 48) !=
+                                            tall)
+                                            continue;
+                                        ++n;
+                                        if (const auto it = after.find(c);
+                                            it != after.end())
+                                            v.push_back(it->second);
+                                    }
+                                    std::sort(v.begin(), v.end());
+                                    std::cout << (shown ? "approach_shown"
+                                                        : "approach_lit")
+                                              << " tall=" << tall
+                                              << " chunks=" << n
+                                              << " unlit=" << n - v.size();
+                                    if (!v.empty())
+                                        std::cout
+                                            << " p50_frames=" << v[v.size() / 2]
+                                            << " p90_frames="
+                                            << v[v.size() * 9 / 10]
+                                            << " max_frames=" << v.back();
+                                    std::cout << '\n';
                                 }
-                                std::sort(v.begin(), v.end());
-                                std::cout << "approach_lit tall=" << tall
-                                          << " chunks=" << n
-                                          << " unlit=" << n - v.size();
-                                if (!v.empty())
-                                    std::cout
-                                        << " p50_frames=" << v[v.size() / 2]
-                                        << " p90_frames="
-                                        << v[v.size() * 9 / 10]
-                                        << " max_frames=" << v.back();
-                                std::cout << '\n';
-                            }
                             size_t ready = 0;
                             chunks.forEachReady(
                                 [&](const ChunkCoord&, Chunk&) { ++ready; });

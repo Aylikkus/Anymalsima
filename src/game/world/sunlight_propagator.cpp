@@ -109,6 +109,7 @@ void SunLightPropagator::markColumnDirty(unsigned cx, unsigned cz) {
         auto& state = states.at(coord);
         state.direct.fill(0);
         state.directKnown = false;
+        state.opacityStale = true;
         // No remesh: light reaches the GPU through light volumes, refreshed
         // when the recomputed light is published.
         invalidateAround(coord);
@@ -133,18 +134,27 @@ SunLightPropagator::snapshotColumn(uint64_t column) {
     int top = std::max(SEA_LEVEL_Y, chunks.getColumnTopY(cx, cz));
     DirectInput input{column, columnRevisions.at(column), 0, {}, map};
     for (const auto& coord : columnChunks.at(column)) {
-        Slab slab{coord, {}};
+        auto& state = states.at(coord);
+        // Sky mode needs no column top from the tiles: reuse snapshots.
+        if (sky && state.opacity && !state.opacityStale) {
+            input.slabs.push_back({coord, state.opacity});
+            continue;
+        }
+        auto opacities = std::make_shared<Light>();
         chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
             for (int z = 0; z < Z; ++z)
                 for (int y = 0; y < Y; ++y)
                     for (int x = 0; x < X; ++x) {
                         const auto& tile = chunk.tiles[z][y][x];
-                        slab.opacity[index(x, y, z)] = opacity(tile);
+                        (*opacities)[index(x, y, z)] = opacity(tile);
                         if (!tile.isAir())
                             top = std::max(top,
                                            static_cast<int>(coord.y) * Y + y);
                     }
         });
+        Slab slab{coord, std::move(opacities)};
+        state.opacity = slab.opacity;
+        state.opacityStale = false;
         input.slabs.push_back(std::move(slab));
     }
     input.topSlab = std::clamp(top / Y, 0, Y_CHUNKS - 1);
@@ -177,7 +187,7 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
                         const int i = index(x, y, z);
                         output.light[i] = incoming;
                         incoming = static_cast<uint8_t>(
-                            std::max(0, int(incoming) - slab.opacity[i]));
+                            std::max(0, int(incoming) - (*slab.opacity)[i]));
                     }
             result.chunks.push_back(std::move(output));
         }
@@ -218,7 +228,7 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
                     const int i = index(x, y, z);
                     output.light[i] = incoming;
                     incoming = static_cast<uint8_t>(
-                        std::max(0, int(incoming) - slab.opacity[i]));
+                        std::max(0, int(incoming) - (*slab.opacity)[i]));
                 }
         result.chunks.push_back(std::move(output));
     }
@@ -227,40 +237,74 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
 
 SunLightPropagator::IndirectInput SunLightPropagator::snapshotHalo(
     const ChunkCoord& coord) {
-    constexpr int count = HX * HY * HZ;
-    IndirectInput input{coord, states.at(coord).revision,
-                        std::vector<uint8_t>(count, 255),
-                        std::vector<uint8_t>(count, 0)};
+    IndirectInput input{coord, states.at(coord).revision, {}, {}, {}, {}};
     for (int dz = -1; dz <= 1; ++dz)
         for (int dy = -1; dy <= 1; ++dy)
             for (int dx = -1; dx <= 1; ++dx) {
                 ChunkCoord neighbor;
                 if (!offset(coord, dx, dy, dz, neighbor)) continue;
+                const int n = LightVolume::neighbor(dx, dy, dz);
+                input.baseY[size_t(n)] = int(neighbor.y) * Y;
                 const auto it = states.find(neighbor);
-                if (it == states.end()) continue;
-                chunks.withChunkLocked(neighbor, [&](const Chunk& chunk) {
-                    for (int z = 0; z < Z; ++z)
-                        for (int y = 0; y < Y; ++y)
-                            for (int x = 0; x < X; ++x) {
-                                const int hx = HALO + dx * X + x;
-                                const int hy = HALO + dy * Y + y;
-                                const int hz = HALO + dz * Z + z;
-                                if (hx < 0 || hx >= HX || hy < 0 || hy >= HY ||
-                                    hz < 0 || hz >= HZ)
-                                    continue;
-                                const auto i = haloIndex(hx, hy, hz);
-                                input.opacity[i] =
-                                    opacity(chunk.tiles[z][y][x]);
-                                input.light[i] =
-                                    it->second.direct[index(x, y, z)];
-                            }
-                });
+                if (it != states.end() && it->second.opacity) {
+                    input.opacity[size_t(n)] = it->second.opacity;
+                    input.direct[size_t(n)] =
+                        std::make_shared<const Light>(it->second.direct);
+                } else if (sky) {
+                    input.sky[size_t(n)] = sky->tile(neighbor.x, neighbor.z);
+                }
             }
     return input;
 }
 
 SunLightPropagator::IndirectResult SunLightPropagator::spread(
-    IndirectInput input) {
+    IndirectInput in) {
+    struct Halo {
+        std::vector<uint8_t> opacity, light;
+    } input{std::vector<uint8_t>(HX * HY * HZ, 255),
+            std::vector<uint8_t>(HX * HY * HZ, 0)};
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const size_t n = size_t(LightVolume::neighbor(dx, dy, dz));
+                const auto* opacity = in.opacity[n].get();
+                const auto* direct = in.direct[n].get();
+                const auto* map = in.sky[n].get();
+                if (!(opacity && direct) && !map) continue;
+                // The part of this neighbour inside the halo.
+                const auto range = [](int d, int size, int& lo, int& hi) {
+                    lo = d < 0 ? size - HALO : 0;
+                    hi = d > 0 ? HALO : size;
+                };
+                int x0, x1, y0, y1, z0, z1;
+                range(dx, X, x0, x1);
+                range(dy, Y, y0, y1);
+                range(dz, Z, z0, z1);
+                for (int z = z0; z < z1; ++z)
+                    for (int x = x0; x < x1; ++x) {
+                        // A missing neighbour: what its column looks like
+                        // from the sky.
+                        sky::Column column;
+                        if (!opacity && map)
+                            column = map->column(sky::Tile::index(x, z));
+                        for (int y = y0; y < y1; ++y) {
+                            const auto i =
+                                haloIndex(HALO + dx * X + x, HALO + dy * Y + y,
+                                          HALO + dz * Z + z);
+                            if (opacity) {
+                                input.opacity[i] = (*opacity)[index(x, y, z)];
+                                input.light[i] = (*direct)[index(x, y, z)];
+                                continue;
+                            }
+                            const int wy = in.baseY[n] + y;
+                            if (column.opaque != sky::None &&
+                                wy < column.opaque)
+                                continue;  // unknown: opaque padding
+                            input.opacity[i] = column.opacityAt(wy);
+                            input.light[i] = column.direct(wy);
+                        }
+                    }
+            }
     // Descending buckets process the strongest paths first. Every edge loses
     // at least one level, so no source outside the halo can affect the target.
     std::array<std::vector<int>, 16> buckets;
@@ -286,7 +330,7 @@ SunLightPropagator::IndirectResult SunLightPropagator::spread(
             }
         }
     }
-    IndirectResult result{input.coord, input.revision, {}};
+    IndirectResult result{in.coord, in.revision, {}};
     for (int z = 0; z < Z; ++z)
         for (int y = 0; y < Y; ++y)
             for (int x = 0; x < X; ++x)
@@ -379,8 +423,19 @@ void SunLightPropagator::collect() {
             throw;
         }
         const auto it = states.find(coord);
-        if (it == states.end() || it->second.revision != result.revision)
+        if (it == states.end()) continue;
+        if (it->second.revision != result.revision) {
+            // Outdated (a neighbour arrived or changed meanwhile; the chunk
+            // is queued again). A chunk never lit still shows it: closer to
+            // its light than the estimate, and arrivals under heavy
+            // streaming could otherwise outdate every attempt.
+            if (sky && !it->second.lit) {
+                publish(coord, result.light);
+                it->second.lit = true;
+                it->second.estimated = false;
+            }
             continue;
+        }
         publish(coord, result.light);
         it->second.complete = true;
         it->second.lit = true;
@@ -396,6 +451,21 @@ bool SunLightPropagator::hasDirect(ChunkCoord coord) const {
 bool SunLightPropagator::isComplete(ChunkCoord coord) const {
     const auto it = states.find(coord);
     return it != states.end() && it->second.complete;
+}
+
+SunLightPropagator::Wait SunLightPropagator::waitingOn(ChunkCoord coord) const {
+    const auto it = states.find(coord);
+    if (it == states.end()) return Wait::NoState;
+    if (it->second.complete) return Wait::None;
+    const auto column = columnKey(coord.x, coord.z);
+    if (sweepPending(column))
+        return sky && !sky->tile(coord.x, coord.z) ? Wait::NoMap : Wait::Sweep;
+    for (const auto other : dependencies(coord))
+        if (sweepPending(other)) return Wait::Neighbours;
+    if (std::any_of(indirectJobs.begin(), indirectJobs.end(),
+                    [&](const auto& job) { return job.coord == coord; }))
+        return Wait::Spreading;
+    return pendingIndirect.contains(coord) ? Wait::Queued : Wait::Idle;
 }
 
 bool SunLightPropagator::isEstimated(ChunkCoord coord) const {
@@ -450,38 +520,32 @@ bool SunLightPropagator::spreadIsIdentity(const ChunkCoord& coord) {
                     [](uint8_t v) { return v == 15; }))
         return true;
     // Opaque cells pass on max(0, level - 15) = 0, so with an opaque shell
-    // no light other than the direct sweep reaches any cell.
-    bool sealed = false;
-    chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
-        const Tile* first = &chunk.tiles[0][0][0];
-        sealed = std::all_of(first, first + VOLUME, [&](const Tile& tile) {
-            return opacity(tile) >= 15;
-        });
-    });
-    if (!sealed) return false;
+    // no light other than the direct sweep reaches any cell. Read from the
+    // sweep snapshots, which every opacity change refreshes first.
+    const auto* own = it->second.opacity.get();
+    if (!own || !std::all_of(own->begin(), own->end(),
+                             [](uint8_t o) { return o >= 15; }))
+        return false;
     const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
                                {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
     for (const auto& o : offsets) {
         ChunkCoord n;
         // Outside the world: the halo is opaque padding (255).
         if (!offset(coord, o[0], o[1], o[2], n)) continue;
-        if (!states.contains(n)) return false;
-        bool covered = false;
-        chunks.withChunkLocked(n, [&](const Chunk& chunk) {
-            covered = true;
-            for (int a = 0; a < 16 && covered; ++a)
-                for (int b = 0; b < 16; ++b) {
-                    const Tile& t = o[0] ? chunk.tiles[a][b][o[0] > 0 ? 0 : 15]
-                                    : o[1]
-                                        ? chunk.tiles[a][o[1] > 0 ? 0 : 15][b]
-                                        : chunk.tiles[o[2] > 0 ? 0 : 15][a][b];
-                    if (opacity(t) < 15) {
-                        covered = false;
-                        break;
-                    }
-                }
-        });
-        if (!covered) return false;
+        const auto neighbor = states.find(n);
+        // A pending sweep may follow an opacity change the snapshot misses.
+        if (neighbor == states.end() || !neighbor->second.opacity ||
+            sweepPending(columnKey(n.x, n.z)))
+            return false;
+        const auto& cells = *neighbor->second.opacity;
+        for (int a = 0; a < 16; ++a)
+            for (int b = 0; b < 16; ++b) {
+                // The neighbour's layer touching this chunk.
+                const int i = o[0]   ? index(o[0] > 0 ? 0 : 15, b, a)
+                              : o[1] ? index(b, o[1] > 0 ? 0 : 15, a)
+                                     : index(b, a, o[2] > 0 ? 0 : 15);
+                if (cells[size_t(i)] < 15) return false;
+            }
     }
     return true;
 }
@@ -575,7 +639,14 @@ void SunLightPropagator::update() {
             chunks.requestLighting(coord, beneficiary(coord)))
             requested.erase(coord);
     }
-    const size_t capacity = std::clamp<size_t>(pool.get_thread_count(), 1, 8);
+    // In flight at once. Jobs are collected once per frame, so this caps the
+    // light jobs finished per frame. With a heightmap a spread's halo is a
+    // handful of pointers to gather (no tile reads here), so it allows
+    // several per thread: chunk arrivals queue a spread for themselves and
+    // their 26 neighbours each.
+    const size_t threads = pool.get_thread_count();
+    const size_t capacity = sky ? std::clamp<size_t>(threads * 3, 3, 24)
+                                : std::clamp<size_t>(threads, 1, 8);
     // At most half the slots: spreads wait for sweeps, but chunk arrivals
     // queue a sweep each, which would otherwise take every slot.
     if (sky) dispatchSweeps(std::max<size_t>(1, capacity / 2));
@@ -647,17 +718,25 @@ void SunLightPropagator::update() {
                 directJobs.push_back({column, std::move(future)});
                 pendingDirect.erase(column);
                 dispatched = true;
-            } else if (!nextColumn && !waiting && !hasQueuedNeighbor(coord)) {
-                // A neighbour still being generated would invalidate this
-                // result on arrival; its direct lower bound shows meanwhile.
+            } else if (!nextColumn && !waiting &&
+                       !((!sky || states.at(coord).lit) &&
+                         hasQueuedNeighbor(coord))) {
+                // A neighbour still being generated invalidates this result
+                // on arrival. A lit chunk keeps its light until they all
+                // arrived (one respread, not one per arrival). In sky mode
+                // a chunk not lit yet spreads now: missing neighbours come
+                // from the heightmap.
                 auto input = snapshotHalo(coord);
-                // Below meshing and direct sweeps: bounced light refines an
-                // already lit chunk.
+                // A chunk still showing its estimate first; refining lit
+                // light can wait behind generation and meshing.
+                const auto spreadPriority = sky && !states.at(coord).lit
+                                                ? BS::pr::high
+                                                : BS::pr::normal;
                 auto future = pool.submit_task(
                     [input = std::move(input)]() mutable {
                         return spread(std::move(input));
                     },
-                    BS::pr::normal);
+                    spreadPriority);
                 indirectJobs.push_back({coord, std::move(future)});
                 pendingIndirect.erase(coord);
                 dispatched = true;

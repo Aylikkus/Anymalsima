@@ -2956,3 +2956,45 @@ TEST(sky_sunlight_without_upper_slabs) {
     CHECK(compared > 1000000);
     CHECK(shaded > 1000);  // tree shade is part of what is compared
 }
+
+// Step 3 of docs/handoff/sky-light.md: a chunk is lit while its neighbours
+// are still being generated; the heightmap stands in for them.
+TEST(sky_spread_without_waiting) {
+    for (const bool withMap : {true, false}) {
+        TreeStream f;
+        TerrainEdits edits;
+        SkyHeightMap map(*f.chunks, edits, f.assets.getStorage<Block>(),
+                         f.pool);
+        SunLightPropagator sun(*f.chunks, f.assets.getStorage<Block>(), f.pool,
+                               withMap ? &map : nullptr);
+        // Column 23 (region 2) loads; its neighbour 24 (region 3) needs the
+        // trees of region 4, which never build: it stays queued.
+        loadSlabs(f, 23, 18, TreeStream::Low, Y_CHUNKS);
+        map.request(23, 18);
+        lightAll(f, sun, &map);
+        f.chunks->setMaxTreeJobs(0);
+        loadSlabs(f, 24, 18, TreeStream::Low, TreeStream::High);
+        CHECK(f.chunks->isQueued({24, 30, 18}));
+        // Relight column 23 (an edit would do the same).
+        sun.markColumnDirty(23, 18);
+        // A fresh column next to the queued one, never lit before.
+        loadSlabs(f, 23, 19, TreeStream::Low, Y_CHUNKS);
+        map.request(23, 19);
+        bool lit = false;
+        for (int i = 0; i < 400 && !lit; ++i) {
+            f.chunks->update();
+            map.update();
+            sun.update();
+            CHECK(f.pool.wait_for(std::chrono::seconds(10)));
+            lit = true;
+            for (unsigned y = TreeStream::Low; y < TreeStream::High; ++y)
+                lit = lit && sun.isComplete({23, y, 19}) &&
+                      !sun.isEstimated({23, y, 19});
+        }
+        CHECK(f.chunks->isQueued({24, 30, 18}));
+        // Without a map the chunks next to the queued column keep waiting
+        // for it; with one they are fully lit at once.
+        EQUAL(lit, withMap,
+              withMap ? "lit beside a queued column" : "old path waits");
+    }
+}

@@ -43,6 +43,18 @@ class SunLightPropagator {
     // the column top). Renderers darken such chunks with the structure
     // sky occlusion map (docs/handoff/structures.md).
     bool isEstimated(ChunkCoord coord) const;
+    // What a chunk's light waits on (diagnostics, smoke harness).
+    enum class Wait {
+        None,        // fully lit
+        NoState,     // not ready
+        NoMap,       // its column's heightmap is not built (sky mode)
+        Sweep,       // its column's sweep is queued or running
+        Neighbours,  // a neighbour column's sweep is queued or running
+        Spreading,   // its spread job is running
+        Queued,      // queued for a spread, not dispatched yet
+        Idle,        // not lit and not queued (blind, or dropped)
+    };
+    Wait waitingOn(ChunkCoord coord) const;
     size_t inFlightCount() const {
         return directJobs.size() + indirectJobs.size();
     }
@@ -76,10 +88,18 @@ class SunLightPropagator {
         // full light lands it keeps doing so rather than drop to the direct
         // lower bound, which is black under a wide structure.
         bool estimated = false;
+        // Tile opacity as of the last sweep snapshot (every opacity change
+        // sweeps the column again before a spread may run), shared with
+        // spread jobs so halos are assembled on the workers.
+        std::shared_ptr<const Light> opacity;
+        // Tiles changed since `opacity` was taken (an edit): the next sweep
+        // copies them again. Untouched chunks reuse their snapshot (sky
+        // mode), so a column sweep reads only new or edited chunks.
+        bool opacityStale = true;
     };
     struct Slab {
         ChunkCoord coord;
-        Light opacity;
+        std::shared_ptr<const Light> opacity;
     };
     struct ChunkLight {
         ChunkCoord coord;
@@ -101,11 +121,18 @@ class SunLightPropagator {
         std::vector<ChunkLight> chunks;
         std::vector<ChunkCoord> missing;
     };
+    // The target and its 26 neighbours, by LightVolume::neighbor order. A
+    // loaded neighbour brings its opacity and direct light; a missing one
+    // its column's heightmap (sky mode), from which spread() fills the
+    // halo: exact down to the highest opaque tile, unknown (opaque) below.
+    // Neither: opaque padding.
     struct IndirectInput {
         ChunkCoord coord;
         uint64_t revision;
-        std::vector<uint8_t> opacity;
-        std::vector<uint8_t> light;
+        std::array<std::shared_ptr<const Light>, 27> opacity;
+        std::array<std::shared_ptr<const Light>, 27> direct;
+        std::array<sky::TilePtr, 27> sky;
+        std::array<int, 27> baseY{};  // world Y of each neighbour slab
     };
     struct IndirectResult {
         ChunkCoord coord;
