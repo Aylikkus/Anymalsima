@@ -738,6 +738,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                            std::chrono::steady_clock::now() - started)
                            .count();
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
+    lightRenderer->setSkyOcclusion(terrainLod->skyOcclusion());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize());
     camera.underwater = terrainLod->eyeUnderwater();

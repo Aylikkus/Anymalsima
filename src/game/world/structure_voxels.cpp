@@ -170,4 +170,59 @@ void markEnclosed(Slabs& slabs, const WorldWrap& wrap) {
                         full(coord, 0, 0, -1);
 }
 
+FootprintPtr footprint(const Source& source, const Occupancy* occupancy,
+                       const Footprint* previous,
+                       const std::optional<TileBox>& changed) {
+    auto out = std::make_shared<Footprint>();
+    const auto& b = source.bounds;
+    if (b.empty()) return out;
+    constexpr int level = FootprintLevel;
+    const int s = spanOf(level), cell = Footprint::Cell;
+    const int sx0 = floorDiv(b.x0, s), sx1 = floorDiv(b.x1 - 1, s);
+    const int sz0 = floorDiv(b.z0, s), sz1 = floorDiv(b.z1 - 1, s);
+    const int sy0 = std::max(0, floorDiv(b.y0, s)),
+              sy1 = std::min((WORLD_HEIGHT_Y + s - 1) / s - 1,
+                             floorDiv(b.y1 - 1, s));
+    // Slab columns to rasterize: all of them, or those under the change.
+    int rx0 = sx0, rx1 = sx1, rz0 = sz0, rz1 = sz1;
+    if (previous && changed) {
+        rx0 = std::max(sx0, floorDiv(changed->x0, s));
+        rx1 = std::min(sx1, floorDiv(changed->x1 - 1, s));
+        rz0 = std::max(sz0, floorDiv(changed->z0, s));
+        rz1 = std::min(sz1, floorDiv(changed->z1 - 1, s));
+        const int perSlab = s / cell;
+        for (const auto& [key, top] : previous->tops) {
+            const auto [cx, cz] = Footprint::unpackColumn(key);
+            const int sx = floorDiv(cx, perSlab), sz = floorDiv(cz, perSlab);
+            if (sx >= rx0 && sx <= rx1 && sz >= rz0 && sz <= rz1) continue;
+            out->tops.emplace(key, top);
+        }
+    }
+    for (int sz = rz0; sz <= rz1; ++sz)
+        for (int sx = rx0; sx <= rx1; ++sx) {
+            // Top down: the first solid cell of a column is its top, and
+            // lower slabs cannot raise it.
+            std::bitset<size_t(Side) * Side> topped;
+            for (int sy = sy1; sy >= sy0 && !topped.all(); --sy) {
+                if (occupancy && !occupancy->contains(level, sx, sy, sz))
+                    continue;
+                const auto slab = source.rasterize(level, sx, sy, sz);
+                if (!slab || slab->bits.none()) continue;
+                for (int z = 0; z < Side; ++z)
+                    for (int x = 0; x < Side; ++x) {
+                        if (topped.test(size_t(z * Side + x))) continue;
+                        for (int y = Side - 1; y >= 0; --y) {
+                            if (!slab->bits.test(cellIndex(x, y, z))) continue;
+                            out->tops.emplace(Footprint::packColumn(
+                                                  sx * Side + x, sz * Side + z),
+                                              (sy * Side + y + 1) * cell);
+                            topped.set(size_t(z * Side + x));
+                            break;
+                        }
+                    }
+            }
+        }
+    return out;
+}
+
 }  // namespace structure_voxels

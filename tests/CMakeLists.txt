@@ -12,6 +12,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/block_light_propagator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_sources.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/lod_light_map.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/sky_occlusion_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/world_editor.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edits.cpp
@@ -288,7 +289,10 @@ foreach(case flora_value_ranges ground_cover_parsing foliage_material_parsing
 endforeach()
 # Distant structure voxels (docs/handoff/structures.md).
 foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
-             structure_voxels_plan_wraps structure_voxels_slab_merge)
+             structure_voxels_plan_wraps structure_voxels_slab_merge
+             structure_footprint_tops structure_footprint_incremental
+             sky_occlusion_matches_sunlight sky_occlusion_by_height
+             sky_occlusion_wraps)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;structures" TIMEOUT 10)

@@ -17,6 +17,7 @@
 #include "flora_assets.hpp"
 #include "test_assets.hpp"
 #include "world/chunk_manager.hpp"
+#include "world/sky_occlusion_map.hpp"
 #include "world/structure_voxels.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/tree_foliage_builder.hpp"
@@ -628,6 +629,19 @@ int main(int argc, char** argv) {
                   << " plan_all_ms=" << plainMs
                   << " planned_occupied=" << sparse.size()
                   << " plan_occupied_ms=" << sparseMs << '\n';
+        // 3c. What the tree casts on the ground (step 2 of
+        // docs/handoff/structures.md): its footprint (pool, once per
+        // revision) and a sky occlusion map around it (pool, on recentre).
+        started = Clock::now();
+        const auto cast = structure_voxels::footprint(*source, occupancy.get());
+        const double footprintMs = msSince(started);
+        started = Clock::now();
+        SkyOcclusionMap map;
+        map.build({cast}, anchor.x, anchor.z, world.wrap().tiles);
+        std::cout << "sky_occlusion footprint_ms=" << footprintMs
+                  << " columns=" << cast->tops.size()
+                  << " map_ms=" << msSince(started)
+                  << " occluded_texels=" << map.occluded() << '\n';
         if (std::getenv("TREE_BENCH_PLAN_ONLY")) return 0;
     }
 

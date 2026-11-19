@@ -10,6 +10,7 @@
 #include "lod_light_map.hpp"
 #include "render/render_target.hpp"
 #include "render/renderer_api.hpp"
+#include "sky_occlusion_map.hpp"
 #include "world_wrap.hpp"
 
 // Main-thread GPU side of lights beyond the voxel near field:
@@ -17,6 +18,8 @@
 //     uniforms read by world_surface.sh, with cube shadow maps for the most
 //     important ones (LightShadows);
 //   - small lights on distant terrain: the LodLightMap glow texture;
+//   - sky light under structures on surfaces without voxel light: the
+//     SkyOcclusionMap texture;
 //   - glare sprites for every light that is not walled in, so lighthouses
 //     and towns read as bright points from far away. The sprites are
 //     depth-tested, so terrain in front hides them.
@@ -46,6 +49,9 @@ class LightRenderer {
     void renderShadows(RenderTarget& target,
                        const LightShadows::Casters& casters, double now);
     LightShadows& shadows() { return *shadowMaps; }
+    // The structures' sky occlusion (TerrainLodManager::skyOcclusion);
+    // uploaded when it changes, null for full sky.
+    void setSkyOcclusion(std::shared_ptr<const SkyOcclusionMap> map);
     // Appends the light uniforms for a program including world_surface.sh.
     void appendUniforms(std::vector<ShaderProperty*>& uniforms,
                         Program program);
@@ -69,6 +75,11 @@ class LightRenderer {
     ShaderProperty glowOrigin;
     ShaderProperty glowBlock;  // u_lod_light_map at the block stage
     ShaderProperty glowLod;    // ... at the terrain_lod stage
+    std::shared_ptr<const SkyOcclusionMap> occlusion;
+    bgfx::TextureHandle occlusionTexture = BGFX_INVALID_HANDLE;
+    ShaderProperty occlusionOrigin;  // u_sky_occlusion_origin
+    ShaderProperty occlusionBlock;   // u_sky_occlusion at the block stage
+    ShaderProperty occlusionLod;     // ... at the terrain_lod stage
     MeshHandle quad;
     bgfx::InstanceDataBuffer instances{};
     std::string shader = "light_glare";

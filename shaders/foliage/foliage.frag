@@ -7,6 +7,9 @@ SAMPLER2DARRAY(u_normal_array, 1);
 // LightShadows atlas and LodLightMap (LightRenderer, block stages).
 SAMPLER2D(u_shadow_atlas, 3);
 SAMPLER2D(u_lod_light_map, 4);
+// Sky occlusion under structures (unused: foliage sky light comes from the
+// CPU, foliage_light).
+SAMPLER2D(u_sky_occlusion, 6);
 #include "../world_surface.sh"
 uniform vec4 u_foliage;  // x = time, y = wind, z = 1: tree crowns
 

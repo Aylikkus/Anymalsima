@@ -11,6 +11,8 @@ SAMPLER2D(u_lod_light_map, 5);
 // Ground cover per texel (TerrainLod::Mesh::covers): r = overlay layer + 1
 // (0 = none), g = density, ba = tint RGB565 little endian. Point sampled.
 SAMPLER2D(u_cover_map, 6);
+// Sky light under structures (SkyOcclusionMap, LightRenderer).
+SAMPLER2D(u_sky_occlusion, 7);
 uniform vec4 u_lod_patch;
 uniform vec4 u_lod_cover;  // x = cover texels per side
 uniform vec4 u_detail_origin;
@@ -123,7 +125,8 @@ void main()
     }
     // Without a light volume, approximate the ocean's skylight attenuation.
     // Keep artificial lights independent of this estimate.
-    float sky = surfaceOceanSky(v_position.y);
+    float sky = surfaceOceanSky(v_position.y)
+              * surfaceStructureSky(v_position, normal);
     vec3 far = surfaceFarLight(v_position, surface, normal, 1.0, 0.0)
              + surfaceLodLight(v_position);
     color = surfaceLight(surface, color, vec2(sky, 0.0), vec3_splat(1.0),

@@ -14,6 +14,9 @@ SAMPLER2D(u_shadow_atlas, 3);
 SAMPLER2D(u_lod_light_map, 4);
 // Ground-cover density in the light volume's slot layout (R, 0-1).
 SAMPLER3D(u_cover_volume, 5);
+// Sky light under structures (SkyOcclusionMap, LightRenderer), for draws
+// without a light volume.
+SAMPLER2D(u_sky_occlusion, 6);
 #include "../world_surface.sh"
 
 // 1 / (144, 144, 72): LightVolumeManager::PageX/PageY/PageZ.
@@ -116,7 +119,10 @@ void main()
         blockDirStrength = clamp(slope * 15.0, 0.0, 1.0);
         blockDir = slope > 0.0001 ? grad / slope : geometric;
     } else {
-        light.x = surfaceOceanSky(v_position.y);
+        // Distant joins and structure slabs: the ocean's attenuation and
+        // the shade of structures above.
+        light.x = surfaceOceanSky(v_position.y)
+                * surfaceStructureSky(v_position, geometric);
     }
     // As on terrain LODs, don't use estimated ocean skylight to gate lamps.
     float skyGate = u_light_chunk.w > 0.5 ? light.x : 1.0;

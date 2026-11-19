@@ -2,11 +2,13 @@
 
 #include <bx/math.h>
 
+#include <algorithm>
 #include <bitset>
 #include <functional>
 #include <future>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "render/frustrum.hpp"
 #include "render/render_target.hpp"
 #include "render/ui_context.hpp"
+#include "sky_occlusion_map.hpp"
 #include "structure_voxels.hpp"
 #include "surface_sampler.hpp"
 #include "terrain_edits.hpp"
@@ -51,9 +54,13 @@ class StructureLod {
     // The generated structures in view (main thread; sources with an
     // unchanged key and revision are kept).
     void setStructures(std::vector<structure_voxels::SourcePtr> sources);
-    // Returns the uploaded bytes, at most about `budget` (one oversized mesh
-    // may use a whole frame).
-    size_t upload(IRenderer& renderer, size_t budget);
+    // Uploads finished meshes, at most about `budget` bytes (one oversized
+    // mesh may use a whole frame), releases retired proxies whose
+    // replacements are ready, and rebuilds the merged meshes of coarse
+    // slabs. hidden(coord): the real chunk is drawn instead (as for draw).
+    // Returns the uploaded bytes.
+    using Hidden = std::function<bool(const ChunkCoord&)>;
+    size_t upload(IRenderer& renderer, size_t budget, const Hidden& hidden);
     // Chunks the detail pass draws (level 0 slabs there need no proxy mesh
     // while they stay well inside it). Set every frame by the owner; used by
     // the next update.
@@ -66,55 +73,44 @@ class StructureLod {
     // hidden(coord): the real chunk is drawn instead. Retired proxies (a
     // level change) stay drawn until all their replacements are drawable;
     // the replacements wait meanwhile, so a level swap never shows a hole
-    // nor both levels at once.
-    template <typename Hidden>
+    // nor both levels at once (upload swaps both in the same frame).
+    template <typename HiddenFn>
     void draw(RenderTarget& target, const Frustum& frustum,
               const Camera& camera, const std::string* shader,
-              const std::vector<ShaderProperty*>& uniforms, Hidden&& hidden) {
-        releaseRetired(hidden);
+              const std::vector<ShaderProperty*>& uniforms, HiddenFn&& hidden) {
         const float eyeX = camera.eye().x;
-        forEachDrawn(hidden, [&](const ChunkCoord& coord, Proxy& p) {
-            auto* proxy = &p;
-            const int level = levelOf(coord);
-            const auto base = baseOf(coord);
-            const double span = spanOf(level);
+        forEachDrawn(hidden, [&](const Drawable& d) {
             // Drawn at the copy nearest the eye (X wraps).
-            const float x = drawTileX(base.x * span, span, eyeX);
-            AABB bounds = proxy->bounds;
-            bounds.maxX += x - bounds.minX;
-            bounds.minX = x;
+            const float x = drawTileX(d.x0, d.width, eyeX);
+            AABB bounds = d.bounds;
+            bounds.minX += float(x - d.x0);
+            bounds.maxX += float(x - d.x0);
             if (!frustum.intersects(bounds)) return;
-            // Meshes are slab-local (ChunkMesher, in cells); place them by
-            // the eye.
-            auto transform =
-                relativeTransform(camera, x, base.y * span, base.z * span);
-            scale(transform, level);
+            // Meshes are local (ChunkMesher, in cells); place them by the
+            // eye.
+            auto transform = relativeTransform(camera, x, d.y0, d.z0);
+            scale(transform, d.level);
             auto bound = uniforms;
-            target.drawVertexBuffer(proxy->mesh.get(), shader, std::move(bound),
+            target.drawVertexBuffer(d.mesh->get(), shader, std::move(bound),
                                     false, std::move(transform),
                                     DrawLayer::GAME);
         });
     }
     // Shadow caster pass of one light cube face (LightShadows): slabs inside
     // the light's sphere and the face frustum (light-relative coordinates).
-    template <typename Hidden>
+    template <typename HiddenFn>
     void drawShadow(RenderTarget& target, const Frustum& frustum,
                     const std::array<double, 3>& light, float radius,
                     const std::string* shader,
                     const std::vector<ShaderProperty*>& uniforms, uint16_t view,
-                    Hidden&& hidden) {
-        forEachDrawn(hidden, [&](const ChunkCoord& coord, Proxy& p) {
-            auto* proxy = &p;
-            const int level = levelOf(coord);
-            const auto base = baseOf(coord);
-            const double span = spanOf(level);
-            const double x = drawTileX(base.x * span, span, float(light[0]));
-            const double y = base.y * span;
-            const double z = base.z * span;
-            const auto& b = proxy->bounds;
-            const double lx = x - light[0], ly = b.minY - light[1],
+                    HiddenFn&& hidden) {
+        forEachDrawn(hidden, [&](const Drawable& d) {
+            const double x = drawTileX(d.x0, d.width, float(light[0]));
+            const auto& b = d.bounds;
+            const double shift = x - d.x0;
+            const double lx = b.minX + shift - light[0], ly = b.minY - light[1],
                          lz = b.minZ - light[2];
-            const double hx = lx + (b.maxX - b.minX), hy = b.maxY - light[1],
+            const double hx = b.maxX + shift - light[0], hy = b.maxY - light[1],
                          hz = b.maxZ - light[2];
             if (!LightShadowMath::reaches(lx, ly, lz, hx, hy, hz, radius))
                 return;
@@ -122,9 +118,9 @@ class StructureLod {
                                          float(hx), float(hy), float(hz)}))
                 return;
             auto transform = LightShadowMath::translation(
-                x - light[0], y - light[1], z - light[2]);
-            scale(transform, level);
-            target.drawShadowCaster(proxy->mesh.get(), shader,
+                x - light[0], d.y0 - light[1], d.z0 - light[2]);
+            scale(transform, d.level);
+            target.drawShadowCaster(d.mesh->get(), shader,
                                     std::vector(uniforms), false,
                                     std::move(transform), view);
         });
@@ -165,6 +161,19 @@ class StructureLod {
         m[10] *= s;
     }
     size_t count() const { return proxies.size(); }
+    // Merged meshes of coarse slabs (debug).
+    size_t groupCount() const { return groups.size(); }
+    // Coarse slabs (levels 1 and 2, which never hand over to chunks) are
+    // drawn merged: GroupSide^3 slabs of one level share one mesh, which
+    // cuts dynamic buffer handles and draw calls. Level 0 slabs stay single,
+    // so each hides exactly where its chunk is drawn.
+    static constexpr unsigned GroupSide = 4;
+    static ChunkCoord groupOf(const ChunkCoord& c) {
+        const auto base = baseOf(c);
+        return withLevel(
+            {base.x / GroupSide, base.y / GroupSide, base.z / GroupSide},
+            levelOf(c));
+    }
     size_t retiredCount() const { return retired.size(); }
     // Debug: structure voxel slabs within `radius` of the eye that show
     // nothing this frame (no drawn proxy, no drawn chunk): visible holes.
@@ -186,8 +195,10 @@ class StructureLod {
             if (level == 0 && hidden(coord)) continue;
             // Drawn, or still covered by the retired proxy it replaces.
             if (shadowedByRetired(coord)) continue;
-            if (const auto it = proxies.find(coord);
-                it != proxies.end() && it->second->drawable)
+            if (level > 0 ? inGroupMesh(coord) : [&] {
+                    const auto it = proxies.find(coord);
+                    return it != proxies.end() && it->second->drawable;
+                }())
                 continue;
             ++out;
         }
@@ -200,6 +211,12 @@ class StructureLod {
     // Wanted slabs without a current mesh, and structures whose planned
     // slabs are not rasterized yet.
     size_t backlog() const;
+    // Sky light under the structures in view, for surfaces without voxel
+    // light (SkyOcclusionMap); null until the first build. Rebuilt on the
+    // pool when a structure's footprint changes or the eye recentres it.
+    std::shared_ptr<const SkyOcclusionMap> skyOcclusion() const {
+        return occlusion;
+    }
 
    private:
     struct Proxy {
@@ -214,6 +231,9 @@ class StructureLod {
         uint64_t staleRevision = 0, builtRevision = 0;
         std::optional<ChunkMesh> cpu;
         uint64_t cpuRevision = 0;
+        // Coarse slabs: the drawn mesh, kept on the CPU and merged into its
+        // group's mesh (`mesh` stays empty).
+        std::optional<ChunkMesh> merged;
         bool stale() const { return builtRevision < staleRevision; }
     };
 
@@ -249,9 +269,10 @@ class StructureLod {
     }
     // Releases retired proxies whose replacements all draw something (a
     // proxy, their real chunk, or nothing because they hold no visible
-    // voxels).
-    template <typename Hidden>
-    void releaseRetired(Hidden&& hidden) {
+    // voxels). True when any went.
+    template <typename HiddenFn>
+    bool releaseRetired(HiddenFn&& hidden) {
+        bool released = false;
         for (auto it = retired.begin(); it != retired.end();) {
             bool ready = true;
             forEachOverlap(it->first, [&](const ChunkCoord& c) {
@@ -268,25 +289,72 @@ class StructureLod {
             }
             retiredBytes -= it->second->bytes;
             it = retired.erase(it);
+            released = true;
         }
+        return released;
     }
-    // Proxies to draw this frame: current ones not waiting for a retired
-    // proxy over them, then the retired ones.
-    template <typename Hidden, typename Fn>
-    void forEachDrawn(Hidden&& hidden, Fn&& fn) {
+    // A mesh to draw: a level 0 slab, or the merged coarse slabs of a group.
+    struct Drawable {
+        const MeshHandle* mesh;
+        int level;
+        double x0, y0, z0;  // origin of the mesh's cells (tiles, canonical X)
+        double width;       // tiles along X, for the copy nearest the eye
+        AABB bounds;        // tiles, canonical X
+    };
+    // Meshes to draw this frame: level 0 proxies not waiting for a retired
+    // proxy over them and retired level 0 proxies, then the groups (their
+    // members were chosen by the same rule on upload).
+    template <typename HiddenFn, typename Fn>
+    void forEachDrawn(HiddenFn&& hidden, Fn&& fn) {
+        const double span = spanOf(0);
+        const auto single = [&](const ChunkCoord& coord, const Proxy& proxy) {
+            fn(Drawable{&proxy.mesh, 0, coord.x * span, coord.y * span,
+                        coord.z * span, span, proxy.bounds});
+        };
         for (auto& [coord, proxy] : proxies) {
-            if (!proxy->drawable || !proxy->hasMesh ||
-                (levelOf(coord) == 0 && hidden(coord)) ||
-                shadowedByRetired(coord))
+            if (levelOf(coord) != 0 || !proxy->drawable || !proxy->hasMesh ||
+                hidden(coord) || shadowedByRetired(coord))
                 continue;
-            fn(coord, *proxy);
+            single(coord, *proxy);
         }
         for (auto& [coord, proxy] : retired) {
-            if (!proxy->hasMesh || (levelOf(coord) == 0 && hidden(coord)))
+            if (levelOf(coord) != 0 || !proxy->hasMesh || hidden(coord))
                 continue;
-            fn(coord, *proxy);
+            single(coord, *proxy);
+        }
+        for (auto& [key, group] : groups) {
+            if (!group.hasMesh) continue;
+            const int level = levelOf(key);
+            const auto base = baseOf(key);
+            const double width = spanOf(level) * GroupSide;
+            fn(Drawable{&group.mesh, level, base.x * width, base.y * width,
+                        base.z * width, width, group.bounds});
         }
     }
+    // A coarse slab whose mesh is in its group's uploaded mesh.
+    bool inGroupMesh(const ChunkCoord& coord) const {
+        const auto it = groups.find(groupOf(coord));
+        return it != groups.end() &&
+               std::binary_search(it->second.members.begin(),
+                                  it->second.members.end(), coord, lessCoord);
+    }
+    static bool lessCoord(const ChunkCoord& a, const ChunkCoord& b) {
+        return std::tie(a.x, a.y, a.z) < std::tie(b.x, b.y, b.z);
+    }
+    // The merged mesh of one group of coarse slabs.
+    struct Group {
+        MeshHandle mesh;
+        bool hasMesh = false;
+        // Slabs in `mesh` (sorted, lessCoord) and their mesh revisions.
+        std::vector<ChunkCoord> members;
+        std::vector<uint64_t> revisions;
+        AABB bounds{};
+    };
+    // Rebuilds the groups whose members (or their meshes) changed: wanted
+    // coarse slabs that are drawable and not under a retired proxy, plus
+    // retired coarse slabs. force: all of them now (a retired proxy was
+    // released, so its replacements must appear in the same frame).
+    size_t rebuildGroups(IRenderer& renderer, size_t budget, bool force);
     struct Job {
         ChunkCoord slab;
         uint64_t revision;
@@ -316,6 +384,11 @@ class StructureLod {
         structure_voxels::SourcePtr occupancyFor;
         structure_voxels::OccupancyPtr occupancy;
         std::optional<std::future<structure_voxels::OccupancyPtr>> occupancyJob;
+        // What it casts on the ground (SkyOcclusionMap), after occupancy;
+        // a new revision redoes only the columns its changed box touches.
+        structure_voxels::SourcePtr footprintFor;
+        structure_voxels::FootprintPtr footprint;
+        std::optional<std::future<structure_voxels::FootprintPtr>> footprintJob;
         // Inputs of the last plan: nothing to do while they are the same.
         std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
         structure_voxels::SourcePtr plannedWanted, plannedBuilt;
@@ -329,6 +402,8 @@ class StructureLod {
     // Plans every structure's slabs for the eye (only after it moved, or
     // a source changed) and lists the slabs to rasterize.
     void planStructures(Vec3 eye);
+    // Footprint jobs of new sources, and the sky occlusion map.
+    void updateFootprints(Vec3 eye);
     void collect();
     void collectStructures();
     void requestStructures();
@@ -349,6 +424,20 @@ class StructureLod {
     std::shared_ptr<const EditMap> chosenFor;
     std::unordered_map<uint64_t, Structure> structures;  // by Source::key
     std::shared_ptr<const VoxelSlabs> voxels;  // all structures, merged
+    std::shared_ptr<const SkyOcclusionMap> occlusion;
+    // Footprints of structures that left the view, by key (a massive tree's
+    // takes seconds on the pool): reused when it comes back.
+    struct CachedFootprint {
+        structure_voxels::SourcePtr source;
+        structure_voxels::FootprintPtr footprint;
+    };
+    std::unordered_map<uint64_t, CachedFootprint> footprintCache;
+    static constexpr size_t FootprintCacheSize = 64;
+    std::optional<std::future<std::shared_ptr<const SkyOcclusionMap>>>
+        occlusionJob;
+    // Footprints the current map (or its job) was built from.
+    std::vector<structure_voxels::FootprintPtr> occlusionInputs;
+    bool occlusionStale = true;
     std::shared_ptr<const VoxelSlabs> voxelsChosenFor;
     std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
     bool replan = true;  // a source changed or a build finished
@@ -361,6 +450,7 @@ class StructureLod {
     // block their own replacements.
     std::unordered_map<ChunkCoord, std::unique_ptr<Proxy>> retired;
     size_t retiredBytes = 0;
+    std::unordered_map<ChunkCoord, Group> groups;  // by groupOf
     Drawn chunkDrawn;
     ChunkCoord drawnCentre{};
     int drawnRadius = 0;

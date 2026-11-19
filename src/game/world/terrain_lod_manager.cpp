@@ -651,10 +651,21 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     // New or rebuilt meshes change what casts shadows.
     if (uploaded) ++drawnRevision;
     if (structures) {
-        const size_t bytes =
-            structures->upload(renderer, quality.uploadBudget > uploaded
-                                             ? quality.uploadBudget - uploaded
-                                             : 0);
+        // The same hand-over to real chunks as the draw below.
+        const int cx = int(camera.position.x) / Chunk::SIZE_X,
+                  cy = int(camera.position.y) / Chunk::SIZE_Y,
+                  cz = int(camera.position.z) / Chunk::SIZE_Z;
+        const size_t bytes = structures->upload(
+            renderer,
+            quality.uploadBudget > uploaded ? quality.uploadBudget - uploaded
+                                            : 0,
+            [&](const ChunkCoord& c) {
+                return std::abs(world.wrap().deltaChunk(c.x, cx)) <=
+                           DETAIL_CHUNK_RADIUS &&
+                       std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
+                       std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
+                       drawsChunk(c) && chunks.hasUploadedMesh(c);
+            });
         uploaded += bytes;
         if (bytes) ++drawnRevision;
     }

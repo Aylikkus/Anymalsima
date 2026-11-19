@@ -419,6 +419,9 @@ int main(int argc, char** argv) {
                     lightRenderer.update(registry, camera, world.wrap(), now);
                 lod.setStructures(trees.landmarkVoxels(0));
                 lod.update(camera, {1280, 720});
+                // Shade under structures on distant surfaces (step 2).
+                if (lights && !std::getenv("SMOKE_NO_OCCLUSION"))
+                    lightRenderer.setSkyOcclusion(lod.skyOcclusion());
                 sections[1] = since(mark);
                 mark = SmokeClock::now();
                 RenderTarget target;
@@ -817,6 +820,10 @@ int main(int argc, char** argv) {
                         << " voxel_slabs_l0=" << lod.voxelSlabs(0)
                         << " voxel_slabs_l1=" << lod.voxelSlabs(1)
                         << " voxel_slabs_l2=" << lod.voxelSlabs(2)
+                        << " voxel_groups=" << lod.structureGroups()
+                        << " occluded_texels="
+                        << (lod.skyOcclusion() ? lod.skyOcclusion()->occluded()
+                                               : 0)
                         << " plants=" << flora.drawnPlants()
                         << " plant_draws=" << flora.drawCalls()
                         << " plant_meshes=" << flora.meshCount()

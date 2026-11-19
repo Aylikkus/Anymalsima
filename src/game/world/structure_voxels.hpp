@@ -158,4 +158,38 @@ Slabs rasterizeAll(const Source& source, int level, const WorldWrap& wrap);
 // Sets `enclosed` on full slabs whose six same-level neighbours are full.
 void markEnclosed(Slabs& slabs, const WorldWrap& wrap);
 
+// What a structure casts on the ground below it, seen from the sky
+// (SkyOcclusionMap): per column of FootprintLevel cells (Footprint::Cell
+// tiles a side), the top of its highest solid cell. Any structure shades
+// what lies under it this way: a tree's limbs, a castle's overhangs, a
+// bridge. Built from the coarse rasterization, so parts thinner than about
+// half a cell vanish; their voxel shade (one or two light levels) is faint
+// anyway.
+inline constexpr int FootprintLevel = MaxLevel;
+struct Footprint {
+    static constexpr int Cell = 1 << FootprintLevel;  // tiles
+    // packColumn(cell x, cell z) of unwrapped cells (the source's bounds
+    // frame) -> top tile Y of the highest solid cell (exclusive).
+    std::unordered_map<uint64_t, int> tops;
+    static uint64_t packColumn(int cx, int cz) {
+        constexpr int64_t Bias = int64_t(1) << 30;
+        return uint64_t(cx + Bias) << 32 | uint64_t(uint32_t(cz + Bias));
+    }
+    static std::pair<int, int> unpackColumn(uint64_t key) {
+        constexpr int64_t Bias = int64_t(1) << 30;
+        return {int(int64_t(key >> 32) - Bias),
+                int(int64_t(uint32_t(key)) - Bias)};
+    }
+    bool operator==(const Footprint&) const = default;
+};
+using FootprintPtr = std::shared_ptr<const Footprint>;
+
+// The footprint of `source` (occupancy: its occupied slabs, null for every
+// slab of its bounds). With `previous` (an earlier revision's footprint)
+// and `changed` (Source::changedSince), only the columns of slabs touching
+// the changed box are rasterized again. May be costly: run it on the pool.
+FootprintPtr footprint(const Source& source, const Occupancy* occupancy,
+                       const Footprint* previous = nullptr,
+                       const std::optional<TileBox>& changed = std::nullopt);
+
 }  // namespace structure_voxels

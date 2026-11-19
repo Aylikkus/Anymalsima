@@ -728,6 +728,9 @@ outside the loaded chunks are no longer missing.
 - `TreeRenderer::setVoxelLandmarks`: landmarks beyond the detailed chunks
   draw `Detail::DistantCrown` (distant clumps, tubes for thin branches, no
   bark prisms). Ordinary trees are unchanged.
+- Landmark wood shades distant terrain and structure slabs like voxel
+  sunlight through the sky occlusion map (`docs/handoff/structures.md`,
+  step 2); crowns cast no shade there, as in the chunks.
 - Known limits: player wounds in a landmark that do not sever it (holes
   dug into the trunk) are not shown at distance until the cut is recorded;
   the wood comes from the skeleton, not from saved chunks. Coarse cells are

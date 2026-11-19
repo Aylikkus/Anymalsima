@@ -2,6 +2,7 @@
 
 #include <bx/math.h>
 
+#include <cfloat>
 #include <iostream>
 #include <unordered_set>
 
@@ -31,7 +32,9 @@ StructureLod::~StructureLod() {
     for (auto& [key, structure] : structures) {
         if (structure.job) structure.job->future.wait();
         if (structure.occupancyJob) structure.occupancyJob->wait();
+        if (structure.footprintJob) structure.footprintJob->wait();
     }
+    if (occlusionJob) occlusionJob->wait();
 }
 
 void StructureLod::setStructures(
@@ -230,6 +233,12 @@ void StructureLod::collectStructures() {
         // Out of view: its slabs go once no job uses the entry.
         if (!structure.wanted && !structure.job) {
             touched(structure.slabs);
+            if (structure.footprint && !structure.footprintJob) {
+                if (footprintCache.size() >= FootprintCacheSize)
+                    footprintCache.erase(footprintCache.begin());
+                footprintCache[it->first] = {structure.footprintFor,
+                                             structure.footprint};
+            }
             it = structures.erase(it);
             continue;
         }
@@ -275,6 +284,93 @@ void StructureLod::mergeVoxels(const std::vector<ChunkCoord>& changed) {
         if (stale.contains(coord)) proxy->staleRevision = revision;
 }
 
+void StructureLod::updateFootprints(Vec3 eye) {
+    using namespace std::chrono_literals;
+    for (auto& [key, structure] : structures) {
+        if (structure.footprintJob &&
+            structure.footprintJob->wait_for(0s) == std::future_status::ready) {
+            try {
+                structure.footprint = structure.footprintJob->get();
+            } catch (const std::exception& e) {
+                std::cerr << "Structure footprint failed: " << e.what() << '\n';
+                structure.footprint = nullptr;
+            }
+            structure.footprintJob.reset();
+            occlusionStale = true;
+        }
+        if (!structure.wanted || structure.footprintJob ||
+            structure.footprintFor == structure.wanted)
+            continue;
+        // Back in view: its footprint from before.
+        if (!structure.footprint)
+            if (const auto cached = footprintCache.find(key);
+                cached != footprintCache.end()) {
+                structure.footprintFor = cached->second.source;
+                structure.footprint = cached->second.footprint;
+                footprintCache.erase(cached);
+                occlusionStale = true;
+            }
+        // The same voxels (another Source object of the same revision).
+        if (structure.footprint && structure.footprintFor &&
+            structure.footprintFor->revision == structure.wanted->revision) {
+            structure.footprintFor = structure.wanted;
+            continue;
+        }
+        // After the occupancy of the same source (planning starts it).
+        if (structure.occupancyFor != structure.wanted ||
+            structure.occupancyJob)
+            continue;
+        // A new revision of the same structure: only where it changed.
+        std::optional<TileBox> changed;
+        if (structure.footprint && structure.footprintFor)
+            changed = structure.wanted->changedSince(*structure.footprintFor);
+        structure.footprintJob = pool.submit_task(
+            [source = structure.wanted, occupancy = structure.occupancy,
+             previous = changed ? structure.footprint : nullptr, changed] {
+                return structure_voxels::footprint(*source, occupancy.get(),
+                                                   previous.get(), changed);
+            },
+            BS::pr::low);
+        structure.footprintFor = structure.wanted;
+    }
+    if (occlusionJob &&
+        occlusionJob->wait_for(0s) == std::future_status::ready) {
+        try {
+            occlusion = occlusionJob->get();
+        } catch (const std::exception& e) {
+            std::cerr << "Sky occlusion failed: " << e.what() << '\n';
+        }
+        occlusionJob.reset();
+    }
+    if (occlusionJob) return;
+    std::vector<structure_voxels::FootprintPtr> inputs;
+    for (const auto& [key, structure] : structures)
+        if (structure.wanted && structure.footprint &&
+            !structure.footprint->tops.empty())
+            inputs.push_back(structure.footprint);
+    std::sort(inputs.begin(), inputs.end());
+    if (inputs != occlusionInputs) occlusionStale = true;
+    occlusionStale =
+        occlusionStale || (occlusion && occlusion->recentres(eye.x, eye.z));
+    if (!occlusionStale) return;
+    occlusionStale = false;
+    // Nothing casts: no map (surfaces get full sky).
+    if (inputs.empty()) {
+        occlusion = nullptr;
+        occlusionInputs.clear();
+        return;
+    }
+    occlusionInputs = inputs;
+    occlusionJob = pool.submit_task(
+        [inputs = std::move(inputs), x = double(eye.x), z = double(eye.z),
+         period = world.wrap().tiles] {
+            auto map = std::make_shared<SkyOcclusionMap>();
+            map->build(inputs, x, z, period);
+            return std::shared_ptr<const SkyOcclusionMap>(std::move(map));
+        },
+        BS::pr::low);
+}
+
 size_t StructureLod::voxelSlabCount(int level) const {
     if (!voxels) return 0;
     if (level < 0) return voxels->size();
@@ -300,6 +396,7 @@ void StructureLod::update(Vec3 eye, std::shared_ptr<const EditMap> edits) {
     snapshot = std::move(edits);
     collectStructures();
     planStructures(eye);
+    updateFootprints(eye);
     requestStructures();
     collect();
     choose(eye);
@@ -548,7 +645,8 @@ void StructureLod::request() {
     }
 }
 
-size_t StructureLod::upload(IRenderer& renderer, size_t limit) {
+size_t StructureLod::upload(IRenderer& renderer, size_t limit,
+                            const Hidden& hidden) {
     size_t uploaded = 0;
     for (const auto& coord : wanted) {
         auto it = proxies.find(coord);
@@ -557,21 +655,32 @@ size_t StructureLod::upload(IRenderer& renderer, size_t limit) {
         const auto& cpu = *proxy.cpu;
         const size_t bytes = cpu.vertices.size() * sizeof(BlockVertex) +
                              cpu.indices.size() * sizeof(uint32_t);
-        if (uploaded && uploaded + bytes > limit) break;
+        const bool coarse = levelOf(coord) > 0;
+        // Coarse meshes reach the GPU merged (rebuildGroups), within the
+        // same per-frame limit.
+        if (!coarse && uploaded && uploaded + bytes > limit) break;
         if (!proxy.drawable && residentOf(proxy) + bytes > budgetOf(proxy))
             continue;
-        MeshHandle mesh;
-        if (!cpu.vertices.empty()) {
-            mesh.initDynamic<BlockVertex>(&renderer, cpu.vertices.size(),
-                                          cpu.indices.size());
-            const auto& gpu = std::get<DynamicMesh>(mesh.get());
-            if (!bgfx::isValid(gpu.vbh) || !bgfx::isValid(gpu.ibh)) continue;
-            mesh.update(cpu.vertices.data(), cpu.vertices.size(),
-                        cpu.indices.data(), cpu.indices.size(), true);
+        if (coarse) {
+            proxy.merged = std::move(proxy.cpu);
+            proxy.mesh = MeshHandle{};
+        } else {
+            MeshHandle mesh;
+            if (!cpu.vertices.empty()) {
+                mesh.initDynamic<BlockVertex>(&renderer, cpu.vertices.size(),
+                                              cpu.indices.size());
+                const auto& gpu = std::get<DynamicMesh>(mesh.get());
+                if (!bgfx::isValid(gpu.vbh) || !bgfx::isValid(gpu.ibh))
+                    continue;
+                mesh.update(cpu.vertices.data(), cpu.vertices.size(),
+                            cpu.indices.data(), cpu.indices.size(), true);
+            }
+            // The previous mesh is released here, after its last draw.
+            proxy.mesh = std::move(mesh);
+            proxy.hasMesh = !cpu.vertices.empty();
+            uploaded += bytes;
         }
-        // The previous mesh is released here, after its last draw.
-        proxy.mesh = std::move(mesh);
-        proxy.hasMesh = !cpu.vertices.empty();
+        if (coarse) proxy.hasMesh = !proxy.merged->vertices.empty();
         residentOf(proxy) = residentOf(proxy) - proxy.bytes + bytes;
         proxy.bytes = bytes;
         const auto base = baseOf(coord);
@@ -582,8 +691,118 @@ size_t StructureLod::upload(IRenderer& renderer, size_t limit) {
         proxy.builtRevision = proxy.cpuRevision;
         proxy.drawable = true;
         proxy.cpu.reset();
+        if (!coarse && uploaded >= limit) break;
+    }
+    // Replacements ready: retired proxies go, and the groups holding either
+    // are rebuilt in this same frame (no hole, no overlap).
+    const bool released = releaseRetired(hidden);
+    uploaded += rebuildGroups(renderer, limit > uploaded ? limit - uploaded : 0,
+                              released);
+    return uploaded;
+}
+
+size_t StructureLod::rebuildGroups(IRenderer& renderer, size_t limit,
+                                   bool force) {
+    struct Wanted {
+        std::vector<std::pair<ChunkCoord, const Proxy*>> members;
+    };
+    std::unordered_map<ChunkCoord, Wanted> next;
+    std::vector<ChunkCoord> order;  // nearest group first
+    const auto add = [&](const ChunkCoord& coord, const Proxy& proxy) {
+        const auto key = groupOf(coord);
+        auto [it, inserted] = next.try_emplace(key);
+        if (inserted) order.push_back(key);
+        it->second.members.emplace_back(coord, &proxy);
+    };
+    for (const auto& coord : wanted) {
+        if (levelOf(coord) == 0) continue;
+        const auto it = proxies.find(coord);
+        if (it == proxies.end()) continue;
+        const auto& proxy = *it->second;
+        if (proxy.drawable && proxy.hasMesh && proxy.merged &&
+            !shadowedByRetired(coord))
+            add(coord, proxy);
+    }
+    for (const auto& [coord, proxy] : retired)
+        if (levelOf(coord) > 0 && proxy->hasMesh && proxy->merged)
+            add(coord, *proxy);
+    // Groups left with no member.
+    for (auto it = groups.begin(); it != groups.end();)
+        if (!next.contains(it->first))
+            it = groups.erase(it);
+        else
+            ++it;
+    size_t uploaded = 0;
+    for (const auto& key : order) {
+        auto& members = next.at(key).members;
+        std::sort(members.begin(), members.end(),
+                  [](const auto& a, const auto& b) {
+                      return lessCoord(a.first, b.first);
+                  });
+        std::vector<ChunkCoord> coords;
+        std::vector<uint64_t> revisions;
+        size_t vertices = 0, indices = 0;
+        for (const auto& [coord, proxy] : members) {
+            coords.push_back(coord);
+            revisions.push_back(proxy->builtRevision);
+            vertices += proxy->merged->vertices.size();
+            indices += proxy->merged->indices.size();
+        }
+        auto& group = groups[key];
+        if (group.members == coords && group.revisions == revisions) continue;
+        const size_t bytes =
+            vertices * sizeof(BlockVertex) + indices * sizeof(uint32_t);
+        if (!force && uploaded && uploaded + bytes > limit) continue;
+        // Members in group-local cells: offset each slab's mesh.
+        const auto groupBase = baseOf(key);
+        ChunkMesh mesh;
+        mesh.vertices.reserve(vertices);
+        mesh.indices.reserve(indices);
+        const int level = levelOf(key);
+        const float span = float(spanOf(level));
+        AABB bounds{FLT_MAX, FLT_MAX, FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX};
+        for (const auto& [coord, proxy] : members) {
+            const auto base = baseOf(coord);
+            const float ox = float((base.x - groupBase.x * GroupSide) *
+                                   Chunk::SIZE_X),
+                        oy = float((base.y - groupBase.y * GroupSide) *
+                                   Chunk::SIZE_Y),
+                        oz = float((base.z - groupBase.z * GroupSide) *
+                                   Chunk::SIZE_Z);
+            const auto first = uint32_t(mesh.vertices.size());
+            for (auto v : proxy->merged->vertices) {
+                v.x += ox;
+                v.y += oy;
+                v.z += oz;
+                mesh.vertices.push_back(v);
+            }
+            for (const auto i : proxy->merged->indices)
+                mesh.indices.push_back(first + i);
+            bounds.minX = std::min(bounds.minX, float(base.x) * span);
+            bounds.minY = std::min(bounds.minY, float(base.y) * span);
+            bounds.minZ = std::min(bounds.minZ, float(base.z) * span);
+            bounds.maxX = std::max(bounds.maxX, float(base.x + 1) * span);
+            bounds.maxY = std::max(bounds.maxY, float(base.y + 1) * span);
+            bounds.maxZ = std::max(bounds.maxZ, float(base.z + 1) * span);
+        }
+        MeshHandle gpu;
+        if (!mesh.vertices.empty()) {
+            gpu.initDynamic<BlockVertex>(&renderer, mesh.vertices.size(),
+                                         mesh.indices.size());
+            const auto& handles = std::get<DynamicMesh>(gpu.get());
+            // Out of handles: keep the old mesh, retry next frame.
+            if (!bgfx::isValid(handles.vbh) || !bgfx::isValid(handles.ibh))
+                continue;
+            gpu.update(mesh.vertices.data(), mesh.vertices.size(),
+                       mesh.indices.data(), mesh.indices.size(), true);
+        }
+        // The previous mesh is released here, after its last draw.
+        group.mesh = std::move(gpu);
+        group.hasMesh = !mesh.vertices.empty();
+        group.members = std::move(coords);
+        group.revisions = std::move(revisions);
+        group.bounds = bounds;
         uploaded += bytes;
-        if (uploaded >= limit) break;
     }
     return uploaded;
 }
@@ -599,7 +818,10 @@ size_t StructureLod::backlog() const {
     return pendingStructures +
            std::count_if(wanted.begin(), wanted.end(), [&](const auto& c) {
                const auto it = proxies.find(c);
-               return it == proxies.end() || !it->second->drawable ||
-                      it->second->stale();
+               if (it == proxies.end() || !it->second->drawable ||
+                   it->second->stale())
+                   return true;
+               // Coarse: drawn once in its group's mesh.
+               return levelOf(c) > 0 && it->second->hasMesh && !inGroupMesh(c);
            });
 }

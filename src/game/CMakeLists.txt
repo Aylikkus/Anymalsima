@@ -22,6 +22,7 @@ add_library(game
     world/light_renderer.cpp
     world/light_shadows.cpp
     world/lod_light_map.cpp
+    world/sky_occlusion_map.cpp
     world/light_volume.cpp
     world/light_volume_manager.cpp
     world/world_editor.cpp

@@ -3,7 +3,7 @@
 //
 // Including programs declare u_texture_array and u_normal_array (the normal
 // array uses the same layer index as the albedo array), u_shadow_atlas
-// (shadow_sampling.sh) and u_lod_light_map.
+// (shadow_sampling.sh), u_lod_light_map and u_sky_occlusion.
 uniform vec4 u_world_eye;
 // x = ocean surface Y, y = 1 when the eye is in water, z = debug LOD edges.
 uniform vec4 u_world_water;
@@ -89,6 +89,60 @@ vec3 surfaceLodLight(vec3 position)
     float vertical = clamp(1.0 - abs(position.y - texel.a)
                                      / SURFACE_NEAR_RANGE, 0.0, 1.0);
     return texel.rgb * vertical;
+}
+
+// Sky light under structures (SkyOcclusionMap, docs/handoff/structures.md)
+// for surfaces without a voxel light volume: xy = world XZ of the map's
+// minimum corner, z = 1 / world extent, w = 1 when the map is valid. Texels
+// (point sampled) hold, for k = 0..3, the lowest occluder top within k
+// texels, or SURFACE_OPEN_SKY: a point at height y is k texels from open
+// sky for the smallest k whose threshold is at most y, like the voxel
+// sunlight (15 - distance to open sky, per tile).
+uniform vec4 u_sky_occlusion_origin;
+// SkyOcclusionMap::TilesPerTexel, Open; fade below a threshold:
+// SkyOcclusionMap::Fade; sky per distance: skyAtDistance(1..4).
+#define SURFACE_OCCLUSION_CELL 4.0
+#define SURFACE_OPEN_SKY -30000.0
+#define SURFACE_SKY_K1 0.833333
+#define SURFACE_SKY_K2 0.566667
+#define SURFACE_SKY_K3 0.3
+#define SURFACE_SKY_K4 0.033333
+
+float surfaceOcclusionTexel(vec2 texel, float y)
+{
+    vec2 uv = (texel + 0.5) * (SURFACE_OCCLUSION_CELL * u_sky_occlusion_origin.z);
+    vec4 t = texture2DLod(u_sky_occlusion, uv, 0.0);
+    if (t.x <= SURFACE_OPEN_SKY + 1.0) return 1.0;
+    // How far the point is above each threshold (they only fall with k).
+    vec4 above = smoothstep(t - 2.0 * SURFACE_OCCLUSION_CELL,
+                            t - SURFACE_OCCLUSION_CELL, vec4_splat(y));
+    above.y = max(above.y, above.x);
+    above.z = max(above.z, above.y);
+    above.w = max(above.w, above.z);
+    return above.x + (above.y - above.x) * SURFACE_SKY_K1
+         + (above.z - above.y) * SURFACE_SKY_K2
+         + (above.w - above.z) * SURFACE_SKY_K3
+         + (1.0 - above.w) * SURFACE_SKY_K4;
+}
+
+// Sky fraction (0-1) at a surface point, sampled half a cell in front of
+// the face (the air that lights it, as the voxel light volumes are) and
+// blended between the four nearest texels.
+float surfaceStructureSky(vec3 position, vec3 normal)
+{
+    if (u_sky_occlusion_origin.w < 0.5) return 1.0;
+    vec3 p = position + normal * (0.5 * SURFACE_OCCLUSION_CELL);
+    vec2 uv = (p.xz - u_sky_occlusion_origin.xy) * u_sky_occlusion_origin.z;
+    if (any(lessThan(uv, vec2_splat(0.0))) || any(greaterThan(uv, vec2_splat(1.0))))
+        return 1.0;
+    vec2 at = (p.xz - u_sky_occlusion_origin.xy) / SURFACE_OCCLUSION_CELL - 0.5;
+    vec2 base = floor(at);
+    vec2 f = at - base;
+    float a = surfaceOcclusionTexel(base, p.y);
+    float b = surfaceOcclusionTexel(base + vec2(1.0, 0.0), p.y);
+    float c = surfaceOcclusionTexel(base + vec2(0.0, 1.0), p.y);
+    float d = surfaceOcclusionTexel(base + vec2(1.0, 1.0), p.y);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 // skyGate: how much sky the point sees. Lights without a shadow map use it

@@ -13,6 +13,8 @@ namespace {
 // light_glare.vert.
 constexpr uint8_t BlockAtlasStage = 3, BlockGlowStage = 4;
 constexpr uint8_t LodAtlasStage = 4, LodGlowStage = 5;
+// Sky occlusion under structures; also foliage.frag (block uniforms).
+constexpr uint8_t BlockOcclusionStage = 6, LodOcclusionStage = 7;
 constexpr uint8_t GlareAtlasStage = 0;
 // Glare fades in from here so it does not cover the lamp block up close.
 constexpr double GlareNear = 24;
@@ -39,6 +41,17 @@ LightRenderer::LightRenderer(IRenderer& renderer, int quality)
                               BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
     glowBlock.initTexture("u_lod_light_map", BlockGlowStage, glowTexture);
     glowLod.initTexture("u_lod_light_map", LodGlowStage, glowTexture);
+    occlusionOrigin.initVec4("u_sky_occlusion_origin", {0, 0, 0, 0});
+    occlusionTexture = bgfx::createTexture2D(
+        SkyOcclusionMap::Size, SkyOcclusionMap::Size, false, 1,
+        bgfx::TextureFormat::RGBA16F,
+        BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_MIN_POINT |
+            BGFX_SAMPLER_MAG_POINT);
+    static_assert(SkyOcclusionMap::Thresholds == 4, "one RGBA texel");
+    occlusionBlock.initTexture("u_sky_occlusion", BlockOcclusionStage,
+                               occlusionTexture);
+    occlusionLod.initTexture("u_sky_occlusion", LodOcclusionStage,
+                             occlusionTexture);
     // createStaticMesh references (does not copy) the data: keep it static.
     static const PosUvColorVertex vertices[4] = {{-1, -1, 0, 0, 0, 0xffffffff},
                                                  {1, -1, 0, 1, 0, 0xffffffff},
@@ -52,6 +65,28 @@ LightRenderer::LightRenderer(IRenderer& renderer, int quality)
 LightRenderer::~LightRenderer() {
     // bgfx defers destruction until frames referencing it finish.
     if (bgfx::isValid(glowTexture)) bgfx::destroy(glowTexture);
+    if (bgfx::isValid(occlusionTexture)) bgfx::destroy(occlusionTexture);
+}
+
+void LightRenderer::setSkyOcclusion(
+    std::shared_ptr<const SkyOcclusionMap> map) {
+    if (map == occlusion) return;
+    occlusion = std::move(map);
+    if (!occlusion || !occlusion->valid()) {
+        occlusionOrigin.setVec4({0, 0, 0, 0});
+        return;
+    }
+    const auto& texels = occlusion->texels();
+    const bgfx::Memory* memory =
+        bgfx::alloc(uint32_t(texels.size() * sizeof(uint16_t)));
+    auto* half = reinterpret_cast<uint16_t*>(memory->data);
+    for (size_t i = 0; i < texels.size(); ++i)
+        half[i] = bx::halfFromFloat(texels[i]);
+    bgfx::updateTexture2D(occlusionTexture, 0, 0, 0, 0, SkyOcclusionMap::Size,
+                          SkyOcclusionMap::Size, memory);
+    occlusionOrigin.setVec4({float(occlusion->originX()),
+                             float(occlusion->originZ()),
+                             1.f / SkyOcclusionMap::Extent, 1});
 }
 
 void LightRenderer::update(const LightSourceRegistry& sources,
@@ -139,6 +174,8 @@ void LightRenderer::appendUniforms(std::vector<ShaderProperty*>& uniforms,
     uniforms.push_back(
         shadowMaps->atlas(block ? BlockAtlasStage : LodAtlasStage));
     uniforms.push_back(block ? &glowBlock : &glowLod);
+    uniforms.push_back(&occlusionOrigin);
+    uniforms.push_back(block ? &occlusionBlock : &occlusionLod);
 }
 
 void LightRenderer::drawGlare(RenderTarget& target, const Camera& camera,

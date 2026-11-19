@@ -137,6 +137,15 @@ Sunlight under a sawn elder limb: `SMOKE_LIMB_CUT=1` (same variables, no
 `limb_cut` sunlight samples on the ground under it; `SMOKE_LIMB_CUT=walk`
 loads that ground first and stays at the cut.
 
+Distant shade under structures (`docs/handoff/structures.md`, step 2): an
+elder seen from 1 km, its limbs' shadows on distant terrain. Add
+`SMOKE_NO_OCCLUSION=1` for the same frame without the sky occlusion map.
+
+```bash
+SMOKE_CAMERA="5857 6484 1.5708 -0.5 1000 0" SMOKE_TERRAIN=2 SMOKE_FOREST=elder \
+  SMOKE_RADIUS=4 build/tests/lod_render_smoke /tmp/shade 3000 lights
+```
+
 ## Camera priority and streaming
 
 Gameplay updates both schedulers' focus from the current camera position every

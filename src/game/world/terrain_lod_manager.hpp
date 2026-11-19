@@ -61,6 +61,12 @@ class TerrainLodManager {
         if (structures) structures->setStructures(std::move(sources));
     }
     bool drawsStructureVoxels() const { return structures != nullptr; }
+    // Sky light under structures for surfaces without voxel light
+    // (SkyOcclusionMap; LightRenderer::setSkyOcclusion); null when nothing
+    // casts.
+    std::shared_ptr<const SkyOcclusionMap> skyOcclusion() const {
+        return structures ? structures->skyOcclusion() : nullptr;
+    }
     // Slabs of structure voxels, all levels or one.
     size_t voxelSlabs(int level = -1) const {
         return structures ? structures->voxelSlabCount(level) : 0;
@@ -71,6 +77,10 @@ class TerrainLodManager {
     }
     size_t structureCount() const {
         return structures ? structures->count() : 0;
+    }
+    // Merged meshes of coarse structure slabs.
+    size_t structureGroups() const {
+        return structures ? structures->groupCount() : 0;
     }
     // Debug: structure voxel slabs within `radius` of the eye that draw
     // nothing this frame (neither a proxy nor their real chunk).
