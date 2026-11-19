@@ -10,7 +10,10 @@
 #include "world/chunk_manager.hpp"
 #include "world/save/chunk_codec.hpp"
 #include "world/save/region_file.hpp"
+#include "world/light_volume.hpp"
+#include "world/save/sky_codec.hpp"
 #include "world/save/trees_codec.hpp"
+#include "world/sky_height_map.hpp"
 #include "world/structure_voxels.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
@@ -2681,4 +2684,193 @@ TEST(tree_wood_lod_cut_is_local) {
     const auto mature = tree_wood_lod::voxels({instance(skeleton), age * 2, 9});
     const auto unchanged = mature->changedSince(*before);
     CHECK(unchanged.has_value() && unchanged->empty());
+}
+
+// ---------------------------------------------------------------------------
+// Sky heightmap (docs/handoff/sky-light.md): wood tops seen from the sky.
+
+namespace {
+// Mismatching columns between treeWoodTops and markTreeWood scanned from the
+// top down.
+size_t woodTopMismatches(const TreeSkeleton& k, const TreeTileBox& box,
+                         float age) {
+    std::vector<uint8_t> mask;
+    markTreeWood(k, Origin, box, age, mask);
+    std::vector<int> tops;
+    treeWoodTops(k, Origin, box, age, tops);
+    size_t wrong = 0;
+    for (int z = box.z0; z < box.z1; ++z)
+        for (int x = box.x0; x < box.x1; ++x) {
+            int expected = INT_MIN;
+            for (int y = box.y1 - 1; y >= box.y0 && expected == INT_MIN; --y)
+                if (mask[box.index(x, y, z)]) expected = y;
+            wrong += tops[size_t(z - box.z0) * size_t(box.x1 - box.x0) +
+                          size_t(x - box.x0)] != expected;
+        }
+    return wrong;
+}
+}  // namespace
+
+TEST(tree_wood_tops_match_raster) {
+    std::vector<std::string> names = Ordinary;
+    names.push_back("trees.test_oak");
+    for (const auto& name : names)
+        for (const uint32_t seed : {3u, 11u}) {
+            const auto k = build(name, seed);
+            const auto box = treeWoodBounds(*k, Origin);
+            for (const float age : {k->matureAge(), k->matureAge() * 0.4f})
+                EQUAL(woodTopMismatches(*k, box, age), size_t(0), name);
+            // A box cutting through the crown: tops stay inside it.
+            auto low = box;
+            low.y1 = std::min(box.y1, Origin.y + 12);
+            EQUAL(woodTopMismatches(*k, low, k->matureAge()), size_t(0),
+                  name + " clipped");
+        }
+    // Cut trunks end flat at their cut plane (perpendicular or sawn).
+    const auto& oak = species("trees.test_oak");
+    TreeSkeletonInput input;
+    input.seed = 23;
+    const auto base = buildTreeSkeleton(oak, input);
+    const int32_t a = trunkAt(*base, 2.5f);
+    CHECK(a >= 0);
+    const auto& s = base->segments[size_t(a)];
+    for (const TreeVec normal : {TreeVec{}, TreeVec{0.6f, 0.8f, 0}}) {
+        const std::vector<TreeCut> cuts{
+            {a, (2.5f - s.a.y) / (s.b.y - s.a.y), base->maturity, normal}};
+        const auto cut = applyTreeCuts(*base, oak, cuts);
+        const float age = base->maturity + 1;
+        EQUAL(woodTopMismatches(*cut, treeWoodBounds(*cut, Origin), age),
+              size_t(0), "cut test_oak");
+    }
+    // An elder: columns at the trunk and under its widest limb, full height
+    // (its whole box is far too large for a mask).
+    const auto elder = build("trees.elder", 1);
+    const auto bounds = treeWoodBounds(*elder, Origin);
+    const TreeSegment* limb = nullptr;
+    float reach = 0;
+    for (const auto& seg : elder->segments) {
+        const float r = std::hypot(seg.b.x, seg.b.z);
+        if (seg.live() && seg.order == 0 && r > reach &&
+            std::max(seg.r0, seg.r1) > 2) {
+            reach = r;
+            limb = &seg;
+        }
+    }
+    CHECK(limb != nullptr);
+    const TreeVec mid = lerp(limb->a, limb->b, 0.5f);
+    for (const auto& [cx, cz] :
+         {std::pair{0.f, 0.f}, std::pair{mid.x, mid.z}}) {
+        const TreeTileBox box{
+            Origin.x + int(cx) - 24, bounds.y0, Origin.z + int(cz) - 24,
+            Origin.x + int(cx) + 24, bounds.y1, Origin.z + int(cz) + 24};
+        EQUAL(woodTopMismatches(*elder, box, elder->matureAge()), size_t(0),
+              "elder");
+    }
+}
+
+namespace {
+// A column as the loaded tiles of TreeStream's slabs show it from the sky.
+sky::Column loadedColumn(TreeStream& f, int x, int z) {
+    const auto& blocks = f.assets.getStorage<Block>();
+    return sky::scanColumn(TreeStream::High * 16 - 1, TreeStream::Low * 16,
+                           [&](int y) -> int {
+                               const Tile* t = f.chunks->tileAt(x, y, z);
+                               return t ? tileOpacity(*t, blocks) : 15;
+                           });
+}
+void settle(TreeStream& f, SkyHeightMap& map,
+            TerrainEditTracker* tracker = nullptr) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    do {
+        if (tracker) tracker->update();
+        f.chunks->update();
+        map.update();
+        CHECK(f.pool.wait_for(std::chrono::seconds(5)));
+        CHECK(std::chrono::steady_clock::now() < deadline);
+    } while (!map.isIdle() || (tracker && tracker->pending()));
+    map.update();
+}
+// Columns of chunk columns 16..19 whose heightmap differs from the tiles.
+size_t heightmapMismatches(TreeStream& f, const SkyHeightMap& map) {
+    size_t wrong = 0, compared = 0;
+    for (int z = 16 * 16; z < 20 * 16; ++z)
+        for (int x = 16 * 16; x < 20 * 16; ++x) {
+            const auto column = map.column(x, z);
+            // Wood above the loaded slabs (an elder's crown): the map
+            // knows it, the tiles cannot show it.
+            if (column && column->top() >= TreeStream::High * 16) continue;
+            ++compared;
+            wrong += !column || !(*column == loadedColumn(f, x, z));
+        }
+    CHECK(compared > 3000);
+    return wrong;
+}
+}  // namespace
+
+TEST(sky_heightmap_matches_chunks) {
+    TreeStream f;
+    TerrainEdits edits;
+    for (unsigned cx = 16; cx < 20; ++cx)
+        for (unsigned cz = 16; cz < 20; ++cz) f.load(cx, cz);
+    SkyHeightMap map(*f.chunks, edits, f.assets.getStorage<Block>(), f.pool);
+    for (unsigned cx = 16; cx < 20; ++cx)
+        for (unsigned cz = 16; cz < 20; ++cz) map.request(cx, cz);
+    settle(f, map);
+    EQUAL(map.builtCount(), size_t(16), "built");
+    // Trees, ground and their tops come from the sources alone.
+    EQUAL(heightmapMismatches(f, map), size_t(0), "generated columns");
+    int woodColumns = 0, hx = 0, hz = 0, hy = 0;
+    for (int z = 16 * 16; z < 20 * 16; ++z)
+        for (int x = 16 * 16; x < 20 * 16; ++x) {
+            const int top = *map.top(x, z);
+            const Tile* t = f.chunks->tileAt(x, top, z);
+            if (t && f.chunks->grownBlocks().test(t->block_id)) {
+                ++woodColumns;
+                hx = x, hy = top, hz = z;
+            }
+        }
+    CHECK(woodColumns > 20);
+    // Gameplay edits: a block on open ground (TerrainEdits records it) and
+    // a hole dug into the top of some wood (only an override can).
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+    TerrainEditTracker tracker(*f.chunks, edits);
+    tracker.watch(editor);
+    map.watch(editor);
+    int px = 0, pz = 0, py = 0;
+    for (int z = 16 * 16 + 4; z < 20 * 16 && !py; ++z)
+        for (int x = 16 * 16 + 4; x < 20 * 16 && !py; ++x) {
+            const int top = *map.top(x, z);
+            if (top != f.chunks->generatedSurfaceY(unsigned(x), unsigned(z)))
+                continue;
+            px = x, pz = z, py = top + 6;
+        }
+    CHECK(py > 0);
+    const uint8_t ground = f.chunks->tileAt(px, py - 6, pz)->block_id;
+    EQUAL(int(editor.placeBlock({px, py, pz}, ground)),
+          int(EditStatus::Applied), "placed");
+    EQUAL(int(editor.removeBlock({hx, hy, hz})), int(EditStatus::Applied),
+          "dug");
+    settle(f, map, &tracker);
+    EQUAL(heightmapMismatches(f, map), size_t(0), "after edits");
+    EQUAL(*map.top(px, pz), py, "placed block");
+    const auto& overrides = map.overrides();
+    const auto key = [](int x, int z) {
+        return SkyHeightMap::columnKey(unsigned(x / 16), unsigned(z / 16));
+    };
+    const auto index = [](int x, int z) { return (z % 16) * 16 + x % 16; };
+    CHECK(overrides.contains(key(hx, hz)) &&
+          overrides.at(key(hx, hz)).contains(index(hx, hz)));
+    // TerrainEdits covers the placed block: no override is kept for it.
+    CHECK(!overrides.contains(key(px, pz)) ||
+          !overrides.at(key(px, pz)).contains(index(px, pz)));
+    CHECK(map.dirty);
+    // Saved and loaded: a fresh map knows the hole.
+    SkyHeightMap again(*f.chunks, edits, f.assets.getStorage<Block>(), f.pool);
+    again.setOverrides(
+        sky_codec::decode(sky_codec::encode(map.overrides())).overrides);
+    for (unsigned cx = 16; cx < 20; ++cx)
+        for (unsigned cz = 16; cz < 20; ++cz) again.request(cx, cz);
+    settle(f, again);
+    EQUAL(heightmapMismatches(f, again), size_t(0), "reloaded");
 }

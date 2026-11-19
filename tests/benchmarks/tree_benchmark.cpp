@@ -10,6 +10,7 @@
 // used; arguments override its size (maxima of the ranges).
 
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -642,6 +643,36 @@ int main(int argc, char** argv) {
                   << " columns=" << cast->tops.size()
                   << " map_ms=" << msSince(started)
                   << " occluded_texels=" << map.occluded() << '\n';
+        // 3d. The tree seen from the sky (docs/handoff/sky-light.md): its
+        // wood tops for the whole box at once, and per chunk column as
+        // SkyHeightMap builds them (the trunk's column and the mean).
+        {
+            std::vector<int> tops;
+            const auto box = tree->wood;
+            started = Clock::now();
+            source->skyTops(box, tops);
+            const double wholeMs = msSince(started);
+            size_t columns = 0;
+            for (const int t : tops) columns += t != INT_MIN;
+            double worst = 0, sum = 0;
+            int chunkColumns = 0;
+            for (int cz = box.z0 / 16; cz <= (box.z1 - 1) / 16; ++cz)
+                for (int cx = box.x0 / 16; cx <= (box.x1 - 1) / 16; ++cx) {
+                    const TileBox part{cx * 16,      box.y0, cz * 16,
+                                       cx * 16 + 16, box.y1, cz * 16 + 16};
+                    const auto t0 = Clock::now();
+                    source->skyTops(part, tops);
+                    const double ms = msSince(t0);
+                    worst = std::max(worst, ms);
+                    sum += ms;
+                    ++chunkColumns;
+                }
+            std::cout << "sky_tops whole_ms=" << wholeMs
+                      << " wood_columns=" << columns
+                      << " chunk_columns=" << chunkColumns
+                      << " per_column_mean_ms=" << sum / chunkColumns
+                      << " per_column_max_ms=" << worst << '\n';
+        }
         if (std::getenv("TREE_BENCH_PLAN_ONLY")) return 0;
     }
 

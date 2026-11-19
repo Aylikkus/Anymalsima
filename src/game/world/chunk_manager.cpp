@@ -126,6 +126,19 @@ bool ChunkManager::isEdited(const ChunkCoord& coord) const {
     return it != chunks.end() && it->second.state == ChunkState::Ready &&
            it->second.edited;
 }
+std::optional<ChunkManager::ColumnSources> ChunkManager::columnSources(
+    unsigned chunkX, unsigned chunkZ) {
+    if (terrainWorld.regions.empty()) return std::nullopt;
+    const auto it = chunks.find({chunkX, 0, chunkZ});
+    if (it == chunks.end()) return std::nullopt;
+    const auto rc = it->second.regionCoord;
+    const auto& region = terrainWorld.regions[rc.y * terrainWorld.width + rc.x];
+    auto trees = prepareTrees({chunkX, 0, chunkZ}, rc);
+    if (!trees) return std::nullopt;
+    return ColumnSources{prepareColumns({chunkX, 0, chunkZ}, region),
+                         std::move(trees)};
+}
+
 std::shared_ptr<const ChunkColumnInputs> ChunkManager::generatedColumns(
     unsigned chunkX, unsigned chunkZ) {
     if (terrainWorld.regions.empty()) return {};
@@ -190,6 +203,7 @@ void ChunkManager::unregister(const ChunkCoord& coord) {
         if (--columnInputs.at(column).registrations == 0) {
             columnInputs.erase(column);
             columnTopY.erase(column);
+            columnReleased.emit(column);
         }
     }
     pending.erase(coord);
@@ -407,6 +421,7 @@ void ChunkManager::refreshTreeColumns(
                 if (handle != chunks.end())
                     prepareTrees({unsigned(wx), 0, unsigned(cz)},
                                  handle->second.regionCoord);
+                columnTreesChanged.emit(key);
             }
     }
 }

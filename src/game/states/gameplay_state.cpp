@@ -221,6 +221,24 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     editTracker = std::make_unique<TerrainEditTracker>(*chunkManager, *edits,
                                                        sameGenerator);
     editTracker->watch(*editor);
+    skyMap = std::make_unique<SkyHeightMap>(*chunkManager, *edits,
+                                            context.assets->getStorage<Block>(),
+                                            context.threadPool);
+    skyMap->watch(*editor);
+    try {
+        auto file = save_catalog::readSky(slot);
+        skyMap->setOverrides(std::move(file.overrides));
+        skyExtra = std::move(file.extra);
+    } catch (const std::exception& e) {
+        // Only edits the sources do not show (holes dug into tree wood)
+        // are lost; loaded chunks are observed again when edited.
+        std::cerr << "sky.dat unreadable (" << e.what()
+                  << "); starting without overrides\n";
+    }
+    skyMap->dirty = false;
+    // The map covers every chunk column with loaded chunks.
+    skyReadyConnection = chunkManager->becameReady.connect(
+        [this](const ChunkCoord& c) { skyMap->request(c.x, c.z); });
     locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
                                                     regionStore.get());
 
@@ -276,6 +294,7 @@ GameplayState::~GameplayState() {
     // Chunk systems outlive the light renderer these listeners use.
     chunkManager->meshUploaded.disconnect(meshConnection);
     chunkManager->removed.disconnect(removedConnection);
+    chunkManager->becameReady.disconnect(skyReadyConnection);
     try {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();
@@ -283,6 +302,7 @@ GameplayState::~GameplayState() {
         regionStore->flush();
         saveTerrainEdits(true);
         saveLightSources(true);
+        saveSky(true);
         saveTrees();
         writeMeta();
     } catch (const std::exception& e) {
@@ -354,6 +374,36 @@ void GameplayState::saveTerrainEdits(bool wait) {
     }
 }
 
+void GameplayState::saveSky(bool wait) {
+    using namespace std::chrono_literals;
+    if (skyWrite.valid()) {
+        if (!wait && skyWrite.wait_for(0s) != std::future_status::ready)
+            return;  // the previous write is still running
+        try {
+            skyWrite.get();
+        } catch (const std::exception& e) {
+            std::cerr << "Saving sky.dat failed: " << e.what() << '\n';
+            skyMap->dirty = true;
+        }
+    }
+    if (!skyMap->dirty) return;
+    skyMap->dirty = false;
+    auto write = [target = slot, overrides = skyMap->overrides(),
+                  extra = skyExtra] {
+        save_catalog::writeSky(target, overrides, extra);
+    };
+    if (!wait) {
+        skyWrite = uiContext->threadPool.submit_task(std::move(write));
+        return;
+    }
+    try {
+        write();
+    } catch (const std::exception& e) {
+        std::cerr << "Saving sky.dat failed: " << e.what() << '\n';
+        skyMap->dirty = true;
+    }
+}
+
 void GameplayState::loadLightSources(const DataStorage<Block>& blocks) {
     try {
         auto file = save_catalog::readLightSources(slot);
@@ -420,6 +470,7 @@ void GameplayState::updateAutosave(float dt) {
         if (autosaveQueue.empty()) {
             saveTerrainEdits(false);
             saveLightSources(false);
+            saveSky(false);
             writeMeta();
         }
         return;
@@ -431,6 +482,7 @@ void GameplayState::updateAutosave(float dt) {
     if (autosaveQueue.empty()) {
         saveTerrainEdits(false);
         saveLightSources(false);
+        saveSky(false);
         writeMeta();
     }
 }
@@ -629,6 +681,8 @@ void GameplayState::update(Game& game, float dt) {
     blockLight->setFocus(camera.position);
     requestChunksAroundCamera();
     chunkManager->update();
+    skyMap->setFocus(camera.position);
+    skyMap->update();
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
@@ -691,6 +745,20 @@ void GameplayState::update(Game& game, float dt) {
                << "\n";
             ss << "artificial_light: " << (int)t.lightLevel.artificial_light
                << "\n";
+            // Sky heightmap at the air tile in front of the face.
+            {
+                const int64_t ax = hit->tx + hit->nx, az = hit->tz + hit->nz;
+                const int ay = hit->ty + hit->ny;
+                const auto top = skyMap->top(ax, az);
+                const auto direct = skyMap->directSky(ax, ay, az);
+                ss << "sky top: "
+                   << (top ? (*top == sky::None ? std::string("none")
+                                                : std::to_string(*top))
+                           : std::string("-"))
+                   << ", direct: "
+                   << (direct ? std::to_string(int(*direct)) : std::string("-"))
+                   << "\n";
+            }
             if (const auto* e = blockLight->emission(t.block_id))
                 ss << "emits: radius " << e->radius << ", falloff "
                    << e->falloff << "\n";

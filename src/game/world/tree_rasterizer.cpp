@@ -1,6 +1,7 @@
 #include "tree_rasterizer.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 
 namespace {
@@ -241,6 +242,86 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                 raster(p, face, true);
                 c = &p;
             }
+        }
+    }
+}
+
+void treeWoodTops(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                  const TreeTileBox& box, float age, std::vector<int>& tops) {
+    const int width = box.x1 - box.x0, depth = box.z1 - box.z0;
+    tops.assign(box.empty() ? 0 : size_t(width) * size_t(depth), INT_MIN);
+    if (box.empty() || age <= 0 || !skeleton.formsWood()) return;
+    const auto planes = cutPlanes(skeleton);
+    static const std::vector<CutPlane> noPlanes;
+    for (size_t si = 0; si < skeleton.segments.size(); ++si) {
+        const auto& s = skeleton.segments[si];
+        if (!s.live()) continue;
+        const auto& clip = planes.empty() ? noPlanes : planes[si];
+        const float visible = skeleton.visible(s, age);
+        if (visible < 0) continue;
+        const float rMax = maxRadius(skeleton, s);
+        if (rMax < TreeVoxelRadius) continue;
+        // The sampling of markTreeWood. Its window around a tile's
+        // projection (rMax + 1 along the axis) and its reach test never
+        // exclude a sample whose sphere holds the tile centre (a sphere
+        // reaches at most sqrt(r^2 + RadiusSlack2) < rMax + 0.71), so every
+        // sample up to `visible` can be tested alone.
+        const TreeVec axis = s.b - s.a;
+        const float length = std::sqrt(axis.dot(axis));
+        const float spacing = std::max(0.5f, rMax * 0.25f);
+        const int samples = std::max(1, int(std::ceil(length / spacing)));
+        const float dt = 1.f / float(samples);
+        const bool lobed = s.order == 0 && skeleton.flare.lobes > 0 &&
+                           !(s.flags & TreeSegment::Sprout);
+        // markTreeWood's per-tile test against one sample.
+        const auto inside = [&](const TreeVec& p, float r, int x, int y,
+                                int z) {
+            const TreeVec q = centre(anchor, x, y, z);
+            const TreeVec d = q - p;
+            if (d.dot(d) > r * r + RadiusSlack2) return false;
+            return std::none_of(clip.begin(), clip.end(),
+                                [&](const CutPlane& c) {
+                                    return (q - c.point).dot(c.normal) > 0.f;
+                                });
+        };
+        for (int k = 0; float(k) * dt <= visible; ++k) {
+            const float t = float(k) * dt;
+            const TreeVec p = lerp(s.a, s.b, t);
+            // Columns the sphere may reach.
+            const float reach = rMax + MaxReachPad;
+            const int x0 =
+                std::max(box.x0, anchor.x + int(std::floor(p.x - reach)));
+            const int x1 =
+                std::min(box.x1 - 1, anchor.x + int(std::ceil(p.x + reach)));
+            const int z0 =
+                std::max(box.z0, anchor.z + int(std::floor(p.z - reach)));
+            const int z1 =
+                std::min(box.z1 - 1, anchor.z + int(std::ceil(p.z + reach)));
+            for (int z = z0; z <= z1; ++z)
+                for (int x = x0; x <= x1; ++x) {
+                    const TreeVec q0 = centre(anchor, x, box.y0, z);
+                    const float dx = q0.x - p.x, dz = q0.z - p.z;
+                    const float angle = lobed ? std::atan2(dz, dx) : 0;
+                    const float r = skeleton.radius(s, t, age, angle);
+                    if (r < TreeVoxelRadius) continue;
+                    const float h2 = r * r + RadiusSlack2 - dx * dx - dz * dz;
+                    // A little negative slack for float rounding: the exact
+                    // test below decides.
+                    if (h2 < -0.01f) continue;
+                    const float h = std::sqrt(std::max(0.f, h2));
+                    // Tile y has its centre at y - anchor.y - 0.5.
+                    int hi = anchor.y + int(std::floor(p.y + h + 0.5f)) + 1;
+                    int lo = anchor.y + int(std::ceil(p.y - h + 0.5f)) - 1;
+                    hi = std::min(hi, box.y1 - 1);
+                    lo = std::max(lo, box.y0);
+                    int& top = tops[size_t(z - box.z0) * size_t(width) +
+                                    size_t(x - box.x0)];
+                    for (int y = hi; y >= lo && y > top; --y)
+                        if (inside(p, r, x, y, z)) {
+                            top = y;
+                            break;
+                        }
+                }
         }
     }
 }

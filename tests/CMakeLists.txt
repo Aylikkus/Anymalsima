@@ -13,6 +13,8 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/light_sources.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/lod_light_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_occlusion_map.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/sky_column.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/sky_height_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/world_editor.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edits.cpp
@@ -38,6 +40,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/save/terrain_edits_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/light_sources_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/trees_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/sky_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/binary_stream.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/compression.cpp
     ${PROJECT_SOURCE_DIR}/src/engine/serialization/section_container.cpp
@@ -81,6 +84,7 @@ add_executable(world_logic_tests
     unit/game/items/tree_data_tests.cpp
     unit/game/world/tree_tests.cpp
     unit/game/world/structure_voxels_tests.cpp
+    unit/game/world/sky_tests.cpp
 )
 add_executable(lighting_benchmark benchmarks/lighting_benchmark.cpp)
 option(ANYMALSIMA_TEST_SANITIZERS "Instrument logic tests with ASan and UBSan" OFF)
@@ -296,6 +300,14 @@ foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;structures" TIMEOUT 10)
+endforeach()
+# Sky heightmap (docs/handoff/sky-light.md).
+foreach(case sky_column_scan_and_direct sky_tile_build_sources
+             sky_tile_overrides sky_codec_roundtrip tree_wood_tops_match_raster
+             sky_heightmap_matches_chunks)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;lighting" TIMEOUT 60)
 endforeach()
 # Tree data (docs/handoff/trees.md).
 foreach(case tree_species_parsing tree_size_classes tree_references_validated

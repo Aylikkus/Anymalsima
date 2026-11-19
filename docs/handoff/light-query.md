@@ -91,10 +91,12 @@ Notes for the implementation:
   (generated surface via `ChunkManager::generatedSurfaceY` /
   `SurfaceSampler`, overridden by `TerrainEdits` ground and structure
   voxels). Coarse is fine: it answers "is there a mountain in between?".
-- **Sky part**: `sun_exposure / 15` from loaded tiles; for unloaded
-  positions, open sky when above the column's ground height. Scale by the
-  day/night cycle's daylight (today `LightRenderer::setSkyDarkness`, debug
-  only).
+- **Sky part**: from the sky light service planned in `sky-light.md`
+  (`skyAt`: the voxel value when loaded, the sky heightmap's rule
+  otherwise, structures included), never from `Tile::lightLevel` directly.
+  Scale by the day/night cycle's daylight (today
+  `LightRenderer::setSkyDarkness`, debug only). Sun direction does not
+  enter it: it only drives rendering (shadows, normal maps).
 - **Colour**: return linear RGB; gameplay helpers such as "is it mostly
   red?" (hue/saturation of `artificial`) belong to the NPC side.
 - **Caching**: results depend on the registry (`version()`), edited chunks

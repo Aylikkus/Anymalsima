@@ -5,6 +5,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -75,6 +76,11 @@ class ChunkManager {
     // The plants of a Ready chunk changed (setFlora). Chunks becoming
     // ready announce their plants through becameReady.
     Signal<const ChunkCoord&> floraChanged;
+    // A chunk column's tree list was rebuilt (a tree changed, was cut,
+    // planted or removed): column key (x << 32 | z).
+    Signal<uint64_t> columnTreesChanged;
+    // A chunk column's last chunk was unregistered: column key.
+    Signal<uint64_t> columnReleased;
     void setFocus(Vec3 value) { focus = value; }
     // X wrapping of the world this manager streams (disabled without a map).
     WorldWrap wrap() const { return terrainWorld.wrap(); }
@@ -135,6 +141,18 @@ class ChunkManager {
     // jobs are still running (or for an unregistered column).
     std::shared_ptr<const TreeColumn> treeColumn(unsigned chunkX,
                                                  unsigned chunkZ) const;
+    // What a registered chunk column's generated content comes from:
+    // terrain inputs and its trees. Prepared on demand (terrain sampling,
+    // tree set jobs); std::nullopt until the trees are ready, for
+    // unregistered columns and without a world map. Main thread.
+    struct ColumnSources {
+        std::shared_ptr<const ChunkColumnInputs> terrain;
+        std::shared_ptr<const TreeColumn> trees;
+    };
+    std::optional<ColumnSources> columnSources(unsigned chunkX,
+                                               unsigned chunkZ);
+    // Day tree wood is generated for (setFloraDay).
+    int32_t woodDay() const { return floraDay; }
     // Tree stamp of a Ready chunk.
     TreeStamp treeStamp(const ChunkCoord& coord) const;
     // Records that a Ready chunk's wood is up to date with `stamp`.

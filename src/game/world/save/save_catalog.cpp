@@ -14,6 +14,7 @@ constexpr const char* MapFile = "world_map.dat";
 constexpr const char* EditsFile = "terrain_edits.dat";
 constexpr const char* LightsFile = "light_sources.dat";
 constexpr const char* TreesFile = "trees.dat";
+constexpr const char* SkyFile = "sky.dat";
 
 std::string folderName(uint64_t seed, const std::string& createdAt) {
     std::string stamp = createdAt;  // YYYY-MM-DDTHH:MM:SS
@@ -116,6 +117,19 @@ void writeLightSources(const SaveSlot& slot,
     FileIO::writeBytesAtomic(
         slot.directory / LightsFile,
         light_sources_codec::encode(std::move(lights), extra));
+}
+
+sky_codec::File readSky(const SaveSlot& slot) {
+    const auto path = slot.directory / SkyFile;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return {};
+    return sky_codec::decode(FileIO::readBytes(path));
+}
+
+void writeSky(const SaveSlot& slot, const sky::Overrides& overrides,
+              const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(slot.directory / SkyFile,
+                             sky_codec::encode(overrides, extra));
 }
 
 trees_codec::File readTrees(const SaveSlot& slot) {

@@ -26,6 +26,7 @@
 #include "world/location_manager.hpp"
 #include "world/save/region_store.hpp"
 #include "world/save/save_catalog.hpp"
+#include "world/sky_height_map.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
@@ -84,6 +85,13 @@ class GameplayState : public IGameState {
     std::future<void> editsWrite;
     // Listens to chunkManager and editor; destroyed before both.
     std::unique_ptr<TerrainEditTracker> editTracker;
+    // Sky heightmap (docs/handoff/sky-light.md); listens to chunkManager,
+    // edits and editor, declared after them. Its overrides are sky.dat.
+    std::unique_ptr<SkyHeightMap> skyMap;
+    SectionContainer skyExtra;
+    std::future<void> skyWrite;
+    Signal<const ChunkCoord&>::Connection skyReadyConnection;
+    void saveSky(bool wait);
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     std::unique_ptr<LightRenderer> lightRenderer;

@@ -23,6 +23,8 @@ add_library(game
     world/light_shadows.cpp
     world/lod_light_map.cpp
     world/sky_occlusion_map.cpp
+    world/sky_column.cpp
+    world/sky_height_map.cpp
     world/light_volume.cpp
     world/light_volume_manager.cpp
     world/world_editor.cpp
@@ -51,6 +53,7 @@ add_library(game
     world/save/terrain_edits_codec.cpp
     world/save/light_sources_codec.cpp
     world/save/trees_codec.cpp
+    world/save/sky_codec.cpp
     items/soil.hpp
     items/soil_validation.hpp
     world/soil_generator.hpp

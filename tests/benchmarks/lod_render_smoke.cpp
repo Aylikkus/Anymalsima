@@ -25,6 +25,7 @@
 #include "world/light_renderer.hpp"
 #include "world/light_volume_manager.hpp"
 #include "world/location_manager.hpp"
+#include "world/sky_height_map.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
@@ -132,6 +133,18 @@ int main(int argc, char** argv) {
         blockLight.watch(editor);
         LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
                                    &blockLight, &sunlight);
+        // Sky heightmap (docs/handoff/sky-light.md), checked against the
+        // voxel sunlight of fully lit chunks at the end of SMOKE_APPROACH.
+        SkyHeightMap skyMap(chunks, edits, assets.getStorage<Block>(), pool);
+        skyMap.watch(editor);
+        struct SkyRequests {
+            ChunkManager& chunks;
+            Signal<const ChunkCoord&>::Connection connection;
+            ~SkyRequests() { chunks.becameReady.disconnect(connection); }
+        } skyRequests{chunks,
+                      chunks.becameReady.connect([&](const ChunkCoord& c) {
+                          skyMap.request(c.x, c.z);
+                      })};
         // SMOKE_QUALITY=0..2 picks the light (shadow) budget preset.
         const int lightQuality = std::getenv("SMOKE_QUALITY")
                                      ? std::atoi(std::getenv("SMOKE_QUALITY"))
@@ -408,6 +421,8 @@ int main(int argc, char** argv) {
                                     {unsigned(world.wrap().wrapChunk(x)),
                                      unsigned(y), unsigned(z)});
                     chunks.update();
+                    skyMap.setFocus(camera.position);
+                    skyMap.update();
                     sunlight.update();
                     blockLight.update();
                     chunks.uploadReadyMeshes(renderer);
@@ -1161,6 +1176,36 @@ int main(int argc, char** argv) {
                                 << " max_gaps128=" << approach.maxGaps128
                                 << " black_frames=" << approach.blackFrames
                                 << " max_black=" << approach.maxBlack << '\n';
+                            // Fully lit tiles: sun 15 exactly where the map
+                            // gives direct 15, never below its direct light.
+                            size_t cells = 0, wrong = 0, unmapped = 0;
+                            chunks.forEachReady([&](const ChunkCoord& c,
+                                                    Chunk& chunk) {
+                                if (!sunlight.isComplete(c)) return;
+                                const auto t = skyMap.tile(c.x, c.z);
+                                if (!t) {
+                                    ++unmapped;
+                                    return;
+                                }
+                                for (int z = 0; z < 16; ++z)
+                                    for (int x = 0; x < 16; ++x)
+                                        for (int y = 0; y < 16; ++y) {
+                                            const int sun =
+                                                chunk.tiles[z][y][x]
+                                                    .lightLevel.sun_exposure;
+                                            const int d = t->direct(
+                                                sky::Tile::index(x, z),
+                                                int(c.y) * 16 + y);
+                                            ++cells;
+                                            wrong += (sun == 15) != (d == 15) ||
+                                                     sun < d;
+                                        }
+                            });
+                            std::cout << "sky_check cells=" << cells
+                                      << " wrong=" << wrong
+                                      << " unmapped_chunks=" << unmapped
+                                      << " columns=" << skyMap.builtCount()
+                                      << '\n';
                             break;
                         }
                         settled = 0;  // no phase changes meanwhile

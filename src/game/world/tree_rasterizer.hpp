@@ -42,6 +42,16 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                   const TreeTileBox& box, float age, std::vector<uint8_t>& mask,
                   TreeWoodSelection selection = {});
 
+// The highest wood tile of each tile column of `box` at `age` (live wood,
+// as markTreeWood marks it inside `box`): tops[(z - box.z0) * width +
+// (x - box.x0)] = world Y, or INT_MIN where the column holds none (tops is
+// resized and reset first). Computed per sample sphere in closed form and
+// checked with markTreeWood's own test, so it agrees with it tile for tile
+// at a fraction of its cost (no volume is scanned). Sky heightmaps use it
+// (docs/handoff/sky-light.md).
+void treeWoodTops(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                  const TreeTileBox& box, float age, std::vector<int>& tops);
+
 // emit(x, y, z) for each wood tile of the box at `age`.
 template <typename Emit>
 void forEachTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,

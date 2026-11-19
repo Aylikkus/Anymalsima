@@ -119,6 +119,14 @@ class Source {
     // limbs) is not planned and rasterized slab by empty slab. May be
     // costly: StructureLod calls it on the pool, once per source object.
     virtual OccupancyPtr occupancy() const { return nullptr; }
+    // Seen from the sky (docs/handoff/sky-light.md): the highest voxel of
+    // each tile column of `columns` (unwrapped X, as `bounds`; only voxels
+    // with y0 <= y < y1 count), as tops[(z - z0) * width + (x - x0)] =
+    // world Y, or INT_MIN where the column holds none. Exact (level 0).
+    // The default rasterizes level-0 slabs from the top down, which is
+    // slow for tall structures: kinds should answer directly (trees project
+    // their skeleton). Thread-safe like rasterize.
+    virtual void skyTops(const TileBox& columns, std::vector<int>& tops) const;
 };
 using SourcePtr = std::shared_ptr<const Source>;
 

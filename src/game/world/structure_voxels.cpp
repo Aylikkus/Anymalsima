@@ -1,6 +1,7 @@
 #include "structure_voxels.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 
 namespace structure_voxels {
@@ -131,6 +132,47 @@ std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
         return a.distance < b.distance;
     });
     return out;
+}
+
+void Source::skyTops(const TileBox& columns, std::vector<int>& tops) const {
+    const int width = columns.x1 - columns.x0;
+    const int depth = columns.z1 - columns.z0;
+    tops.assign(columns.empty() ? 0 : size_t(width) * size_t(depth), INT_MIN);
+    const TileBox box = columns.intersect(bounds);
+    if (box.empty()) return;
+    const auto floorDiv = [](int a) {
+        return a >= 0 ? a / Side : -((-a + Side - 1) / Side);
+    };
+    for (int sz = floorDiv(box.z0); sz <= floorDiv(box.z1 - 1); ++sz)
+        for (int sx = floorDiv(box.x0); sx <= floorDiv(box.x1 - 1); ++sx) {
+            // Tiles of the box in this slab column still without a top.
+            const int tx0 = std::max(box.x0, sx * Side);
+            const int tx1 = std::min(box.x1, (sx + 1) * Side);
+            const int tz0 = std::max(box.z0, sz * Side);
+            const int tz1 = std::min(box.z1, (sz + 1) * Side);
+            int open = (tx1 - tx0) * (tz1 - tz0);
+            for (int sy = floorDiv(box.y1 - 1); sy >= floorDiv(box.y0) && open;
+                 --sy) {
+                const auto slab = rasterize(0, sx, sy, sz);
+                if (!slab) continue;
+                for (int z = tz0; z < tz1; ++z)
+                    for (int x = tx0; x < tx1; ++x) {
+                        int& top = tops[size_t(z - columns.z0) * width +
+                                        size_t(x - columns.x0)];
+                        if (top != INT_MIN) continue;
+                        for (int ly = Side - 1; ly >= 0; --ly) {
+                            const int y = sy * Side + ly;
+                            if (y < box.y0 || y >= box.y1) continue;
+                            if (slab->bits.test(cellIndex(x - sx * Side, ly,
+                                                          z - sz * Side))) {
+                                top = y;
+                                --open;
+                                break;
+                            }
+                        }
+                    }
+            }
+        }
 }
 
 Slabs rasterizeAll(const Source& source, int level, const WorldWrap& wrap) {

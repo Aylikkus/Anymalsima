@@ -49,6 +49,10 @@ Now:
 - `SunLightPropagator::isEstimated`: never fully lit and showing the estimate. `LightVolumeManager::bind` sets `u_light_chunk.w = 2` for these chunks, and `block.frag` multiplies their sky light by the structure sky occlusion map (step 2), as on distant terrain. Shade under limbs therefore goes distant terrain (map), then estimated chunk (estimate times map), then swept chunk (voxel light). The map matches voxel light within one level, so each step changes little.
 - Test: `sunlight_unknown_upper_slab_keeps_estimate`. Smoke: the elder approach (`SMOKE_APPROACH`) logs `approach_black columns=` (loaded columns within 128 tiles whose open ground reads no sky at four probes) and `black_frames` / `max_black` in `approach_done`. Measured (`SMOKE_TERRAIN=2 SMOKE_FOREST=elder SMOKE_ELDER_SPACING=3000 SMOKE_RADIUS=8 SMOKE_APPROACH="1200 0.5 40"`): before, black columns in 1541 of 2555 frames, at most 18 at once; after, none in 2590 frames. Mean frame 12.8 ms against 13.3 ms before.
 
+The blind/estimate path is a stopgap. The structural fix is the sky
+heightmap in `sky-light.md`: structures report their sky tops through a
+`Source` query, and sunlight no longer needs the slabs above the ground.
+
 ### Bottlenecks the structure API must respect
 
 These come from the light pipeline and chunk loading. They decide how far a structure kind can push height, footprint and edit rate.
@@ -111,5 +115,5 @@ Known limits:
 
 - Foliage (plants, ordinary tree crowns, billboards) takes its sky light from the CPU (`foliage_light`), which sees only loaded tiles: distant foliage under a structure stays sky-lit.
 - The map covers 2 km around the camera; beyond it structures cast nothing (view distance is up to 8 km on High).
-- Footprint cost: a source could compute its footprint directly (trees: project segments top-down) instead of through `rasterize`, if 3 s per elder per revision shows up in play. A tree's growth step (a new revision without `changedSince`) recomputes the whole footprint.
+- Footprint cost: a source could compute its footprint directly (trees: project segments top-down) instead of through `rasterize`, if 3 s per elder per revision shows up in play. `Source::skyTops` (sky heightmap, `sky-light.md`) now does exactly that at full resolution in about 0.1 s per elder; step 4 there builds the occlusion map from it. A tree's growth step (a new revision without `changedSince`) recomputes the whole footprint.
 - The upload could be limited to the changed rectangle.

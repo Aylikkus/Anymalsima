@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -55,6 +56,27 @@ class TreeVoxels final : public structure_voxels::Source {
             if (counts[i] >= needed) result.bits.set(i);
         if (result.bits.none()) return {};
         return result;
+    }
+
+    // Projects the skeleton (treeWoodTops) instead of rasterizing slabs.
+    void skyTops(const TileBox& columns,
+                 std::vector<int>& tops) const override {
+        const int width = columns.x1 - columns.x0;
+        tops.assign(columns.empty()
+                        ? 0
+                        : size_t(width) * size_t(columns.z1 - columns.z0),
+                    INT_MIN);
+        const auto& tree = *wood.tree;
+        if (!tree.skeleton || wood.age <= 0) return;
+        const auto part = tree.wood.intersect(columns);
+        if (part.empty()) return;
+        std::vector<int> local;
+        treeWoodTops(*tree.skeleton, tree.anchor, part, wood.age, local);
+        const int w = part.x1 - part.x0;
+        for (int z = part.z0; z < part.z1; ++z)
+            for (int x = part.x0; x < part.x1; ++x)
+                tops[size_t(z - columns.z0) * width + size_t(x - columns.x0)] =
+                    local[size_t(z - part.z0) * w + size_t(x - part.x0)];
     }
 
     // A cut changes only some segments (pruned ones, the cut one, new
