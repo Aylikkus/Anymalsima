@@ -10,6 +10,8 @@
 #include "chunk_manager.hpp"
 #include "light_volume.hpp"
 
+class SunLightPropagator;
+
 // Main-thread owner of the GPU light volumes sampled by the block shader.
 //
 // Every drawn chunk owns one 18^3 slot inside a paged 3D atlas. A slot holds
@@ -36,10 +38,13 @@ class LightVolumeManager {
     static constexpr uint8_t VolumeStage = 2;
     static constexpr uint8_t CoverStage = 5;
 
-    // blockLight: optional source of artificial light chroma; must outlive
-    // the manager.
+    // blockLight: optional source of artificial light chroma; sunLight:
+    // optional, tells which chunks still show estimated sky light (bound
+    // with u_light_chunk.w = 2, darkened by the structure sky occlusion map
+    // in block.frag). Both must outlive the manager.
     LightVolumeManager(ChunkManager& chunks, const DataStorage<Block>& blocks,
-                       const BlockLightPropagator* blockLight = nullptr);
+                       const BlockLightPropagator* blockLight = nullptr,
+                       const SunLightPropagator* sunLight = nullptr);
     ~LightVolumeManager();
     LightVolumeManager(const LightVolumeManager&) = delete;
     LightVolumeManager& operator=(const LightVolumeManager&) = delete;
@@ -61,8 +66,9 @@ class LightVolumeManager {
 
    private:
     struct Binding {
-        ShaderProperty chunk;  // u_light_chunk: origin - 1, valid flag
-        ShaderProperty slot;   // u_light_slot: slot base texel in the page
+        ShaderProperty
+            chunk;  // u_light_chunk: origin - 1, w: 1 swept, 2 estimated
+        ShaderProperty slot;  // u_light_slot: slot base texel in the page
     };
     // Pages are heap-pinned: ShaderProperty cannot be moved safely, and
     // queued draw commands keep pointers to these bindings.
@@ -97,6 +103,7 @@ class LightVolumeManager {
     ChunkManager& chunks;
     const DataStorage<Block>& blocks;
     const BlockLightPropagator* blockLight;
+    const SunLightPropagator* sunLight;
     Signal<const ChunkCoord&>::Connection readyConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     Signal<const ChunkCoord&>::Connection lightConnection;

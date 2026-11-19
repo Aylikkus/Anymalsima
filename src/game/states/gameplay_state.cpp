@@ -186,7 +186,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         *chunkManager, context.assets->getStorage<Block>(), context.threadPool,
         lightSources.get());
     lightVolumes = std::make_unique<LightVolumeManager>(
-        *chunkManager, context.assets->getStorage<Block>(), blockLight.get());
+        *chunkManager, context.assets->getStorage<Block>(), blockLight.get(),
+        sunLight.get());
     floraRenderer = std::make_unique<FloraRenderer>(
         *chunkManager, *context.assets, *this->world, *context.renderer);
     treeRenderer = std::make_unique<TreeRenderer>(

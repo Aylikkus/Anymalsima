@@ -24,6 +24,12 @@ class SunLightPropagator {
     bool isIdle() const;
     bool hasDirect(ChunkCoord coord) const;
     bool isComplete(ChunkCoord coord) const;
+    // The chunk shows estimated sky light, not swept voxel light: it was
+    // never fully lit, and its column's sweep has not run yet or stopped at
+    // a slab above it that is not generated yet (a tall structure raised
+    // the column top). Renderers darken such chunks with the structure
+    // sky occlusion map (docs/handoff/structures.md).
+    bool isEstimated(ChunkCoord coord) const;
     size_t inFlightCount() const {
         return directJobs.size() + indirectJobs.size();
     }
@@ -48,6 +54,15 @@ class SunLightPropagator {
         // recomputations keep showing it instead of a darker direct-only
         // lower bound, so edits never flash bounced light off.
         bool lit = false;
+        // The last sweep stopped at a missing slab above this chunk. Its
+        // tiles keep what they showed (the generation estimate or earlier
+        // full light) and serve as its direct light for neighbours; it gets
+        // no spread job until a complete sweep.
+        bool blind = false;
+        // Showed the estimate since it became ready (a blind sweep). Until
+        // full light lands it keeps doing so rather than drop to the direct
+        // lower bound, which is black under a wide structure.
+        bool estimated = false;
     };
     struct Slab {
         ChunkCoord coord;
@@ -56,6 +71,8 @@ class SunLightPropagator {
     struct ChunkLight {
         ChunkCoord coord;
         Light light{};
+        // Below a missing slab: `light` is only a lower bound of zero.
+        bool blind = false;
     };
     struct DirectInput {
         uint64_t column;
@@ -112,6 +129,8 @@ class SunLightPropagator {
     // fully opaque. Such chunks are finished without a worker job.
     bool spreadIsIdentity(const ChunkCoord& coord);
     bool hasQueuedNeighbor(const ChunkCoord& coord) const;
+    // The column has a sweep waiting or running.
+    bool sweepPending(uint64_t column) const;
     std::vector<uint64_t> dependencies(ChunkCoord coord) const;
     ChunkCoord beneficiary(ChunkCoord slab) const;
 

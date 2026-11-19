@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 #include "light_volume.hpp"
 #include "render/ui_context.hpp"
@@ -143,6 +144,7 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
     std::array<uint8_t, X * Z> sun;
     sun.fill(15);
     size_t next = 0;
+    bool blind = false;
     const int lowest = static_cast<int>(input.slabs.back().coord.y);
     const int highest =
         std::max(input.topSlab, static_cast<int>(input.slabs.front().coord.y));
@@ -158,12 +160,15 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
                      static_cast<unsigned>(input.column)});
                 // Never invent sky through an unavailable slab. Its arrival
                 // invalidates this column and resumes the sweep from the top.
+                // The chunks below are blind meanwhile: collect() keeps their
+                // estimate instead of publishing this zero.
                 sun.fill(0);
+                blind = true;
             }
             continue;
         }
         const auto& slab = input.slabs[next++];
-        ChunkLight output{slab.coord, {}};
+        ChunkLight output{slab.coord, {}, blind};
         for (int y = Y - 1; y >= 0; --y)
             for (int z = 0; z < Z; ++z)
                 for (int x = 0; x < X; ++x) {
@@ -270,8 +275,35 @@ void SunLightPropagator::collect() {
         for (auto& output : result.chunks) {
             auto it = states.find(output.coord);
             if (it == states.end()) continue;
-            const bool changed =
-                !it->second.directKnown || it->second.direct != output.light;
+            if (output.blind) {
+                // Sky slabs above are still generating (tall structures raise
+                // column tops by hundreds of tiles). Publishing the zero lower
+                // bound would turn whole chunks black until they all arrive;
+                // the tiles keep their estimate and neighbours spread from it.
+                Light shown{};
+                chunks.withChunkLocked(output.coord, [&](const Chunk& chunk) {
+                    for (int z = 0; z < Z; ++z)
+                        for (int y = 0; y < Y; ++y)
+                            for (int x = 0; x < X; ++x)
+                                shown[index(x, y, z)] =
+                                    chunk.tiles[z][y][x]
+                                        .lightLevel.sun_exposure;
+                });
+                const bool changed = !it->second.directKnown ||
+                                     !it->second.blind ||
+                                     it->second.direct != shown;
+                it->second.direct = shown;
+                it->second.directKnown = true;
+                it->second.blind = true;
+                if (!it->second.lit) it->second.estimated = true;
+                if (changed) invalidateAround(output.coord);
+                continue;
+            }
+            // A blind chunk dropped its spread job: requeue it even when the
+            // sweep matches what it showed.
+            const bool wasBlind = std::exchange(it->second.blind, false);
+            const bool changed = wasBlind || !it->second.directKnown ||
+                                 it->second.direct != output.light;
             it->second.direct = std::move(output.light);
             it->second.directKnown = true;
             if (changed) {
@@ -279,8 +311,10 @@ void SunLightPropagator::collect() {
                 // A chunk without any light yet gets a correct lower bound
                 // immediately; indirect light refines it without waiting
                 // for distant columns. A lit chunk keeps its previous full
-                // light until the refined result replaces it.
-                if (!it->second.lit) publish(output.coord, it->second.direct);
+                // light until the refined result replaces it, and so does a
+                // chunk showing the estimate (blind sweeps before).
+                if (!it->second.lit && !it->second.estimated)
+                    publish(output.coord, it->second.direct);
             }
         }
         for (const auto& coord : result.missing)
@@ -308,6 +342,7 @@ void SunLightPropagator::collect() {
         publish(coord, result.light);
         it->second.complete = true;
         it->second.lit = true;
+        it->second.estimated = false;
     }
 }
 
@@ -319,6 +354,12 @@ bool SunLightPropagator::hasDirect(ChunkCoord coord) const {
 bool SunLightPropagator::isComplete(ChunkCoord coord) const {
     const auto it = states.find(coord);
     return it != states.end() && it->second.complete;
+}
+
+bool SunLightPropagator::isEstimated(ChunkCoord coord) const {
+    const auto it = states.find(coord);
+    return it != states.end() && !it->second.lit &&
+           (it->second.estimated || !it->second.directKnown);
 }
 
 void SunLightPropagator::publish(ChunkCoord coord, const Light& values) {
@@ -350,14 +391,16 @@ bool SunLightPropagator::hasQueuedNeighbor(const ChunkCoord& coord) const {
     return false;
 }
 
+bool SunLightPropagator::sweepPending(uint64_t column) const {
+    return pendingDirect.contains(column) ||
+           std::any_of(directJobs.begin(), directJobs.end(),
+                       [&](const auto& job) { return job.column == column; });
+}
+
 bool SunLightPropagator::spreadIsIdentity(const ChunkCoord& coord) {
     const auto it = states.find(coord);
     if (it == states.end() || !it->second.directKnown) return false;
-    const auto column = columnKey(coord.x, coord.z);
-    if (pendingDirect.contains(column) ||
-        std::any_of(directJobs.begin(), directJobs.end(),
-                    [&](const auto& job) { return job.column == column; }))
-        return false;
+    if (sweepPending(columnKey(coord.x, coord.z))) return false;
     const auto& direct = it->second.direct;
     if (std::all_of(direct.begin(), direct.end(),
                     [](uint8_t v) { return v == 15; }))
@@ -472,11 +515,21 @@ void SunLightPropagator::update() {
                     indirectJobs.begin(), indirectJobs.end(),
                     [&](const auto& job) { return job.coord == coord; }))
                 continue;
+            // Blind and its column is not about to be swept again: nothing
+            // to spread yet, the column's next sweep re-queues it. A pending
+            // sweep is dispatched below, as this chunk's dependency.
+            if (const auto state = states.find(coord);
+                state != states.end() && state->second.blind &&
+                !sweepPending(columnKey(coord.x, coord.z))) {
+                pendingIndirect.erase(coord);
+                continue;
+            }
             if (spreadIsIdentity(coord)) {
                 auto& state = states.at(coord);
                 publish(coord, state.direct);
                 state.complete = true;
                 state.lit = true;
+                state.estimated = false;
                 pendingIndirect.erase(coord);
                 continue;
             }

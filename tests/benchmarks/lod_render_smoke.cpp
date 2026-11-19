@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
                                         pool, &registry);
         blockLight.watch(editor);
         LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
-                                   &blockLight);
+                                   &blockLight, &sunlight);
         // SMOKE_QUALITY=0..2 picks the light (shadow) budget preset.
         const int lightQuality = std::getenv("SMOKE_QUALITY")
                                      ? std::atoi(std::getenv("SMOKE_QUALITY"))
@@ -272,6 +272,9 @@ int main(int argc, char** argv) {
             int state = 0;  // 0 settling, 1 walking, 2 arrived
             int frames = 0, gapFrames = 0, gapFrames128 = 0;
             size_t maxGaps = 0, maxGaps128 = 0;
+            // Loaded columns near the eye showing black ground.
+            size_t maxBlack = 0;
+            int blackFrames = 0;
             std::vector<std::array<double, 6>> times;  // per section
         } approach;
         const bool approaching =
@@ -1078,8 +1081,36 @@ int main(int argc, char** argv) {
                         const double d =
                             std::hypot(approach.targetX - camera.position.x,
                                        approach.targetZ - camera.position.z);
+                        // Loaded columns within 128 tiles whose open ground
+                        // reads no sky at four probes: chunks blacked out
+                        // while sky slabs above them generate (a tall
+                        // structure raises the column top).
+                        size_t black = 0;
+                        const int cx0 = int(camera.position.x) / 16;
+                        const int cz0 = int(camera.position.z) / 16;
+                        for (int dz = -8; dz <= 8; ++dz)
+                            for (int dx = -8; dx <= 8; ++dx) {
+                                int dark = 0;
+                                for (const int p : {2, 13})
+                                    for (const int q : {2, 13}) {
+                                        const int x = (cx0 + dx) * 16 + p;
+                                        const int z = (cz0 + dz) * 16 + q;
+                                        if (x < 0 || z < 0) continue;
+                                        const int y =
+                                            chunks.generatedSurfaceY(
+                                                unsigned(x), unsigned(z)) +
+                                            1;
+                                        const Tile* t = chunks.tileAt(x, y, z);
+                                        dark += t && t->isAir() &&
+                                                t->lightLevel.sun_exposure == 0;
+                                    }
+                                black += dark == 4;
+                            }
+                        approach.maxBlack = std::max(approach.maxBlack, black);
+                        approach.blackFrames += black > 0;
                         if (approach.frames++ % 30 == 0 || sections[4] > 33)
                             std::cout
+                                << "approach_black columns=" << black << '\n'
                                 << "approach d=" << int(d)
                                 << " frame_ms=" << sections[4]
                                 << " chunks_ms=" << sections[0]
@@ -1128,7 +1159,8 @@ int main(int argc, char** argv) {
                                 << " gap_frames128=" << approach.gapFrames128
                                 << " max_gaps512=" << approach.maxGaps
                                 << " max_gaps128=" << approach.maxGaps128
-                                << '\n';
+                                << " black_frames=" << approach.blackFrames
+                                << " max_black=" << approach.maxBlack << '\n';
                             break;
                         }
                         settled = 0;  // no phase changes meanwhile

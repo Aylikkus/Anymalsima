@@ -241,6 +241,28 @@ TEST(sunlight_unknown_upper_slab) {
     f.expectSun(8, 15, 8, 15);
 }
 
+TEST(sunlight_unknown_upper_slab_keeps_estimate) {
+    test::SunlightFixture f;
+    // Generation estimated open sky (ChunkManager::estimateSkyLight). A
+    // sweep that stops at the missing slab above must not black it out, and
+    // the chunk reports the estimate until it is fully lit.
+    f.load({0, 0, 0}, 15);
+    f.light();
+    f.expectSun(8, 15, 8, 15);
+    f.expectSun(8, 0, 8, 15);
+    CHECK(f.sunlight.isEstimated(f.coord({0, 0, 0})));
+    CHECK(!f.sunlight.isComplete(f.coord({0, 0, 0})));
+    // The arriving slab holds a roof over part of the chunk.
+    auto& roof = f.load({0, 1, 0});
+    for (int z = 0; z < 8; ++z)
+        for (int x = 0; x < 16; ++x) roof.tiles[z][0][x].block_id = 1;
+    f.light();
+    CHECK(!f.sunlight.isEstimated(f.coord({0, 0, 0})));
+    CHECK(f.sunlight.isComplete(f.coord({0, 0, 0})));
+    f.expectSun(8, 15, 12, 15);
+    f.expectSun(8, 15, 2, 9);  // 15 - 6: six tiles from the roof's edge
+}
+
 TEST(sunlight_ready_above_bound) {
     test::SunlightFixture f;
     f.load({0, 1, 0});

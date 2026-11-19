@@ -7,7 +7,9 @@ SAMPLER2DARRAY(u_normal_array, 1);
 // r = sky light, g = block light, ba = block light chroma. Each slot has a one-cell border copied
 // from neighboring chunks, so faces on chunk borders filter seamlessly.
 SAMPLER3D(u_light_volume, 2);
-uniform vec4 u_light_chunk;  // w = 0: no volume, use full sky light
+// w = 0: no volume, use full sky light; 1: swept voxel light; 2: estimated
+// sky light (SunLightPropagator::isEstimated), shaded by u_sky_occlusion.
+uniform vec4 u_light_chunk;
 uniform vec4 u_light_slot;   // xyz = slot base texel inside the page
 // LightShadows atlas and LodLightMap (LightRenderer).
 SAMPLER2D(u_shadow_atlas, 3);
@@ -103,6 +105,10 @@ void main()
     if (u_light_chunk.w > 0.5) {
         vec4 cell = sampleLightVolume(v_light);
         light = cell.rg;
+        // Sky slabs above are still generating: the estimate ignores the
+        // structures above, which the occlusion map knows.
+        if (u_light_chunk.w > 1.5)
+            light.x *= surfaceStructureSky(v_position, geometric);
         tint = surfaceLightTint(cell.ba);
         // The block-light gradient points toward brighter space, which
         // gives artificial light a direction for the normal maps.

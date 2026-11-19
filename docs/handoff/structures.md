@@ -30,6 +30,37 @@ tree-specific today and the general API they move into.
 - **Fixed (step 1):** a whole tree was rasterized at one level, chosen by the distance to its nearest point, so a 1 km elder near the player was full-resolution end to end. Levels are now planned per slab.
 - **Fixed:** seen from high up (an elder's crown), its real chunks were loaded but never drawn, so the slabs stayed and edits did not show. A column counts as detailed only while its ground surface is within the vertical detail range (`DetailCoverage`), and both the chunk pass and the slab hand-over required that. `TerrainLodManager::drawsChunk` now also accepts any chunk above its column's surface band, where distant terrain draws nothing.
 - **Fixed (step 2):** distant terrain ignored structures for sky light, so shade appeared only when chunks loaded. Surfaces without voxel light now read the sky occlusion map.
+- **Fixed (2026-11-19):** walking up to an elder, whole chunks of open ground turned black and stayed so for seconds. See "Light hand-over when chunks load" below.
+
+## Light hand-over when chunks load (2026-11-19)
+
+How a chunk gets its sky light, in order:
+
+1. **Estimate** (`ChunkManager::estimateSkyLight`, when generation publishes the chunk): full sky down to the first solid tile, for chunks above the column's *terrain* surface. It knows nothing about structures.
+2. **Direct sweep** (`SunLightPropagator::sweep`, one job per chunk column): sunlight falls from the column top (`ChunkManager::getColumnTopY`) down through every slab. Structures raise the column top before any slab of the column is lit (trees: `TreeColumn::woodTop` in `prepareTrees`), so the sweep sees their voxels.
+3. **Spread** (indirect light, one job per chunk, needs the direct light of its 26 neighbours): the final value.
+
+The bug: a sweep that reaches a slab that is not generated yet does not invent sky through it. It used to publish zero for every chunk below it as their "lower bound". Under an elder the column top is up to about 1000, so a column needs up to 60 slabs above the ground, generated as sky prerequisites (`requestLighting`). Until the last one arrived, the ground chunks were black, and the spread jobs of their neighbours used those zeros too.
+
+Now:
+
+- Chunks below a missing slab are **blind** (`State::blind`). Their tiles keep what they showed (the estimate, or earlier full light), neighbours spread from those values, and they get no spread job until a complete sweep. When the slab arrives its column is swept again (`sweepPending` keeps the blind chunk queued until the sweep is dispatched).
+- A chunk that has shown the estimate keeps it through its first complete sweep, until its spread result lands. The direct lower bound has no bounce, so it is black under a wide limb.
+- `SunLightPropagator::isEstimated`: never fully lit and showing the estimate. `LightVolumeManager::bind` sets `u_light_chunk.w = 2` for these chunks, and `block.frag` multiplies their sky light by the structure sky occlusion map (step 2), as on distant terrain. Shade under limbs therefore goes distant terrain (map), then estimated chunk (estimate times map), then swept chunk (voxel light). The map matches voxel light within one level, so each step changes little.
+- Test: `sunlight_unknown_upper_slab_keeps_estimate`. Smoke: the elder approach (`SMOKE_APPROACH`) logs `approach_black columns=` (loaded columns within 128 tiles whose open ground reads no sky at four probes) and `black_frames` / `max_black` in `approach_done`. Measured (`SMOKE_TERRAIN=2 SMOKE_FOREST=elder SMOKE_ELDER_SPACING=3000 SMOKE_RADIUS=8 SMOKE_APPROACH="1200 0.5 40"`): before, black columns in 1541 of 2555 frames, at most 18 at once; after, none in 2590 frames. Mean frame 12.8 ms against 13.3 ms before.
+
+### Bottlenecks the structure API must respect
+
+These come from the light pipeline and chunk loading. They decide how far a structure kind can push height, footprint and edit rate.
+
+- **Column top and sky prerequisites.** Raising a column top makes every slab from the ground up to that top a prerequisite of the column's sunlight. Cost grows with height times footprint, and every one of those slabs runs full generation and stamping. An elder costs up to about 60 slabs per column over its whole crown. Towns are cheap; towers, bridges and arches are expensive; the planned sky islands at Y of about 2048 are expensive too. Step 3 (chunk stamping) should:
+  - give the column top per column from the structure's real occupancy, not its bounding box (`Source::occupancy` already knows which slabs can hold voxels);
+  - let slabs that a source reports empty over a column skip generation (known air), so the sweep can pass through them without generating anything.
+- **Tree sets before slabs.** A slab under a landmark is generated only once every region tree set it needs is built (`treesReady`, landmark reach up to `TreeMaxLandmarkReach`). Kinds with world-wide reach should have their per-region data cheap and ready before chunk generation asks for it.
+- **The estimate ignores structures.** Until the sweep lands, structure shade comes only from the sky occlusion map. The map holds wood only (no crowns), at 4-tile texels, within 2 km. Its footprint takes about 3 s per elder, and until a footprint exists an estimated chunk under it is fully lit, so the shade appears later. A kind whose shade matters (roofs, covered yards) should compute its footprint directly rather than through `rasterize` (see step 2, known limits).
+- **Edits in a blind column.** Opacity edits to a chunk whose column is still blind do not change its sky light until the missing slabs arrive (the chunk keeps its estimate or old light). This is harmless at walking pace. A structure that edits itself quickly near the player (a growing settlement, collapse) needs its columns' slabs generated first.
+- **Spread waits for neighbours.** A chunk's final light needs the direct light of its 26 neighbours. A structure that dirties many columns at once (a large revision) relights a wide area: one sweep per column and one spread per chunk, at most 8 jobs in flight and 2 ms of dispatch per frame. Report a tight `changedSince` box, which shrinks the dirtied area.
+- **Light volume uploads.** At most 64 volume rebuilds per frame (1.5 ms budget, `LightVolumeManager`). A completed column under an elder republishes many chunks at once; the rest catch up over the next frames, nearest first.
 
 ## Plan
 

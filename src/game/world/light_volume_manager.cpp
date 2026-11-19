@@ -4,6 +4,8 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "sunlight_propagator.hpp"
+
 namespace {
 // Generous idle windows: re-acquiring a slot rebuilds it synchronously, so
 // turning the camera back must not rebuild hundreds of volumes at once.
@@ -41,8 +43,12 @@ void forNeighborhood(const WorldWrap& wrap, const ChunkCoord& coord, F&& fn) {
 
 LightVolumeManager::LightVolumeManager(ChunkManager& chunks,
                                        const DataStorage<Block>& blocks,
-                                       const BlockLightPropagator* blockLight)
-    : chunks(chunks), blocks(blocks), blockLight(blockLight) {
+                                       const BlockLightPropagator* blockLight,
+                                       const SunLightPropagator* sunLight)
+    : chunks(chunks),
+      blocks(blocks),
+      blockLight(blockLight),
+      sunLight(sunLight) {
     const auto* caps = bgfx::getCaps();
     if (!(caps->supported & BGFX_CAPS_TEXTURE_3D))
         throw std::runtime_error("Light volumes require 3D texture support");
@@ -282,11 +288,16 @@ bool LightVolumeManager::bind(const ChunkCoord& coord,
     auto& page = *pages[it->second.page];
     auto& binding = page.bindings[it->second.index];
     // block.vert rebuilds world positions from the drawn transform, so the
-    // volume origin must be in the same X frame as the draw.
+    // volume origin must be in the same X frame as the draw. Estimated sky
+    // light ignores structures above the chunk; w = 2 lets the shader shade
+    // it with the sky occlusion map, as distant terrain is, until the sweep
+    // lands.
+    const float estimated =
+        sunLight && sunLight->isEstimated(coord) ? 2.f : 1.f;
     binding.chunk.setVec4(
         {float(originX.value_or(double(coord.x) * Chunk::SIZE_X)) - 1.f,
          float(coord.y) * Chunk::SIZE_Y - 1.f,
-         float(coord.z) * Chunk::SIZE_Z - 1.f, 1.f});
+         float(coord.z) * Chunk::SIZE_Z - 1.f, estimated});
     uniforms.push_back(&binding.chunk);
     uniforms.push_back(&binding.slot);
     uniforms.push_back(&page.sampler);
