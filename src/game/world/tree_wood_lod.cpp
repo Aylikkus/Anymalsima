@@ -21,8 +21,9 @@ class TreeVoxels final : public structure_voxels::Source {
         bounds = tree.wood;
         const uint64_t skeleton =
             uint64_t(reinterpret_cast<uintptr_t>(tree.skeleton.get()));
-        revision = (uint64_t(std::bit_cast<uint32_t>(this->wood.age)) << 8 |
-                    this->wood.block) ^
+        revision = (uint64_t(std::bit_cast<uint32_t>(this->wood.age)) << 24 |
+                    uint64_t(this->wood.shell) << 16 |
+                    uint64_t(this->wood.innerBlock) << 8 | this->wood.block) ^
                    (skeleton * 0x9e3779b97f4a7c15ULL);
     }
 
@@ -36,27 +37,43 @@ class TreeVoxels final : public structure_voxels::Source {
         const auto part = tree.wood.intersect(slab);
         if (part.empty()) return {};
         std::vector<uint8_t> mask;
-        markTreeWood(*tree.skeleton, tree.anchor, part, wood.age, mask);
+        markTreeWoodLayers(*tree.skeleton, tree.uncut.get(), tree.anchor, part,
+                           wood.age, wood.innerBlock ? wood.shell : 0, mask);
         structure_voxels::Slab result;
         result.block = wood.block;
         // Level zero is also the chunk stamping path. Count samples only
         // when several tiles contribute to a coarse cell.
         std::vector<uint16_t> counts(level ? structure_voxels::Cells : 0);
+        std::vector<uint16_t> coreCounts(
+            level && wood.innerBlock ? structure_voxels::Cells : 0);
+        const auto setCore = [&](size_t i) {
+            if (result.blocks.empty())
+                result.blocks.assign(structure_voxels::Cells, wood.block);
+            result.blocks[i] = wood.innerBlock;
+        };
         for (int y = part.y0; y < part.y1; ++y)
             for (int z = part.z0; z < part.z1; ++z)
                 for (int x = part.x0; x < part.x1; ++x) {
-                    if (!mask[part.index(x, y, z)]) continue;
+                    const uint8_t material = mask[part.index(x, y, z)];
+                    if (!material) continue;
                     const size_t i = structure_voxels::cellIndex(
                         (x - slab.x0) / s, (y - slab.y0) / s,
                         (z - slab.z0) / s);
-                    if (level)
+                    if (level) {
                         ++counts[i];
-                    else
+                        if (material == 2) ++coreCounts[i];
+                    } else {
                         result.bits.set(i);
+                        if (material == 2) setCore(i);
+                    }
                 }
         const int needed = std::max(1, s * s * s / 4);
         for (size_t i = 0; i < counts.size(); ++i)
-            if (counts[i] >= needed) result.bits.set(i);
+            if (counts[i] >= needed) {
+                result.bits.set(i);
+                if (!coreCounts.empty() && coreCounts[i] == counts[i])
+                    setCore(i);
+            }
         if (result.bits.none()) return {};
         return result;
     }
@@ -87,7 +104,10 @@ class TreeVoxels final : public structure_voxels::Source {
     std::optional<TileBox> changedSince(
         const structure_voxels::Source& olderSource) const override {
         const auto* older = dynamic_cast<const TreeVoxels*>(&olderSource);
-        if (!older || older->wood.block != wood.block) return std::nullopt;
+        if (!older || older->wood.block != wood.block ||
+            older->wood.innerBlock != wood.innerBlock ||
+            older->wood.shell != wood.shell)
+            return std::nullopt;
         const auto& a = *older->wood.tree;
         const auto& b = *wood.tree;
         if (!a.skeleton || !b.skeleton || !(a.anchor == b.anchor))
@@ -124,7 +144,8 @@ class TreeVoxels final : public structure_voxels::Source {
             const float flare = s.order == 0 ? 1 + k.flare.amount : 1;
             if (std::max(s.r0, s.r1) * flare < TreeVoxelRadius) return;
             const float r =
-                std::max(s.r0, s.r1) * (1 + std::max(0.f, k.flare.amount)) + 2;
+                std::max(s.r0, s.r1) * (1 + std::max(0.f, k.flare.amount)) + 2 +
+                wood.shell;
             const TileBox part{
                 int(std::floor(a.anchor.x + 0.5f + std::min(s.a.x, s.b.x) - r)),
                 int(std::floor(a.anchor.y + 1 + std::min(s.a.y, s.b.y) - r)),
@@ -256,9 +277,10 @@ structure_voxels::ColumnPtr columnVoxels(
         const auto& tree = *entry.tree;
         const auto* rule = table.find(tree.species);
         if (!rule || !rule->woodBlock || tree.wood.empty()) continue;
-        const float age = tree.growthAge(day);
+        const float age = tree.woodAgeForDay(day);
         if (age <= 0) continue;
-        const Source input{entry.tree, age, rule->woodBlock};
+        const Source input{entry.tree, age, rule->woodBlock,
+                           rule->innerWoodBlock, rule->woodShell()};
         column->add(make(input), entry.anchor.x - tree.anchor.x);
     }
     column->orderByKey();

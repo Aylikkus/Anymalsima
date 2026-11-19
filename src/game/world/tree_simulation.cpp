@@ -98,7 +98,8 @@ void TreeSimulation::applyChanges(const ChunkCoord& coord,
                             EditMode::Replace,
                             c.block,
                             true,
-                            c.rootOwner});
+                            c.rootOwner,
+                            c.previousBlock});
     }
     applying = true;
     editor.apply(requests);
@@ -174,7 +175,7 @@ std::vector<TreeSimulation::Owner> TreeSimulation::owners(TilePos pos,
     for (const auto& entry : column->trees) {
         const auto& tree = *entry.tree;
         const auto* rule = chunks.treeSpecies().find(tree.species);
-        if (!rule || rule->woodBlock != block) continue;
+        if (!rule || !rule->ownsWood(block)) continue;
         const auto& k = *tree.skeleton;
         if (!k.formsWood()) continue;
         const float age = tree.growthAge(today);
@@ -269,7 +270,7 @@ bool TreeSimulation::severed(Owner& o, TilePos removed, bool thin) const {
                     continue;
                 const Tile* t = chunks.tileAt(
                     int(chunks.wrap().wrapTile(tile.x)), tile.y, tile.z);
-                if (!t || t->block_id == rule->woodBlock) return false;
+                if (!t || rule->ownsWood(t->block_id)) return false;
             }
         return true;
     }
@@ -327,7 +328,7 @@ bool TreeSimulation::severed(Owner& o, TilePos removed, bool thin) const {
                     probe % 2 ? offset : -offset;
             const Tile* tile =
                 chunks.tileAt(int(chunks.wrap().wrapTile(p[0])), p[1], p[2]);
-            if (tile && tile->block_id != rule->woodBlock) continue;
+            if (tile && !rule->ownsWood(tile->block_id)) continue;
             markTreeWood(section, a,
                          {p[0], p[1], p[2], p[0] + 1, p[1] + 1, p[2] + 1}, age,
                          mask);
@@ -364,7 +365,7 @@ bool TreeSimulation::severed(Owner& o, TilePos removed, bool thin) const {
                 for (int x = slice.x1 - 1; x >= slice.x0 && !supported; --x) {
                     const Tile* tile =
                         chunks.tileAt(int(chunks.wrap().wrapTile(x)), y, z);
-                    if (tile && tile->block_id != rule->woodBlock) continue;
+                    if (tile && !rule->ownsWood(tile->block_id)) continue;
                     markTreeWood(k, a, {x, y, z, x + 1, y + 1, z + 1}, age,
                                  mask);
                     // Unloaded wood still counts as supporting the limb.
@@ -489,10 +490,10 @@ bool TreeSimulation::severedByConnectivity(Owner& o, TilePos removed) const {
         auto [it, inserted] = loaded.try_emplace(c, nullptr);
         if (inserted) it->second = chunks.getChunk(c);
         if (!it->second) return true;
-        return it->second
-                   ->tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y]
-                          [wx % Chunk::SIZE_X]
-                   .block_id == rule->woodBlock;
+        return rule->ownsWood(it->second
+                                  ->tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y]
+                                         [wx % Chunk::SIZE_X]
+                                  .block_id);
     };
     const auto inLimb = [&](const Where& w) {
         return w.distance <= w.radius + 1.5f && w.arc >= nearLimit - 2 &&
@@ -744,7 +745,7 @@ bool TreeSimulation::baseLost(const TreeColumn::Entry& entry) {
             if (!mask[row.index(x, row.y0, z)]) continue;
             expected = true;
             const Tile* t = chunks.tileAt(x, row.y0, z);
-            if (!t || t->block_id == rule->woodBlock) return false;
+            if (!t || rule->ownsWood(t->block_id)) return false;
         }
     return expected;
 }
@@ -752,7 +753,7 @@ bool TreeSimulation::baseLost(const TreeColumn::Entry& entry) {
 void TreeSimulation::kill(const TreeColumn::Entry& entry) {
     const auto tree = entry.tree;
     auto map = std::make_shared<TreeOverrideMap>(*chunks.treeOverrides());
-    if (tree->key & TreeRecord::PlantedBit) {
+    if (TreeRecord::isPlantedKey(tree->key)) {
         map->erase(tree->key);
     } else {
         TreeRecord record;
@@ -792,6 +793,9 @@ void TreeSimulation::woodRemoved(const BlockChange& change) {
         auto& c = candidates[i];
         const auto& k = *c.entry.tree->skeleton;
         const auto& segment = k.segments[size_t(c.segment)];
+        // A trunk capsule extends below the base into nearby caves. Wood
+        // there can be excavated without sawing a row through the trunk.
+        if (segment.order == 0 && change.pos.y <= c.entry.anchor.y) continue;
         // A settling trunk is not cut again before its ring has closed.
         if (segment.order == 0 && settling.contains(c.entry.tree->key))
             continue;
@@ -862,10 +866,11 @@ void TreeSimulation::startClear(const Clear& clear) {
              pool.submit_task(
                  [tree = clear.removed, coord = clear.coord,
                   anchor = clear.anchor, block = rule ? rule->woodBlock : 0,
+                  inner = rule ? rule->innerWoodBlock : 0,
                   age = clear.removed->growthAge(today),
                   period = chunks.wrap().tiles] {
                      return treeWoodRemoval(coord, *tree, anchor, block, age,
-                                            period);
+                                            period, inner);
                  },
                  BS::pr::high)});
         return;
@@ -875,11 +880,13 @@ void TreeSimulation::startClear(const Clear& clear) {
         {clear,
          pool.submit_task(
              [tree = clear.tree, coord = clear.coord, anchor = clear.anchor,
-              block = rule ? rule->woodBlock : 0, day = clear.cutDay,
+              block = rule ? rule->woodBlock : 0,
+              inner = rule ? rule->innerWoodBlock : 0,
+              shell = rule ? rule->woodShell() : 0, day = clear.cutDay,
               settles = clear.settling != 0, period = chunks.wrap().tiles] {
                  return treeCutWoodDelta(coord, *tree, anchor, block,
                                          uint16_t(tree->cuts.size()), day,
-                                         settles, period);
+                                         settles, period, inner, shell);
              },
              BS::pr::high)});
 }
@@ -943,6 +950,7 @@ void TreeSimulation::cut(const Owner& o) {
     record.cuts.push_back({o.segment, o.t, old.age(today), o.normal});
     auto start = std::chrono::steady_clock::now();
     auto tree = std::make_shared<TreeInstance>(old);
+    if (!tree->uncut) tree->uncut = old.skeleton;
     tree->skeleton = applyTreeCuts(*old.skeleton, rule->species, record.cuts,
                                    record.cuts.size() - 1);
     tree->variant = -1;
@@ -1044,7 +1052,7 @@ std::string TreeSimulation::describe(TilePos tile, double now) const {
             << " m";
         if (!tree.cuts.empty()) out << ", " << tree.cuts.size() << " cut(s)";
         if (!k.alive(age)) out << ", dead";
-        if (tree.key & TreeRecord::PlantedBit) out << ", planted";
+        if (TreeRecord::isPlantedKey(tree.key)) out << ", planted";
         return out.str();
     }
     return {};

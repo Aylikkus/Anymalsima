@@ -119,10 +119,11 @@ TreeTileBox treeCutWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
     return cut ? woodBounds(skeleton, anchor, true, cut) : TreeTileBox{};
 }
 
-void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
-                  const TreeTileBox& box, float age, std::vector<uint8_t>& mask,
-                  TreeWoodSelection selection) {
-    mask.assign(box.volume(), 0);
+namespace {
+void rasterTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                    const TreeTileBox& box, float age,
+                    std::vector<uint8_t>& mask, TreeWoodSelection selection,
+                    bool extendCutEnds = false) {
     if (box.empty() || age <= 0 || !skeleton.formsWood()) return;
     const auto planes = selection.cut == 0
                             ? cutPlanes(skeleton)
@@ -157,7 +158,7 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
         const TreeVec hi{std::max(s.a.x, s.b.x) + reach,
                          std::max(s.a.y, s.b.y) + reach,
                          std::max(s.a.z, s.b.z) + reach};
-        const TreeTileBox local =
+        TreeTileBox local =
             TreeTileBox{anchor.x + int(std::floor(lo.x)),
                         anchor.y + int(std::floor(lo.y + 0.5f)),
                         anchor.z + int(std::floor(lo.z)),
@@ -165,6 +166,13 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                         anchor.y + int(std::ceil(hi.y + 0.5f)) + 1,
                         anchor.z + int(std::ceil(hi.z)) + 1}
                 .intersect(box);
+        if (s.flags & TreeSegment::RootCollar) {
+            const auto& plate = skeleton.segments.front();
+            const int rise =
+                int(std::ceil(plate.r0 * (1 + skeleton.flare.amount)));
+            local.y0 = std::max(local.y0, anchor.y + 1);
+            local.y1 = std::min(local.y1, anchor.y + rise + 1);
+        }
         if (local.empty()) return;
         if (s.flags & TreeSegment::RootPlate) {
             // The flared trunk continues beneath its lowest face, tapering
@@ -243,7 +251,9 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
     for (size_t si = 0; si < skeleton.segments.size(); ++si) {
         const auto& s = skeleton.segments[si];
         if (!selected(s, selection)) continue;
-        raster(s, planes.empty() ? noPlanes : planes[si], false);
+        if (extendCutEnds && (planes.empty() || planes[si].empty())) continue;
+        raster(s, planes.empty() || extendCutEnds ? noPlanes : planes[si],
+               false);
         // The piece a cut took starts on its stump: the stump's wood past
         // the cut face went with it (on a sloping limb sawn along a grid
         // row, a wedge the piece's own capsule does not reach).
@@ -271,6 +281,67 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
             }
         }
     }
+}
+
+}  // namespace
+
+void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                  const TreeTileBox& box, float age, std::vector<uint8_t>& mask,
+                  TreeWoodSelection selection) {
+    mask.assign(box.volume(), 0);
+    rasterTreeWood(skeleton, anchor, box, age, mask, selection);
+}
+
+void markTreeWoodLayers(const TreeSkeleton& skeleton, const TreeSkeleton* uncut,
+                        TreeAnchor anchor, const TreeTileBox& box, float age,
+                        int shell, std::vector<uint8_t>& layers) {
+    if (!shell || box.empty() || age <= 0) {
+        markTreeWood(skeleton, anchor, box, age, layers);
+        return;
+    }
+
+    const TreeTileBox padded{box.x0 - shell, box.y0 - shell, box.z0 - shell,
+                             box.x1 + shell, box.y1 + shell, box.z1 + shell};
+    std::vector<uint8_t> exterior;
+    markTreeWood(skeleton, anchor, padded, age, exterior);
+    layers.resize(box.volume());
+    bool occupied = false;
+    for (int y = box.y0; y < box.y1; ++y)
+        for (int z = box.z0; z < box.z1; ++z)
+            for (int x = box.x0; x < box.x1; ++x) {
+                const uint8_t cell = exterior[padded.index(x, y, z)];
+                layers[box.index(x, y, z)] = cell;
+                occupied |= cell != 0;
+            }
+    if (!occupied) return;
+
+    // The clipped occupancy is already copied out. Fill the reference
+    // exterior in place so occupied cells skip the sample tests.
+    if (uncut) {
+        rasterTreeWood(*uncut, anchor, padded, age, exterior, {});
+        rasterTreeWood(skeleton, anchor, padded, age, exterior, {}, true);
+    }
+
+    const size_t row = size_t(padded.x1 - padded.x0);
+    const size_t plane = row * size_t(padded.z1 - padded.z0);
+    std::vector<uint8_t> core(exterior.size());
+    for (int depth = 1; depth <= shell; ++depth) {
+        for (int y = padded.y0 + depth; y < padded.y1 - depth; ++y)
+            for (int z = padded.z0 + depth; z < padded.z1 - depth; ++z)
+                for (int x = padded.x0 + depth; x < padded.x1 - depth; ++x) {
+                    const size_t i = padded.index(x, y, z);
+                    core[i] = exterior[i] & exterior[i - 1] & exterior[i + 1] &
+                              exterior[i - row] & exterior[i + row] &
+                              exterior[i - plane] & exterior[i + plane];
+                }
+        core.swap(exterior);
+    }
+    for (int y = box.y0; y < box.y1; ++y)
+        for (int z = box.z0; z < box.z1; ++z)
+            for (int x = box.x0; x < box.x1; ++x) {
+                auto& cell = layers[box.index(x, y, z)];
+                if (cell && exterior[padded.index(x, y, z)]) cell = 2;
+            }
 }
 
 void treeWoodTops(const TreeSkeleton& skeleton, TreeAnchor anchor,

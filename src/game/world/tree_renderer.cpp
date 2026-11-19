@@ -188,7 +188,7 @@ std::vector<structure_voxels::SourcePtr> TreeRenderer::landmarkVoxels(
         const auto* rule = table.find(tree.species);
         if (!rule || !rule->landmark || !rule->woodBlock || !tree.skeleton)
             continue;
-        const float age = tree.growthAge(today);
+        const float age = tree.woodAgeForDay(today);
         if (age <= 0) continue;
         // Growth steps of the crown meshes: the proxies are rebuilt a few
         // dozen times over the tree's maturity, not every day, and never
@@ -201,8 +201,9 @@ std::vector<structure_voxels::SourcePtr> TreeRenderer::landmarkVoxels(
                               k.matureAge(), k.growthPhaseStart())
                         : age;
         if (woodAge > 0)
-            out.push_back(
-                tree_wood_lod::voxels({draw.tree, woodAge, rule->woodBlock}));
+            out.push_back(tree_wood_lod::voxels(
+                {draw.tree, woodAge, rule->woodBlock, rule->innerWoodBlock,
+                 rule->woodShell()}));
     }
     return out;
 }

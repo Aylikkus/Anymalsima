@@ -13,8 +13,11 @@ using namespace structure_voxels;
 class MaskedStructure final : public Source {
    public:
     MaskedStructure(SourcePtr source, EditMap masks, WorldWrap wrap,
-                    uint64_t editRevision)
-        : source(std::move(source)), masks(std::move(masks)), wrap(wrap) {
+                    uint64_t editRevision, bool keepWounds)
+        : source(std::move(source)),
+          masks(std::move(masks)),
+          wrap(wrap),
+          keepWounds(keepWounds) {
         key = this->source->key;
         bounds = this->source->bounds;
         revision = this->source->revision ^
@@ -26,7 +29,7 @@ class MaskedStructure final : public Source {
     std::optional<Slab> rasterize(int level, int sx, int sy,
                                   int sz) const override {
         auto out = source->rasterize(level, sx, sy, sz);
-        if (!out) return out;
+        if (!out || masks.empty()) return out;
         const int scale = 1 << level;
         const int x0 = sx * scale, y0 = sy * scale, z0 = sz * scale;
         for (int dz = 0; dz < scale; ++dz)
@@ -50,7 +53,7 @@ class MaskedStructure final : public Source {
     void skyTops(const TileBox& columns,
                  std::vector<int>& tops) const override {
         source->skyTops(columns, tops);
-        if (columns.empty()) return;
+        if (columns.empty() || masks.empty()) return;
         std::vector<int> next;
         for (int z = columns.z0; z < columns.z1; ++z)
             for (int x = columns.x0; x < columns.x1; ++x) {
@@ -69,11 +72,49 @@ class MaskedStructure final : public Source {
 
     std::optional<TileBox> changedSince(const Source& older) const override {
         const auto* masked = dynamic_cast<const MaskedStructure*>(&older);
-        if (masked && masks == masked->masks) {
-            if (source->revision == masked->source->revision) return TileBox{};
-            return source->changedSince(*masked->source);
-        }
-        return std::nullopt;
+        if (!masked || keepWounds != masked->keepWounds) return std::nullopt;
+        auto changed = source->revision == masked->source->revision
+                           ? std::optional{TileBox{}}
+                           : source->changedSince(*masked->source);
+        if (!changed || masks == masked->masks) return changed;
+        const auto include = [&](const TileBox& box) {
+            if (box.empty()) return;
+            auto& b = *changed;
+            b = b.empty()
+                    ? box
+                    : TileBox{std::min(b.x0, box.x0), std::min(b.y0, box.y0),
+                              std::min(b.z0, box.z0), std::max(b.x1, box.x1),
+                              std::max(b.y1, box.y1), std::max(b.z1, box.z1)};
+        };
+        const auto compare = [&](const MaskedStructure& a,
+                                 const MaskedStructure& b) {
+            for (const auto& [key, column] : a.masks) {
+                const auto other = b.masks.find(key);
+                if (other != b.masks.end() && other->second == column) continue;
+                const int x = int(key >> 32) * Side,
+                          z = int(uint32_t(key)) * Side;
+                const int first =
+                    wrap.enabled()
+                        ? a.bounds.x0 -
+                              int(WorldWrap::mod(a.bounds.x0 - x, wrap.tiles))
+                        : x;
+                for (const auto& [sy, cells] : column->removed) {
+                    const auto* prior = other == b.masks.end()
+                                            ? nullptr
+                                            : other->second->removals(sy);
+                    if (prior && *prior == cells) continue;
+                    const int y = int(sy) * Side;
+                    for (int sx = first; sx < a.bounds.x1; sx += wrap.tiles) {
+                        include(TileBox{sx, y, z, sx + Side, y + Side, z + Side}
+                                    .intersect(a.bounds));
+                        if (!wrap.enabled()) break;
+                    }
+                }
+            }
+        };
+        compare(*this, *masked);
+        compare(*masked, *this);
+        return changed;
     }
 
    private:
@@ -94,10 +135,16 @@ class MaskedStructure final : public Source {
         auto remaining = exact->bits;
         std::bitset<Cells> touched;
         for (const int cell : cells) {
+            if (!remaining.test(size_t(cell))) continue;
             remaining.reset(size_t(cell));
             touched.set(cellIndex((dx * Side + cell % Side) / scale,
                                   (dy * Side + cell / Side % Side) / scale,
                                   (dz * Side + cell / (Side * Side)) / scale));
+        }
+        // A carved tile should leave a trace even at 2 m and 4 m resolution.
+        if (keepWounds) {
+            coarse.bits &= ~touched;
+            return;
         }
         const int cellsPerAxis = Side / scale;
         for (int z = 0; z < Side; z += scale)
@@ -135,6 +182,7 @@ class MaskedStructure final : public Source {
     SourcePtr source;
     EditMap masks;
     WorldWrap wrap;
+    bool keepWounds;
 };
 }  // namespace
 
@@ -212,11 +260,13 @@ void TerrainEdits::erase(uint64_t key) {
 }
 
 structure_voxels::SourcePtr TerrainEdits::maskStructure(
-    const structure_voxels::SourcePtr& source, const WorldWrap& wrap) const {
-    if (!columnsWithRemovals) return source;
+    const structure_voxels::SourcePtr& source, const WorldWrap& wrap,
+    bool keepWounds) const {
+    if (!columnsWithRemovals && !keepWounds) return source;
     auto& cached = maskedStructures[source->key];
-    if (cached.source && cached.source->revision == source->revision)
-        return cached.result;
+    if (cached.sourceRevision == source->revision &&
+        cached.keepWounds == keepWounds)
+        if (auto result = cached.result.lock()) return result;
     EditMap masks;
     const auto& b = source->bounds;
     for (const auto& [key, edit] : *map) {
@@ -229,9 +279,10 @@ structure_voxels::SourcePtr TerrainEdits::maskStructure(
             (wrap.enabled() && wrap.tiles - from < Chunk::SIZE_X))
             masks.emplace(key, edit);
     }
-    auto result = masks.empty() ? source
-                                : std::make_shared<const MaskedStructure>(
-                                      source, std::move(masks), wrap, rev);
-    cached = {source, result};
+    auto result = masks.empty() && !keepWounds
+                      ? source
+                      : std::make_shared<const MaskedStructure>(
+                            source, std::move(masks), wrap, rev, keepWounds);
+    cached = {result, source->revision, keepWounds};
     return result;
 }

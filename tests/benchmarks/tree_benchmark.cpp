@@ -189,7 +189,11 @@ int main(int argc, char** argv) {
     WorldEditor editor(chunks, sunlight.get(), assets.getStorage<Block>());
     TreeSimulation sim(chunks, editor);
     sim.update(today);
-    const uint8_t wood = chunks.treeSpecies().find(tree->species)->woodBlock;
+    const auto& wood = *chunks.treeSpecies().find(tree->species);
+    const auto woodSource = [&](const TreeInstancePtr& tree, float age) {
+        return tree_wood_lod::voxels(
+            {tree, age, wood.woodBlock, wood.innerWoodBlock, wood.woodShell()});
+    };
 
     // 0. TREE_BENCH_LIMB_LIGHT=1: saw through the thickest primary limb near
     // the trunk with the ground under its middle loaded as in play, then
@@ -310,7 +314,7 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     if (const Tile* t = chunks.tileAt(x, y, z);
-                        t && t->block_id == wood)
+                        t && wood.ownsWood(t->block_id))
                         slice.push_back({x, y, z});
                 }
         const size_t cutsBefore = sim.cutCount();
@@ -360,7 +364,7 @@ int main(int argc, char** argv) {
                 for (int x = c[0] - 2 * reach; x <= c[0] + 2 * reach; ++x)
                     if (slitDistance(x, y, z) > thick)
                         if (const Tile* t = chunks.tileAt(x, y, z);
-                            t && t->block_id == wood &&
+                            t && wood.ownsWood(t->block_id) &&
                             TreeVec{float(x - c[0]), float(y - c[1]),
                                     float(z - c[2])}
                                     .dot(dir) > 0 &&
@@ -390,11 +394,11 @@ int main(int argc, char** argv) {
         int x = anchor.x;
         while (x < anchor.x + 200) {
             const Tile* t = chunks.tileAt(x + 1, y, anchor.z);
-            if (!t || t->block_id != wood) break;
+            if (!t || !wood.ownsWood(t->block_id)) break;
             ++x;
         }
         const Tile* t = chunks.tileAt(x, y, anchor.z);
-        if (t && t->block_id == wood) {
+        if (t && wood.ownsWood(t->block_id)) {
             const auto started = Clock::now();
             editor.removeBlock({x, y, anchor.z});
             print("break_trunk_surface", sim.lastBreak(), msSince(started));
@@ -417,6 +421,7 @@ int main(int argc, char** argv) {
         if (limb < 0) return 1;
         auto after = std::make_shared<TreeInstance>(*tree);
         after->cuts.push_back({limb, 0.25f, tree->age(today)});
+        after->uncut = tree->skeleton;
         after->skeleton = applyTreeCuts(k, *elder, after->cuts);
         finishTreeInstance(*after);
         const auto quantized = [age](const TreeSkeleton& shape) {
@@ -425,9 +430,8 @@ int main(int argc, char** argv) {
                 tree_foliage::bucket(age, shape.matureAge(), start),
                 shape.matureAge(), start);
         };
-        const auto before = tree_wood_lod::voxels({tree, quantized(k), wood});
-        const auto next =
-            tree_wood_lod::voxels({after, quantized(*after->skeleton), wood});
+        const auto before = woodSource(tree, quantized(k));
+        const auto next = woodSource(after, quantized(*after->skeleton));
         const auto changed = next->changedSince(*before);
         const TreeVec at =
             lerp(k.segments[size_t(limb)].a, k.segments[size_t(limb)].b, 0.25f);
@@ -477,7 +481,7 @@ int main(int argc, char** argv) {
                     for (int dx = -r; dx <= r && !hit; ++dx)
                         if (const Tile* t =
                                 chunks.tileAt(bx + dx, by + dy, bz + dz);
-                            t && t->block_id == wood)
+                            t && wood.ownsWood(t->block_id))
                             hit = TilePos{bx + dx, by + dy, bz + dz};
         if (hit) {
             const size_t before = sim.cutCount();
@@ -496,15 +500,13 @@ int main(int argc, char** argv) {
                 if (t->key == tree->key) after = t;
             });
             if (after) {
-                const auto oldVoxels =
-                    tree_wood_lod::voxels({tree, k.matureAge(), wood});
+                const auto oldVoxels = woodSource(tree, k.matureAge());
                 const auto& shape = *after->skeleton;
                 const float start = shape.growthPhaseStart();
                 const float quantized = tree_foliage::bucketAge(
                     tree_foliage::bucket(age, shape.matureAge(), start),
                     shape.matureAge(), start);
-                const auto newVoxels =
-                    tree_wood_lod::voxels({after, quantized, wood});
+                const auto newVoxels = woodSource(after, quantized);
                 const auto box = newVoxels->changedSince(*oldVoxels);
                 const auto all = structure_voxels::plan(
                     newVoxels->bounds, anchor.x, anchor.y + 20, anchor.z,
@@ -539,7 +541,7 @@ int main(int argc, char** argv) {
         for (int z = anchor.z - reach; z <= anchor.z + reach; ++z)
             for (int x = anchor.x - reach; x <= anchor.x + reach; ++x)
                 if (const Tile* t = chunks.tileAt(x, y, z);
-                    t && t->block_id == wood)
+                    t && wood.ownsWood(t->block_id))
                     ring.push_back({x, y, z});
         const size_t before = sim.cutCount();
         double worst = 0, sum = 0;
@@ -582,7 +584,7 @@ int main(int argc, char** argv) {
         size_t refilled = 0;
         for (const auto& p : ring)
             if (const Tile* t = chunks.tileAt(p.x, p.y, p.z);
-                t && t->block_id == wood)
+                t && wood.ownsWood(t->block_id))
                 ++refilled;
         std::cout << "ring_refilled=" << refilled << '/' << ring.size() << '\n';
         if (std::getenv("TREE_BENCH_SAW_ONLY")) return 0;
@@ -608,7 +610,7 @@ int main(int argc, char** argv) {
     // thread): every slab of the wood box, or only the occupied ones
     // (structure_voxels::Source::occupancy, built once on the pool).
     {
-        const auto source = tree_wood_lod::voxels({tree, age, wood});
+        const auto source = woodSource(tree, age);
         auto started = Clock::now();
         const auto occupancy = source->occupancy();
         const double built = msSince(started);
@@ -692,7 +694,7 @@ int main(int argc, char** argv) {
     }
 
     // 4. Distant voxels: every slab at each level (StructureLod plans a mix).
-    const auto source = tree_wood_lod::voxels({tree, age, wood});
+    const auto source = woodSource(tree, age);
     for (int level = 0; level <= structure_voxels::MaxLevel; ++level) {
         const auto started = Clock::now();
         const auto slabs =

@@ -1,10 +1,16 @@
 #include "terrain_edit_tracker.hpp"
 
 #include <algorithm>
+#include <bitset>
 
 #include "save/chunk_codec.hpp"
 
 namespace {
+bool hasTileEdits(const Chunk& chunk) {
+    return chunk.legacyRootTerrain ||
+           (chunk.rootTerrain && !chunk.rootTerrain->edited.empty());
+}
+
 bool sameEdit(const ColumnEdit& a, const ColumnEdit& b) {
     if (a.groundY != b.groundY || a.groundBlock != b.groundBlock ||
         a.waterY != b.waterY || a.structure.size() != b.structure.size() ||
@@ -24,7 +30,10 @@ TerrainEditTracker::TerrainEditTracker(ChunkManager& chunks,
     : chunks(chunks), edits(edits), detect(detectSavedEdits) {
     readyConnection = chunks.becameReady.connect([this](const ChunkCoord& c) {
         const auto key = editKey(c.x, c.z);
-        if (incomplete.contains(key) || (detect && this->chunks.isEdited(c))) {
+        const auto* chunk = this->chunks.getChunk(c);
+        if (incomplete.contains(key) ||
+            (detect &&
+             (this->chunks.isEdited(c) || (chunk && hasTileEdits(*chunk))))) {
             dirty.insert(key);
             return;
         }
@@ -75,7 +84,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
     // Unregistered column (region unloaded meanwhile): keep what is stored.
     if (!inputs) return true;
     const auto old = edits.find(key);
-    // Tree wood is regenerated from the seed: neither ground nor structure.
+    const auto trees = chunks.treeColumn(cx, cz);
+    // Tree wood is regenerated from the seed. Record only its wounds.
     const auto& grown = chunks.grownBlocks();
     auto next = std::make_shared<ColumnEdit>();
     bool complete = true;
@@ -149,6 +159,34 @@ bool TerrainEditTracker::refresh(uint64_t key) {
         Chunk part;
         std::vector<uint16_t> removed;
         const auto* baseline = chunks.structureBaseline(coord);
+        const auto* previous = old ? old->removals(uint16_t(slab)) : nullptr;
+        std::bitset<structure_voxels::Cells> landmarkWood;
+        const auto stamp = chunks.treeStamp(coord);
+        if (trees && stamp.placed() && (hasTileEdits(*chunk) || previous)) {
+            constexpr int side = Chunk::SIZE_X;
+            const TileBox box{int(cx) * side,    slab * side,
+                              int(cz) * side,    int(cx + 1) * side,
+                              (slab + 1) * side, int(cz + 1) * side};
+            std::vector<uint8_t> mask;
+            for (const auto& entry : trees->trees) {
+                const auto& tree = *entry.tree;
+                const auto* rule = chunks.treeSpecies().find(tree.species);
+                if (!rule || !rule->landmark) continue;
+                auto bounds = tree.wood;
+                bounds.x0 += entry.anchor.x - tree.anchor.x;
+                bounds.x1 += entry.anchor.x - tree.anchor.x;
+                const auto part = box.intersect(bounds);
+                if (part.empty()) continue;
+                markTreeWood(*tree.skeleton, entry.anchor, part,
+                             tree.woodAgeForDay(stamp.day), mask);
+                for (int z = part.z0; z < part.z1; ++z)
+                    for (int y = part.y0; y < part.y1; ++y)
+                        for (int x = part.x0; x < part.x1; ++x)
+                            if (mask[part.index(x, y, z)])
+                                landmarkWood.set(structure_voxels::cellIndex(
+                                    x - box.x0, y - box.y0, z - box.z0));
+            }
+        }
         bool any = false;
         for (int z = 0; z < Chunk::SIZE_Z; ++z)
             for (int y = 0; y < Chunk::SIZE_Y; ++y)
@@ -163,10 +201,19 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                                         ? baseline->tileAt(cell)
                                         : 0;
                     if (grown.test(expected)) expected = 0;
-                    const auto actual =
-                        grown.test(tile.block_id) ? 0 : tile.block_id;
+                    const bool livingWood = grown.test(tile.block_id);
+                    const auto actual = livingWood ? 0 : tile.block_id;
+                    const bool wound =
+                        worldY > SEA_LEVEL_Y && !livingWood &&
+                        landmarkWood.test(cell) &&
+                        (chunk->legacyRootTerrain ||
+                         chunk->rootEdited(uint16_t(cell)) ||
+                         (previous &&
+                          std::binary_search(previous->begin(), previous->end(),
+                                             uint16_t(cell))));
+                    if (wound || (expected && actual != expected))
+                        removed.push_back(uint16_t(cell));
                     if (actual == expected) continue;
-                    if (expected) removed.push_back(uint16_t(cell));
                     if (actual) {
                         part.tiles[z][y][x].block_id = actual;
                         any = true;

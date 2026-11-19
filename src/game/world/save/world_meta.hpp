@@ -19,8 +19,9 @@ struct WorldMeta : ISerializable {
     // Bump when chunk generation output changes. 6: ground cover on the
     // surface topsoil tile. 7: plants (FLOR). 8: trees (living wood).
     // 9: surface ceiling blended across region borders (no beach steps).
-    // 10: prototype roots. 11: shallow branching roots.
-    static constexpr int GeneratorVersion = 11;
+    // 10: prototype roots. 11: branching roots. 12: bark and inner wood.
+    // 13: uphill root contact.
+    static constexpr int GeneratorVersion = 13;
     // Oldest generator version whose surface heights match the current one.
     // Bump it whenever surface heights change (not for material changes).
     static constexpr int SurfaceVersion = 9;

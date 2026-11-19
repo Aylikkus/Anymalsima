@@ -126,14 +126,29 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         }
         const uint8_t block =
             request.mode == EditMode::Remove ? 0 : request.block;
-        if (request.rootOwner &&
+        if (request.previousWood &&
+            (!request.treeGrowth || tile.block_id != request.previousWood ||
+             !chunks.grownBlocks().test(tile.block_id) ||
+             !chunks.grownBlocks().test(block) || chunk.rootEdited(cell))) {
+            status = EditStatus::Blocked;
+            return;
+        }
+        if (request.previousWood && request.rootOwner) {
+            const auto* root = chunk.rootAt(cell);
+            if (!root || root->owner != request.rootOwner) {
+                status = EditStatus::Blocked;
+                return;
+            }
+        }
+        if (request.rootOwner && !request.previousWood &&
             (chunk.legacyRootTerrain || chunk.rootEdited(cell) ||
              !tile.isSolid() || tile.isLiquid() ||
              chunks.grownBlocks().test(tile.block_id))) {
             status = EditStatus::Blocked;
             return;
         }
-        if (request.treeGrowth && change.wasRoot) {
+        if (request.treeGrowth && change.wasRoot &&
+            !(request.rootOwner && request.previousWood)) {
             status = EditStatus::Blocked;
             return;
         }
@@ -145,7 +160,7 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             status = EditStatus::Unchanged;
             return;
         }
-        if (request.rootOwner)
+        if (request.rootOwner && !request.previousWood)
             chunk.recordRoot(cell, request.rootOwner, tile);
         else if (!request.treeGrowth)
             chunk.markRootEdited(cell);

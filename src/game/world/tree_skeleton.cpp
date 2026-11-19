@@ -1077,6 +1077,22 @@ TreeSkeletonPtr buildTreeRoots(const Tree& species, const TreeSkeleton& crown,
                    rule.depth_m * rng.range(0.5f, 0.8f)),
                 std::max(0.54f, thickness * 0.5f), 0.35f, 0.56f, 0.89f, parent);
     }
+    // Generated landmarks stand at the lowest ground under the trunk.
+    // Reuse the basal trunk samples where higher ground meets the bole.
+    // These copies belong to the independent root skeleton and stay put
+    // when the crown settles.
+    if (species.landmark()) {
+        const float rise = radius * (1 + roots->flare.amount);
+        for (auto segment : crown.segments) {
+            if (!segment.live() || segment.order != 0) continue;
+            const float reach =
+                std::max(segment.r0, segment.r1) * (1 + roots->flare.amount);
+            if (std::min(segment.a.y, segment.b.y) - reach > rise) continue;
+            segment.flags |= TreeSegment::RootCollar;
+            segment.parent = -1;
+            roots->segments.push_back(segment);
+        }
+    }
     return roots;
 }
 

@@ -152,8 +152,9 @@ Known limits:
   an expected structure block was suppressed. Restoring the baseline removes
   the derived edit. Unloaded slabs keep their last known differences.
 - Landmark proxies apply the suppression masks at full resolution and
-  recalculate affected coarse voxel cells. The streamed and far sky
-  projections look for the next intact occluder below a suppressed top.
+  recalculate affected coarse voxel cells. Tree proxies omit coarse cells
+  containing a wound so narrow excavations remain visible. The streamed and
+  far sky projections look for the next intact occluder below a suppressed top.
 - `terrain_edits.dat` stores suppression masks in EDIT v2. EDIT v1 still
   loads with additions only. Region CHNK data supplies the actual tiles for
   the reconciliation in step 5.

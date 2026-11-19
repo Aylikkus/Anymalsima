@@ -11,7 +11,12 @@
                          "branches_per_node": [4, 6], "crown_base": [0.05, 0.2],
                          "droop": 0.35, "taper": 0.95, "gnarl": 0.08,
                          "root_flare": 0.3, "branch_orders": 2 },
-        "wood": { "block": "blocks.spruce_wood", "bark": "foliage.bark_spruce" },
+        "wood": {
+            "block": "blocks.spruce_wood",
+            "inner_block": "blocks.spruce_inner_wood",
+            "shell_thickness": 1,
+            "bark": "foliage.bark_spruce"
+        },
         "foliage": { "type": "needle_clump", "material": "foliage.spruce_needles",
                      "clump_size_m": [0.7, 1.1], "density": 2.5 },
         "placement": {
@@ -39,7 +44,7 @@
                          "branches_per_node": [2, 4], "crown_base": [0, 0.15],
                          "lean_deg": [5, 25], "droop": 0.1, "taper": 0.9,
                          "gnarl": 0.5, "branch_orders": 2 },
-        "wood": { "block": "blocks.pine_wood", "bark": "foliage.bark_pine" },
+        "wood": { "bark": "foliage.bark_pine" },
         "foliage": { "type": "needle_clump", "material": "foliage.pine_needles",
                      "clump_size_m": [0.5, 0.9], "density": 2 },
         "placement": {
@@ -66,7 +71,7 @@
                          "branches_per_node": [1, 1], "crown_base": [0.25, 0.4],
                          "droop": 0.1, "taper": 0.7, "gnarl": 0.35,
                          "root_flare": 0.25, "branch_orders": 3 },
-        "wood": { "block": "blocks.oak_wood", "bark": "foliage.bark_oak" },
+        "wood": { "bark": "foliage.bark_oak" },
         "foliage": { "type": "leaf_clump", "material": "foliage.oak_leaf",
                      "clump_size_m": [1.8, 2.6], "density": 2.2 },
         "placement": {
@@ -92,7 +97,7 @@
         "form_params": { "branches_per_node": [10, 16],
                          "branch_angle_deg": [40, 100], "lean_deg": [3, 15],
                          "gnarl": 0.15, "taper": 0.3, "root_flare": 0.3 },
-        "wood": { "block": "blocks.palm_wood", "bark": "foliage.bark_palm" },
+        "wood": { "bark": "foliage.bark_palm" },
         "foliage": { "type": "frond", "material": "foliage.palm_frond",
                      "clump_size_m": [2.5, 4] },
         "placement": {
@@ -120,7 +125,12 @@
                          "branches_per_node": [3, 5], "crown_base": [0.35, 0.5],
                          "droop": 0.2, "taper": 0.9, "gnarl": 0.1,
                          "root_flare": 0.5, "branch_orders": 2 },
-        "wood": { "block": "blocks.redwood_wood", "bark": "foliage.bark_redwood" },
+        "wood": {
+            "block": "blocks.redwood_wood",
+            "inner_block": "blocks.redwood_inner_wood",
+            "shell_thickness": 1,
+            "bark": "foliage.bark_redwood"
+        },
         "roots": { "depth_m": 4, "reach_m": 26, "branches": 7 },
         "foliage": { "type": "needle_clump", "material": "foliage.redwood_needles",
                      "clump_size_m": [2, 3], "density": 1.5 },
@@ -150,8 +160,13 @@
                          "branches_per_node": [2, 3], "crown_base": 0.3,
                          "droop": 0.15, "taper": 0.6, "gnarl": 0.3,
                          "root_flare": 0.5, "branch_orders": 3 },
-        "wood": { "block": "blocks.elder_wood", "bark": "foliage.bark_elder" },
-        "roots": { "depth_m": 16, "reach_m": 150, "branches": 9 },
+        "wood": {
+            "block": "blocks.elder_wood",
+            "inner_block": "blocks.elder_inner_wood",
+            "shell_thickness": 3,
+            "bark": "foliage.bark_elder"
+        },
+        "roots": { "depth_m": 128, "reach_m": 128, "branches": 9 },
         "foliage": { "type": "leaf_clump", "material": "foliage.elder_leaf",
                      "clump_size_m": [5, 8], "density": 1.0 },
         "placement": {

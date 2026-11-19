@@ -33,7 +33,11 @@ void attachRoots(TreeInstance& tree, const Tree& species) {
     tree.rootWood.y0 =
         std::max({0, tree.rootWood.y0,
                   tree.anchor.y - int(std::ceil(species.roots.depth_m)) + 1});
-    tree.rootWood.y1 = tree.anchor.y + 1;
+    const int rise =
+        species.landmark()
+            ? int(std::ceil(base.r0 * (1 + tree.roots->flare.amount)))
+            : 0;
+    tree.rootWood.y1 = tree.anchor.y + rise + 1;
 }
 }  // namespace
 
@@ -73,6 +77,9 @@ TreeSpeciesTable::TreeSpeciesTable(const IAssets& assets) : siteTable(assets) {
         if (const auto it = blocks.indexByName.find(tree.wood.block);
             it != blocks.indexByName.end())
             r.woodBlock = blocks.items[it->second].id;
+        if (const auto it = blocks.indexByName.find(tree.wood.inner_block);
+            it != blocks.indexByName.end())
+            r.innerWoodBlock = blocks.items[it->second].id;
         if (!r.landmark) {
             extent = std::max(
                 {extent, double(tree.extent()), double(tree.roots.reach_m)});
@@ -385,6 +392,7 @@ TreeInstancePtr RegionGenerator::build(const TreeSpeciesRule& r, int64_t x,
     if (in.overrides && !in.lightweight)
         if (const auto it = in.overrides->find(key);
             it != in.overrides->end() && !it->second.cuts.empty()) {
+            tree->uncut = tree->skeleton;
             tree->skeleton =
                 applyTreeCuts(*tree->skeleton, r.species, it->second.cuts);
             tree->variant = -1;
@@ -601,9 +609,11 @@ TreeInstancePtr buildPlantedTree(const TreeSpeciesTable& table,
     input.headroom = record.headroom;
     tree->skeleton = buildTreeSkeleton(rule->species, input);
     attachRoots(*tree, rule->species);
-    if (!record.cuts.empty())
+    if (!record.cuts.empty()) {
+        tree->uncut = tree->skeleton;
         tree->skeleton =
             applyTreeCuts(*tree->skeleton, rule->species, record.cuts);
+    }
     tree->cuts = record.cuts;
     finishTreeInstance(*tree);
     return tree;
@@ -646,7 +656,7 @@ TreeColumn makeTreeColumn(unsigned chunkX, unsigned chunkZ,
 
 TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
                             const TreeSpeciesTable& table, double since,
-                            double today) {
+                            double today, bool legacyBark) {
     TreeWoodDelta out;
     const TreeTileBox box{
         int(coord.x) * Chunk::SIZE_X,     int(coord.y) * Chunk::SIZE_Y,
@@ -656,7 +666,7 @@ TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
         return (z - box.z0) * Chunk::SIZE_X * Chunk::SIZE_Y +
                (y - box.y0) * Chunk::SIZE_X + (x - box.x0);
     };
-    std::vector<uint8_t> now, then, cut;
+    std::vector<uint8_t> now, then, cut, otherWood;
     for (const auto& entry : column.trees) {
         const auto& tree = *entry.tree;
         const auto* rule = table.find(tree.species);
@@ -668,9 +678,15 @@ TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
         const auto part = wood.intersect(box);
         if (part.empty()) continue;
         const auto& k = *tree.skeleton;
-        const float ageNow = tree.growthAge(today),
+        const float ageNow = tree.woodAgeForDay(today),
                     ageThen = tree.growthAge(since);
-        markTreeWood(k, entry.anchor, part, ageNow, now);
+        const bool growing = ageNow > ageThen;
+        const bool changingShape = growing && ageThen < k.matureAge();
+        const bool classify = legacyBark || changingShape;
+        const bool preserveEdits = rule->species.cut.fell == TreeFell::Settle;
+        if (!classify && tree.cuts.empty()) continue;
+        markTreeWoodLayers(k, tree.uncut.get(), entry.anchor, part, ageNow,
+                           classify ? rule->woodShell() : 0, now);
         // Cuts the chunk's wood may predate: clear the wood they took away.
         // Stamps are whole days (the day the wood was produced), so a cut
         // made later on that same day counts, and cut ages are floats (an
@@ -686,19 +702,48 @@ TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
                     for (int x = part.x0; x < part.x1; ++x) {
                         const size_t m = part.index(x, y, z);
                         if (cut[m] && !now[m])
-                            out.remove.push_back(
-                                {tileIndex(x, y, z), rule->woodBlock});
+                            out.remove.push_back({tileIndex(x, y, z),
+                                                  rule->woodBlock, 0,
+                                                  rule->innerWoodBlock});
                     }
         }
-        if (ageNow <= ageThen) continue;
+        if (!classify) continue;
         markTreeWood(k, entry.anchor, part, ageThen, then);
+        // Without per-cell crown provenance, shared bark IDs in overlapping
+        // trees are ambiguous. Leave existing material alone there.
+        std::bitset<Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z> sharedBark;
+        if (rule->innerWoodBlock)
+            for (const auto& other : column.trees) {
+                if (other.tree->key == tree.key) continue;
+                const auto* otherRule = table.find(other.tree->species);
+                if (!otherRule || !otherRule->ownsWood(rule->woodBlock))
+                    continue;
+                auto bounds = other.tree->wood;
+                const int shift = other.anchor.x - other.tree->anchor.x;
+                bounds.x0 += shift;
+                bounds.x1 += shift;
+                if (part.intersect(bounds).empty()) continue;
+                markTreeWood(*other.tree->skeleton, other.anchor, part,
+                             other.tree->growthAge(today), otherWood);
+                for (size_t i = 0; i < otherWood.size(); ++i)
+                    if (otherWood[i]) sharedBark.set(i);
+            }
         for (int y = part.y0; y < part.y1; ++y)
             for (int z = part.z0; z < part.z1; ++z)
                 for (int x = part.x0; x < part.x1; ++x) {
                     const size_t m = part.index(x, y, z);
-                    if (now[m] && !then[m])
-                        out.add.push_back(
-                            {tileIndex(x, y, z), rule->woodBlock});
+                    if (!now[m]) continue;
+                    const auto block =
+                        now[m] == 2 ? rule->innerWoodBlock : rule->woodBlock;
+                    const int cell = tileIndex(x, y, z);
+                    if (growing && !then[m])
+                        out.add.push_back({.index = cell,
+                                           .block = block,
+                                           .preserveEdit = preserveEdits});
+                    if (now[m] == 2 && (legacyBark || then[m]) &&
+                        !sharedBark.test(m))
+                        out.recolor.push_back(
+                            {cell, block, 0, rule->woodBlock});
                 }
     }
     return out;
@@ -707,7 +752,8 @@ TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
 TreeWoodDelta treeCutWoodDelta(const ChunkCoord& coord,
                                const TreeInstance& tree, TreeAnchor anchor,
                                uint8_t woodBlock, uint16_t cut, double today,
-                               bool settles, int periodTiles) {
+                               bool settles, int periodTiles,
+                               uint8_t innerBlock, int shell) {
     TreeWoodDelta out;
     if (!tree.skeleton || !woodBlock || !cut) return out;
     const TreeTileBox box{
@@ -726,8 +772,20 @@ TreeWoodDelta treeCutWoodDelta(const ChunkCoord& coord,
     if (!settles && std::none_of(removed.begin(), removed.end(),
                                  [](uint8_t v) { return v != 0; }))
         return out;
-    markTreeWood(k, anchor, box, age, now);
+    markTreeWoodLayers(k, tree.uncut.get(), anchor, box, age,
+                       settles && innerBlock ? shell : 0, now);
     if (settles) markTreeWood(k, anchor, box, tree.growthAge(today - 1), then);
+    // Only the actual saw row can close across player edits. Other space
+    // in the settling upper piece is subject to the ordinary growth filter.
+    const TreeSegment* stump = nullptr;
+    if (settles)
+        for (const auto& s : k.segments)
+            if (!s.live() && s.cut == cut && s.order == 0 && s.parent >= 0 &&
+                s.attachT >= 1 &&
+                (k.segments[size_t(s.parent)].flags & TreeSegment::CutEnd) &&
+                k.segments[size_t(s.parent)].b == s.a)
+                stump = &k.segments[size_t(s.parent)];
+    const TreeVec axis = stump ? (stump->b - stump->a).normalized() : TreeVec{};
     for (int y = box.y0; y < box.y1; ++y)
         for (int z = box.z0; z < box.z1; ++z)
             for (int x = box.x0; x < box.x1; ++x) {
@@ -735,16 +793,25 @@ TreeWoodDelta treeCutWoodDelta(const ChunkCoord& coord,
                 const int tile = (z - box.z0) * Chunk::SIZE_X * Chunk::SIZE_Y +
                                  (y - box.y0) * Chunk::SIZE_X + x - box.x0;
                 if (removed[i] && !now[i])
-                    out.remove.push_back({tile, woodBlock});
-                if (settles && now[i] && !then[i])
-                    out.add.push_back({tile, woodBlock});
+                    out.remove.push_back({tile, woodBlock, 0, innerBlock});
+                if (settles && y > anchor.y && now[i] && !then[i]) {
+                    const TreeVec center{float(x - anchor.x),
+                                         float(y - anchor.y) - 0.5f,
+                                         float(z - anchor.z)};
+                    const float fromFace =
+                        stump ? (center - stump->b).dot(axis) : 0.f;
+                    out.add.push_back(
+                        {.index = tile,
+                         .block = now[i] == 2 ? innerBlock : woodBlock,
+                         .preserveEdit = fromFace <= 0 || fromFace > 1});
+                }
             }
     return out;
 }
 
 TreeWoodDelta treeWoodRemoval(const ChunkCoord& coord, const TreeInstance& tree,
                               TreeAnchor anchor, uint8_t woodBlock, float age,
-                              int periodTiles) {
+                              int periodTiles, uint8_t innerBlock) {
     TreeWoodDelta out;
     if (!tree.skeleton || !woodBlock) return out;
     const int x0 = int(coord.x) * Chunk::SIZE_X,
@@ -771,7 +838,7 @@ TreeWoodDelta treeWoodRemoval(const ChunkCoord& coord, const TreeInstance& tree,
                     out.remove.push_back(
                         {(z - z0) * Chunk::SIZE_X * Chunk::SIZE_Y +
                              (y - y0) * Chunk::SIZE_X + (x - cx0),
-                         woodBlock});
+                         woodBlock, 0, innerBlock});
     return out;
 }
 
@@ -784,13 +851,24 @@ std::vector<TreeWoodChange> filterTreeWood(const Chunk& chunk,
         size_t(Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z));
     std::vector<TreeWoodChange> out;
     for (const auto& c : delta.remove)
-        if (!seen[size_t(c.index)] && tiles[c.index].block_id == c.block &&
+        if (!seen[size_t(c.index)] &&
+            (tiles[c.index].block_id == c.block ||
+             (c.previousBlock && tiles[c.index].block_id == c.previousBlock)) &&
             !chunk.rootAt(uint16_t(c.index))) {
             seen[size_t(c.index)] = 1;
             out.push_back({c.index, 0});
         }
+    for (const auto& c : delta.recolor)
+        if (!seen[size_t(c.index)] &&
+            tiles[c.index].block_id == c.previousBlock &&
+            !chunk.rootAt(uint16_t(c.index)) &&
+            !chunk.rootEdited(uint16_t(c.index))) {
+            seen[size_t(c.index)] = 1;
+            out.push_back(c);
+        }
     for (const auto& c : delta.add)
-        if (!seen[size_t(c.index)] && tiles[c.index].isAir()) {
+        if (!seen[size_t(c.index)] && tiles[c.index].isAir() &&
+            (!c.preserveEdit || !chunk.rootEdited(uint16_t(c.index)))) {
             seen[size_t(c.index)] = 1;
             out.push_back(c);
         }
@@ -801,40 +879,47 @@ std::vector<TreeWoodChange> treeWoodChanges(const Chunk& chunk,
                                             const ChunkCoord& coord,
                                             const TreeColumn& column,
                                             const TreeSpeciesTable& table,
-                                            double since, double today) {
-    return filterTreeWood(chunk,
-                          treeWoodDelta(coord, column, table, since, today));
+                                            double since, double today,
+                                            bool legacyBark) {
+    return filterTreeWood(
+        chunk, treeWoodDelta(coord, column, table, since, today, legacyBark));
 }
 
-std::vector<TreeWoodChange> treeRootChanges(const Chunk& chunk,
-                                            const ChunkCoord& coord,
-                                            const TreeColumn& column,
-                                            const TreeSpeciesTable& table,
-                                            const ChunkColumnInputs& terrain,
-                                            double since, double today) {
+std::vector<TreeWoodChange> treeRootChanges(
+    const Chunk& chunk, const ChunkCoord& coord, const TreeColumn& column,
+    const TreeSpeciesTable& table, const ChunkColumnInputs& terrain,
+    double since, double today, bool legacyBark) {
     std::vector<TreeWoodChange> changes;
-    if (chunk.legacyRootTerrain || since >= today) return changes;
+    if (chunk.legacyRootTerrain || (since >= today && !legacyBark))
+        return changes;
     constexpr int Side = Chunk::SIZE_X;
     const int x0 = int(coord.x) * Side, y0 = int(coord.y) * Side,
               z0 = int(coord.z) * Side;
     const TreeTileBox slab{x0, y0, z0, x0 + Side, y0 + Side, z0 + Side};
+    int surfaceTop = -1;
+    for (const auto& sample : terrain.columns)
+        surfaceTop = std::max(surfaceTop, sample.surface_y);
+    if (y0 > surfaceTop) return changes;
     std::vector<uint8_t> before, after;
     std::bitset<Side * Side * Side> claimed;
     for (const auto& entry : column.trees) {
         const auto& tree = *entry.tree;
         if (!tree.roots) continue;
         const float start = tree.growthAge(since), end = tree.growthAge(today);
-        if (start >= tree.roots->maturity || end <= start) continue;
+        const bool growing = start < tree.roots->maturity && end > start;
+        if (!growing && !legacyBark) continue;
         const int shift = entry.anchor.x - tree.anchor.x;
         auto box = tree.rootWood;
         box.x0 += shift;
         box.x1 += shift;
+        box.y1 = std::min(box.y1, surfaceTop + 1);
         box = box.intersect(slab);
         if (box.empty()) continue;
         const auto* species = table.find(tree.species);
         if (!species || !species->woodBlock) continue;
         const float reach = tree.rootReach;
-        markTreeWood(*tree.roots, entry.anchor, box, end, after);
+        markTreeWoodLayers(*tree.roots, nullptr, entry.anchor, box, end,
+                           species->woodShell(), after);
         if (std::none_of(after.begin(), after.end(),
                          [](auto value) { return value; }))
             continue;
@@ -848,17 +933,28 @@ std::vector<TreeWoodChange> treeRootChanges(const Chunk& chunk,
                 const int surface = terrain.columns[lz * Side + lx].surface_y;
                 for (int y = box.y0; y <= std::min(box.y1 - 1, surface); ++y) {
                     const size_t i = box.index(x, y, z);
-                    if (!after[i] || before[i]) continue;
+                    if (!after[i]) continue;
                     const int ly = y - y0;
                     const auto cell = Chunk::cell(lx, ly, lz);
                     const Tile& tile = chunk.tiles[lz][ly][lx];
+                    const auto block = after[i] == 2 ? species->innerWoodBlock
+                                                     : species->woodBlock;
+                    if (const auto* root = chunk.rootAt(cell);
+                        root && root->owner == tree.key && after[i] == 2 &&
+                        tile.block_id == species->woodBlock &&
+                        (before[i] || legacyBark)) {
+                        changes.push_back(
+                            {cell, block, tree.key, species->woodBlock});
+                        continue;
+                    }
+                    if (!growing || before[i]) continue;
                     if (claimed.test(cell) || !tile.isSolid() ||
                         tile.isLiquid() ||
                         !table.rootSubstrate(tile.block_id) ||
                         chunk.rootEdited(cell))
                         continue;
                     claimed.set(cell);
-                    changes.push_back({cell, species->woodBlock, tree.key});
+                    changes.push_back({cell, block, tree.key});
                 }
             }
     }

@@ -64,5 +64,38 @@
             "opacity": 15,
             "natural_growth": true
         }
+    },
+    {
+        "name": "blocks.spruce_inner_wood",
+        "material": "materials.spruce_inner_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 3,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.redwood_inner_wood",
+        "material": "materials.redwood_inner_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 4,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
+    },
+    {
+        "name": "blocks.elder_inner_wood",
+        "material": "materials.elder_inner_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 6,
+            "flammable": true,
+            "opacity": 15,
+            "natural_growth": true
+        }
     }
 ]

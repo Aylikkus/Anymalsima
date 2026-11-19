@@ -695,10 +695,12 @@ void GameplayState::update(Game& game, float dt) {
     chunkManager->appendStructureLandmarks(generatedLandmarks, camera.eye(),
                                            camera.viewDistance);
     auto landmarks = treeRenderer->landmarkVoxels(clock.days());
+    for (auto& source : landmarks)
+        source = edits->maskStructure(source, chunkManager->wrap(), true);
+    for (auto& source : generatedLandmarks)
+        source = edits->maskStructure(source, chunkManager->wrap());
     landmarks.insert(landmarks.end(), generatedLandmarks.begin(),
                      generatedLandmarks.end());
-    for (auto& source : landmarks)
-        source = edits->maskStructure(source, chunkManager->wrap());
     terrainLod->setStructures(std::move(landmarks));
     terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
@@ -710,10 +712,10 @@ void GameplayState::update(Game& game, float dt) {
     skyMap->update();
     auto skyLandmarks =
         treeRenderer->landmarkVoxels(chunkManager->woodDay(), false);
+    for (auto& source : skyLandmarks)
+        source = edits->maskStructure(source, chunkManager->wrap(), true);
     skyLandmarks.insert(skyLandmarks.end(), generatedLandmarks.begin(),
                         generatedLandmarks.end());
-    for (auto& source : skyLandmarks)
-        source = edits->maskStructure(source, chunkManager->wrap());
     skyMap->updateOcclusion(camera.eye(), std::move(skyLandmarks), *world,
                             *uiContext->assets);
     sunLight->update();

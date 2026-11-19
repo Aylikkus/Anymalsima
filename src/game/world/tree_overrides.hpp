@@ -14,11 +14,14 @@
 // trees.dat); untouched generated trees are never stored, they are regenerated
 // from the seed.
 struct TreeRecord {
-    // Planted trees have bit 62 set; others are generated tree keys
-    // (TreeInstance::key).
+    // Planted keys have the two high bits 01. Generated landmarks have
+    // an 0xff prefix (TreeInstance::key).
     static constexpr uint64_t PlantedBit = 1ULL << 62;
     uint64_t key = 0;
-    bool planted() const { return key & PlantedBit; }
+    static bool isPlantedKey(uint64_t key) {
+        return (key & (3ULL << 62)) == PlantedBit;
+    }
+    bool planted() const { return isPlantedKey(key); }
     // Planted trees only: what their skeleton is built from.
     uint8_t species = 0;
     uint32_t seed = 0;

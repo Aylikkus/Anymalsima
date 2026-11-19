@@ -350,7 +350,10 @@ foreach(case tree_skeleton_deterministic tree_sizes_follow_species
              streaming_withdraws_stale_requests tree_regrowth_starts_on_stump
              streaming_new_chunks_sky_lit tree_regrowth_takes_time
              tree_crown_mesh_never_ahead_of_wood tree_immortal_landmark
+             tree_elder_undercut_is_excavation tree_landmark_wounds_persist_in_lod
+             tree_wood_layers tree_legacy_bark_migrates_and_core_supports_cut
              tree_roots_wrap_and_preserve_substrate
+             tree_elder_roots_backfill_uphill_contact
              tree_live_roots_respect_edits_and_support)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES

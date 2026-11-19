@@ -71,8 +71,8 @@ sort later). After changes, run `python3 generate_assets.py` and rebuild.
 `natural_growth` marks wood that only trees grow. Worlds regenerate trees
 from the seed, so this wood never counts as a player edit and is not drawn
 as a building at a distance. Logs or planks that players place must be
-**different blocks** without the flag, and a tree's `wood.block` must have
-it (checked at load).
+**different blocks** without the flag. Both of a tree's voxel block
+references must have the flag (checked at load).
 
 Wood blocks use the terrain material array: their textures are coloured
 128x128 images like soil and stone (no palette). The placeholder barks come
@@ -92,7 +92,9 @@ from `tools/generate_foliage_textures.py` (`assets/materials/blocks/wood/`).
                      "branches_per_node": [2, 3], "crown_base": [0.25, 0.4],
                      "droop": 0.1, "taper": 0.7, "gnarl": 0.35,
                      "root_flare": 0.5, "branch_orders": 3 },
-    "wood": { "block": "blocks.oak_wood", "bark": "foliage.bark_oak" },
+    "wood": { "block": "blocks.oak_wood",
+              "inner_block": "blocks.oak_inner_wood",
+              "shell_thickness": 1, "bark": "foliage.bark_oak" },
     "foliage": { "type": "leaf_clump", "material": "foliage.oak_leaf",
                  "clump_size_m": [1.4, 2.2], "density": 1.2 },
     "placement": {
@@ -179,8 +181,13 @@ All optional. How each is used depends on the form.
 
 | Field | Meaning |
 | --- | --- |
-| `block` | the living wood block (must have `natural_growth`) for parts thicker than 0.5 m radius |
+| `block` | outer living wood. Required when the maximum trunk radius is at least 0.5 m |
+| `inner_block` | a distinct living wood block for the core. Required when the maximum trunk radius exceeds 1.0 m |
+| `shell_thickness` | bark thickness in voxel layers measured inward from the merged uncut shape. An integer from 1 to 16, default 1 |
 | `bark` | a foliage material for the thinner branches drawn as meshes; match its palette to the block texture |
+
+Mesh-only species can supply just the foliage bark material. Cross-sections
+develop a core as they grow wide enough for their shell thickness.
 
 ### `roots`
 
@@ -188,14 +195,15 @@ Omit this object to disable subsurface roots. Elder and redwood enable it.
 A species can enable roots when its maximum trunk radius reaches 0.5 m.
 Individual trees form root voxels once their sampled trunk can form wood.
 The shallow root base starts at the width of the flared trunk. Tapered
-branches fork outward as the tree matures.
-They use the species' `wood.block` and replace natural soil and rock while
+branches fork outward as the tree matures. On a slope, landmark roots also
+occupy eligible terrain where the base of the trunk enters the uphill ground.
+They use the species' living wood blocks and replace natural soil and rock while
 respecting water, cavities and player edits. `form_params.root_flare`
 independently controls the above-ground buttress.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `depth_m` | 4 | Maximum depth below the base, 2 to 64 m |
+| `depth_m` | 4 | Maximum depth below the base, 2 to 256 m |
 | `reach_m` | 8 | Target horizontal reach from the trunk centre, 1 to 256 m. The roots always cover the width of the trunk base. Ordinary species still use the 96 m reach-plus-spacing limit. |
 | `branches` | 4 | Number of main root branches, each with two forks, 1 to 12 |
 

@@ -22,7 +22,9 @@
 // Saved per chunk with its wood (TreeStamp): growth is only reconciled into
 // wood made by the same version, so a changed algorithm never grows
 // new-shape wood next to old wood. Bump with any change to their output.
-inline constexpr uint16_t TreeVersion = 3;
+inline constexpr uint16_t TreeBarkOnlyVersion = 3;
+inline constexpr uint16_t TreeBeforeRootCollarVersion = 4;
+inline constexpr uint16_t TreeVersion = 5;
 
 struct TreeVec {
     float x = 0, y = 0, z = 0;
@@ -50,6 +52,7 @@ struct TreeSegment {
         Sprout = 2,     // regrowth from a cut
         CutEnd = 4,     // its end is a cut: the wood stops flat at it
         RootPlate = 8,  // flattened layers beneath the flared trunk
+        RootCollar = 16,  // basal trunk sampled where uphill terrain buries it
     };
     TreeVec a, b;          // metres from the anchor point
     float r0 = 0, r1 = 0;  // full-grown radius at a and b

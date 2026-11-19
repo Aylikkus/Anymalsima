@@ -30,6 +30,7 @@ struct EditRequest {
     uint8_t block = 0;  // ignored by Remove
     bool treeGrowth = false;
     uint64_t rootOwner = 0;  // root growth claims natural substrate
+    uint8_t previousWood = 0;  // material change requires this living block
 };
 
 struct BlockChange {

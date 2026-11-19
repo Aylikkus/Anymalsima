@@ -42,6 +42,12 @@ void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,
                   const TreeTileBox& box, float age, std::vector<uint8_t>& mask,
                   TreeWoodSelection selection = {});
 
+// Same occupancy, with core cells marked 2. The shell is measured through
+// face neighbors in the merged, uncut raster, including across slab edges.
+void markTreeWoodLayers(const TreeSkeleton& skeleton, const TreeSkeleton* uncut,
+                        TreeAnchor anchor, const TreeTileBox& box, float age,
+                        int shell, std::vector<uint8_t>& layers);
+
 // The highest wood tile of each tile column of `box` at `age` (live wood,
 // as markTreeWood marks it inside `box`): tops[(z - box.z0) * width +
 // (x - box.x0)] = world Y, or INT_MIN where the column holds none (tops is

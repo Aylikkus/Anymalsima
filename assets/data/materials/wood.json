@@ -28,5 +28,20 @@
         "name": "materials.elder_wood",
         "texture_albedo": "blocks.wood.elder_bark",
         "texture_normal": "blocks.wood.elder_bark_normal"
+    },
+    {
+        "name": "materials.spruce_inner_wood",
+        "texture_albedo": "blocks.wood.spruce_inner_wood",
+        "texture_normal": "blocks.wood.inner_wood_normal"
+    },
+    {
+        "name": "materials.redwood_inner_wood",
+        "texture_albedo": "blocks.wood.redwood_inner_wood",
+        "texture_normal": "blocks.wood.inner_wood_normal"
+    },
+    {
+        "name": "materials.elder_inner_wood",
+        "texture_albedo": "blocks.wood.elder_inner_wood",
+        "texture_normal": "blocks.wood.inner_wood_normal"
     }
 ]

@@ -27,6 +27,13 @@ struct TreeSpeciesRule {
     FloraSpeciesRule site;
     int cell = 1;  // candidate grid cell, tiles (one candidate per cell)
     uint8_t woodBlock = 0;
+    uint8_t innerWoodBlock = 0;
+    int woodShell() const {
+        return innerWoodBlock ? species.wood.shell_thickness : 0;
+    }
+    bool ownsWood(uint8_t block) const {
+        return block && (block == woodBlock || block == innerWoodBlock);
+    }
     bool landmark = false;
 };
 
@@ -82,6 +89,7 @@ struct TreeInstance {
     TreeAnchor anchor;     // canonical X
     int32_t birthDay = 0;  // game day it germinated (negative: before day 0)
     TreeSkeletonPtr skeleton;  // turned by `rotation`
+    TreeSkeletonPtr uncut;     // exterior reference after the first cut
     TreeSkeletonPtr roots;     // independent of the crown and its cut indices
     // Shared shape (TreeSpeciesTable::variant) or -1 for a tree of its own
     // (landmarks; trees whose branches the ground prunes).
@@ -106,6 +114,16 @@ struct TreeInstance {
                 a = std::min(a, cuts.back().age);
         }
         return a;
+    }
+    // Chunk stamps use whole days. Include a cut already recorded during
+    // this day, especially the settled wood that appears at its exact age.
+    float woodAgeForDay(double day) const {
+        if (!cuts.empty()) {
+            const double cutDay = double(birthDay) + cuts.back().age;
+            if (cutDay > day && std::floor(cutDay) == std::floor(day))
+                day = cutDay;
+        }
+        return growthAge(day);
     }
 };
 using TreeInstancePtr = std::shared_ptr<const TreeInstance>;
@@ -186,45 +204,52 @@ TreeColumn makeTreeColumn(unsigned chunkX, unsigned chunkZ,
 // reach `today`: wood its trees grew since then (into air only), and the
 // natural wood of cuts made since then that the tree no longer has. Player
 // holes in older wood stay (growth only adds what the older tree lacked).
-// Changes as {tile index z * 256 + y * 16 + x, new block id}.
+// Tile index is z * 256 + y * 16 + x.
 struct TreeWoodChange {
     int index;
     uint8_t block;
     uint64_t rootOwner = 0;
+    uint8_t previousBlock = 0;
+    bool preserveEdit = false;
 };
 std::vector<TreeWoodChange> treeWoodChanges(const Chunk& chunk,
                                             const ChunkCoord& coord,
                                             const TreeColumn& column,
                                             const TreeSpeciesTable& table,
-                                            double since, double today);
+                                            double since, double today,
+                                            bool legacyBark = false);
 // The same change before the tiles are consulted: pure rasterization, safe
 // on any thread (a massive tree costs milliseconds per chunk). `remove`
-// lists tiles to clear where they still hold that wood block, `add` tiles
-// to fill with it where they are air; filterTreeWood applies those tests.
+// lists tiles to clear if they still hold either wood ID (block or
+// previousBlock). `add` fills air; `recolor` replaces existing bark with
+// core. filterTreeWood checks the current tiles and preserves excavations
+// on additions that request it.
 struct TreeWoodDelta {
-    std::vector<TreeWoodChange> remove, add;
+    std::vector<TreeWoodChange> remove, add, recolor;
 };
 TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
                             const TreeSpeciesTable& table, double since,
-                            double today);
+                            double today, bool legacyBark = false);
 // One cut of one immutable tree snapshot, without unrelated growth or cuts.
 // Settling also fills the new wood which appears at this cut's age.
 TreeWoodDelta treeCutWoodDelta(const ChunkCoord& coord,
                                const TreeInstance& tree, TreeAnchor anchor,
                                uint8_t woodBlock, uint16_t cut, double today,
-                               bool settles, int periodTiles);
+                               bool settles, int periodTiles,
+                               uint8_t innerBlock = 0, int shell = 0);
 // All of one tree's wood in a chunk at `age` (a removed tree), as removals.
 // anchor: the column copy the chunk sees.
 TreeWoodDelta treeWoodRemoval(const ChunkCoord& coord, const TreeInstance& tree,
                               TreeAnchor anchor, uint8_t woodBlock, float age,
-                              int periodTiles);
+                              int periodTiles, uint8_t innerBlock = 0);
 std::vector<TreeWoodChange> filterTreeWood(const Chunk& chunk,
                                            const TreeWoodDelta& delta);
 inline void applyTreeWoodChanges(Chunk& chunk,
                                  const std::vector<TreeWoodChange>& changes) {
     for (const auto& c : changes) {
         Tile& tile = (&chunk.tiles[0][0][0])[c.index];
-        if (c.rootOwner) chunk.recordRoot(uint16_t(c.index), c.rootOwner, tile);
+        if (c.rootOwner && !c.previousBlock)
+            chunk.recordRoot(uint16_t(c.index), c.rootOwner, tile);
         tile.block_id = c.block;
         if (c.block) tile.clearCover();
     }
@@ -232,12 +257,10 @@ inline void applyTreeWoodChanges(Chunk& chunk,
 
 // Roots replace only eligible natural terrain. A separate path keeps buried
 // wood out of the air-only structure proxy and skylight projections.
-std::vector<TreeWoodChange> treeRootChanges(const Chunk& chunk,
-                                            const ChunkCoord& coord,
-                                            const TreeColumn& column,
-                                            const TreeSpeciesTable& table,
-                                            const ChunkColumnInputs& terrain,
-                                            double since, double today);
+std::vector<TreeWoodChange> treeRootChanges(
+    const Chunk& chunk, const ChunkCoord& coord, const TreeColumn& column,
+    const TreeSpeciesTable& table, const ChunkColumnInputs& terrain,
+    double since, double today, bool legacyBark = false);
 
 // Writes the column's wood at `day` into the air tiles of one chunk.
 // Returns the number of tiles written.

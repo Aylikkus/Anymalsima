@@ -1,6 +1,6 @@
 # Handoff: tree roots and forest renewal
 
-Status: stages 1 and 2 implemented. This updates the death, seeding and
+Status: stages 1 through 3 implemented. This updates the death, seeding and
 decay direction in [the tree handoff](trees.md), whose Progress section
 records what already works. Each stage has its own verification. Roots and
 wood materials can land independently of forest renewal. The loaded mesh
@@ -93,12 +93,16 @@ roots remesh and relight, and that the terrain edit tracker leaves
 natural root growth out of player structure entries.
 
 **Implementation.** Each tree has its own deterministic root skeleton.
-Elder uses up to 16 m depth, 150 m horizontal reach and nine forked branches.
+Elder has 128 m configured depth and reach and nine forked branches.
 Redwood uses up to 4 m depth, 26 m reach and seven branches. Chunk generation and
 the loaded growth sweep use the same bounded, age-dependent raster and
 skip ineligible cells. Root cells in the trunk's contact layer support
 their owner. Excavating below or around that layer can expose roots
 without cutting the crown.
+
+On slopes, the elder's root contact follows the buried part of the basal
+trunk above its anchor. Older slabs with terrain edit history backfill the
+new contact through eligible substrate around existing excavations.
 
 Chunk encoding v4 stores the displaced block and ground cover with the
 tree's identity, plus terrain edits, including explicit same-material
@@ -134,6 +138,23 @@ for exposed interior wood before changing their stamps.
 **Verify.** Saw through elder and redwood at different ages. Check mixed
 bark and core for support and cut ownership, including branch joints.
 Reload a legacy trunk and confirm that growth preserves player holes.
+
+**Implementation.** The voxel raster measures the bark shell through
+face-connected layers of the merged wood, with a margin across slab
+boundaries. It uses the uncut shape as a reference after sawing. Redwood
+has a one-block shell and elder has a three-block shell. Growth can turn
+existing bark into core, including roots with recorded ownership. The
+distant wood proxy uses both materials.
+
+The chunk loader upgrades version 3 tree stamps in place. It converts
+matching living bark where the current shape has a core, preserves holes
+and edits, then resumes normal growth with the current tree stamp. Older
+geometry versions retain their existing compatibility behavior.
+
+**Headless verification.** The tree tests check young and mature cut faces,
+merged branch joints, growth into the core, and bark-only save migration.
+The elder thick-limb benchmark rebuilt 1,386 of 3,547 planned proxy slabs
+in 3.26 seconds of worker time. Visual checks on a GPU remain pending.
 
 ## 4. Renew mesh forests in loaded regions
 

@@ -74,7 +74,8 @@ class TerrainEdits {
     // Apply the suppression masks to a generated landmark source. Positive
     // edit voxels continue to come from the edit's own slabs.
     structure_voxels::SourcePtr maskStructure(
-        const structure_voxels::SourcePtr& source, const WorldWrap& wrap) const;
+        const structure_voxels::SourcePtr& source, const WorldWrap& wrap,
+        bool keepWounds = false) const;
 
     // Column key, emitted after each set/erase.
     Signal<uint64_t> changed;
@@ -85,7 +86,9 @@ class TerrainEdits {
     std::shared_ptr<const EditMap> map;
     size_t columnsWithRemovals = 0;
     struct Masked {
-        structure_voxels::SourcePtr source, result;
+        std::weak_ptr<const structure_voxels::Source> result;
+        uint64_t sourceRevision = 0;
+        bool keepWounds = false;
     };
     mutable std::unordered_map<uint64_t, Masked> maskedStructures;
     uint64_t rev = 0;

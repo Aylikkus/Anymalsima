@@ -584,7 +584,9 @@ anchor, heightCap, terrain, cuts)` returns an immutable `TreeSkeleton`.
   Saved chunks catch up on load: `treeWoodChanges(since, today)` adds wood
   grown since their stamp (into air only) and clears natural wood of cuts
   made after it; player holes in older wood stay (`tree_reload_catches_up`).
-  Wood of a different `TreeVersion` is frozen.
+  Version 3 bark-only wood migrates in place to the current bark and core
+  materials as described in [the tree lifecycle handoff](tree-lifecycle.md#3-show-inner-wood-on-cut-faces).
+  Earlier geometry versions stay frozen.
 - `TreeInstance::growthAge`: growth stops at the end of the lifespan, or at
   a root cut of a species that does not resprout (`skeleton->dead`).
 - `world/tree_simulation.{hpp,cpp}` (`TreeSimulation`, in `GameplayState`):
@@ -721,10 +723,11 @@ outside the loaded chunks are no longer missing.
 - Landmark wood shades distant terrain and structure slabs like voxel
   sunlight through the sky occlusion map (`docs/handoff/structures.md`,
   step 2); crowns cast no shade there, as in the chunks.
-- Known limits: player wounds in a landmark that do not sever it (holes
-  dug into the trunk) are not shown at distance until the cut is recorded;
-  the wood comes from the skeleton, not from saved chunks. Coarse cells are
-  textured as 2x or 4x larger blocks.
+- Player wounds in landmark wood use the saved terrain suppression masks.
+  A changed mask rebuilds the affected proxy slabs. A wound in a coarse
+  cell removes that cell so narrow cuts remain visible at a distance.
+  A chunk stamped at the start of a day includes any settlement committed
+  later on that day when the edit tracker checks its wood.
 ### Massive tree performance (the elder sample)
 
 The elder is the optimization sample for big trees: `tree_benchmark`
@@ -767,6 +770,8 @@ its distant voxels. Measured with a 1000 m crown, 500 m tall, 64 m trunk
   live wood with the day before the cut to find additions (float tree ages:
   1e-3 day rounds away at elder ages). `tree_cut_delta_local` checks both
   falling and settling against the catch-up path across the X seam.
+- Removing trunk wood below the anchor is treated as excavation. An elder's
+  settling trunk closes the saw row and preserves other player excavations.
 - `TREE_BENCH_CUT_ONLY=1 build/tests/tree_benchmark` measures a thin elder
   cut and exits before full-tree rasterization. On the default fixture the
   cleanup queue shrank from 143 chunks to 2, and drained in about 0.09 ms

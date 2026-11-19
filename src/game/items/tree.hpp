@@ -82,7 +82,9 @@ struct TreeFormParams {
 };
 
 struct TreeWood {
-    std::string block;  // a Block with natural_growth (living wood)
+    std::string block;        // outer living wood
+    std::string inner_block;  // core living wood
+    int shell_thickness = 1;  // blocks measured inward from the exterior
     std::string bark;   // FoliageMaterial for branches thinner than blocks
 };
 
@@ -220,8 +222,22 @@ inline void from_json(const Json& j, Tree& t) {
         if (!j.contains("wood")) fail("wood", "missing wood");
         {
             const auto& w = j.at("wood");
-            known(w, "wood", {"block", "bark"});
-            t.wood.block = name(w, "block");
+            known(w, "wood",
+                  {"block", "inner_block", "shell_thickness", "bark"});
+            if (w.contains("block") ||
+                t.size.trunk_radius_m.max >= TreeVoxelRadius)
+                t.wood.block = name(w, "block");
+            if (w.contains("inner_block") || t.size.trunk_radius_m.max > 1.f)
+                t.wood.inner_block = name(w, "inner_block");
+            if (!t.wood.inner_block.empty() &&
+                (t.wood.block.empty() || t.wood.inner_block == t.wood.block))
+                fail("inner_block", "requires a distinct outer block");
+            if (w.contains("shell_thickness")) {
+                const auto& n = w.at("shell_thickness");
+                if (!n.is_number_integer() || n < 1 || n > 16)
+                    fail("shell_thickness", "expected an integer in [1, 16]");
+                t.wood.shell_thickness = n.get<int>();
+            }
             t.wood.bark = name(w, "bark");
         }
 
@@ -247,7 +263,7 @@ inline void from_json(const Json& j, Tree& t) {
             known(r, "roots", {"depth_m", "reach_m", "branches"});
             if (t.size.trunk_radius_m.max < TreeVoxelRadius)
                 fail("roots", "roots require a voxel trunk");
-            t.roots.depth_m = number(r, "depth_m", 4, 2, 64);
+            t.roots.depth_m = number(r, "depth_m", 4, 2, 256);
             t.roots.reach_m = number(r, "reach_m", 8, 1, 256);
             if (r.contains("branches")) {
                 const auto& n = r.at("branches");

@@ -66,13 +66,15 @@ inline void validateTreeReferences(const IAssets& assets) {
         const auto fail = [&](const std::string& what) {
             throw std::runtime_error(tree.name + ": " + what);
         };
-        if (!storageHas.template operator()<Block>(tree.wood.block))
-            fail("unknown wood block " + tree.wood.block);
-        const auto& blocks = assets.getStorage<Block>();
-        if (!blocks.items[blocks.indexByName.at(tree.wood.block)]
-                 .properties.natural_growth)
-            fail("wood block " + tree.wood.block +
-                 " needs \"natural_growth\": true");
+        for (const auto* name : {&tree.wood.block, &tree.wood.inner_block}) {
+            if (name->empty()) continue;
+            if (!storageHas.template operator()<Block>(*name))
+                fail("unknown wood block " + *name);
+            const auto& blocks = assets.getStorage<Block>();
+            if (!blocks.items[blocks.indexByName.at(*name)]
+                     .properties.natural_growth)
+                fail("wood block " + *name + " needs \"natural_growth\": true");
+        }
         for (const auto* material : {&tree.wood.bark, &tree.foliage.material})
             if (!storageHas.template operator()<FoliageMaterial>(*material))
                 fail("unknown foliage material " + *material);

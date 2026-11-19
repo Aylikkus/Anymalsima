@@ -10,8 +10,10 @@
 #include "world/chunk_manager.hpp"
 #include "world/light_volume.hpp"
 #include "world/save/chunk_codec.hpp"
+#include "world/save/flora_codec.hpp"
 #include "world/save/region_file.hpp"
 #include "world/save/sky_codec.hpp"
+#include "world/save/terrain_edits_codec.hpp"
 #include "world/save/trees_codec.hpp"
 #include "world/sky_height_map.hpp"
 #include "world/structure_voxels.hpp"
@@ -47,6 +49,8 @@ void loadTreeContent(test::FloraAssets& assets) {
             tree["name"] = "trees.test_oak";
             tree["size"]["trunk_radius_m"] = Json::array({1.6, 2.6});
             tree["wood"]["block"] = "blocks.test_oak_wood";
+            tree["wood"]["inner_block"] = "blocks.oak_wood";
+            tree["wood"]["shell_thickness"] = 4;
             assets.load<Tree>(Json::array({tree}));
         }
 }
@@ -1119,7 +1123,8 @@ TEST(tree_landmarks) {
         "growth": { "maturity_days": 80000, "lifespan_days": 3000000 },
         "form_params": { "limbs": [5, 7], "root_flare": 0.5,
                          "branch_orders": 2 },
-        "wood": { "block": "blocks.elder_wood", "bark": "foliage.bark_elder" },
+        "wood": { "block": "blocks.elder_wood", "inner_block": "blocks.elder_inner_wood",
+                  "bark": "foliage.bark_elder" },
         "foliage": { "type": "leaf_clump", "material": "foliage.elder_leaf",
                      "clump_size_m": 5, "density": 0.4 },
         "placement": {
@@ -1388,6 +1393,15 @@ TEST(tree_foliage_meshes) {
 // Growth, overrides and cutting (steps 5 and 6).
 
 TEST(trees_codec_roundtrip) {
+    // Generated landmark keys start with 0xff. Their cut entries carry
+    // only the key and cuts because placement supplies the species.
+    TreeRecord elder;
+    elder.key = 0xff00000000000001ULL;
+    elder.cuts.push_back({1, 0.5f, 197506.03125f});
+    const auto landmark =
+        trees_codec::decode(trees_codec::encode({{elder.key, elder}}));
+    CHECK(landmark.trees.at(elder.key) == elder);
+    CHECK(!landmark.trees.at(elder.key).planted());
     TreeOverrideMap map;
     TreeRecord cut;
     cut.key = 1234;
@@ -1715,8 +1729,7 @@ TEST(tree_cut_angled_branch) {
         for (unsigned z = cz - 1; z <= cz + 1; ++z)
             for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
         const auto a = found->anchor;
-        const uint8_t wood =
-            f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+        const auto& wood = *f.chunks->treeSpecies().find(found->tree->species);
         auto skeleton = std::make_shared<TreeSkeleton>();
         skeleton->trunkRadius = 3;
         skeleton->height = 50;
@@ -1745,7 +1758,7 @@ TEST(tree_cut_angled_branch) {
             for (auto& slab : chunk.tiles)
                 for (auto& row : slab)
                     for (auto& tile : row)
-                        if (tile.block_id == wood) tile.block_id = 0;
+                        if (wood.ownsWood(tile.block_id)) tile.block_id = 0;
             placeTreeWood(chunk, coord, column, f.chunks->treeSpecies(), 0);
         });
         WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
@@ -1755,16 +1768,16 @@ TEST(tree_cut_angled_branch) {
         for (int y = a.y + 17; y <= a.y + 31; ++y)
             for (int z = a.z - 9; z <= a.z + 9; ++z)
                 if (const Tile* tile = f.chunks->tileAt(a.x, y, z);
-                    tile && tile->block_id == wood)
+                    tile && wood.ownsWood(tile->block_id))
                     slice.push_back({a.x, y, z});
         CHECK(slice.size() > 10);
         const TilePos tip{a.x + 8 * direction, a.y + 27, a.z + 3 * direction};
-        CHECK(f.chunks->tileAt(tip.x, tip.y, tip.z)->block_id == wood);
+        CHECK(wood.ownsWood(f.chunks->tileAt(tip.x, tip.y, tip.z)->block_id));
         // Wood holds by its faces: while a slice tile still joins wood on
         // both sides of the slit through faces, the limb stays attached.
         const auto isWood = [&](int x, int y, int z) {
             const Tile* t = f.chunks->tileAt(x, y, z);
-            return t && t->block_id == wood;
+            return t && wood.ownsWood(t->block_id);
         };
         std::vector<bool> bridge;
         for (const auto& p : slice)
@@ -1799,10 +1812,10 @@ TEST(tree_cut_angled_branch) {
                 for (int k = 1; k <= 18; ++k)
                     if (const Tile* t =
                             f.chunks->tileAt(a.x + k * direction, y, z);
-                        t && t->block_id == wood)
+                        t && wood.ownsWood(t->block_id))
                         ++beyond;
                 if (const Tile* t = f.chunks->tileAt(a.x - direction, y, z);
-                    t && t->block_id == wood)
+                    t && wood.ownsWood(t->block_id))
                     ++before;
             }
         EQUAL(beyond, size_t(0), "no wood left beyond the slit");
@@ -1824,8 +1837,7 @@ TEST(tree_cut_slanted_slit) {
         for (unsigned z = cz - 1; z <= cz + 1; ++z)
             for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
         const auto a = found->anchor;
-        const uint8_t wood =
-            f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+        const auto& wood = *f.chunks->treeSpecies().find(found->tree->species);
         auto skeleton = std::make_shared<TreeSkeleton>();
         skeleton->trunkRadius = 3;
         skeleton->height = 50;
@@ -1849,7 +1861,7 @@ TEST(tree_cut_slanted_slit) {
             for (auto& slab : chunk.tiles)
                 for (auto& row : slab)
                     for (auto& tile : row)
-                        if (tile.block_id == wood) tile.block_id = 0;
+                        if (wood.ownsWood(tile.block_id)) tile.block_id = 0;
             placeTreeWood(chunk, coord, column, f.chunks->treeSpecies(), 0);
         });
         WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
@@ -1867,7 +1879,7 @@ TEST(tree_cut_slanted_slit) {
             for (int z = a.z - 12; z <= a.z + 12; ++z)
                 for (int x = a.x - 20; x <= a.x + 20; ++x)
                     if (const Tile* t = f.chunks->tileAt(x, y, z);
-                        t && t->block_id == wood) {
+                        t && wood.ownsWood(t->block_id)) {
                         const int s = slitOf(x, y, z);
                         if (s == 0) slit.push_back({x, y, z});
                         far += s > 0;
@@ -1877,7 +1889,7 @@ TEST(tree_cut_slanted_slit) {
         // A slit tile bridges while it has wood faces on both sides.
         const auto isWood = [&](int x, int y, int z) {
             const Tile* t = f.chunks->tileAt(x, y, z);
-            return t && t->block_id == wood;
+            return t && wood.ownsWood(t->block_id);
         };
         std::vector<bool> bridge;
         for (const auto& p : slit) {
@@ -1908,7 +1920,7 @@ TEST(tree_cut_slanted_slit) {
             for (int z = a.z - 12; z <= a.z + 12; ++z)
                 for (int x = a.x - 20; x <= a.x + 20; ++x)
                     if (const Tile* t = f.chunks->tileAt(x, y, z);
-                        t && t->block_id == wood) {
+                        t && wood.ownsWood(t->block_id)) {
                         beyond += slitOf(x, y, z) > 0;
                         kept += slitOf(x, y, z) < 0;
                     }
@@ -1940,8 +1952,7 @@ TEST(tree_cut_relights_below) {
     for (unsigned z = cz - 1; z <= cz + 1; ++z)
         for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
     const auto a = found->anchor;
-    const uint8_t wood =
-        f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+    const auto& wood = *f.chunks->treeSpecies().find(found->tree->species);
     auto skeleton = std::make_shared<TreeSkeleton>();
     skeleton->trunkRadius = 3;
     skeleton->height = 50;
@@ -1966,7 +1977,7 @@ TEST(tree_cut_relights_below) {
         for (auto& slab : chunk.tiles)
             for (auto& row : slab)
                 for (auto& tile : row)
-                    if (tile.block_id == wood) tile.block_id = 0;
+                    if (wood.ownsWood(tile.block_id)) tile.block_id = 0;
         placeTreeWood(chunk, coord, column, f.chunks->treeSpecies(), 0);
         columns.insert(uint64_t{coord.x} << 32 | coord.z);
     });
@@ -1984,7 +1995,7 @@ TEST(tree_cut_relights_below) {
     for (int y = a.y + 17; y <= a.y + 31; ++y)
         for (int z = a.z - 9; z <= a.z + 9; ++z)
             if (const Tile* t = f.chunks->tileAt(a.x, y, z);
-                t && t->block_id == wood)
+                t && wood.ownsWood(t->block_id))
                 editor.removeBlock({a.x, y, z});
     EQUAL(sim.cutCount(), size_t(1), "limb sawn off");
     sim.finishClears();
@@ -2066,6 +2077,9 @@ TEST(tree_settle_in_world) {
     settling["name"] = "trees.test_settling_oak";
     settling["size"]["trunk_radius_m"] = Json::array({1.6, 2.6});
     settling["wood"]["block"] = "blocks.test_oak_wood";
+    settling["wood"]["inner_block"] = "blocks.oak_wood";
+    settling["wood"]["shell_thickness"] = 4;
+    settling["wood"]["block"] = "blocks.test_oak_wood";
     settling["cut"]["fell"] = "settle";
     TreeStream f(forestWorld(), Json::array({settling}));
     unsigned cx = 0, cz = 0;
@@ -2081,6 +2095,9 @@ TEST(tree_settle_in_world) {
     const uint8_t wood =
         f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
     const int cutY = a.y + 3;
+    const int holeY = cutY + 3;
+    CHECK(editor.removeBlock({a.x, holeY, a.z}) == EditStatus::Applied);
+    EQUAL(sim.cutCount(), size_t(0), "a hole away from the saw row");
     const size_t above = woodNear(f, a, cutY + 1, cutY + 8, 3, wood);
     CHECK(above > 0);
     for (int z = a.z - 6; z <= a.z + 6; ++z)
@@ -2095,6 +2112,7 @@ TEST(tree_settle_in_world) {
     sim.finishClears();
     CHECK(woodNear(f, a, cutY, cutY + 1, 6, wood) > 0);
     CHECK(woodNear(f, a, cutY + 1, cutY + 8, 3, wood) > 0);
+    CHECK(f.chunks->tileAt(a.x, holeY, a.z)->isAir());
 }
 
 TEST(tree_regrowth_starts_on_stump) {
@@ -3170,6 +3188,294 @@ TEST(tree_immortal_landmark) {
     CHECK(restored->skeleton->alive(restored->growthAge(today)));
 }
 
+TEST(tree_elder_undercut_is_excavation) {
+    TreeStream f;
+    constexpr unsigned cx = 18, cz = 18;
+    const TreeAnchor a{int(cx * 16 + 8), 596, int(cz * 16 + 8)};
+    const auto& rule = *f.chunks->treeSpecies().find(species("trees.elder").id);
+    TreeRecord record;
+    record.key = plantedTreeKey(a);
+    record.species = rule.id;
+    record.anchor = a;
+    record.headroom = 8;
+    const auto records = std::make_shared<TreeOverrideMap>(
+        TreeOverrideMap{{record.key, record}});
+    f.chunks->setTreeOverrides(records);
+    f.chunks->setFloraDay(10);
+    f.load(cx, cz);
+
+    // A cave touches the underside of the crown's first capsule. The row
+    // above the anchor is empty within the sampled cross-section.
+    auto tree = std::make_shared<TreeInstance>(
+        *buildPlantedTree(f.chunks->treeSpecies(), record));
+    auto skeleton = std::make_shared<TreeSkeleton>();
+    skeleton->trunkRadius = 2;
+    TreeSegment trunk;
+    trunk.b = {0, 6, 0};
+    trunk.r0 = trunk.r1 = 2;
+    trunk.birthB = trunk.matureAge = 1;
+    skeleton->segments.push_back(trunk);
+    const auto old = tree->bounds;
+    tree->skeleton = skeleton;
+    finishTreeInstance(*tree);
+    f.chunks->updateTree(tree, old);
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+    CHECK(editor.placeBlock({a.x, a.y - 1, a.z}, rule.woodBlock) ==
+          EditStatus::Applied);
+    TreeSimulation sim(*f.chunks, editor);
+    sim.update(10);
+    CHECK(editor.removeBlock({a.x, a.y - 1, a.z}) == EditStatus::Applied);
+    sim.finishClears();
+    EQUAL(sim.cutCount(), size_t(0), "trunk underside does not sever the bole");
+    CHECK(f.chunks->tileAt(a.x, a.y - 1, a.z)->isAir());
+}
+
+TEST(tree_landmark_wounds_persist_in_lod) {
+    TreeStream f(forestWorld(16));
+    constexpr unsigned cz = 18;
+    constexpr int day = 0;
+    const TreeAnchor a{0, 590, int(cz * 16 + 8)};
+    const unsigned cx = unsigned(f.chunks->wrap().chunks() - 1);
+    TreeRecord record;
+    record.key = plantedTreeKey(a);
+    record.anchor = a;
+    record.species = species("trees.elder").id;
+    record.seed = 7;
+    record.birthDay = -150000;
+    record.headroom = 40;
+    const auto original = buildPlantedTree(f.chunks->treeSpecies(), record);
+    const int32_t trunk = trunkAt(*original->skeleton, 4.f);
+    CHECK(trunk >= 0);
+    if (trunk < 0) return;
+    const auto& segment = original->skeleton->segments[size_t(trunk)];
+    record.cuts = {
+        {trunk, (4.f - segment.a.y) / (segment.b.y - segment.a.y), 150000.25f}};
+    const auto records = std::make_shared<TreeOverrideMap>(
+        TreeOverrideMap{{record.key, record}});
+    f.chunks->setTreeOverrides(records);
+    f.chunks->setFloraDay(day);
+    f.load(cx, cz);
+    const auto tree = buildPlantedTree(f.chunks->treeSpecies(), record);
+    const auto& rule = *f.chunks->treeSpecies().find(record.species);
+    const auto source =
+        tree_wood_lod::voxels({tree, tree->woodAgeForDay(day), rule.woodBlock,
+                               rule.innerWoodBlock, rule.woodShell()});
+    CHECK(tree->growthAge(day) < record.cuts.back().age);
+    EQUAL(tree->woodAgeForDay(day), record.cuts.back().age,
+          "whole-day stamp includes the committed settlement");
+    const int y = a.y + 8;
+    const unsigned slab = unsigned(y / 16);
+    const ChunkCoord coord{cx, slab, cz};
+    TerrainEdits edits;
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+    TerrainEditTracker tracker(*f.chunks, edits);
+    tracker.watch(editor);
+    const auto before = edits.maskStructure(source, f.chunks->wrap(), true);
+    CHECK(editor.removeBlock({-1, y, a.z}) == EditStatus::Applied);
+    tracker.update();
+    const auto edit = edits.find(editKey(cx, cz));
+    CHECK(edit && edit->suppresses(15, y, a.z % 16));
+    const auto after = edits.maskStructure(source, f.chunks->wrap(), true);
+    const auto change = after->changedSince(*before);
+    CHECK(change && !change->empty() && change->sizeX() <= 16 &&
+          change->sizeY() <= 16 && change->sizeZ() <= 16);
+    const auto verify = [&](const structure_voxels::SourcePtr& proxy) {
+        for (int level = 0; level <= structure_voxels::MaxLevel; ++level) {
+            const int scale = 1 << level, span = 16 * scale;
+            const int sy = y / span, sz = a.z / span;
+            const auto cell = structure_voxels::cellIndex(
+                15, (y % span) / scale, (a.z % span) / scale);
+            const auto intact = before->rasterize(level, -1, sy, sz);
+            CHECK(intact && intact->tileAt(cell) != 0);
+            const auto carved = proxy->rasterize(level, -1, sy, sz);
+            CHECK(!carved || carved->tileAt(cell) == 0);
+        }
+    };
+    verify(after);
+    TerrainEdits saved(terrain_edits_codec::decode(
+                           terrain_edits_codec::encode(*edits.snapshot()))
+                           .columns);
+    verify(saved.maskStructure(source, f.chunks->wrap(), true));
+
+    // If the world-wide index is absent, the chunk's saved edit restores it.
+    TreeStream reloaded(forestWorld(16));
+    reloaded.chunks->setTreeOverrides(records);
+    reloaded.chunks->setFloraDay(day);
+    TerrainEdits rebuilt;
+    TerrainEditTracker restore(*reloaded.chunks, rebuilt);
+    reloaded.load(cx, cz,
+                  {{slab, std::make_shared<const Bytes>(chunk_codec::encode(
+                              *f.chunks->getChunk(coord)))}},
+                  {{slab, std::make_shared<const Bytes>(flora_codec::encode(
+                              {}, f.chunks->treeStamp(coord)))}});
+    restore.update();
+    verify(rebuilt.maskStructure(source, reloaded.chunks->wrap(), true));
+
+    CHECK(editor.placeBlock({-1, y, a.z}, rule.innerWoodBlock) ==
+          EditStatus::Applied);
+    tracker.update();
+    const auto repaired = edits.maskStructure(source, f.chunks->wrap(), true);
+    CHECK(repaired->changedSince(*after) == change);
+    const auto wood = repaired->rasterize(0, -1, int(slab), int(cz));
+    CHECK(wood && wood->tileAt(Chunk::cell(15, y % 16, a.z % 16)));
+}
+
+TEST(tree_wood_layers) {
+    // Neither capsule has a core here alone. Their merged junction does.
+    TreeSkeleton junction;
+    junction.trunkRadius = 1;
+    junction.maturity = 10;
+    TreeSegment limb;
+    limb.a = {-0.5f, 0, 0};
+    limb.b = {-0.5f, 10, 0};
+    limb.r0 = limb.r1 = 1;
+    limb.birthB = limb.matureAge = 10;
+    junction.segments.push_back(limb);
+    const auto cell = layer(5, 0);
+    std::vector<uint8_t> layers;
+    markTreeWoodLayers(junction, nullptr, Origin, cell, 10, 1, layers);
+    EQUAL(layers[0], 1, "single limb has bark at its edge");
+    limb.a.x = limb.b.x = 0.5f;
+    junction.segments.push_back(limb);
+    markTreeWoodLayers(junction, nullptr, Origin, cell, 10, 1, layers);
+    EQUAL(layers[0], 2, "merged junction has no internal bark seam");
+
+    for (const auto* name : {"trees.redwood", "trees.elder"}) {
+        Tree rule = species(name);
+        // Use a falling cut to leave the face accessible on both species.
+        rule.cut.fell = TreeFell::Fall;
+        const auto whole = build(name);
+        constexpr float height = 6;
+        const int32_t trunk = trunkAt(*whole, height);
+        CHECK(trunk >= 0);
+        if (trunk < 0) continue;
+        const auto& s = whole->segments[size_t(trunk)];
+        const float t = (height - s.a.y) / (s.b.y - s.a.y);
+        const auto face = layer(int(height), 20);
+        for (const float age : {whole->maturity * .5f, whole->matureAge()}) {
+            std::vector<uint8_t> before, after;
+            markTreeWoodLayers(*whole, nullptr, Origin, face, age,
+                               rule.wood.shell_thickness, before);
+            const auto cut = applyTreeCuts(*whole, rule, {{trunk, t, age}});
+            markTreeWoodLayers(*cut, whole.get(), Origin, face, age,
+                               rule.wood.shell_thickness, after);
+            const auto center =
+                face.index(Origin.x, Origin.y + int(height), Origin.z);
+            EQUAL(before[center], 2, name);
+            EQUAL(after[center], before[center], name);
+            for (size_t i = 0; i < after.size(); ++i)
+                if (before[i] == 2 && after[i])
+                    EQUAL(after[i], before[i], "retained core on the cut face");
+        }
+    }
+}
+
+TEST(tree_legacy_bark_migrates_and_core_supports_cut) {
+    constexpr unsigned cx = 18, cz = 18;
+    constexpr int day = 10000;
+    const TreeAnchor a{int(cx * 16 + 8), 590, int(cz * 16 + 8)};
+    TreeRecord record;
+    record.key = plantedTreeKey(a);
+    record.anchor = a;
+    record.seed = 7;
+    record.species = species("trees.redwood").id;
+    record.headroom = 40;
+    const auto overrides = std::make_shared<const TreeOverrideMap>(
+        TreeOverrideMap{{record.key, record}});
+
+    TreeStream fresh;
+    fresh.chunks->setTreeOverrides(overrides);
+    fresh.chunks->setFloraDay(day);
+    fresh.load(cx, cz);
+    const auto& rule = *fresh.chunks->treeSpecies().find(record.species);
+    const int cutY = a.y + 7, holeY = cutY + 1;
+    const unsigned slab = unsigned(cutY / 16);
+    const ChunkCoord coord{cx, slab, cz};
+    const auto tree = buildPlantedTree(fresh.chunks->treeSpecies(), record);
+    const TreeSet trees{tree};
+    const auto column =
+        makeTreeColumn(cx, cz, {&trees}, fresh.chunks->wrap().tiles);
+    Chunk growing, mature;
+    constexpr int earlyDay = 4000;
+    const auto& table = fresh.chunks->treeSpecies();
+    placeTreeWood(growing, coord, column, table, earlyDay);
+    placeTreeWood(mature, coord, column, table, day);
+    const auto growth =
+        treeWoodChanges(growing, coord, column, table, earlyDay, day);
+    const auto barkToCore =
+        std::find_if(growth.begin(), growth.end(), [&](const auto& change) {
+            return change.previousBlock == rule.woodBlock &&
+                   change.block == rule.innerWoodBlock;
+        });
+    CHECK(barkToCore != growth.end());
+    if (barkToCore != growth.end()) {
+        const int cell = barkToCore->index;
+        (&growing.tiles[0][0][0])[cell].block_id = 0;
+        applyTreeWoodChanges(growing, treeWoodChanges(growing, coord, column,
+                                                      table, earlyDay, day));
+        CHECK((&growing.tiles[0][0][0])[cell].isAir());
+        (&mature.tiles[0][0][0])[cell].block_id = 0;
+        CHECK(sameTiles(growing, mature));
+    }
+    const auto proxy =
+        tree_wood_lod::voxels({tree, float(day), rule.woodBlock,
+                               rule.innerWoodBlock, rule.woodShell()});
+    const auto voxels = proxy->rasterize(0, int(cx), int(slab), int(cz));
+    CHECK(voxels);
+    if (voxels) {
+        EQUAL(voxels->tileAt(Chunk::cell(8, cutY % 16, 8)), rule.innerWoodBlock,
+              "distant wood keeps the core");
+        CHECK(std::find(voxels->blocks.begin(), voxels->blocks.end(),
+                        rule.woodBlock) != voxels->blocks.end());
+    }
+    Chunk legacy = *fresh.chunks->getChunk(coord);
+    EQUAL(legacy.tiles[8][cutY % 16][8].block_id, rule.innerWoodBlock,
+          "fresh chunk has a core");
+    for (auto& slice : legacy.tiles)
+        for (auto& row : slice)
+            for (auto& tile : row)
+                if (tile.block_id == rule.innerWoodBlock)
+                    tile.block_id = rule.woodBlock;
+    legacy.tiles[8][holeY % 16][8].block_id = 0;
+    legacy.markRootEdited(Chunk::cell(8, holeY % 16, 8));
+
+    TreeStream loaded;
+    loaded.chunks->setTreeOverrides(overrides);
+    loaded.chunks->setFloraDay(day);
+    loaded.load(
+        cx, cz,
+        {{slab, std::make_shared<const Bytes>(chunk_codec::encode(legacy))}},
+        {{slab, std::make_shared<const Bytes>(
+                    flora_codec::encode({}, {day, TreeBarkOnlyVersion}))}});
+    EQUAL(loaded.chunks->treeStamp(coord).version, TreeVersion,
+          "legacy stamp upgraded");
+    EQUAL(loaded.chunks->tileAt(a.x, cutY, a.z)->block_id, rule.innerWoodBlock,
+          "legacy bark converted to core");
+    CHECK(loaded.chunks->tileAt(a.x, holeY, a.z)->isAir());
+    for (unsigned z = cz - 1; z <= cz + 1; ++z)
+        for (unsigned x = cx - 1; x <= cx + 1; ++x)
+            if (x != cx || z != cz) loaded.load(x, z);
+    WorldEditor editor(*loaded.chunks, nullptr,
+                       loaded.assets.getStorage<Block>());
+    TreeSimulation sim(*loaded.chunks, editor);
+    sweepAll(sim, day + 1);
+    CHECK(loaded.chunks->tileAt(a.x, holeY, a.z)->isAir());
+
+    for (int z = a.z - 14; z <= a.z + 14; ++z)
+        for (int x = a.x - 14; x <= a.x + 14; ++x)
+            if (x != a.x || z != a.z)
+                if (const auto* tile = loaded.chunks->tileAt(x, cutY, z);
+                    tile && rule.ownsWood(tile->block_id))
+                    editor.removeBlock({x, cutY, z});
+    EQUAL(sim.cutCount(), size_t(0), "remaining core supports the crown");
+    editor.removeBlock({a.x, cutY, a.z});
+    EQUAL(sim.cutCount(), size_t(1), "removing the last core severs the trunk");
+    sim.finishClears();
+    EQUAL(loaded.chunks->tileAt(a.x, cutY - 1, a.z)->block_id,
+          rule.innerWoodBlock, "stump exposes its existing core");
+    CHECK(loaded.chunks->tileAt(a.x, cutY + 2, a.z)->isAir());
+}
+
 TEST(tree_roots_wrap_and_preserve_substrate) {
     for (const auto* name : {"trees.redwood", "trees.elder"}) {
         const auto crown = build(name);
@@ -3189,7 +3495,7 @@ TEST(tree_roots_wrap_and_preserve_substrate) {
                            roots->fullRadius(plate, 0, angle)) < 0.01f);
         const auto& branch = roots->segments.at(1);
         const TreeVec direction = branch.b - branch.a;
-        CHECK(std::hypot(direction.x, direction.z) > 3 * std::abs(direction.y));
+        CHECK(std::hypot(direction.x, direction.z) > 0 && direction.y < 0);
         const auto bounds = treeWoodBounds(*roots, Origin);
         const int depth = int(std::ceil(rule.roots.depth_m));
         const auto shallow =
@@ -3197,15 +3503,18 @@ TEST(tree_roots_wrap_and_preserve_substrate) {
                               bounds.x1, Origin.y + 1, bounds.z1});
         std::vector<uint8_t> wood;
         markTreeWood(*roots, Origin, shallow, crown->maturity, wood);
-        int spread = 0;
+        int spread = 0, deepest = 0;
         for (int z = shallow.z0; z < shallow.z1; ++z)
             for (int x = shallow.x0; x < shallow.x1; ++x)
                 for (int y = shallow.y0; y < shallow.y1; ++y)
-                    if (wood[shallow.index(x, y, z)])
+                    if (wood[shallow.index(x, y, z)]) {
                         spread =
                             std::max(spread, std::max(std::abs(x - Origin.x),
                                                       std::abs(z - Origin.z)));
-        CHECK(spread > depth * 3);
+                        deepest = std::max(deepest, Origin.y - y);
+                    }
+        CHECK(spread >= rule.roots.reach_m * 0.65f);
+        CHECK(deepest >= depth * 0.35f);
     }
 
     const TreeSpeciesTable table(content());
@@ -3287,6 +3596,47 @@ TEST(tree_roots_wrap_and_preserve_substrate) {
     CHECK(mature(restored, 15, seamColumn).empty());
     chunk_codec::decode(chunk_codec::encode(restored), chunk);
     CHECK(chunk.legacyRootTerrain);
+}
+
+TEST(tree_elder_roots_backfill_uphill_contact) {
+    constexpr unsigned cx = 18, cz = 18;
+    constexpr int x = int(cx * 16 + 8), z = int(cz * 16 + 8);
+    TreeStream plain;
+    plain.load(cx, cz);
+    const auto inputs = plain.chunks->generatedColumns(cx, cz);
+    CHECK(inputs);
+    const int surface = inputs->columns[8 * 16 + 8].surface_y;
+    const int y = surface - 2;
+    const unsigned slab = unsigned(y / 16);
+    const ChunkCoord coord{cx, slab, cz};
+    Chunk previous = *plain.chunks->getChunk(coord);
+    const Tile soil = previous.tiles[8][y % 16][8];
+    CHECK(soil.isSolid());
+    previous.tiles[8][y % 16][9] = {};
+    previous.markRootEdited(Chunk::cell(9, y % 16, 8));
+
+    TreeRecord record;
+    record.anchor = {x, surface - 8, z};
+    record.key = plantedTreeKey(record.anchor);
+    record.species = species("trees.elder").id;
+    record.seed = 7;
+    record.headroom = 40;
+    record.birthDay = -150000;
+    const auto overrides = std::make_shared<const TreeOverrideMap>(
+        TreeOverrideMap{{record.key, record}});
+    TreeStream reloaded;
+    reloaded.chunks->setTreeOverrides(overrides);
+    reloaded.load(
+        cx, cz,
+        {{slab, std::make_shared<const Bytes>(chunk_codec::encode(previous))}},
+        {{slab, std::make_shared<const Bytes>(flora_codec::encode(
+                    {}, {0, TreeBeforeRootCollarVersion}))}});
+    const auto* root = reloaded.chunks->rootAt(x, y, z);
+    CHECK(root && root->owner == record.key && root->block == soil.block_id);
+    CHECK(reloaded.chunks->tileAt(x + 1, y, z)->isAir());
+    CHECK(!reloaded.chunks->rootAt(x + 1, y, z));
+    EQUAL(reloaded.chunks->treeStamp(coord).version, TreeVersion,
+          "uphill root contact saved at the current version");
 }
 
 TEST(tree_live_roots_respect_edits_and_support) {

@@ -18,7 +18,8 @@ Json oakJson() {
                          "branches_per_node": [2, 3], "crown_base": 0.3,
                          "droop": 0.1, "taper": 0.7, "gnarl": 0.35,
                          "root_flare": 0.5, "branch_orders": 3 },
-        "wood": { "block": "blocks.oak_wood", "bark": "foliage.bark" },
+        "wood": { "block": "blocks.oak_wood", "inner_block": "blocks.oak_inner_wood",
+                  "bark": "foliage.bark" },
         "foliage": { "type": "leaf_clump", "material": "foliage.leaf",
                      "clump_size_m": [1.4, 2.2], "density": 1.2 },
         "placement": {
@@ -33,7 +34,8 @@ Json oakJson() {
 }
 
 // Minimal assets the oak refers to.
-void loadOakReferences(test::FloraAssets& a, bool naturalGrowth = true) {
+void loadOakReferences(test::FloraAssets& a, bool barkLiving = true,
+                       bool coreLiving = true) {
     a.load<Material>(Json::array({{{"name", "materials.oak_wood"},
                                    {"texture_albedo", "oak"},
                                    {"texture_normal", "oak_normal"}}}));
@@ -41,7 +43,11 @@ void loadOakReferences(test::FloraAssets& a, bool naturalGrowth = true) {
         Json::array({{{"name", "blocks.oak_wood"},
                       {"material", "materials.oak_wood"},
                       {"render_category", "Vegetation"},
-                      {"properties", {{"natural_growth", naturalGrowth}}}}}));
+                      {"properties", {{"natural_growth", barkLiving}}}},
+                     {{"name", "blocks.oak_inner_wood"},
+                      {"material", "materials.oak_wood"},
+                      {"render_category", "Vegetation"},
+                      {"properties", {{"natural_growth", coreLiving}}}}}));
     a.load<FoliageMaterial>(Json::array(
         {{{"name", "foliage.leaf"}, {"albedo", "foliage.leaf_broad"}},
          {{"name", "foliage.bark"}, {"albedo", "foliage.blade"}}}));
@@ -93,6 +99,24 @@ TEST(tree_species_parsing) {
             [](Json& j) { j["form_params"]["branch_orders"] = 5; });
     rejects("foliage type", [](Json& j) { j["foliage"]["type"] = "flowers"; });
     rejects("missing wood", [](Json& j) { j.erase("wood"); });
+    rejects("missing bark block at voxel threshold", [](Json& j) {
+        j["size"]["trunk_radius_m"] = 0.5;
+        j["wood"].erase("block");
+        j["wood"].erase("inner_block");
+    });
+    rejects("missing core block over radius one",
+            [](Json& j) { j["wood"].erase("inner_block"); });
+    rejects("same bark and core block",
+            [](Json& j) { j["wood"]["inner_block"] = j["wood"]["block"]; });
+    rejects("fractional shell",
+            [](Json& j) { j["wood"]["shell_thickness"] = 1.5; });
+    auto thin = oakJson();
+    thin["wood"].erase("inner_block");
+    thin["size"]["trunk_radius_m"] = {0.5, 1.0};
+    CHECK(thin.get<Tree>().wood.inner_block.empty());
+    thin["wood"].erase("block");
+    thin["size"]["trunk_radius_m"] = 0.49;
+    CHECK(thin.get<Tree>().wood.block.empty());
     rejects("companions", [](Json& j) {
         j["placement"]["companions"] =
             Json::array({{{"species", "flora.fern"}}});
@@ -138,19 +162,19 @@ TEST(tree_references_validated) {
         validateTreeReferences(assets);
         const auto grown =
             naturalGrowthBlocks(assets.getStorage<Block>().items);
-        EQUAL(grown.count(), size_t(1), "one natural growth block");
+        EQUAL(grown.count(), size_t(2), "both living wood blocks");
         CHECK(grown.test(assets.getStorage<Block>().items[0].id));
     }
     // Wood that players could place (no natural_growth) is refused: edit
     // detection would hide it.
-    {
+    for (const bool barkLiving : {false, true}) {
         test::FloraAssets assets;
-        loadOakReferences(assets, false);
+        loadOakReferences(assets, barkLiving, !barkLiving);
         assets.load<Tree>(Json::array({oakJson()}));
         test::expectThrows([&] { validateTreeReferences(assets); },
                            "wood without natural_growth");
     }
-    for (const auto* key : {"block", "bark"}) {
+    for (const auto* key : {"block", "inner_block", "bark"}) {
         test::FloraAssets assets;
         loadOakReferences(assets);
         auto tree = oakJson();
@@ -205,8 +229,6 @@ TEST(tree_runtime_content) {
     CHECK(classes[size_t(TreeSizeClass::Massive)] > 0);
     // Every tree wood block is natural growth, and nothing else is.
     const auto grown = naturalGrowthBlocks(assets.getStorage<Block>().items);
-    EQUAL(grown.count(), assets.getStorage<Tree>().items.size(),
-          "one living wood per species");
     for (const auto& block : assets.getStorage<Block>().items)
         CHECK(grown.test(block.id) == block.name.ends_with("_wood"));
 }

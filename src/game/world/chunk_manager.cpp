@@ -1218,11 +1218,12 @@ void ChunkManager::dispatchGeneration() {
                         GeneratedChunk out{result, true, edited, nullptr};
                         out.structuresUsed = structures;
                         out.baselineChanged = baselineChanged;
-                        const auto growRoots = [&](double since) {
+                        const auto growRoots = [&](double since,
+                                                   bool legacyBark = false) {
                             if (!columns) return false;
                             const auto roots = treeRootChanges(
                                 *result, coord, *trees, *treeRules, *columns,
-                                since, day);
+                                since, day, legacyBark);
                             applyTreeWoodChanges(*result, roots);
                             return !roots.empty();
                         };
@@ -1247,17 +1248,27 @@ void ChunkManager::dispatchGeneration() {
                             // chunk may have been saved earlier that day,
                             // before the cut (its wood would stay, unseen
                             // high up, and shade the ground below).
-                            if (out.trees.version != TreeVersion ||
+                            const bool legacyBark =
+                                out.trees.version == TreeBarkOnlyVersion;
+                            const bool addRootCollar =
+                                out.trees.version ==
+                                TreeBeforeRootCollarVersion;
+                            if ((!legacyBark && !addRootCollar &&
+                                 out.trees.version != TreeVersion) ||
                                 out.trees.day > day)
                                 return;
-                            const auto changes =
-                                treeWoodChanges(*result, coord, *trees,
-                                                *treeRules, out.trees.day, day);
+                            const auto changes = treeWoodChanges(
+                                *result, coord, *trees, *treeRules,
+                                out.trees.day, day, legacyBark);
                             applyTreeWoodChanges(*result, changes);
-                            out.treesPlaced = reshapeRoots ||
-                                              growRoots(out.trees.day) ||
-                                              !changes.empty();
-                            out.trees.day = day;
+                            const bool backfill = legacyBark || addRootCollar;
+                            const bool rootsChanged =
+                                !reshapeRoots &&
+                                growRoots(backfill ? -INFINITY : out.trees.day,
+                                          backfill);
+                            out.treesPlaced = reshapeRoots || rootsChanged ||
+                                              legacyBark || !changes.empty();
+                            out.trees = stamp;
                         };
                         if (storedFlora) {
                             try {

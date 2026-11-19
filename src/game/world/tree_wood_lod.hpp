@@ -19,6 +19,8 @@ struct Source {
     TreeInstancePtr tree;
     float age = 0;
     uint8_t block = 0;
+    uint8_t innerBlock = 0;
+    int shell = 0;
     bool operator==(const Source&) const = default;
 };
 
