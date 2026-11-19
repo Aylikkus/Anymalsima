@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 #include <thread>
+#include <unordered_map>
 
 #include "lod_capture_renderer.hpp"
 #include "lod_scene.hpp"
@@ -121,22 +122,12 @@ int main(int argc, char** argv) {
                             : 600.f;
                 }
         ChunkManager chunks(generator, pool, &mesher, world, &assets);
-        SunLightPropagator sunlight(chunks, assets.getStorage<Block>(), pool);
-        LocationManager locations(chunks, world);
         TerrainEdits edits;
-        TerrainEditTracker tracker(chunks, edits);
-        WorldEditor editor(chunks, &sunlight, assets.getStorage<Block>());
-        tracker.watch(editor);
-        LightSourceRegistry registry;
-        BlockLightPropagator blockLight(chunks, assets.getStorage<Block>(),
-                                        pool, &registry);
-        blockLight.watch(editor);
-        LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
-                                   &blockLight, &sunlight);
-        // Sky heightmap (docs/handoff/sky-light.md), checked against the
-        // voxel sunlight of fully lit chunks at the end of SMOKE_APPROACH.
+        // Sky heightmap (docs/handoff/sky-light.md): seeds sunlight (unless
+        // SMOKE_LEGACY_SUN=1, the sweep through every slab up to the column
+        // top) and is checked against the voxel sunlight of fully lit chunks
+        // at the end of SMOKE_APPROACH.
         SkyHeightMap skyMap(chunks, edits, assets.getStorage<Block>(), pool);
-        skyMap.watch(editor);
         struct SkyRequests {
             ChunkManager& chunks;
             Signal<const ChunkCoord&>::Connection connection;
@@ -145,6 +136,24 @@ int main(int argc, char** argv) {
                       chunks.becameReady.connect([&](const ChunkCoord& c) {
                           skyMap.request(c.x, c.z);
                       })};
+        SunLightPropagator sunlight(
+            chunks, assets.getStorage<Block>(), pool,
+            std::getenv("SMOKE_LEGACY_SUN") ? nullptr : &skyMap);
+        LocationManager locations(chunks, world);
+        TerrainEditTracker tracker(chunks, edits);
+        WorldEditor editor(chunks, &sunlight, assets.getStorage<Block>());
+        tracker.watch(editor);
+        skyMap.watch(editor);
+        struct SkyUnwatch {
+            SkyHeightMap& map;
+            ~SkyUnwatch() { map.unwatch(); }
+        } skyUnwatch{skyMap};
+        LightSourceRegistry registry;
+        BlockLightPropagator blockLight(chunks, assets.getStorage<Block>(),
+                                        pool, &registry);
+        blockLight.watch(editor);
+        LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
+                                   &blockLight, &sunlight);
         // SMOKE_QUALITY=0..2 picks the light (shadow) budget preset.
         const int lightQuality = std::getenv("SMOKE_QUALITY")
                                      ? std::atoi(std::getenv("SMOKE_QUALITY"))
@@ -288,6 +297,9 @@ int main(int argc, char** argv) {
             // Loaded columns near the eye showing black ground.
             size_t maxBlack = 0;
             int blackFrames = 0;
+            // Ground chunks near the eye: frame first seen ready, and
+            // frames until full light (isComplete, not estimated).
+            std::unordered_map<ChunkCoord, int> seenAt, litAfter;
             std::vector<std::array<double, 6>> times;  // per section
         } approach;
         const bool approaching =
@@ -1121,6 +1133,26 @@ int main(int argc, char** argv) {
                                     }
                                 black += dark == 4;
                             }
+                        for (int dz = -8; dz <= 8; ++dz)
+                            for (int dx = -8; dx <= 8; ++dx) {
+                                const int x = (cx0 + dx) * 16 + 8;
+                                const int z = (cz0 + dz) * 16 + 8;
+                                if (x < 0 || z < 0) continue;
+                                const int y = chunks.generatedSurfaceY(
+                                                  unsigned(x), unsigned(z)) +
+                                              1;
+                                const ChunkCoord c{
+                                    unsigned(world.wrap().wrapChunk(x / 16)),
+                                    unsigned(y / 16), unsigned(z / 16)};
+                                if (!chunks.isReady(c)) continue;
+                                const int first =
+                                    approach.seenAt.try_emplace(c, frame)
+                                        .first->second;
+                                if (!approach.litAfter.contains(c) &&
+                                    sunlight.isComplete(c) &&
+                                    !sunlight.isEstimated(c))
+                                    approach.litAfter[c] = frame - first;
+                            }
                         approach.maxBlack = std::max(approach.maxBlack, black);
                         approach.blackFrames += black > 0;
                         if (approach.frames++ % 30 == 0 || sections[4] > 33)
@@ -1176,6 +1208,41 @@ int main(int argc, char** argv) {
                                 << " max_gaps128=" << approach.maxGaps128
                                 << " black_frames=" << approach.blackFrames
                                 << " max_black=" << approach.maxBlack << '\n';
+                            // Ready to full light, under tall structures
+                            // (wood 48+ tiles above the chunk) and elsewhere.
+                            for (const bool tall : {false, true}) {
+                                std::vector<int> v;
+                                size_t n = 0;
+                                for (const auto& [c, first] : approach.seenAt) {
+                                    const auto trees =
+                                        chunks.treeColumn(c.x, c.z);
+                                    if ((trees &&
+                                         trees->woodTop > int(c.y) * 16 + 48) !=
+                                        tall)
+                                        continue;
+                                    ++n;
+                                    if (const auto it =
+                                            approach.litAfter.find(c);
+                                        it != approach.litAfter.end())
+                                        v.push_back(it->second);
+                                }
+                                std::sort(v.begin(), v.end());
+                                std::cout << "approach_lit tall=" << tall
+                                          << " chunks=" << n
+                                          << " unlit=" << n - v.size();
+                                if (!v.empty())
+                                    std::cout
+                                        << " p50_frames=" << v[v.size() / 2]
+                                        << " p90_frames="
+                                        << v[v.size() * 9 / 10]
+                                        << " max_frames=" << v.back();
+                                std::cout << '\n';
+                            }
+                            size_t ready = 0;
+                            chunks.forEachReady(
+                                [&](const ChunkCoord&, Chunk&) { ++ready; });
+                            std::cout << "approach_ready_chunks=" << ready
+                                      << '\n';
                             // Fully lit tiles: sun 15 exactly where the map
                             // gives direct 15, never below its direct light.
                             size_t cells = 0, wrong = 0, unmapped = 0;

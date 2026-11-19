@@ -104,6 +104,11 @@ SkyHeightMap::~SkyHeightMap() {
     for (auto& job : jobs) job.future.wait();
 }
 
+void SkyHeightMap::unwatch() {
+    if (editor) editor->blockChanged.disconnect(editConnection);
+    editor = nullptr;
+}
+
 void SkyHeightMap::watch(WorldEditor& source) {
     if (editor) editor->blockChanged.disconnect(editConnection);
     editor = &source;

@@ -2,18 +2,31 @@
 
 #include <array>
 #include <future>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "chunk_manager.hpp"
+#include "sky_column.hpp"
+
+class SkyHeightMap;
 
 // Main-thread scheduler. Workers receive owned opacity/direct-light snapshots;
 // they never access ChunkManager, live tiles, or the propagator itself.
+//
+// With a sky heightmap (docs/handoff/sky-light.md), a slab's direct light
+// starts from the slab above when it is loaded and from the heightmap
+// otherwise, so sunlight never needs the slabs between a chunk and the sky.
+// A column waits for its heightmap; never-lit chunks keep their estimate
+// (isEstimated) until their full light lands. Without one (headless
+// fixtures without a world map), direct light sweeps from the column top
+// through every slab and requests the missing ones.
 class SunLightPropagator {
    public:
+    // sky: optional; must outlive the propagator.
     SunLightPropagator(ChunkManager& chunks, const DataStorage<Block>& blocks,
-                       ThreadPool& pool);
+                       ThreadPool& pool, SkyHeightMap* sky = nullptr);
     ~SunLightPropagator();
     SunLightPropagator(const SunLightPropagator&) = delete;
     SunLightPropagator& operator=(const SunLightPropagator&) = delete;
@@ -79,6 +92,8 @@ class SunLightPropagator {
         uint64_t revision;
         int topSlab;
         std::vector<Slab> slabs;
+        // The column's sky heightmap (null: sweep from topSlab).
+        sky::TilePtr sky;
     };
     struct DirectResult {
         uint64_t column;
@@ -120,7 +135,10 @@ class SunLightPropagator {
     void ready(const ChunkCoord& coord);
     void removed(const ChunkCoord& coord);
     void invalidateAround(const ChunkCoord& coord);
-    DirectInput snapshotColumn(uint64_t column);
+    // std::nullopt while the column's heightmap is not built (sky mode).
+    std::optional<DirectInput> snapshotColumn(uint64_t column);
+    // Sky mode: sweeps waiting for no chunk's spread (heightmap changes).
+    void dispatchSweeps(size_t capacity);
     IndirectInput snapshotHalo(const ChunkCoord& coord);
     void collect();
     void publish(ChunkCoord coord, const Light& light);
@@ -137,6 +155,8 @@ class SunLightPropagator {
     ChunkManager& chunks;
     const DataStorage<Block>& blocks;
     ThreadPool& pool;
+    SkyHeightMap* sky;
+    Signal<uint64_t>::Connection skyConnection;
     Signal<const ChunkCoord&>::Connection readyConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     std::unordered_map<ChunkCoord, State> states;

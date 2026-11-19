@@ -51,13 +51,15 @@ Now:
 
 The blind/estimate path is a stopgap. The structural fix is the sky
 heightmap in `sky-light.md`: structures report their sky tops through a
-`Source` query, and sunlight no longer needs the slabs above the ground.
+`Source` query, and sunlight no longer needs the slabs above the ground
+(step 2 there, done: with a heightmap, chunks are never blind, and only
+headless fixtures without a world map still use this path).
 
 ### Bottlenecks the structure API must respect
 
 These come from the light pipeline and chunk loading. They decide how far a structure kind can push height, footprint and edit rate.
 
-- **Column top and sky prerequisites.** Raising a column top makes every slab from the ground up to that top a prerequisite of the column's sunlight. Cost grows with height times footprint, and every one of those slabs runs full generation and stamping. An elder costs up to about 60 slabs per column over its whole crown. Towns are cheap; towers, bridges and arches are expensive; the planned sky islands at Y of about 2048 are expensive too. Step 3 (chunk stamping) should:
+- **Column top and sky prerequisites** (for sunlight, solved by the sky heightmap, `sky-light.md` step 2: sunlight no longer requests these slabs; they still cost generation wherever something needs them). Raising a column top makes every slab from the ground up to that top a prerequisite of the column's sunlight. Cost grows with height times footprint, and every one of those slabs runs full generation and stamping. An elder costs up to about 60 slabs per column over its whole crown. Towns are cheap; towers, bridges and arches are expensive; the planned sky islands at Y of about 2048 are expensive too. Step 3 (chunk stamping) should:
   - give the column top per column from the structure's real occupancy, not its bounding box (`Source::occupancy` already knows which slabs can hold voxels);
   - let slabs that a source reports empty over a column skip generation (known air), so the sweep can pass through them without generating anything.
 - **Tree sets before slabs.** A slab under a landmark is generated only once every region tree set it needs is built (`treesReady`, landmark reach up to `TreeMaxLandmarkReach`). Kinds with world-wide reach should have their per-region data cheap and ready before chunk generation asks for it.

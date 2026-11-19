@@ -8,9 +8,9 @@
 
 #include "flora_assets.hpp"
 #include "world/chunk_manager.hpp"
+#include "world/light_volume.hpp"
 #include "world/save/chunk_codec.hpp"
 #include "world/save/region_file.hpp"
-#include "world/light_volume.hpp"
 #include "world/save/sky_codec.hpp"
 #include "world/save/trees_codec.hpp"
 #include "world/sky_height_map.hpp"
@@ -2873,4 +2873,86 @@ TEST(sky_heightmap_matches_chunks) {
         for (unsigned cz = 16; cz < 20; ++cz) again.request(cx, cz);
     settle(f, again);
     EQUAL(heightmapMismatches(f, again), size_t(0), "reloaded");
+}
+
+namespace {
+// Registers and generates slabs [low, high) of column (cx, cz).
+void loadSlabs(TreeStream& f, unsigned cx, unsigned cz, unsigned low,
+               unsigned high) {
+    const auto& region = f.world.regions[(cz / 8) * f.world.width + cx / 8];
+    const ChunkCoord origin{(cx / 8) * 8, 0, (cz / 8) * 8};
+    if (!f.chunks->isRegistered({cx, 0, cz}))
+        f.chunks->registerChunk({cx, 0, cz}, origin, &region);
+    for (unsigned y = low; y < high; ++y) {
+        f.chunks->registerChunk({cx, y, cz}, origin, &region);
+        f.chunks->request({cx, y, cz});
+    }
+}
+void lightAll(TreeStream& f, SunLightPropagator& sun,
+              SkyHeightMap* map = nullptr) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    do {
+        f.chunks->update();
+        if (map) map->update();
+        sun.update();
+        CHECK(f.pool.wait_for(std::chrono::seconds(10)));
+        CHECK(std::chrono::steady_clock::now() < deadline);
+    } while (!sun.isIdle() || f.chunks->hasGenerationWork() ||
+             (map && !map->isIdle()));
+}
+}  // namespace
+
+// Step 2 of docs/handoff/sky-light.md: seeded from the heightmap, slabs
+// light as if every slab up to the sky were loaded, without loading them.
+TEST(sky_sunlight_without_upper_slabs) {
+    TreeStream f, reference;
+    TerrainEdits edits;
+    SkyHeightMap map(*f.chunks, edits, f.assets.getStorage<Block>(), f.pool);
+    SunLightPropagator sun(*f.chunks, f.assets.getStorage<Block>(), f.pool,
+                           &map);
+    SunLightPropagator full(*reference.chunks,
+                            reference.assets.getStorage<Block>(),
+                            reference.pool);
+    for (unsigned cx = 16; cx < 20; ++cx)
+        for (unsigned cz = 16; cz < 20; ++cz) {
+            loadSlabs(f, cx, cz, TreeStream::Low, TreeStream::High);
+            map.request(cx, cz);
+            // The old sweep needs every slab up to the column top.
+            loadSlabs(reference, cx, cz, TreeStream::Low, Y_CHUNKS);
+        }
+    lightAll(f, sun, &map);
+    lightAll(reference, full);
+    // Nothing above the loaded slabs was asked for.
+    for (unsigned cx = 16; cx < 20; ++cx)
+        for (unsigned cz = 16; cz < 20; ++cz)
+            CHECK(!f.chunks->isRegistered({cx, TreeStream::High, cz}));
+    // Every slab is fully lit and matches the reference, except the top one
+    // (light spreading down from the slabs above reaches 14 tiles into it).
+    size_t compared = 0, wrong = 0, shaded = 0;
+    for (unsigned cx = 16; cx < 20; ++cx)
+        for (unsigned cz = 16; cz < 20; ++cz)
+            for (unsigned y = TreeStream::Low; y < TreeStream::High; ++y) {
+                CHECK(sun.isComplete({cx, y, cz}));
+                CHECK(!sun.isEstimated({cx, y, cz}));
+                if (y + 1 >= TreeStream::High) continue;
+                const auto* a = f.chunks->getChunk({cx, y, cz});
+                const auto* b = reference.chunks->getChunk({cx, y, cz});
+                CHECK(a && b);
+                for (int z = 0; z < 16; ++z)
+                    for (int ty = 0; ty < 16; ++ty)
+                        for (int x = 0; x < 16; ++x) {
+                            const int s =
+                                a->tiles[z][ty][x].lightLevel.sun_exposure;
+                            const int r =
+                                b->tiles[z][ty][x].lightLevel.sun_exposure;
+                            ++compared;
+                            wrong += s != r;
+                            shaded += !a->tiles[z][ty][x].isSolid() && s > 0 &&
+                                      s < 15;
+                        }
+            }
+    EQUAL(wrong, size_t(0), "sunlight matches the full column");
+    CHECK(compared > 1000000);
+    CHECK(shaded > 1000);  // tree shade is part of what is compared
 }

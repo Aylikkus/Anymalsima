@@ -179,9 +179,26 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         std::cerr << "trees.dat unreadable (" << e.what()
                   << "); cut and planted trees are lost\n";
     }
+    skyMap = std::make_unique<SkyHeightMap>(*chunkManager, *edits,
+                                            context.assets->getStorage<Block>(),
+                                            context.threadPool);
+    try {
+        auto file = save_catalog::readSky(slot);
+        skyMap->setOverrides(std::move(file.overrides));
+        skyExtra = std::move(file.extra);
+    } catch (const std::exception& e) {
+        // Only edits the sources do not show (holes dug into tree wood)
+        // are lost; loaded chunks are observed again when edited.
+        std::cerr << "sky.dat unreadable (" << e.what()
+                  << "); starting without overrides\n";
+    }
+    skyMap->dirty = false;
+    // The map covers every chunk column with loaded chunks.
+    skyReadyConnection = chunkManager->becameReady.connect(
+        [this](const ChunkCoord& c) { skyMap->request(c.x, c.z); });
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
-        context.threadPool);
+        context.threadPool, skyMap.get());
     blockLight = std::make_unique<BlockLightPropagator>(
         *chunkManager, context.assets->getStorage<Block>(), context.threadPool,
         lightSources.get());
@@ -204,6 +221,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
     blockLight->watch(*editor);
+    skyMap->watch(*editor);
     clock.set(slot.meta.worldDays);
     floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
                                                  *this->world);
@@ -221,24 +239,6 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     editTracker = std::make_unique<TerrainEditTracker>(*chunkManager, *edits,
                                                        sameGenerator);
     editTracker->watch(*editor);
-    skyMap = std::make_unique<SkyHeightMap>(*chunkManager, *edits,
-                                            context.assets->getStorage<Block>(),
-                                            context.threadPool);
-    skyMap->watch(*editor);
-    try {
-        auto file = save_catalog::readSky(slot);
-        skyMap->setOverrides(std::move(file.overrides));
-        skyExtra = std::move(file.extra);
-    } catch (const std::exception& e) {
-        // Only edits the sources do not show (holes dug into tree wood)
-        // are lost; loaded chunks are observed again when edited.
-        std::cerr << "sky.dat unreadable (" << e.what()
-                  << "); starting without overrides\n";
-    }
-    skyMap->dirty = false;
-    // The map covers every chunk column with loaded chunks.
-    skyReadyConnection = chunkManager->becameReady.connect(
-        [this](const ChunkCoord& c) { skyMap->request(c.x, c.z); });
     locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
                                                     regionStore.get());
 
@@ -295,6 +295,8 @@ GameplayState::~GameplayState() {
     chunkManager->meshUploaded.disconnect(meshConnection);
     chunkManager->removed.disconnect(removedConnection);
     chunkManager->becameReady.disconnect(skyReadyConnection);
+    // The editor is destroyed before the heightmap.
+    skyMap->unwatch();
     try {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();

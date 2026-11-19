@@ -70,6 +70,20 @@ class GameplayState : public IGameState {
     std::unique_ptr<ChunkManager> chunkManager;
     std::unique_ptr<LocationManager> locationMgr;
     std::unique_ptr<ChunkMesher> mesher;
+    // Edits shown at distance (terrain_edits.dat). Declared before the LOD
+    // manager, tracker and sky heightmap that hold references to it.
+    std::unique_ptr<TerrainEdits> edits;
+    SectionContainer editsExtra;
+    std::future<void> editsWrite;
+    // Sky heightmap (docs/handoff/sky-light.md): listens to chunkManager and
+    // edits (declared after them); sunLight listens to it (declared after
+    // it). The editor it watches is released in ~GameplayState (unwatch).
+    // Its overrides are sky.dat.
+    std::unique_ptr<SkyHeightMap> skyMap;
+    SectionContainer skyExtra;
+    std::future<void> skyWrite;
+    Signal<const ChunkCoord&>::Connection skyReadyConnection;
+    void saveSky(bool wait);
     std::unique_ptr<SunLightPropagator> sunLight;
     std::unique_ptr<WorldEditor> editor;
     // Artificial light. Listens to chunkManager, editor and lightSources;
@@ -78,20 +92,8 @@ class GameplayState : public IGameState {
     // Listens to chunkManager signals and reads blockLight; declared after
     // both so it is destroyed first.
     std::unique_ptr<LightVolumeManager> lightVolumes;
-    // Edits shown at distance (terrain_edits.dat). Declared before the LOD
-    // manager and tracker that hold references to it.
-    std::unique_ptr<TerrainEdits> edits;
-    SectionContainer editsExtra;
-    std::future<void> editsWrite;
     // Listens to chunkManager and editor; destroyed before both.
     std::unique_ptr<TerrainEditTracker> editTracker;
-    // Sky heightmap (docs/handoff/sky-light.md); listens to chunkManager,
-    // edits and editor, declared after them. Its overrides are sky.dat.
-    std::unique_ptr<SkyHeightMap> skyMap;
-    SectionContainer skyExtra;
-    std::future<void> skyWrite;
-    Signal<const ChunkCoord&>::Connection skyReadyConnection;
-    void saveSky(bool wait);
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     std::unique_ptr<LightRenderer> lightRenderer;

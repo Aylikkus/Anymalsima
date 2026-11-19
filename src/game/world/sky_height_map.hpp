@@ -41,8 +41,10 @@ class SkyHeightMap {
     SkyHeightMap(const SkyHeightMap&) = delete;
     SkyHeightMap& operator=(const SkyHeightMap&) = delete;
 
-    // Observes this editor's changes (overrides).
+    // Observes this editor's changes (overrides). Call unwatch() before the
+    // editor is destroyed if it dies first.
     void watch(WorldEditor& editor);
+    void unwatch();
     void setFocus(Vec3 value) { focus = value; }
     // Keeps the chunk column's map built while it is registered.
     void request(unsigned chunkX, unsigned chunkZ);

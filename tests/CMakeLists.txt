@@ -304,7 +304,7 @@ endforeach()
 # Sky heightmap (docs/handoff/sky-light.md).
 foreach(case sky_column_scan_and_direct sky_tile_build_sources
              sky_tile_overrides sky_codec_roundtrip tree_wood_tops_match_raster
-             sky_heightmap_matches_chunks)
+             sky_heightmap_matches_chunks sky_sunlight_without_upper_slabs)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;lighting" TIMEOUT 60)

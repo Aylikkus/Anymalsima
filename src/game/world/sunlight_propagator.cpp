@@ -6,11 +6,21 @@
 
 #include "light_volume.hpp"
 #include "render/ui_context.hpp"
+#include "sky_height_map.hpp"
 
 SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
                                        const DataStorage<Block>& blocks,
-                                       ThreadPool& pool)
-    : chunks(chunks), blocks(blocks), pool(pool) {
+                                       ThreadPool& pool, SkyHeightMap* sky)
+    : chunks(chunks), blocks(blocks), pool(pool), sky(sky) {
+    // A changed heightmap (edits, tree growth, overrides) sweeps the
+    // column again; its spreads rerun only where direct light changed.
+    if (sky)
+        skyConnection = sky->changed.connect([this](uint64_t column) {
+            if (!columnChunks.contains(column) || columnChunks[column].empty())
+                return;
+            columnRevisions[column] = ++nextRevision;
+            pendingDirect.insert(column);
+        });
     readyConnection = chunks.becameReady.connect(
         [this](const ChunkCoord& coord) { ready(coord); });
     removedConnection = chunks.removed.connect(
@@ -22,6 +32,7 @@ SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
 SunLightPropagator::~SunLightPropagator() {
     chunks.becameReady.disconnect(readyConnection);
     chunks.removed.disconnect(removedConnection);
+    if (sky) sky->changed.disconnect(skyConnection);
     for (auto& job : directJobs) job.future.wait();
     for (auto& job : indirectJobs) job.future.wait();
 }
@@ -110,12 +121,17 @@ bool SunLightPropagator::isIdle() const {
            indirectJobs.empty();
 }
 
-SunLightPropagator::DirectInput SunLightPropagator::snapshotColumn(
-    uint64_t column) {
+std::optional<SunLightPropagator::DirectInput>
+SunLightPropagator::snapshotColumn(uint64_t column) {
     const auto cx = static_cast<unsigned>(column >> 32);
     const auto cz = static_cast<unsigned>(column);
+    sky::TilePtr map;
+    if (sky) {
+        map = sky->tile(cx, cz);
+        if (!map) return std::nullopt;
+    }
     int top = std::max(SEA_LEVEL_Y, chunks.getColumnTopY(cx, cz));
-    DirectInput input{column, columnRevisions.at(column), 0, {}};
+    DirectInput input{column, columnRevisions.at(column), 0, {}, map};
     for (const auto& coord : columnChunks.at(column)) {
         Slab slab{coord, {}};
         chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
@@ -141,6 +157,32 @@ SunLightPropagator::DirectInput SunLightPropagator::snapshotColumn(
 SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
     DirectResult result{input.column, input.revision, {}, {}};
     if (input.slabs.empty()) return result;
+    if (input.sky) {
+        // Each run of loaded slabs starts from the heightmap's direct light
+        // at its top tile and continues down through its own tiles; nothing
+        // is missing, nothing is requested.
+        std::array<uint8_t, X * Z> sun{};
+        int above = -1;  // slab Y of the previous (higher) loaded slab
+        for (const auto& slab : input.slabs) {
+            const int cy = static_cast<int>(slab.coord.y);
+            if (cy != above - 1)
+                for (int i = 0; i < X * Z; ++i)
+                    sun[size_t(i)] = input.sky->direct(i, cy * Y + Y - 1);
+            above = cy;
+            ChunkLight output{slab.coord, {}, false};
+            for (int y = Y - 1; y >= 0; --y)
+                for (int z = 0; z < Z; ++z)
+                    for (int x = 0; x < X; ++x) {
+                        auto& incoming = sun[size_t(z * X + x)];
+                        const int i = index(x, y, z);
+                        output.light[i] = incoming;
+                        incoming = static_cast<uint8_t>(
+                            std::max(0, int(incoming) - slab.opacity[i]));
+                    }
+            result.chunks.push_back(std::move(output));
+        }
+        return result;
+    }
     std::array<uint8_t, X * Z> sun;
     sun.fill(15);
     size_t next = 0;
@@ -313,7 +355,7 @@ void SunLightPropagator::collect() {
                 // for distant columns. A lit chunk keeps its previous full
                 // light until the refined result replaces it, and so does a
                 // chunk showing the estimate (blind sweeps before).
-                if (!it->second.lit && !it->second.estimated)
+                if (!it->second.lit && !it->second.estimated && !sky)
                     publish(output.coord, it->second.direct);
             }
         }
@@ -358,8 +400,10 @@ bool SunLightPropagator::isComplete(ChunkCoord coord) const {
 
 bool SunLightPropagator::isEstimated(ChunkCoord coord) const {
     const auto it = states.find(coord);
+    // With a heightmap, the estimate stays until full light lands: the
+    // direct lower bound has no bounce and is black under a wide limb.
     return it != states.end() && !it->second.lit &&
-           (it->second.estimated || !it->second.directKnown);
+           (sky || it->second.estimated || !it->second.directKnown);
 }
 
 void SunLightPropagator::publish(ChunkCoord coord, const Light& values) {
@@ -482,6 +526,41 @@ ChunkCoord SunLightPropagator::beneficiary(ChunkCoord slab) const {
     return best;
 }
 
+void SunLightPropagator::dispatchSweeps(size_t capacity) {
+    if (pendingDirect.empty()) return;
+    // Nearest columns first (at the focus height); sweeps are cheap and
+    // every spread waits for them.
+    std::vector<std::pair<double, uint64_t>> order;
+    order.reserve(pendingDirect.size());
+    for (const auto column : pendingDirect) {
+        if (std::any_of(directJobs.begin(), directJobs.end(),
+                        [&](const auto& job) { return job.column == column; }))
+            continue;
+        const ChunkCoord anchor{static_cast<unsigned>(column >> 32),
+                                static_cast<unsigned>(std::max(
+                                    0.f, focus.y / float(Chunk::SIZE_Y))),
+                                static_cast<unsigned>(column)};
+        order.emplace_back(pendingIndirect.distance(anchor, focus), column);
+    }
+    std::sort(order.begin(), order.end());
+    const auto started = std::chrono::steady_clock::now();
+    for (const auto& [distance, column] : order) {
+        if (directJobs.size() >= capacity ||
+            std::chrono::steady_clock::now() - started >=
+                std::chrono::milliseconds(1))
+            break;
+        auto input = snapshotColumn(column);
+        if (!input) continue;  // heightmap not built yet
+        auto future = pool.submit_task(
+            [input = std::move(*input)]() mutable {
+                return sweep(std::move(input));
+            },
+            BS::pr::high);
+        directJobs.push_back({column, std::move(future)});
+        pendingDirect.erase(column);
+    }
+}
+
 void SunLightPropagator::update() {
     pendingIndirect.setPeriodX(chunks.wrap().tiles);
     // Columns that lost chunks: recompute what remains of them (an emptied
@@ -496,10 +575,13 @@ void SunLightPropagator::update() {
             chunks.requestLighting(coord, beneficiary(coord)))
             requested.erase(coord);
     }
+    const size_t capacity = std::clamp<size_t>(pool.get_thread_count(), 1, 8);
+    // At most half the slots: spreads wait for sweeps, but chunk arrivals
+    // queue a sweep each, which would otherwise take every slot.
+    if (sky) dispatchSweeps(std::max<size_t>(1, capacity / 2));
     const auto started = std::chrono::steady_clock::now();
     const auto normal = pendingIndirect.ordered(focus, false);
     std::vector<ChunkCoord> oldest;
-    const size_t capacity = std::clamp<size_t>(pool.get_thread_count(), 1, 8);
     size_t submitted = 0;
     while (inFlightCount() < capacity) {
         if (submitted && std::chrono::steady_clock::now() - started >=
@@ -551,18 +633,21 @@ void SunLightPropagator::update() {
                     nextDistance = distance;
                 }
             }
-            if (nextColumn) {
+            // A column whose heightmap is not built keeps this chunk
+            // waiting (sky mode).
+            std::optional<DirectInput> input;
+            if (nextColumn) input = snapshotColumn(*nextColumn);
+            if (input) {
                 const auto column = *nextColumn;
-                auto input = snapshotColumn(column);
                 auto future = pool.submit_task(
-                    [input = std::move(input)]() mutable {
+                    [input = std::move(*input)]() mutable {
                         return sweep(std::move(input));
                     },
                     BS::pr::high);
                 directJobs.push_back({column, std::move(future)});
                 pendingDirect.erase(column);
                 dispatched = true;
-            } else if (!waiting && !hasQueuedNeighbor(coord)) {
+            } else if (!nextColumn && !waiting && !hasQueuedNeighbor(coord)) {
                 // A neighbour still being generated would invalidate this
                 // result on arrival; its direct lower bound shows meanwhile.
                 auto input = snapshotHalo(coord);

@@ -1,6 +1,6 @@
 # Handoff: sky light
 
-Status: **step 1 done** (heightmap service, see Progress); step 2 next.
+Status: **steps 1 and 2 done** (see Progress); step 3 next.
 Agreed with the maintainer on 2026-11-19.
 This replaces the way sky light reaches the ground today: a top-down sweep
 through every generated chunk slab. Instead, a saved sky heightmap that
@@ -169,18 +169,7 @@ service, never `Tile::lightLevel` directly.
 ## Plan
 
 1. **Heightmap service (done).** See Progress.
-2. **Direct light from the heightmap.** `SunLightPropagator` computes each
-   slab's direct light from the heightmap plus its own tiles, independent of
-   other slabs.
-   - Remove sky-prerequisite generation (`requestLighting`, beneficiaries,
-     missing-slab handling). Upper slabs then generate only when something
-     needs them: drawing, edits, simulation.
-   - Tree column tops stop driving sunlight.
-   - Columns over the span bound keep today's sweep.
-   - The blind/estimate path stays for columns whose heightmap is not ready
-     yet.
-   - Measure: no slabs generated for sunlight alone; latency under the elder
-     about equal to elsewhere.
+2. **Direct light from the heightmap (done).** See Progress.
 3. **Spread without waiting.**
    - A missing neighbour's halo is filled from the heightmap (15 above
      `top`, opaque below) instead of being waited for; its arrival refines
@@ -257,6 +246,56 @@ everywhere.
     as `SkyHeightMap` builds them: mean 0.34 ms, max 1.25 ms. Each call
     still visits every segment's samples; cull segments by box first if
     this ever matters.
+
+### Step 2: direct light from the heightmap (done 2026-11-19)
+
+- `SunLightPropagator` takes an optional `SkyHeightMap*` (`GameplayState`
+  and the smoke harness pass it; `SMOKE_LEGACY_SUN=1` leaves it out for A/B
+  runs). With it:
+  - A column sweeps once its map is built (`snapshotColumn` returns nothing
+    before that). Each run of loaded slabs starts from
+    `sky::Tile::direct` at the top tile of its highest slab and continues
+    down through its own tiles. A slab whose slab above is loaded continues
+    from that slab, so edits relight at once and overflow columns are exact
+    wherever the slabs above are loaded.
+  - Nothing is missing, so nothing is requested: no slab is generated for
+    sunlight alone, and chunks are never blind.
+  - A heightmap change (`SkyHeightMap::changed`) sweeps the column again;
+    spreads rerun only where direct light changed.
+  - Pending sweeps are dispatched nearest first (`dispatchSweeps`), using
+    at most half the job slots (otherwise chunk arrivals, each queueing a
+    column sweep, starve the spreads). A spread can still start its own
+    column's sweep, as before.
+  - A chunk that was never fully lit keeps its generation estimate until
+    its spread lands (`isEstimated` is true until then, so light volumes
+    shade it with the occlusion map). The direct lower bound has no bounce
+    and is black under a wide limb, so it is no longer shown.
+- Without a heightmap (headless fixtures without a world map) the old path
+  is unchanged: sweep from the column top, missing slabs requested and
+  blind chunks keeping their light. `ChunkManager::requestLighting` and the
+  tree column tops serve only that path now.
+- Test: `sky_sunlight_without_upper_slabs`. A forest lit from slabs 20 to
+  39 with the heightmap matches, cell for cell, one lit the old way with
+  every slab up to the sky loaded. The top slab, which light from unloaded
+  slabs above reaches, is excluded. Over a million cells, tree shade
+  included; nothing above slab 39 is registered.
+- Measured (elder approach smoke, same binary, `SMOKE_LEGACY_SUN=1` for the
+  old sweep), frames from ready to full light for ground chunks near the
+  walking eye:
+
+  | | Old sweep | Heightmap |
+  | --- | --- | --- |
+  | Under the elder: p50 / p90 / max | 204 / 318 / 592 | 67 / 134 / 216 |
+  | Under the elder: unlit at the end | 215 of 340 | 84 of 340 |
+  | Elsewhere: p50 / p90 / max | 46 / 144 / 534 | 50 / 140 / 501 |
+  | Elsewhere: unlit at the end | 170 of 1190 | 111 of 1190 |
+  | Loaded chunks at the end | 8847 | 7514 |
+  | Mean frame | 15.1 ms | 14.7 ms |
+
+  `sky_check`: 14.3M cells of fully lit chunks, no mismatch. Ground under
+  the elder now lights about as fast as anywhere else. What remains (median
+  50-70 frames, unlit chunks at the rim) is the spread waiting for queued
+  neighbours: step 3.
 
 ## Open questions
 
