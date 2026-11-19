@@ -66,7 +66,8 @@ TileBox boxOf(const Planned& p) {
 std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
                           double eyeZ, const WorldWrap& wrap,
                           const std::unordered_set<ChunkCoord>& previous,
-                          const Occupancy* occupancy) {
+                          const Occupancy* occupancy,
+                          const TileBox& fullDetail) {
     std::vector<Planned> out;
     if (bounds.empty()) return out;
     // Distance from the eye to the part of a cell the structure fills.
@@ -105,6 +106,18 @@ std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
             const float margin =
                 previous.empty() ? 0.f : (coarse ? -Margin : Margin);
             finer = d < limit + margin;
+            if (!finer && !fullDetail.empty()) {
+                // Match the X images of the slab and handover box.
+                const auto box = slabBox(level, sx, sy, sz);
+                const int detailX = fullDetail.x0 + fullDetail.sizeX() / 2;
+                const int slabX = box.x0 + box.sizeX() / 2;
+                const int shift =
+                    int(wrap.deltaTile(detailX, slabX)) + slabX - detailX;
+                auto detail = fullDetail;
+                detail.x0 += shift;
+                detail.x1 += shift;
+                finer = !detail.intersect(box).empty();
+            }
         }
         if (!finer) {
             if (const auto key = keyOf(level, sx, sy, sz, wrap))

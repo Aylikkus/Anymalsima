@@ -35,14 +35,30 @@ FloraRenderer::FloraRenderer(ChunkManager& chunks, const IAssets& assets,
     floraConnection = chunks.floraChanged.connect(changed);
     // Light at the base tile, and tiles (cover under a plant) both arrive
     // through lightChanged: markModified emits it too.
-    lightConnection = chunks.lightChanged.connect(changed);
+    lightConnection = chunks.lightChanged.connect([this](const ChunkCoord& c) {
+        invalidate(c);
+        if (c.y > 0) invalidate({c.x, c.y - 1, c.z});
+    });
     removedConnection = chunks.removed.connect([this](const ChunkCoord& c) {
         caches.erase(c);
         withPlants.erase(c);
     });
 }
 
+void FloraRenderer::setSkyLight(SkyHeightMap& map) {
+    if (skyMap) skyMap->changed.disconnect(skyConnection);
+    skyMap = &map;
+    skyConnection = map.changed.connect([this](uint64_t key) {
+        for (unsigned y = 0; y < Y_CHUNKS; ++y)
+            if (const auto it =
+                    caches.find({unsigned(key >> 32), y, unsigned(key)});
+                it != caches.end())
+                it->second.valid = false;
+    });
+}
+
 FloraRenderer::~FloraRenderer() {
+    if (skyMap) skyMap->changed.disconnect(skyConnection);
     chunks.becameReady.disconnect(readyConnection);
     chunks.floraChanged.disconnect(floraConnection);
     chunks.lightChanged.disconnect(lightConnection);
@@ -105,9 +121,10 @@ void FloraRenderer::rebuild(const ChunkCoord& coord, ChunkPlants& cache,
         plant.y = anchorY + 1;
         const int tx = int(std::floor(plant.x)), tz = int(std::floor(plant.z));
         // Light of the air tile the plant stands in.
-        float sun = 1, block = foliage_light::pack(0, 0, foliage_light::White);
+        const float sun =
+            foliage_light::sky(chunks, skyMap, tx, anchorY + 1, tz);
+        float block = foliage_light::pack(0, 0, foliage_light::White);
         if (const Tile* above = chunks.tileAt(tx, anchorY + 1, tz)) {
-            sun = above->lightLevel.sun_exposure / 15.f;
             const int level = above->lightLevel.artificial_light;
             block = foliage_light::pack(
                 level, level,

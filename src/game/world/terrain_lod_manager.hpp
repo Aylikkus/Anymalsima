@@ -61,12 +61,6 @@ class TerrainLodManager {
         if (structures) structures->setStructures(std::move(sources));
     }
     bool drawsStructureVoxels() const { return structures != nullptr; }
-    // Sky light under structures for surfaces without voxel light
-    // (SkyOcclusionMap; LightRenderer::setSkyOcclusion); null when nothing
-    // casts.
-    std::shared_ptr<const SkyOcclusionMap> skyOcclusion() const {
-        return structures ? structures->skyOcclusion() : nullptr;
-    }
     // Slabs of structure voxels, all levels or one.
     size_t voxelSlabs(int level = -1) const {
         return structures ? structures->voxelSlabCount(level) : 0;

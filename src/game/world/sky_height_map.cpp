@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <climits>
+#include <iostream>
 
 #include "light_volume.hpp"
+#include "sunlight_propagator.hpp"
 #include "tree_rasterizer.hpp"
 #include "world_editor.hpp"
 
@@ -80,7 +82,7 @@ SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
     treesConnection = chunks.columnTreesChanged.connect(
         [this](uint64_t key) { invalidate(key); });
     releasedConnection = chunks.columnReleased.connect([this](uint64_t key) {
-        entries.erase(key);
+        if (entries.erase(key)) ++revision;
         queue.erase({unsigned(key >> 32), 0, unsigned(key)});
         observations.erase(key);
     });
@@ -102,6 +104,7 @@ SkyHeightMap::~SkyHeightMap() {
     chunks.columnReleased.disconnect(releasedConnection);
     chunks.becameReady.disconnect(readyConnection);
     for (auto& job : jobs) job.future.wait();
+    if (occlusionJob) occlusionJob->wait();
 }
 
 void SkyHeightMap::unwatch() {
@@ -124,19 +127,60 @@ void SkyHeightMap::watch(WorldEditor& source) {
 
 void SkyHeightMap::request(unsigned chunkX, unsigned chunkZ) {
     const auto key = columnKey(chunkX, chunkZ);
-    if (entries.contains(key)) return;
     if (!chunks.isRegistered({chunkX, 0, chunkZ})) return;
-    entries.emplace(key, Entry{});
-    queue.insert({chunkX, 0, chunkZ});
+    auto [it, inserted] = entries.try_emplace(key);
+    if (inserted || it->second.queried) invalidate(key);
+    it->second.queried = false;
+}
+
+void SkyHeightMap::requestUnloaded(int64_t x, int64_t z) {
+    constexpr size_t MaxQueried = 64;
+    x = chunks.wrap().wrapTile(x);
+    if (x < 0 || z < 0 ||
+        z >= int64_t(chunks.worldHeightRegions()) * TerrainTuning::RegionZ)
+        return;
+    const auto cx = unsigned(x / Chunk::SIZE_X);
+    const auto cz = unsigned(z / Chunk::SIZE_Z);
+    if (chunks.isRegistered({cx, 0, cz})) {
+        request(cx, cz);
+        return;
+    }
+    const auto key = columnKey(cx, cz);
+    if (auto it = entries.find(key); it != entries.end()) {
+        it->second.lastQuery = ++queryClock;
+        return;
+    }
+    auto oldest = entries.end();
+    size_t count = 0;
+    for (auto it = entries.begin(); it != entries.end(); ++it) {
+        if (!it->second.queried) continue;
+        ++count;
+        if (oldest == entries.end() ||
+            it->second.lastQuery < oldest->second.lastQuery)
+            oldest = it;
+    }
+    if (count >= MaxQueried) {
+        queue.erase(
+            {unsigned(oldest->first >> 32), 0, unsigned(oldest->first)});
+        entries.erase(oldest);
+        ++revision;
+    }
+    auto& entry = entries[key];
+    entry.queried = true;
+    entry.lastQuery = ++queryClock;
+    queue.insert({cx, 0, cz});
 }
 
 void SkyHeightMap::invalidate(uint64_t key) {
-    if (!entries.contains(key)) return;
+    const auto entry = entries.find(key);
+    if (entry == entries.end()) return;
+    entry->second.generation = 0;
     queue.insert({unsigned(key >> 32), 0, unsigned(key)});
 }
 
 void SkyHeightMap::setOverrides(Overrides value) {
     overridden = std::move(value);
+    ++revision;
     for (auto& [key, entry] : entries) refreshEffective(key, entry);
 }
 
@@ -146,6 +190,11 @@ void SkyHeightMap::update() {
         day = today;
         for (const auto& [key, entry] : entries)
             if (entry.hasTrees) invalidate(key);
+    }
+    if (treeRevision != chunks.treeRevision()) {
+        treeRevision = chunks.treeRevision();
+        for (const auto& [key, entry] : entries)
+            if (entry.queried) invalidate(key);
     }
     collect();
     dispatch();
@@ -163,18 +212,41 @@ void SkyHeightMap::dispatch() {
             queue.erase(coord);
             continue;
         }
+        auto& e = entry->second;
+        if (e.queried) {
+            // Leave the other slots available for the streamed world.
+            if (jobs.size() >= MaxJobs - 1 ||
+                std::any_of(jobs.begin(), jobs.end(),
+                            [](const Job& job) { return job.unloaded; }))
+                continue;
+            auto source = chunks.snapshotColumnSources(coord.x, coord.z);
+            queue.erase(coord);
+            if (!source) continue;
+            e.generation = ++nextGeneration;
+            e.hasTrees = !chunks.treeSpecies().empty();
+            jobs.push_back(
+                {key, e.generation,
+                 pool.submit_task(
+                     [source = std::move(source), edit = edits.find(key),
+                      opacity = opacity, species = &chunks.treeSpecies(),
+                      cx = coord.x, cz = coord.z, day = day] {
+                         auto inputs = source();
+                         return buildTile({inputs.terrain, inputs.trees, edit,
+                                           opacity, species, cx, cz, day});
+                     },
+                     BS::pr::low),
+                 true});
+            continue;
+        }
         // Waits (stays queued) until terrain and trees are ready.
         const auto sources = chunks.columnSources(coord.x, coord.z);
         if (!sources || !sources->terrain) continue;
         queue.erase(coord);
-        auto& e = entry->second;
-        e.trees = sources->trees;
-        e.edit = edits.find(key);
-        e.day = day;
         e.generation = ++nextGeneration;
-        e.hasTrees = e.trees && !e.trees->trees.empty();
-        BuildInputs inputs{sources->terrain,      e.trees, e.edit,  opacity,
-                           &chunks.treeSpecies(), coord.x, coord.z, day};
+        e.hasTrees = !sources->trees->trees.empty();
+        BuildInputs inputs{
+            sources->terrain,      sources->trees, edits.find(key), opacity,
+            &chunks.treeSpecies(), coord.x,        coord.z,         day};
         jobs.push_back(
             {key, e.generation,
              pool.submit_task(
@@ -193,7 +265,17 @@ void SkyHeightMap::collect() {
         }
         auto job = std::move(jobs[i]);
         jobs.erase(jobs.begin() + ptrdiff_t(i));
-        auto tile = job.future.get();
+        sky::Tile tile;
+        try {
+            tile = job.future.get();
+        } catch (const std::exception& error) {
+            std::cerr << "Sky heightmap build failed: " << error.what() << '\n';
+            const auto entry = entries.find(job.key);
+            if (entry != entries.end() &&
+                entry->second.generation == job.generation)
+                invalidate(job.key);
+            continue;
+        }
         const auto entry = entries.find(job.key);
         if (entry == entries.end() ||
             entry->second.generation != job.generation)
@@ -218,13 +300,15 @@ void SkyHeightMap::collect() {
 void SkyHeightMap::refreshEffective(uint64_t key, Entry& entry) {
     if (!entry.derived) return;
     const auto it = overridden.find(key);
-    if (it == overridden.end()) {
-        entry.effective = entry.derived;
-    } else {
+    auto effective = entry.derived;
+    if (it != overridden.end()) {
         auto tile = std::make_shared<sky::Tile>(*entry.derived);
         for (const auto& [index, column] : it->second) tile->set(index, column);
-        entry.effective = std::move(tile);
+        effective = std::move(tile);
     }
+    if (entry.effective && *entry.effective == *effective) return;
+    entry.effective = std::move(effective);
+    ++revision;
     changed.emit(key);
 }
 
@@ -323,6 +407,259 @@ std::optional<uint8_t> SkyHeightMap::directSky(int64_t x, int y,
     if (!t) return std::nullopt;
     return t->direct(
         sky::Tile::index(int(x % Chunk::SIZE_X), int(z % Chunk::SIZE_Z)), y);
+}
+
+std::optional<uint8_t> SkyHeightMap::skyAt(int64_t x, int y, int64_t z) const {
+    x = chunks.wrap().wrapTile(x);
+    if (x < 0 || z < 0 || x > INT_MAX || z > INT_MAX) return std::nullopt;
+    if (y < 0) return 0;
+    if (y >= WORLD_HEIGHT_Y) return sky::Opaque;
+    const ChunkCoord coord{unsigned(x / Chunk::SIZE_X),
+                           unsigned(y / Chunk::SIZE_Y),
+                           unsigned(z / Chunk::SIZE_Z)};
+    if (voxelLight && !voxelLight->isEstimated(coord))
+        if (const auto* voxel = chunks.tileAt(int(x), y, int(z)))
+            return voxel->lightLevel.sun_exposure;
+
+    const auto direct = directSky(x, y, z);
+    if (!direct || *direct == sky::Opaque) return direct;
+    int best = *direct;
+    const auto target = column(x, z);
+    // Below the highest opaque tile the column has no cavity geometry.
+    // Treat the queried point there as open for this lateral estimate.
+    const int excess =
+        y < target->opaque ? 0 : std::max(1, int(target->opacityAt(y))) - 1;
+    // Heightmap approximation: horizontal 4-neighbour distance from direct
+    // light. The column profile supplies attenuation, even under glass.
+    for (int d = 1; d + excess < sky::Opaque - best; ++d)
+        for (int dx = -d; dx <= d; ++dx) {
+            const int dz = d - std::abs(dx);
+            if (const auto light = directSky(x + dx, y, z + dz))
+                best = std::max(best, int(*light) - d - excess);
+            if (dz != 0)
+                if (const auto light = directSky(x + dx, y, z - dz))
+                    best = std::max(best, int(*light) - d - excess);
+        }
+    return uint8_t(best);
+}
+
+std::shared_ptr<const SkyHeightMap::TerrainRaster> SkyHeightMap::sampleTerrain(
+    int x0, int z0, const World& world, const IAssets& assets, WorldWrap wrap,
+    std::shared_ptr<const TerrainRaster> terrain) {
+    constexpr int Size = SkyOcclusionMap::Size;
+    constexpr int Extent = SkyOcclusionMap::Extent;
+    constexpr int Cell = SkyOcclusionMap::TilesPerTexel;
+    if (terrain && terrain->x0 == x0 && terrain->z0 == z0) return terrain;
+    auto raster = std::make_shared<TerrainRaster>(TerrainRaster{
+        x0, z0,
+        std::vector<float>(size_t(Size) * Size, SkyOcclusionMap::Open)});
+    // Sample generated terrain at texel centres. Reuse
+    // the overlap when the camera moves to the next snap.
+    std::unordered_map<uint64_t, TerrainNeighborhood> regions;
+    const auto surface = [&](int x, int z) {
+        const Vec2u region{unsigned(x / TerrainTuning::RegionX),
+                           unsigned(z / TerrainTuning::RegionZ)};
+        const uint64_t key = columnKey(region.x, region.y);
+        auto it = regions.find(key);
+        if (it == regions.end())
+            it = regions
+                     .emplace(key, TerrainNeighborhood::capture(world, region,
+                                                                assets))
+                     .first;
+        return float(std::floor(TerrainSampler(it->second).surface(x, z)) + 1);
+    };
+    if (!world.regions.empty())
+        for (int tz = 0; tz < Size; ++tz) {
+            const int z = z0 + tz * Cell + Cell / 2;
+            if (z < 0 || z >= world.height * TerrainTuning::RegionZ) continue;
+            for (int tx = 0; tx < Size; ++tx) {
+                const int x = x0 + tx * Cell + Cell / 2;
+                const int wx = int(wrap.wrapTile(x));
+                const int oldX =
+                    terrain ? int(WorldWrap::mod(int64_t(x) - terrain->x0,
+                                                 wrap.tiles))
+                            : -1;
+                const int oldZ = terrain ? z - terrain->z0 : -1;
+                raster->heights[size_t(tz) * Size + tx] =
+                    oldX >= 0 && oldX < Extent && oldZ >= 0 && oldZ < Extent
+                        ? terrain->heights[size_t(oldZ / Cell) * Size +
+                                           oldX / Cell]
+                        : surface(wx, z);
+            }
+        }
+    return raster;
+}
+
+void SkyHeightMap::updateOcclusion(
+    Vec3 eye, std::vector<structure_voxels::SourcePtr> structures,
+    const World& world, const IAssets& assets) {
+    using namespace std::chrono_literals;
+    if (occlusionJob) {
+        if (occlusionJob->wait_for(0s) != std::future_status::ready) return;
+        try {
+            auto result = occlusionJob->get();
+            occlusion = std::move(result.map);
+            projections = std::move(result.projections);
+            occlusionTerrain = std::move(result.terrain);
+        } catch (const std::exception& error) {
+            std::cerr << "Sky occlusion failed: " << error.what() << '\n';
+            occlusionSources.clear();
+            occlusionRevision = 0;
+        }
+        occlusionJob.reset();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < nextOcclusionBuild) return;
+    std::sort(structures.begin(), structures.end(),
+              [](const auto& a, const auto& b) { return a->key < b->key; });
+    const bool sameSources = std::equal(
+        structures.begin(), structures.end(), occlusionSources.begin(),
+        occlusionSources.end(), [](const auto& a, const auto& b) {
+            return a->key == b->key && a->revision == b->revision;
+        });
+    if (occlusion && !occlusion->recentres(eye.x, eye.z) && sameSources &&
+        occlusionRevision == revision &&
+        occlusionEditRevision == edits.revision())
+        return;
+
+    std::unordered_map<uint64_t, sky::TilePtr> tiles;
+    for (const auto& [key, entry] : entries)
+        if (entry.effective) tiles.emplace(key, entry.effective);
+    occlusionSources = structures;
+    occlusionRevision = revision;
+    occlusionEditRevision = edits.revision();
+    nextOcclusionBuild = now + 250ms;
+    OcclusionInputs inputs{eye,
+                           std::move(structures),
+                           projections,
+                           std::move(tiles),
+                           edits.snapshot(),
+                           overridden,
+                           opacity,
+                           chunks.wrap(),
+                           occlusionTerrain};
+    occlusionJob = pool.submit_task(
+        [inputs = std::move(inputs), &world, &assets]() mutable {
+            return buildOcclusion(std::move(inputs), world, assets);
+        },
+        BS::pr::low);
+}
+
+SkyHeightMap::OcclusionResult SkyHeightMap::buildOcclusion(
+    OcclusionInputs inputs, const World& world, const IAssets& assets) {
+    auto& [eye, structures, previous, tiles, edits, overrides, opacity, wrap,
+           terrain] = inputs;
+    Projections next;
+    for (const auto& source : structures) {
+        const auto same = std::find_if(
+            previous.begin(), previous.end(), [&](const auto& cached) {
+                return cached->source->key == source->key &&
+                       cached->source->revision == source->revision;
+            });
+        if (same != previous.end()) {
+            next.push_back(*same);
+            continue;
+        }
+        auto projection = std::make_shared<Projection>();
+        projection->source = source;
+        projection->box = source->bounds;
+        projection->box.y0 = std::max(0, projection->box.y0);
+        projection->box.y1 = std::min(WORLD_HEIGHT_Y, projection->box.y1);
+        if (projection->box.empty()) continue;
+        source->skyTops(projection->box, projection->tops);
+        next.push_back(std::move(projection));
+    }
+    auto map = std::make_shared<SkyOcclusionMap>();
+    map->build(eye.x, eye.z, [&](int x0, int z0, std::vector<float>& heights) {
+        constexpr int Size = SkyOcclusionMap::Size;
+        constexpr int Extent = SkyOcclusionMap::Extent;
+        constexpr int Cell = SkyOcclusionMap::TilesPerTexel;
+        terrain =
+            sampleTerrain(x0, z0, world, assets, wrap, std::move(terrain));
+        heights = terrain->heights;
+
+        const auto add = [&](int x, int z, int top) {
+            if (top < 0 || z < z0 || z >= z0 + Extent) return;
+            int offset = int(WorldWrap::mod(int64_t(x) - x0, wrap.tiles));
+            for (; offset >= 0 && offset < Extent;
+                 offset += wrap.enabled() ? wrap.tiles : Extent) {
+                auto& height =
+                    heights[size_t((z - z0) / Cell) * Size + offset / Cell];
+                height = std::max(height, float(top + 1));
+            }
+        };
+        const auto inView = [&](uint64_t key) {
+            const int x = int(unsigned(key >> 32)) * Chunk::SIZE_X;
+            const int z = int(unsigned(key)) * Chunk::SIZE_Z;
+            return z < z0 + Extent && z + Chunk::SIZE_Z > z0 &&
+                   WorldWrap::mod(int64_t(x) - x0, wrap.tiles) < Extent &&
+                   (wrap.enabled() || x + Chunk::SIZE_X > x0);
+        };
+        const auto addTile = [&](uint64_t key, const sky::Tile& tile) {
+            const int x = int(unsigned(key >> 32)) * Chunk::SIZE_X;
+            const int z = int(unsigned(key)) * Chunk::SIZE_Z;
+            // The aligned chunk tile replaces the terrain
+            // samples, including lowered ground and open texels.
+            const int columnX =
+                int(WorldWrap::mod(int64_t(x) - x0, wrap.tiles));
+            for (int offset = columnX; offset >= 0 && offset < Extent;
+                 offset += wrap.enabled() ? wrap.tiles : Extent)
+                for (int lz = 0; lz < Chunk::SIZE_Z; lz += Cell)
+                    for (int lx = 0; lx < Chunk::SIZE_X; lx += Cell)
+                        heights[size_t((z + lz - z0) / Cell) * Size +
+                                (offset + lx) / Cell] = SkyOcclusionMap::Open;
+            for (int i = 0; i < sky::Tile::Size; ++i)
+                add(x + i % Chunk::SIZE_X, z + i / Chunk::SIZE_X,
+                    tile.opaqueTop(i));
+        };
+        for (const auto& [key, tile] : tiles)
+            if (inView(key)) addTile(key, *tile);
+        for (const auto& [key, edit] : *edits) {
+            if (tiles.contains(key) || !inView(key)) continue;
+            sky::TileInputs inputs;
+            inputs.edit = edit;
+            inputs.opacity = opacity.get();
+            inputs.structureTop.fill(INT_MIN);
+            auto tile = sky::build(inputs);
+            if (const auto it = overrides.find(key); it != overrides.end())
+                for (const auto& [i, column] : it->second) tile.set(i, column);
+            addTile(key, tile);
+        }
+        for (const auto& [key, columns] : overrides) {
+            if (tiles.contains(key) || edits->contains(key) || !inView(key))
+                continue;
+            for (const auto& [i, column] : columns)
+                add(int(unsigned(key >> 32)) * Chunk::SIZE_X +
+                        i % Chunk::SIZE_X,
+                    int(unsigned(key)) * Chunk::SIZE_Z + i / Chunk::SIZE_X,
+                    column.opaque);
+        }
+        for (const auto& projection : next) {
+            const auto& box = projection->box;
+            const int width = box.x1 - box.x0;
+            for (int z = std::max(box.z0, z0);
+                 z < std::min(box.z1, z0 + Extent); ++z) {
+                for (int x = box.x0; x < box.x1; ++x) {
+                    const int top =
+                        projection
+                            ->tops[size_t(z - box.z0) * width + (x - box.x0)];
+                    if (top < 0) continue;
+                    const auto wx = wrap.wrapTile(x);
+                    if (wx < 0 || z < 0) continue;
+                    const auto key = columnKey(unsigned(wx / Chunk::SIZE_X),
+                                               unsigned(z / Chunk::SIZE_Z));
+                    if (tiles.contains(key)) continue;
+                    const auto it = overrides.find(key);
+                    if (it != overrides.end() &&
+                        it->second.contains(sky::Tile::index(
+                            int(wx % Chunk::SIZE_X), z % Chunk::SIZE_Z)))
+                        continue;
+                    add(x, z, top);
+                }
+            }
+        }
+    });
+    return OcclusionResult{std::move(map), std::move(next), std::move(terrain)};
 }
 
 bool SkyHeightMap::isIdle() const {

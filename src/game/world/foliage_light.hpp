@@ -5,6 +5,7 @@
 
 #include "block_light_propagator.hpp"
 #include "chunk_manager.hpp"
+#include "sky_height_map.hpp"
 
 // Near-field block light of foliage instances (FloraRenderer, TreeRenderer):
 // the 4-bit levels and the chroma of the voxel field, packed into one
@@ -13,6 +14,20 @@
 // light volumes, so plants and crowns take the colour of the light that
 // tints the blocks around them.
 namespace foliage_light {
+
+// Use the voxel-resolution service when available, then its coarse map for
+// render-only samples outside the built columns (distant tree crowns).
+inline float sky(const ChunkManager& chunks, const SkyHeightMap* map, int x,
+                 int y, int z) {
+    if (!map) return 1.f;
+    if (const auto level = map->skyAt(x, y, z)) return *level / 15.f;
+    if (const auto coarse = map->skyOcclusion()) {
+        const double centre = coarse->originX() + SkyOcclusionMap::Extent / 2;
+        return coarse->sky(chunks.wrap().imageX(x + 0.5, centre), y + 0.5,
+                           z + 0.5);
+    }
+    return 1.f;
+}
 
 using Chroma = std::array<uint8_t, 2>;
 inline constexpr Chroma White{128, 128};

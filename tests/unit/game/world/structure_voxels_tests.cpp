@@ -1,3 +1,4 @@
+#include <climits>
 #include <cmath>
 #include <map>
 
@@ -60,8 +61,9 @@ TEST(structure_voxels_plan_levels) {
 TEST(structure_voxels_plan_hysteresis) {
     const TileBox bounds{0, 0, 0, 1024, 64, 64};
     const WorldWrap none{};
-    // A level-1 cell starting at x = 576 (32-tile cells): its distance from
-    // an eye at x = 64 - d is 512 + d tiles.
+    // A level-1 cell starts at x = 576. Move the eye to both sides of
+    // its refinement threshold.
+    const double thresholdX = 576 - Limits[0];
     const auto at = [&](double eyeX,
                         const std::unordered_set<ChunkCoord>& previous) {
         return structure_voxels::plan(bounds, eyeX, 32, 32, none, previous);
@@ -75,16 +77,16 @@ TEST(structure_voxels_plan_hysteresis) {
         return -1;
     };
     // Coarse while clearly beyond the limit.
-    const auto far = at(64 - 100, {});
+    const auto far = at(thresholdX - 100, {});
     EQUAL(levelAt(far, 576), 1, "coarse beyond the limit");
     // Approaching to just inside the limit: still coarse (margin).
-    const auto closer = at(64 + 20, keys(far));
+    const auto closer = at(thresholdX + 20, keys(far));
     EQUAL(levelAt(closer, 576), 1, "kept coarse within the margin");
     // Well inside: full tiles.
-    const auto near = at(64 + 100, keys(closer));
+    const auto near = at(thresholdX + 100, keys(closer));
     EQUAL(levelAt(near, 576), 0, "full tiles inside the band");
     // Backing off to just beyond the limit: stays fine (margin).
-    const auto back = at(64 - 20, keys(near));
+    const auto back = at(thresholdX - 20, keys(near));
     EQUAL(levelAt(back, 576), 0, "kept fine within the margin");
     expectExactCover(bounds, back);
 }
@@ -101,6 +103,29 @@ TEST(structure_voxels_plan_wraps) {
         CHECK(base.x < unsigned(2048 / spanOf(levelOf(p.key))));
         EQUAL(levelOf(p.key), 0, "the eye is beside it across the seam");
     }
+}
+
+TEST(structure_voxels_plan_chunk_handover) {
+    // The orbit eye is far from the loaded chunks. The tree crosses the
+    // seam and the detail box is in the camera target's canonical image.
+    const WorldWrap wrap{2048};
+    const TileBox bounds{-384, 512, 0, 128, 640, 64};
+    const TileBox detail{1984, 512, 0, 2112, 640, 64};
+    const TileBox detailAtTree{-64, 512, 0, 64, 640, 64};
+    const auto plan =
+        structure_voxels::plan(bounds, 900, 600, 32, wrap, {}, nullptr, detail);
+    expectExactCover(bounds, plan);
+    size_t exact = 0, coarse = 0;
+    for (const auto& slab : plan) {
+        const auto box = boxOf(slab);
+        if (!box.intersect(detailAtTree).empty()) {
+            EQUAL(levelOf(slab.key), 0, "only exact slabs hand over to chunks");
+            ++exact;
+        }
+        if (levelOf(slab.key) == MaxLevel) ++coarse;
+    }
+    CHECK(exact > 0);
+    CHECK(coarse > 0);
 }
 
 TEST(structure_voxels_slab_merge) {
@@ -201,13 +226,37 @@ TEST(structure_footprint_incremental) {
     EQUAL(full->tops.at(Footprint::packColumn(10, 10)), 104, "roof top");
 }
 
+namespace {
+void buildOcclusion(SkyOcclusionMap& map, const Source& source, int eyeX,
+                    int eyeZ, int period) {
+    const auto& box = source.bounds;
+    std::vector<int> tops;
+    source.skyTops(box, tops);
+    map.build(eyeX, eyeZ, [&](int x0, int z0, std::vector<float>& heights) {
+        constexpr int Cell = SkyOcclusionMap::TilesPerTexel;
+        for (int z = box.z0; z < box.z1; ++z)
+            for (int x = box.x0; x < box.x1; ++x) {
+                const int top =
+                    tops[size_t(z - box.z0) * (box.x1 - box.x0) + x - box.x0];
+                if (top == INT_MIN) continue;
+                const int tx =
+                    int((eyeX + WorldWrap::delta(x, eyeX, period) - x0) / Cell);
+                const int tz = (z - z0) / Cell;
+                auto& height =
+                    heights.at(size_t(tz) * SkyOcclusionMap::Size + tx);
+                height = std::max(height, float(top + 1));
+            }
+    });
+}
+}  // namespace
+
 TEST(sky_occlusion_matches_sunlight) {
     // Under a 256x256 roof the voxel sunlight is 15 - d, d the 4-neighbour
     // distance to the nearest open column; the map gives the same within a
     // light level at texel centres, independent of the roof's height.
     const BoxSource roof({{0, 400, 0, 256, 404, 256}});
     SkyOcclusionMap map;
-    map.build({footprint(roof, nullptr)}, 128, 128, 0);
+    buildOcclusion(map, roof, 128, 128, 0);
     EQUAL(map.occluded(), size_t(64 * 64), "roof texels");
     for (int k = 0; k < 8; ++k)
         for (int z : {130, 2 + 4 * k}) {
@@ -231,7 +280,7 @@ TEST(sky_occlusion_by_height) {
     const BoxSource roofs(
         {{0, 96, 0, 128, 100, 256}, {128, 396, 0, 256, 400, 256}});
     SkyOcclusionMap map;
-    map.build({footprint(roofs, nullptr)}, 128, 128, 0);
+    buildOcclusion(map, roofs, 128, 128, 0);
     const int x = 130, z = 128;  // first texel under the high roof
     const float lit = map.sky(x + 0.5, 200, z + 0.5);
     CHECK(std::abs(lit - (15 - 3) / 15.f) <= 1.f / 15 + 1e-4f);
@@ -242,7 +291,7 @@ TEST(sky_occlusion_by_height) {
     // tower above the plinth there is full sky.
     const BoxSource tower({{0, 0, 0, 64, 8, 64}, {24, 0, 24, 40, 300, 40}});
     SkyOcclusionMap towerMap;
-    towerMap.build({footprint(tower, nullptr)}, 32, 32, 0);
+    buildOcclusion(towerMap, tower, 32, 32, 0);
     EQUAL(towerMap.sky(20, 150, 32), 1.f, "beside the tower");
     // Inside it, two texels from the open side.
     CHECK(std::abs(towerMap.sky(32, 150, 32) -
@@ -254,7 +303,7 @@ TEST(sky_occlusion_wraps) {
     // of the seam as seen from the eye.
     const BoxSource bridge({{-64, 200, 0, 64, 204, 128}});
     SkyOcclusionMap map;
-    map.build({footprint(bridge, nullptr)}, 2040, 64, 2048);
+    buildOcclusion(map, bridge, 2040, 64, 2048);
     CHECK(map.sky(2040, 50, 64) < 0.5f);
     CHECK(map.sky(2050, 50, 64) < 0.5f);  // x = 2 past the seam
     EQUAL(map.sky(1900, 50, 64), 1.f, "open beyond it");

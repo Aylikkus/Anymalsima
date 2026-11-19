@@ -711,11 +711,12 @@ outside the loaded chunks are no longer missing.
   voxel sources (`TreeRenderer::landmarkVoxels`, whose age is quantized to
   the crown growth buckets, so a tree is re-rasterized a few dozen times over
   its maturity). Since the structure voxel API (`docs/handoff/structures.md`)
-  the level is chosen per slab, not per tree; the paragraph below describes
-  the original per-tree version.
-  Each tree is rasterized on the pool (two jobs, nearest tree first) at a
-  level chosen by its distance: full voxels within 512 m, 2-tile cells to
-  1536 m and 4-tile cells beyond, with 64 m of hysteresis. The old slabs stay
+  the level is chosen per slab.
+  Each tree is rasterized on the pool (two jobs, nearest tree first). The
+  current slab bands use full voxels within 192 m of the eye, 2-tile cells
+  to 640 m and 4-tile cells beyond, with 64 m of hysteresis. The chunk draw
+  box plus two slabs of lead time keeps full voxels for handover. This
+  reduces the cold-load cost of a nearby elder. The old slabs stay
   drawn until the new ones are ready. The merged wood fills the air of the
   proxy slabs and the meshes are built like structure slabs
   (`ChunkMesher`, greedy). Coarse proxies are meshed in cell units and

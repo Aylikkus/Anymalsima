@@ -16,6 +16,8 @@
 #include "structure_lod.hpp"
 #include "tree_foliage_builder.hpp"
 
+class SkyHeightMap;
+
 // Main-thread GPU side of tree crowns (docs/handoff/trees.md, "Rendering").
 // Wood blocks are ordinary chunk geometry; this draws the rest: foliage and
 // branches thinner than a block, with the foliage program in tree mode
@@ -75,12 +77,16 @@ class TreeRenderer {
     // drawn, so the hand-over never shows a gap. Default: an uploaded mesh.
     using ChunkDrawn = std::function<bool(const ChunkCoord&)>;
     void setChunkDrawn(ChunkDrawn drawn) { chunkDrawn = std::move(drawn); }
-    // Source of block light chroma (coloured lamps tint crowns); optional,
-    // must outlive the renderer. Without it block light is white.
+    // The map must outlive the renderer.
+    void setSkyLight(const SkyHeightMap& map) { skyMap = &map; }
+    // Optional block light chroma (coloured lamps tint crowns).
+    // The propagator must outlive the renderer.
     void setBlockLight(const BlockLightPropagator* light) {
         blockLight = light;
     }
-    std::vector<structure_voxels::SourcePtr> landmarkVoxels(double today) const;
+    // Pass the voxel wood day and disable age quantization for sky tops.
+    std::vector<structure_voxels::SourcePtr> landmarkVoxels(
+        double today, bool quantizeAge = true) const;
     double cpuMilliseconds() const { return cpuMs; }
 
    private:
@@ -170,6 +176,7 @@ class TreeRenderer {
     // prisms) meanwhile, so leaves never hang over missing wood.
     bool woodPending(const TreeInstance& tree) const;
     ChunkDrawn chunkDrawn;
+    const SkyHeightMap* skyMap = nullptr;
     const BlockLightPropagator* blockLight = nullptr;
     size_t drawn = 0, calls = 0;
     double cpuMs = 0;

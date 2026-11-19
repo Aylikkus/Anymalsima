@@ -132,7 +132,7 @@ using SourcePtr = std::shared_ptr<const Source>;
 
 // Distances (tiles) where slabs coarsen: level 0 below Limits[0], level 1
 // below Limits[1], level 2 beyond; with Margin of hysteresis.
-inline constexpr float Limits[MaxLevel] = {512, 1536};
+inline constexpr float Limits[MaxLevel] = {192, 640};
 inline constexpr float Margin = 64;
 
 struct Planned {
@@ -149,10 +149,12 @@ struct Planned {
 TileBox boxOf(const Planned& planned);
 
 // occupancy: only these slabs are planned (null: every slab of bounds).
+// Slabs intersecting fullDetail stay at level 0 for chunk handover.
 std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
                           double eyeZ, const WorldWrap& wrap,
                           const std::unordered_set<ChunkCoord>& previous,
-                          const Occupancy* occupancy = nullptr);
+                          const Occupancy* occupancy = nullptr,
+                          const TileBox& fullDetail = {});
 
 // Canonical key of unwrapped slab coordinates (std::nullopt: outside a
 // world that does not wrap).

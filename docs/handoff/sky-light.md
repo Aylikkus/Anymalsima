@@ -1,6 +1,6 @@
 # Handoff: sky light
 
-Status: **steps 1 to 3 done** (see Progress); step 4 next.
+Status: **steps 1 to 4 implemented** (see Progress).
 Agreed with the maintainer on 2026-11-19.
 This replaces the way sky light reaches the ground today: a top-down sweep
 through every generated chunk slab. Instead, a saved sky heightmap that
@@ -157,26 +157,25 @@ sky light is 0. Code must not assume one Y range starting at 0.
 | Loaded chunks (rendering) | Voxel field per chunk (tiles today), from heightmap plus local spread | Light volumes, unchanged on the GPU side |
 | Distant terrain, joins, structure slabs | `SkyOcclusionMap`, built from the heightmap | Replaces per-source footprints |
 | Chunks not lit yet | Estimate × occlusion map (`u_light_chunk.w = 2`) | Kept as a fallback only (see `structures.md`) |
-| Instanced foliage | `foliage_light`: tiles when loaded, heightmap rule otherwise | Today it sees only loaded tiles |
-| Plant growth (`flora_simulation`) | `directSky(x, y, z)`: y above `top`, so exact everywhere | Replaces `sun_exposure >= 10` and `== 15` checks |
-| `LightQuery` sky part | Loaded: voxel value. Unloaded: the heightmap rule. Times daylight | Same rule as the occlusion map, so loaded and unloaded agree |
+| Instanced foliage | `foliage_light`: published voxel light or heightmap estimate | Distant crowns and billboards can use the coarse map |
+| Plant growth (`flora_simulation`) | `directSky(x, y, z)`: attenuated overhead light | Germination and catch-up need at least 10. Cover regrowth needs 15. |
+| `LightQuery` sky part | Published voxel light or heightmap estimate, scaled by daylight | The sky API is available for the planned `LightQuery` |
 
-`SkyHeightMap` (`world/sky_height_map.hpp`) owns the maps and answers
-`top(x, z)` and `directSky(x, y, z)`; `skyAt(x, y, z)` (the voxel value when
-loaded, else the heightmap rule) comes with step 4. Gameplay uses only this
-service, never `Tile::lightLevel` directly.
+`SkyHeightMap` (`world/sky_height_map.hpp`) owns the maps and exposes
+`top(x, z)`, `directSky(x, y, z)` and `skyAt(x, y, z)`. Gameplay reads
+sky light through this service.
 
 ## Plan
 
 1. **Heightmap service (done).** See Progress.
 2. **Direct light from the heightmap (done).** See Progress.
 3. **Spread without waiting (done).** See Progress.
-4. **Far and gameplay.**
+4. **Far and gameplay (done).**
    - Build `SkyOcclusionMap` from the heightmap.
    - Move plant growth, `foliage_light` and the `LightQuery` sky part onto
      the service.
    - Unloaded plants then grow by the same rule as loaded ones.
-5. **Optional: light out of `Tile`.** Sky light is derived data and is never
+5. **Optional: light out of `Tile` (deferred after profiling).** Sky light is derived data and is never
    saved. A lighting-owned buffer per chunk would publish by pointer swap
    instead of writing tiles under the chunk lock, and could be dropped for
    chunks nobody draws. Do this only if it pays for itself after step 3.
@@ -338,6 +337,66 @@ everywhere.
   wood chunks arrive slowly, and each arrival sweeps its column again
   (`approach_waits` splits the waits roughly evenly between sweeps,
   neighbours' sweeps and the queue).
+
+### Step 4: far and gameplay
+
+- `SkyHeightMap` publishes the renderer's camera-centred `SkyOcclusionMap`.
+  The worker samples generated terrain at 4-tile texel centres, overlays
+  exact heightmap tiles, and fills the rest with saved terrain edits,
+  overrides and projected landmark wood. Landmark projection uses
+  `Source::skyTops` at the voxel wood day. It reuses projections with the
+  same source revision and terrain samples shared by successive map
+  positions. The coarse map stores opaque heights and uses the existing
+  shader's lateral falloff and ocean attenuation. Translucent spans are
+  retained for voxel and gameplay queries.
+- `requestUnloaded(x, z)` builds the requested column without registering
+  or generating voxel slabs. The query cache is bounded and the caller can
+  poll `directSky` or `skyAt` for the result. `skyAt` uses published voxel
+  light where available. Elsewhere it estimates lateral light from direct
+  light in known columns within 14 tiles, using 4-neighbour distance. Request
+  adjacent columns when sampling near their edges. Unloaded cavity walls
+  can change the true voxel spread. The planned `LightQuery` can scale this
+  sky component once daylight is implemented.
+- Plant germination and long-unloaded population catch-up use the same
+  direct light threshold of 10. Ground cover needs 15. These checks can run
+  before the voxel light arrives and across a missing upper slab. Plant
+  stages advance analytically. Seed placement needs a loaded target for
+  soil, room and population checks.
+- Plant instances and tree crowns sample sky light through `foliage_light`.
+  Distant crowns and billboards can use the coarse map. Lamp level and
+  chroma still come from nearby voxels.
+- `sky_queries_and_far_shade_without_chunks` exercises a saved roof and an
+  override before any voxel slab is registered, including a wrapped query
+  and lateral falloff under the roof. `flora_catchup_uses_direct_sky`
+  verifies that an unloaded roof prevents catch-up germination.
+
+### Step 5: publication profile (2026-11-19)
+
+Deferred the separate sunlight buffer. Two Release headless runs used the
+LOD smoke scene (height seed 1234, feature seed 5678), four worker threads,
+an eight-chunk request radius and a 13 ms update cadence. Each run walked
+from 1,200 tiles west of the elder to 40 tiles from its trunk at four tiles
+per update. The edit phase alternated placing and removing 25 overhead
+blocks every four updates, for 950 successful edits per run. Temporary
+timers measured the production `SunLightPropagator::publish` path,
+including lock acquisition, the tile writes and change notification.
+
+| Phase | Mean publication per update | p95 publication per update | p95 lock acquisition per update | p95 total CPU update |
+| --- | ---: | ---: | ---: | ---: |
+| Elder approach | 0.11–0.13 ms | 0.22–0.29 ms | 0.007–0.009 ms | 7.6–8.4 ms |
+| Rapid edits | 0.12–0.13 ms | 0.27–0.29 ms | 0.010–0.013 ms | 7.6–8.1 ms |
+
+The largest publication total was 0.61 ms in one approach update. A
+separate software Vulkan smoke run collected only 44 frames before a
+crash. Its CPU timers recorded up to 0.12 ms per frame for sunlight
+publication, 0.36 ms for light-volume cell encoding and 0.37 ms for
+border and cover packing. GPU execution time was unavailable.
+
+`Tile` remains six bytes if only the sunlight nibble moves, since the
+artificial-light nibble still occupies that byte. A separate buffer would
+add 2 KiB per retained chunk when nibble-packed, or 4 KiB at one byte per
+voxel. Revisit the split if publication becomes a larger share of slow
+updates or another change allows the light byte to be removed entirely.
 
 ## Open questions
 

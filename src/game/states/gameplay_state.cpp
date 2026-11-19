@@ -212,6 +212,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         context.threadPool);
     // Coloured lamps tint plants and crowns (declared after blockLight).
     floraRenderer->setBlockLight(blockLight.get());
+    floraRenderer->setSkyLight(*skyMap);
+    treeRenderer->setSkyLight(*skyMap);
     treeRenderer->setBlockLight(blockLight.get());
     treeRenderer->setVoxelLandmarks(terrainLod->drawsStructureVoxels());
     // Trees hand their wood over to blocks only where render() draws them.
@@ -224,7 +226,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     skyMap->watch(*editor);
     clock.set(slot.meta.worldDays);
     floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
-                                                 *this->world);
+                                                 *this->world, *skyMap);
     floraSim->watch(*editor);
     treeSim = std::make_unique<TreeSimulation>(*chunkManager, *editor);
     updatePlantLabel();
@@ -685,6 +687,10 @@ void GameplayState::update(Game& game, float dt) {
     chunkManager->update();
     skyMap->setFocus(camera.position);
     skyMap->update();
+    skyMap->updateOcclusion(
+        camera.eye(),
+        treeRenderer->landmarkVoxels(chunkManager->woodDay(), false), *world,
+        *uiContext->assets);
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
@@ -809,7 +815,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                            std::chrono::steady_clock::now() - started)
                            .count();
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
-    lightRenderer->setSkyOcclusion(terrainLod->skyOcclusion());
+    lightRenderer->setSkyOcclusion(skyMap->skyOcclusion());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize());
     camera.underwater = terrainLod->eyeUnderwater();

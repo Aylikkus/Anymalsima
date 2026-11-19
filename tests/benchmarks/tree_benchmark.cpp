@@ -638,7 +638,22 @@ int main(int argc, char** argv) {
         const double footprintMs = msSince(started);
         started = Clock::now();
         SkyOcclusionMap map;
-        map.build({cast}, anchor.x, anchor.z, world.wrap().tiles);
+        map.build(anchor.x, anchor.z,
+                  [&](int x0, int z0, std::vector<float>& heights) {
+                      constexpr int Cell = SkyOcclusionMap::TilesPerTexel;
+                      constexpr int Size = SkyOcclusionMap::Size;
+                      for (const auto& [key, top] : cast->tops) {
+                          const auto [x, z] =
+                              structure_voxels::Footprint::unpackColumn(key);
+                          const int dx = int(WorldWrap::mod(
+                              x * Cell - x0, world.wrap().tiles));
+                          const int dz = z * Cell - z0;
+                          if (dx >= 0 && dx < Size * Cell && dz >= 0 &&
+                              dz < Size * Cell)
+                              heights[size_t(dz / Cell) * Size + dx / Cell] =
+                                  float(top);
+                      }
+                  });
         std::cout << "sky_occlusion footprint_ms=" << footprintMs
                   << " columns=" << cast->tops.size()
                   << " map_ms=" << msSince(started)

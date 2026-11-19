@@ -618,6 +618,11 @@ Each step builds, runs and is testable on its own.
 
 ### Step 9: spreading, death replacement and harvest (done)
 
+- Germination and long-unloaded population catch-up need direct overhead
+  light of at least 10 out of 15 from `SkyHeightMap`. Ground cover regrowth
+  needs 15. These checks use the same rule on initial catch-up and on
+  later sweeps, even before the upper slab or voxel light arrives. See
+  [Sky light](sky-light.md#step-4-far-and-gameplay).
 - Seeding (revised after review: no rebirth in place). Per seeding cycle
   (`flora_growth::cycle`) passed since `resolvedDay` (at most 16 per resolve),
   at the end of the seed stage (`flora_growth::seedDrop`, `spread.stage`), a

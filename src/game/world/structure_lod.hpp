@@ -18,7 +18,6 @@
 #include "render/frustrum.hpp"
 #include "render/render_target.hpp"
 #include "render/ui_context.hpp"
-#include "sky_occlusion_map.hpp"
 #include "structure_voxels.hpp"
 #include "surface_sampler.hpp"
 #include "terrain_edits.hpp"
@@ -50,7 +49,8 @@ class StructureLod {
 
     // A column's edit changed: it and its 4 side columns need new meshes.
     void edited(uint64_t column);
-    void update(Vec3 eye, std::shared_ptr<const EditMap> snapshot);
+    void update(Vec3 eye, const TileBox& fullDetail,
+                std::shared_ptr<const EditMap> snapshot);
     // The generated structures in view (main thread; sources with an
     // unchanged key and revision are kept).
     void setStructures(std::vector<structure_voxels::SourcePtr> sources);
@@ -195,10 +195,9 @@ class StructureLod {
             if (level == 0 && hidden(coord)) continue;
             // Drawn, or still covered by the retired proxy it replaces.
             if (shadowedByRetired(coord)) continue;
-            if (level > 0 ? inGroupMesh(coord) : [&] {
-                    const auto it = proxies.find(coord);
-                    return it != proxies.end() && it->second->drawable;
-                }())
+            const auto proxy = proxies.find(coord);
+            if (proxy != proxies.end() && proxy->second->drawable &&
+                (level == 0 || !proxy->second->hasMesh || inGroupMesh(coord)))
                 continue;
             ++out;
         }
@@ -211,12 +210,6 @@ class StructureLod {
     // Wanted slabs without a current mesh, and structures whose planned
     // slabs are not rasterized yet.
     size_t backlog() const;
-    // Sky light under the structures in view, for surfaces without voxel
-    // light (SkyOcclusionMap); null until the first build. Rebuilt on the
-    // pool when a structure's footprint changes or the eye recentres it.
-    std::shared_ptr<const SkyOcclusionMap> skyOcclusion() const {
-        return occlusion;
-    }
 
    private:
     struct Proxy {
@@ -384,13 +377,9 @@ class StructureLod {
         structure_voxels::SourcePtr occupancyFor;
         structure_voxels::OccupancyPtr occupancy;
         std::optional<std::future<structure_voxels::OccupancyPtr>> occupancyJob;
-        // What it casts on the ground (SkyOcclusionMap), after occupancy;
-        // a new revision redoes only the columns its changed box touches.
-        structure_voxels::SourcePtr footprintFor;
-        structure_voxels::FootprintPtr footprint;
-        std::optional<std::future<structure_voxels::FootprintPtr>> footprintJob;
         // Inputs of the last plan: nothing to do while they are the same.
         std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
+        TileBox plannedDetail;
         structure_voxels::SourcePtr plannedWanted, plannedBuilt;
         // A plan with slabs to rasterize, waiting for a job slot.
         std::vector<structure_voxels::Planned> pending;
@@ -401,9 +390,7 @@ class StructureLod {
 
     // Plans every structure's slabs for the eye (only after it moved, or
     // a source changed) and lists the slabs to rasterize.
-    void planStructures(Vec3 eye);
-    // Footprint jobs of new sources, and the sky occlusion map.
-    void updateFootprints(Vec3 eye);
+    void planStructures(Vec3 eye, const TileBox& fullDetail);
     void collect();
     void collectStructures();
     void requestStructures();
@@ -424,22 +411,9 @@ class StructureLod {
     std::shared_ptr<const EditMap> chosenFor;
     std::unordered_map<uint64_t, Structure> structures;  // by Source::key
     std::shared_ptr<const VoxelSlabs> voxels;  // all structures, merged
-    std::shared_ptr<const SkyOcclusionMap> occlusion;
-    // Footprints of structures that left the view, by key (a massive tree's
-    // takes seconds on the pool): reused when it comes back.
-    struct CachedFootprint {
-        structure_voxels::SourcePtr source;
-        structure_voxels::FootprintPtr footprint;
-    };
-    std::unordered_map<uint64_t, CachedFootprint> footprintCache;
-    static constexpr size_t FootprintCacheSize = 64;
-    std::optional<std::future<std::shared_ptr<const SkyOcclusionMap>>>
-        occlusionJob;
-    // Footprints the current map (or its job) was built from.
-    std::vector<structure_voxels::FootprintPtr> occlusionInputs;
-    bool occlusionStale = true;
     std::shared_ptr<const VoxelSlabs> voxelsChosenFor;
     std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
+    TileBox plannedDetail;
     bool replan = true;  // a source changed or a build finished
     std::array<int, 3> chosenCell{INT32_MIN, 0, 0};
     // Wanted slabs, nearest first.

@@ -10,6 +10,8 @@
 #include "tile_pos.hpp"
 #include "world_editor.hpp"
 
+class SkyHeightMap;
+
 // Items a harvest yields (Flora "forage"). Names refer to the future items
 // data type and are not resolved yet.
 struct ForageYield {
@@ -66,7 +68,7 @@ class FloraSimulation {
     static constexpr double CoverLevelsPerDay = 2;
 
     FloraSimulation(ChunkManager& chunks, const IAssets& assets,
-                    const World& world);
+                    const World& world, const SkyHeightMap& sky);
     ~FloraSimulation();
     FloraSimulation(const FloraSimulation&) = delete;
     FloraSimulation& operator=(const FloraSimulation&) = delete;
@@ -95,7 +97,7 @@ class FloraSimulation {
     // Resolves a chunk: deaths, regrowth and seeding (or re-samples it after
     // a long absence).
     void resolve(const ChunkCoord& coord, double today);
-    void spread(const ChunkCoord& coord, const FloraLayer& layer, double since,
+    bool spread(const ChunkCoord& coord, const FloraLayer& layer, double since,
                 double today,
                 std::unordered_map<ChunkCoord, FloraLayer>& changed);
     // Adds an offspring if the ground at world (x, z) near anchor height
@@ -104,7 +106,8 @@ class FloraSimulation {
     // roll: its deterministic draw in [0, 1).
     bool plant(const FloraSpeciesRule& rule, double x, double z, int nearY,
                int32_t birthDay, uint16_t seed, double roll, double germination,
-               std::unordered_map<ChunkCoord, FloraLayer>& changed);
+               std::unordered_map<ChunkCoord, FloraLayer>& changed,
+               bool& skyPending);
     // Same-species plants (and dormant seeds) within radius of (x, z).
     int crowd(const FloraSpeciesRule& rule, double x, double z, int y,
               double radius,
@@ -123,6 +126,7 @@ class FloraSimulation {
     ChunkManager& chunks;
     const IAssets& assets;
     const World& world;
+    const SkyHeightMap& sky;
     WorldEditor* editor = nullptr;
     std::vector<ChunkCoord> loaded;  // became ready, not yet resolved
     int regenerations = 0;           // this update

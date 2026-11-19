@@ -139,6 +139,53 @@ std::optional<ChunkManager::ColumnSources> ChunkManager::columnSources(
                          std::move(trees)};
 }
 
+std::function<ChunkManager::ColumnSources()>
+ChunkManager::snapshotColumnSources(unsigned cx, unsigned cz) {
+    const Vec2u region{cx / CHUNKS_PER_REGION, cz / CHUNKS_PER_REGION};
+    if (terrainWorld.regions.empty() ||
+        region.x >= unsigned(terrainWorld.width) ||
+        region.y >= unsigned(terrainWorld.height))
+        return {};
+
+    struct TreeInput {
+        Vec2u region;
+        std::shared_ptr<const TreeSet> set;
+        std::vector<TreeLandmark> landmarks;
+    };
+    std::vector<TreeInput> inputs;
+    if (!treeTable->empty())
+        for (const auto q : treeRegionsAround(region)) {
+            const auto found = treeSets.find(q);
+            if (found != treeSets.end())
+                inputs.push_back({q, found->second, {}});
+            else
+                inputs.push_back({q, {}, landmarksNear(q)});
+        }
+    return [world = &terrainWorld, assets = soilAssets, table = treeTable,
+            seed = treeSeed, overrides = overrides, inputs = std::move(inputs),
+            region, cx, cz]() mutable {
+        const auto terrain =
+            TerrainNeighborhood::capture(*world, region, *assets);
+        std::vector<const TreeSet*> sets;
+        for (auto& input : inputs) {
+            if (!input.set) {
+                const auto halo =
+                    TerrainNeighborhood::capture(*world, input.region, *assets);
+                const RegionTreesInput treeInput{
+                    table.get(),      &halo,          input.region, seed,
+                    &input.landmarks, overrides.get()};
+                input.set = std::make_shared<const TreeSet>(
+                    generateRegionTrees(treeInput));
+            }
+            sets.push_back(input.set.get());
+        }
+        return ColumnSources{std::make_shared<const ChunkColumnInputs>(
+                                 TerrainSampler(terrain).columns(cx, cz)),
+                             std::make_shared<const TreeColumn>(makeTreeColumn(
+                                 cx, cz, sets, world->wrap().tiles))};
+    };
+}
+
 std::shared_ptr<const ChunkColumnInputs> ChunkManager::generatedColumns(
     unsigned chunkX, unsigned chunkZ) {
     if (terrainWorld.regions.empty()) return {};

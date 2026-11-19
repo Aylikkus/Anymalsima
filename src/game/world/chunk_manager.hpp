@@ -153,6 +153,10 @@ class ChunkManager {
                                                unsigned chunkZ);
     // Day tree wood is generated for (setFloraDay).
     int32_t woodDay() const { return floraDay; }
+    // Capture a column's generation inputs without registering any slabs.
+    // The returned work may generate missing tree sets on a worker.
+    std::function<ColumnSources()> snapshotColumnSources(unsigned cx,
+                                                         unsigned cz);
     // Tree stamp of a Ready chunk.
     TreeStamp treeStamp(const ChunkCoord& coord) const;
     // Records that a Ready chunk's wood is up to date with `stamp`.

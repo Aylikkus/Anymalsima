@@ -14,6 +14,8 @@
 #include "render/frustrum.hpp"
 #include "render/render_target.hpp"
 
+class SkyHeightMap;
+
 // Main-thread GPU side of plants (docs/handoff/flora.md, sections 5 and 6).
 //
 // Meshes come from FloraMeshBuilder, one per (species, variant, stage), built
@@ -48,8 +50,10 @@ class FloraRenderer {
                 const Frustum& frustum, LightRenderer& lights, double now,
                 double today, ShaderProperty& water);
 
-    // Source of block light chroma (coloured lamps tint plants); optional,
-    // must outlive the renderer. Without it block light is white.
+    // The map must outlive the renderer.
+    void setSkyLight(SkyHeightMap& map);
+    // Optional block light chroma (coloured lamps tint plants).
+    // The propagator must outlive the renderer.
     void setBlockLight(const BlockLightPropagator* light) {
         blockLight = light;
     }
@@ -102,6 +106,8 @@ class FloraRenderer {
         lightConnection, removedConnection;
     std::vector<float> speciesFade;  // by Flora id - 1
     double lastToday = 0;
+    SkyHeightMap* skyMap = nullptr;
+    Signal<uint64_t>::Connection skyConnection;
     const BlockLightPropagator* blockLight = nullptr;
     size_t drawn = 0, calls = 0;
     double cpuMs = 0;

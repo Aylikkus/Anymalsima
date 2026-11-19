@@ -2,17 +2,13 @@
 
 #include <algorithm>
 
-#include "world_wrap.hpp"
-
 float SkyOcclusionMap::skyAtDistance(int k) {
     if (k <= 0) return 1.f;
     const float tiles = k * TilesPerTexel - (TilesPerTexel - 1) * 0.5f;
     return std::clamp((MaxLight - tiles) / MaxLight, 0.f, 1.f);
 }
 
-void SkyOcclusionMap::build(
-    const std::vector<structure_voxels::FootprintPtr>& footprints, double eyeX,
-    double eyeZ, int periodX) {
+void SkyOcclusionMap::build(double eyeX, double eyeZ, const Raster& raster) {
     centreX = snapped(eyeX);
     centreZ = snapped(eyeZ);
     minX = centreX - Extent / 2.0;
@@ -21,31 +17,17 @@ void SkyOcclusionMap::build(
     covered = 0;
     data.assign(size_t(Size) * Size * Thresholds, Open);
     std::vector<float> top(size_t(Size) * Size, Open);
+    raster(int(minX), int(minZ), top);
     int bx0 = Size, bz0 = Size, bx1 = -1, bz1 = -1;
-    for (const auto& footprint : footprints) {
-        if (!footprint) continue;
-        for (const auto& [key, t] : footprint->tops) {
-            const auto [cx, cz] =
-                structure_voxels::Footprint::unpackColumn(key);
-            // The cell's copy nearest the centre (X wraps).
-            const double x =
-                centreX + WorldWrap::deltaf(
-                              double(cx) * TilesPerTexel + TilesPerTexel / 2.0,
-                              centreX, periodX);
-            const int tx = int(std::floor((x - minX) / TilesPerTexel));
-            const int tz = int(std::floor(
-                (double(cz) * TilesPerTexel + TilesPerTexel / 2.0 - minZ) /
-                TilesPerTexel));
-            if (tx < 0 || tz < 0 || tx >= Size || tz >= Size) continue;
-            float& v = top[size_t(tz) * Size + tx];
-            if (v == Open) ++covered;
-            v = std::max(v, float(t));
+    for (int tz = 0; tz < Size; ++tz)
+        for (int tx = 0; tx < Size; ++tx) {
+            if (top[size_t(tz) * Size + tx] == Open) continue;
+            ++covered;
             bx0 = std::min(bx0, tx);
             bx1 = std::max(bx1, tx);
             bz0 = std::min(bz0, tz);
             bz1 = std::max(bz1, tz);
         }
-    }
     if (bx1 < 0) return;
     // Threshold k: the lowest top within k texels (4-neighbour), by k
     // passes of a cross-shaped min filter, around the occupied rectangle.

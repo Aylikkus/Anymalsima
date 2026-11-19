@@ -58,6 +58,10 @@ int main(int argc, char** argv) {
     // glare), then the same lamps from 350 tiles away and high above (far
     // light on distant terrain and glare).
     const bool lights = scenario == "lights";
+    // Allow forest captures (including handover) to exercise sky shading
+    // independently of the lamp and shadow phases of the lights scenario.
+    const bool forestLighting = lights || std::getenv("SMOKE_FOREST");
+    const bool occlusion = forestLighting && !std::getenv("SMOKE_NO_OCCLUSION");
     const bool handover = scenario == "handover" || walking || structure ||
                           seams || wrapScene || lights;
     const bool travel = scenario == "travel" || walking;
@@ -164,6 +168,8 @@ int main(int argc, char** argv) {
         FloraRenderer flora(chunks, assets, world, renderer);
         TreeRenderer trees(chunks, assets, world, renderer, pool);
         flora.setBlockLight(&blockLight);
+        flora.setSkyLight(skyMap);
+        trees.setSkyLight(skyMap);
         trees.setBlockLight(&blockLight);
         double treesMaxMs = 0;
         double floraMaxMs = 0;
@@ -365,7 +371,7 @@ int main(int argc, char** argv) {
             trees.setChunkDrawn([&](const ChunkCoord& c) {
                 return lod.drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
-            if (lights) {
+            if (forestLighting) {
                 std::vector<ShaderProperty*> patchLights, blockLights;
                 lightRenderer.appendUniforms(patchLights,
                                              LightRenderer::Program::Lod);
@@ -441,7 +447,7 @@ int main(int argc, char** argv) {
                     sunlight.update();
                     blockLight.update();
                     chunks.uploadReadyMeshes(renderer);
-                    if (lights) volumes.update(camera.position);
+                    if (forestLighting) volumes.update(camera.position);
                 }
                 sections[0] = since(mark);
                 mark = SmokeClock::now();
@@ -452,9 +458,13 @@ int main(int argc, char** argv) {
                     lightRenderer.update(registry, camera, world.wrap(), now);
                 lod.setStructures(trees.landmarkVoxels(0));
                 lod.update(camera, {1280, 720});
-                // Shade under structures on distant surfaces (step 2).
-                if (lights && !std::getenv("SMOKE_NO_OCCLUSION"))
-                    lightRenderer.setSkyOcclusion(lod.skyOcclusion());
+                if (occlusion) {
+                    skyMap.updateOcclusion(
+                        camera.eye(),
+                        trees.landmarkVoxels(chunks.woodDay(), false), world,
+                        assets);
+                    lightRenderer.setSkyOcclusion(skyMap.skyOcclusion());
+                }
                 sections[1] = since(mark);
                 mark = SmokeClock::now();
                 RenderTarget target;
@@ -561,7 +571,7 @@ int main(int argc, char** argv) {
                             double(coord.z) * Chunk::SIZE_Z);
                         std::vector<ShaderProperty*> uniforms{
                             &blockTexture, &blockEye, &water};
-                        if (lights) {
+                        if (forestLighting) {
                             if (!volumes.bind(coord, uniforms, wx)) return;
                             lightRenderer.appendUniforms(
                                 uniforms, LightRenderer::Program::Block);
@@ -572,7 +582,7 @@ int main(int argc, char** argv) {
                         ++detailed;
                     });
                 }
-                if (lights) {
+                if (forestLighting) {
                     float worldView[16], worldProj[16], viewProj[16];
                     bx::mtxLookAt(worldView, {eye.x, eye.y, eye.z},
                                   {camera.position.x, camera.position.y,
@@ -855,8 +865,9 @@ int main(int argc, char** argv) {
                         << " voxel_slabs_l2=" << lod.voxelSlabs(2)
                         << " voxel_groups=" << lod.structureGroups()
                         << " occluded_texels="
-                        << (lod.skyOcclusion() ? lod.skyOcclusion()->occluded()
-                                               : 0)
+                        << (skyMap.skyOcclusion()
+                                ? skyMap.skyOcclusion()->occluded()
+                                : 0)
                         << " plants=" << flora.drawnPlants()
                         << " plant_draws=" << flora.drawCalls()
                         << " plant_meshes=" << flora.meshCount()

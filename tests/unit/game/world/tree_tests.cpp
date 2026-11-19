@@ -2813,6 +2813,7 @@ TEST(sky_heightmap_matches_chunks) {
     TerrainEdits edits;
     for (unsigned cx = 16; cx < 20; ++cx)
         for (unsigned cz = 16; cz < 20; ++cz) f.load(cx, cz);
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
     SkyHeightMap map(*f.chunks, edits, f.assets.getStorage<Block>(), f.pool);
     for (unsigned cx = 16; cx < 20; ++cx)
         for (unsigned cz = 16; cz < 20; ++cz) map.request(cx, cz);
@@ -2833,7 +2834,6 @@ TEST(sky_heightmap_matches_chunks) {
     CHECK(woodColumns > 20);
     // Gameplay edits: a block on open ground (TerrainEdits records it) and
     // a hole dug into the top of some wood (only an override can).
-    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
     TerrainEditTracker tracker(*f.chunks, edits);
     tracker.watch(editor);
     map.watch(editor);
@@ -2873,6 +2873,60 @@ TEST(sky_heightmap_matches_chunks) {
         for (unsigned cz = 16; cz < 20; ++cz) again.request(cx, cz);
     settle(f, again);
     EQUAL(heightmapMismatches(f, again), size_t(0), "reloaded");
+}
+
+TEST(sky_queries_and_far_shade_without_chunks) {
+    TreeStream f;
+    TerrainEdits edits;
+    constexpr int X = 17 * Chunk::SIZE_X;
+    constexpr int Z = 18 * Chunk::SIZE_Z;
+    constexpr int Roof = 800;
+    const auto key = SkyHeightMap::columnKey(17, 18);
+    auto edit = std::make_shared<ColumnEdit>();
+    edit->groundY.fill(400);
+    edit->groundBlock.fill(1);
+    edit->waterY.fill(-1);
+    Chunk roof;
+    for (auto& row : roof.tiles)
+        for (auto& tile : row[0]) tile.block_id = 1;
+    edit->structure.emplace_back(
+        Roof / Chunk::SIZE_Y,
+        std::make_shared<const Bytes>(chunk_codec::encode(roof)));
+    edit->finish();
+    edits.set(key, edit);
+
+    SkyHeightMap map(*f.chunks, edits, f.assets.getStorage<Block>(), f.pool);
+    // Build the renderer map directly from saved data before any query or
+    // chunk registration. A lowered override opens one whole render texel
+    // through the roof, while the surrounding roof remains an occluder.
+    sky::Overrides overrides;
+    for (int z = 0; z < 4; ++z)
+        for (int x = 0; x < 4; ++x)
+            overrides[key][sky::Tile::index(x, z)].opaque = 400;
+    map.setOverrides(std::move(overrides));
+    const Vec3 eye{X, 500, Z};
+    map.updateOcclusion(eye, {}, f.world, f.assets);
+    CHECK(f.pool.wait_for(std::chrono::seconds(15)));
+    map.updateOcclusion(eye, {}, f.world, f.assets);
+    const auto far = map.skyOcclusion();
+    CHECK(far);
+    EQUAL(far->at(X + 10, Z + 10)[0], float(Roof + 1), "unloaded roof");
+    EQUAL(far->at(X + 2, Z + 2)[0], 401.f, "unloaded override");
+
+    CHECK(!map.directSky(X + 10, Roof - 1, Z + 10));
+    map.requestUnloaded(X + 10 - f.world.wrap().tiles, Z + 10);
+    settle(f, map);
+    CHECK(!f.chunks->isRegistered({17, 0, 18}));
+    CHECK(!f.chunks->isReady({17, Roof / Chunk::SIZE_Y, 18}));
+    const auto direct = map.directSky(X + 10, Roof - 1, Z + 10);
+    CHECK(direct);
+    EQUAL(int(*direct), 0, "roof blocks overhead sunlight");
+    EQUAL(int(*map.directSky(X + 2, Roof - 1, Z + 2)), 15,
+          "override opens sky");
+    // At the diagonal corner beside the 4x4 opening, light travels 2 cells.
+    EQUAL(int(*map.skyAt(X + 4, Roof - 1, Z + 4)), 13,
+          "unloaded lateral falloff");
+    EQUAL(int(*map.skyAt(X + 10, Roof + 1, Z + 10)), 15, "open sky above roof");
 }
 
 namespace {
@@ -2923,6 +2977,42 @@ TEST(sky_sunlight_without_upper_slabs) {
         }
     lightAll(f, sun, &map);
     lightAll(reference, full);
+    // Give both paths a guaranteed shade caster. The amount of shade
+    // from generated trees alone varies with floating-point code generation.
+    constexpr unsigned Cx = 18, Cz = 18;
+    constexpr unsigned RoofSlab = TreeStream::High - 2;
+    auto roofEdit = std::make_shared<ColumnEdit>();
+    roofEdit->waterY.fill(-1);
+    Chunk roof;
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            const auto i = ColumnEdit::index(x, z);
+            roofEdit->groundY[i] = int16_t(f.chunks->generatedSurfaceY(
+                Cx * Chunk::SIZE_X + x, Cz * Chunk::SIZE_Z + z));
+            roofEdit->groundBlock[i] = 1;
+            roof.tiles[z][0][x].block_id = 1;
+        }
+    roofEdit->structure.emplace_back(
+        RoofSlab, std::make_shared<const Bytes>(chunk_codec::encode(roof)));
+    roofEdit->finish();
+    edits.set(SkyHeightMap::columnKey(Cx, Cz), roofEdit);
+    for (auto* fixture : {&f, &reference})
+        CHECK(fixture->chunks->withChunkLocked(
+            {Cx, RoofSlab, Cz}, [&](Chunk& chunk) {
+                for (int z = 0; z < Chunk::SIZE_Z; ++z)
+                    for (int x = 0; x < Chunk::SIZE_X; ++x)
+                        chunk.tiles[z][0][x] = roof.tiles[z][0][x];
+            }));
+    sun.markColumnDirty(Cx, Cz);
+    full.markColumnDirty(Cx, Cz);
+    lightAll(f, sun, &map);
+    lightAll(reference, full);
+    const int x = 18 * Chunk::SIZE_X, z = 18 * Chunk::SIZE_Z;
+    const int y = TreeStream::Low * Chunk::SIZE_Y;
+    const auto* voxel = f.chunks->tileAt(x, y, z);
+    CHECK(voxel);
+    EQUAL(int(*map.skyAt(x, y, z)), int(voxel->lightLevel.sun_exposure),
+          "published voxel sky");
     // Nothing above the loaded slabs was asked for.
     for (unsigned cx = 16; cx < 20; ++cx)
         for (unsigned cz = 16; cz < 20; ++cz)
@@ -2954,7 +3044,7 @@ TEST(sky_sunlight_without_upper_slabs) {
             }
     EQUAL(wrong, size_t(0), "sunlight matches the full column");
     CHECK(compared > 1000000);
-    CHECK(shaded > 1000);  // tree shade is part of what is compared
+    CHECK(shaded > 1000);  // the comparison includes partially lit air
 }
 
 // Step 3 of docs/handoff/sky-light.md: a chunk is lit while its neighbours

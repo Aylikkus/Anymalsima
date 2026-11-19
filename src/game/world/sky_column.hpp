@@ -96,6 +96,7 @@ class Tile {
 
     Column column(int i) const;
     int top(int i) const;
+    int opaqueTop(int i) const { return opaque[size_t(i)]; }
     uint8_t direct(int i, int y) const;
     bool overflow(int i) const { return (flags[i] & OverflowFlag) != 0; }
     // Highest attenuating tile of the whole chunk column (None: none).

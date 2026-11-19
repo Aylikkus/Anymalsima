@@ -8,6 +8,7 @@
 #include "world/save/flora_codec.hpp"
 #include "world/save/region_file.hpp"
 #include "world/save/world_meta.hpp"
+#include "world/sky_height_map.hpp"
 #include "world/world_clock.hpp"
 #include "world/world_editor.hpp"
 #include "world_fixture.hpp"
@@ -284,6 +285,19 @@ struct FloraStream {
     ThreadPool pool{2};
     ChunkMesher mesher{assets};
     std::unique_ptr<ChunkManager> chunks;
+    TerrainEdits skyEdits;
+    std::unique_ptr<SkyHeightMap> skyMap;
+
+    void prepareSky(const std::vector<ChunkCoord>& columns) {
+        skyMap = std::make_unique<SkyHeightMap>(
+            *chunks, skyEdits, assets.getStorage<Block>(), pool);
+        for (const auto& c : columns) skyMap->request(c.x, c.z);
+        do {
+            chunks->update();
+            skyMap->update();
+            CHECK(pool.wait_for(std::chrono::seconds(10)));
+        } while (!skyMap->isIdle());
+    }
     // extraFlora: species added after the shipped ones.
     explicit FloraStream(const Json& extraFlora = Json::array()) {
         test::loadAllContent(assets);
@@ -588,11 +602,35 @@ TEST(flora_life_cycle) {
         }
 }
 
+TEST(flora_catchup_uses_direct_sky) {
+    FloraStream f;
+    const auto coord = f.load(18, 18);
+    f.prepareSky({coord});
+    const auto original = f.chunks->flora(coord);
+    CHECK(original && !original->empty());
+    FloraSimulation sim(*f.chunks, f.assets, f.world, *f.skyMap);
+    const double today = FloraSimulation::CatchUpDays + 1;
+    sim.update(today);
+    const auto open = f.chunks->flora(coord);
+    CHECK(open && open->resolvedDay == int(today));
+
+    // Place an overhead roof in the heightmap beyond the loaded slabs.
+    // The old near-field light in the plant's chunk is unchanged.
+    constexpr int Roof = 800;
+    CHECK(!f.chunks->isReady({coord.x, Roof / Chunk::SIZE_Y, coord.z}));
+    sky::Overrides overrides;
+    const auto key = SkyHeightMap::columnKey(coord.x, coord.z);
+    for (int i = 0; i < sky::Tile::Size; ++i) overrides[key][i].opaque = Roof;
+    f.skyMap->setOverrides(std::move(overrides));
+    f.chunks->setFlora(coord, original);
+    // The slow sweep reaches the chunk again, using the same elapsed days.
+    sim.update(today);
+    CHECK(!f.chunks->flora(coord));
+}
+
 TEST(flora_simulation_spread_harvest_regrow) {
     FloraStream f;
     WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
-    FloraSimulation sim(*f.chunks, f.assets, f.world);
-    sim.watch(editor);
     // Load a 5x5 block of chunk columns (their plants resolve on load);
     // populations are measured in the inner 3x3, away from the unloaded
     // edge where seeds are lost (the game loads all around the camera).
@@ -606,14 +644,9 @@ TEST(flora_simulation_spread_harvest_regrow) {
     const auto inner = [](const ChunkCoord& c) {
         return c.x > 16 && c.x < 20 && c.z > 16 && c.z < 20;
     };
-    // Light the surface as sunlight would (no propagator in this fixture).
-    for (const auto& c : all)
-        f.chunks->withChunkLocked(c, [](Chunk& chunk) {
-            for (auto& plane : chunk.tiles)
-                for (auto& row : plane)
-                    for (auto& t : row)
-                        if (t.isAir()) t.lightLevel.sun_exposure = 15;
-        });
+    f.prepareSky(all);
+    FloraSimulation sim(*f.chunks, f.assets, f.world, *f.skyMap);
+    sim.watch(editor);
     const auto count = [&] {
         size_t n = 0;
         f.chunks->forEachReady([&](const ChunkCoord& c, Chunk&) {
@@ -892,17 +925,11 @@ TEST(flora_rare_species_persists) {
     // three years pass. Seeds keep it alive near where it was; crowding
     // keeps it rare.
     FloraStream f(Json::array({moonflower(true, 0.02)}));
-    FloraSimulation sim(*f.chunks, f.assets, f.world);
     std::vector<ChunkCoord> all;
     for (unsigned cz = 16; cz < 21; ++cz)
         for (unsigned cx = 16; cx < 21; ++cx) all.push_back(f.load(cx, cz));
-    for (const auto& c : all)
-        f.chunks->withChunkLocked(c, [](Chunk& chunk) {
-            for (auto& plane : chunk.tiles)
-                for (auto& row : plane)
-                    for (auto& t : row)
-                        if (t.isAir()) t.lightLevel.sun_exposure = 15;
-        });
+    f.prepareSky(all);
+    FloraSimulation sim(*f.chunks, f.assets, f.world, *f.skyMap);
     const auto& species = f.assets.getStorage<Flora>();
     const auto rare = species.get(std::string("flora.test_moonflower")).id;
     // Plant one where a grass tuft grows (suitable ground), in the middle.

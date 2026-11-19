@@ -293,7 +293,8 @@ foreach(case flora_value_ranges ground_cover_parsing foliage_material_parsing
 endforeach()
 # Distant structure voxels (docs/handoff/structures.md).
 foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
-             structure_voxels_plan_wraps structure_voxels_slab_merge
+             structure_voxels_plan_wraps structure_voxels_plan_chunk_handover
+             structure_voxels_slab_merge
              structure_footprint_tops structure_footprint_incremental
              sky_occlusion_matches_sunlight sky_occlusion_by_height
              sky_occlusion_wraps)
@@ -304,7 +305,8 @@ endforeach()
 # Sky heightmap (docs/handoff/sky-light.md).
 foreach(case sky_column_scan_and_direct sky_tile_build_sources
              sky_tile_overrides sky_codec_roundtrip tree_wood_tops_match_raster
-             sky_heightmap_matches_chunks sky_sunlight_without_upper_slabs
+             sky_heightmap_matches_chunks sky_queries_and_far_shade_without_chunks
+             sky_sunlight_without_upper_slabs
              sky_spread_without_waiting)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
@@ -354,7 +356,8 @@ endforeach()
 foreach(case flora_growth_stages flora_generation_borders
              flora_generation_wraps_seam flora_edits flora_meshes
              flora_world_clock flora_life_cycle
-             flora_simulation_spread_harvest_regrow flora_rare_species
+             flora_catchup_uses_direct_sky flora_simulation_spread_harvest_regrow
+             flora_rare_species
              flora_rare_species_persists)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES

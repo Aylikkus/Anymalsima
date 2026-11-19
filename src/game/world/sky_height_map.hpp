@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <future>
 #include <memory>
 #include <optional>
@@ -11,9 +12,12 @@
 #include "chunk_manager.hpp"
 #include "core/signal.hpp"
 #include "sky_column.hpp"
+#include "sky_occlusion_map.hpp"
+#include "structure_voxels.hpp"
 #include "terrain_edits.hpp"
 
 class WorldEditor;
+class SunLightPropagator;
 struct BlockChange;
 
 // The sky heightmap (docs/handoff/sky-light.md): the source of truth for
@@ -62,6 +66,22 @@ class SkyHeightMap {
     // above it. Gameplay "direct sunlight" (plants) reads this.
     std::optional<uint8_t> directSky(int64_t x, int y, int64_t z) const;
 
+    // Request a heightmap column without generating any voxel slabs.
+    // Call for adjacent columns as needed for indirect samples near edges.
+    // A query returns null while its own column is pending.
+    void requestUnloaded(int64_t x, int64_t z);
+    // Published voxel light, or an estimate from the heightmap.
+    std::optional<uint8_t> skyAt(int64_t x, int y, int64_t z) const;
+
+    // Capture immutable inputs and refresh the renderer map on the pool.
+    // World and assets must remain alive and immutable during builds.
+    void updateOcclusion(Vec3 eye,
+                         std::vector<structure_voxels::SourcePtr> structures,
+                         const World& world, const IAssets& assets);
+    std::shared_ptr<const SkyOcclusionMap> skyOcclusion() const {
+        return occlusion;
+    }
+
     // Loaded overrides (before any column is built), and the current ones
     // for saving.
     void setOverrides(Overrides value);
@@ -81,20 +101,22 @@ class SkyHeightMap {
     }
 
    private:
+    friend class SunLightPropagator;
+    const SunLightPropagator* voxelLight = nullptr;
+
     struct Entry {
-        sky::TilePtr derived;    // from the sources alone
-        sky::TilePtr effective;  // with overrides
-        // Inputs of the last dispatched build.
-        std::shared_ptr<const TreeColumn> trees;
-        std::shared_ptr<const ColumnEdit> edit;
-        int32_t day = -1;
+        sky::TilePtr derived;     // from the sources alone
+        sky::TilePtr effective;   // with overrides
         uint64_t generation = 0;  // of the newest dispatched build
         bool hasTrees = false;
+        bool queried = false;
+        uint64_t lastQuery = 0;
     };
     struct Job {
         uint64_t key;
         uint64_t generation;
         std::future<sky::Tile> future;
+        bool unloaded = false;
     };
 
     void dispatch();
@@ -125,5 +147,49 @@ class SkyHeightMap {
     Overrides overridden;
     int32_t day = -1;
     uint64_t nextGeneration = 0;
+    uint64_t queryClock = 0;
+    uint64_t treeRevision = 0;
+    uint64_t revision = 0;
+    uint64_t occlusionRevision = 0;
+    uint64_t occlusionEditRevision = 0;
+    std::chrono::steady_clock::time_point nextOcclusionBuild{};
+    std::shared_ptr<const SkyOcclusionMap> occlusion;
+    struct Projection {
+        structure_voxels::SourcePtr source;
+        TileBox box;
+        std::vector<int> tops;
+    };
+    using Projections = std::vector<std::shared_ptr<const Projection>>;
+    struct TerrainRaster {
+        int x0, z0;
+        std::vector<float> heights;
+    };
+    struct OcclusionInputs {
+        Vec3 eye;
+        std::vector<structure_voxels::SourcePtr> structures;
+        Projections previous;
+        std::unordered_map<uint64_t, sky::TilePtr> tiles;
+        std::shared_ptr<const EditMap> edits;
+        Overrides overrides;
+        std::shared_ptr<const sky::OpacityTable> opacity;
+        WorldWrap wrap;
+        std::shared_ptr<const TerrainRaster> terrain;
+    };
+    struct OcclusionResult {
+        std::shared_ptr<const SkyOcclusionMap> map;
+        Projections projections;
+        std::shared_ptr<const TerrainRaster> terrain;
+    };
+    static std::shared_ptr<const TerrainRaster> sampleTerrain(
+        int x0, int z0, const World& world, const IAssets& assets,
+        WorldWrap wrap, std::shared_ptr<const TerrainRaster> previous);
+    static OcclusionResult buildOcclusion(OcclusionInputs inputs,
+                                          const World& world,
+                                          const IAssets& assets);
+
+    Projections projections;
+    std::shared_ptr<const TerrainRaster> occlusionTerrain;
+    std::optional<std::future<OcclusionResult>> occlusionJob;
+    std::vector<structure_voxels::SourcePtr> occlusionSources;
     Vec3 focus{0, 0, 0};
 };

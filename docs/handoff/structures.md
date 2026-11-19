@@ -63,7 +63,7 @@ These come from the light pipeline and chunk loading. They decide how far a stru
   - give the column top per column from the structure's real occupancy, not its bounding box (`Source::occupancy` already knows which slabs can hold voxels);
   - let slabs that a source reports empty over a column skip generation (known air), so the sweep can pass through them without generating anything.
 - **Tree sets before slabs.** A slab under a landmark is generated only once every region tree set it needs is built (`treesReady`, landmark reach up to `TreeMaxLandmarkReach`). Kinds with world-wide reach should have their per-region data cheap and ready before chunk generation asks for it.
-- **The estimate ignores structures.** Until the sweep lands, structure shade comes only from the sky occlusion map. The map holds wood only (no crowns), at 4-tile texels, within 2 km. Its footprint takes about 3 s per elder, and until a footprint exists an estimated chunk under it is fully lit, so the shade appears later. A kind whose shade matters (roofs, covered yards) should compute its footprint directly rather than through `rasterize` (see step 2, known limits).
+- **The estimate ignores structures.** Until the sweep lands, structure shade comes only from the sky occlusion map. The map holds wood only (no crowns), at 4-tile texels, within 2 km. Its footprint takes about 3 s per elder, and until a footprint exists an estimated chunk under it is fully lit, so the shade appears later. Sky light step 4 now projects wood directly from its source and replaces the footprint input.
 - **Edits in a blind column.** Opacity edits to a chunk whose column is still blind do not change its sky light until the missing slabs arrive (the chunk keeps its estimate or old light). This is harmless at walking pace. A structure that edits itself quickly near the player (a growing settlement, collapse) needs its columns' slabs generated first.
 - **Spread waits for neighbours.** A chunk's final light needs the direct light of its 26 neighbours. A structure that dirties many columns at once (a large revision) relights a wide area: one sweep per column and one spread per chunk, at most 8 jobs in flight and 2 ms of dispatch per frame. Report a tight `changedSince` box, which shrinks the dirtied area.
 - **Light volume uploads.** At most 64 volume rebuilds per frame (1.5 ms budget, `LightVolumeManager`). A completed column under an elder republishes many chunks at once; the rest catch up over the next frames, nearest first.
@@ -88,7 +88,7 @@ Done:
 - `world/structure_voxels.{hpp,cpp}` (pure, in the headless test library):
   - `Source`: `key` (stable across revisions), `revision`, `bounds` (unwrapped X), `rasterize(level, sx, sy, sz)` returning a `Slab` or nothing. Implementations must be thread-safe; a changed structure is a new source with the same key.
   - `Slab`: bits plus one `block`, or per-cell ids in `blocks` for structures of several blocks; `merge` keeps the first structure's cells where two overlap.
-  - `plan(bounds, eye, wrap, previous)`: covers the box exactly once with slabs of levels 0-2 by distance (`Limits` 512 / 1536 tiles, `Margin` 64 of hysteresis against the previous plan), nearest first. `keyOf`, `rasterizeAll`, `markEnclosed`.
+  - `plan(bounds, eye, wrap, previous)`: covers the box exactly once with slabs of levels 0-2 by distance (`Limits` 192 / 640 tiles, `Margin` 64 of hysteresis against the previous plan), nearest first. The chunk draw box plus a two-slab margin always uses level 0 so the proxies can hand over to exact chunk meshes. `keyOf`, `rasterizeAll`, `markEnclosed`.
 - Trees: `tree_wood_lod::voxels(source)` (a `TreeVoxels` source: key = `TreeInstance::key`, revision from age, skeleton and block); `TreeRenderer::landmarkVoxels` lists them; `TerrainLodManager::setStructures` / `StructureLod::setStructures` take any sources.
 - `StructureLod`: per structure, the plan is redone when the eye crosses a 32-tile cell or a source or build changes; only planned slabs not yet rasterized for the current revision go to a job (two jobs, nearest structure first). Kept slabs are not remeshed; replaced and new ones (and their face neighbours) are.
 - `Source::occupancy()`: the slabs (per level) that may hold voxels, computed once per source on the pool; plans visit only those. A sparse structure in a huge box (a massive tree's limbs) is otherwise planned and rasterized slab by empty slab. Towns and castles should report their occupied slabs too.
@@ -104,6 +104,11 @@ Done:
 
 ### Step 2: sky occlusion at distance (done)
 
+Sky light step 4 replaced the footprint-based input described below.
+`SkyHeightMap` now publishes the map from generated terrain, projected
+landmark wood, edits and saved overrides. The renderer still samples the
+same texture layout. See [Sky light](sky-light.md#step-4-far-and-gameplay).
+
 Voxel sunlight (`SunLightPropagator`) falls straight down at 15 until something opaque stops it, then spreads sideways losing one level per tile. So under an occluder a point at height y gets `15 - d`, d being the 4-neighbour distance in tiles to the nearest column open to the sky down to y, however high the occluder is. Distant surfaces reproduce that from a top-down map; any structure kind gets it from its `Source` alone: a tree's limbs, a castle's overhangs and covered yards, a bridge. Wood only, no crown shade (agreed 2026-11-18).
 
 - `structure_voxels::footprint(source, occupancy, previous, changed)` (pure): per column of level-2 cells (4x4 tiles), the top of the highest solid cell, from the level-2 rasterization (cells solid when a quarter of their tiles are, so a roof one tile thick casts, a limb under about two tiles does not; its voxel shade is one light level). With an earlier footprint and `Source::changedSince`, only the slab columns under the changed box are rasterized again. `StructureLod` computes one per source on the pool after its occupancy and caches them by key (`footprintCache`, 64), so a structure coming back into view with the same revision reuses its footprint.
@@ -115,7 +120,7 @@ Voxel sunlight (`SunLightPropagator`) falls straight down at 15 until something 
 
 Known limits:
 
-- Foliage (plants, ordinary tree crowns, billboards) takes its sky light from the CPU (`foliage_light`), which sees only loaded tiles: distant foliage under a structure stays sky-lit.
+- Foliage takes its sky light from the CPU (`foliage_light`). Sky light step 4 added heightmap and coarse sky estimates for crowns and billboards beyond the loaded slabs.
 - The map covers 2 km around the camera; beyond it structures cast nothing (view distance is up to 8 km on High).
-- Footprint cost: a source could compute its footprint directly (trees: project segments top-down) instead of through `rasterize`, if 3 s per elder per revision shows up in play. `Source::skyTops` (sky heightmap, `sky-light.md`) now does exactly that at full resolution in about 0.1 s per elder; step 4 there builds the occlusion map from it. A tree's growth step (a new revision without `changedSince`) recomputes the whole footprint.
+- Footprint cost: a source could compute its footprint directly (trees: project segments top-down) instead of through `rasterize`, if 3 s per elder per revision shows up in play. `Source::skyTops` (sky heightmap, `sky-light.md`) now does exactly that at full resolution in about 0.1 s per elder; step 4 there now builds the occlusion map from it. A tree's growth step (a new revision without `changedSince`) recomputes the whole footprint.
 - The upload could be limited to the changed rectangle.

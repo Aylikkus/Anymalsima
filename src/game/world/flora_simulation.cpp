@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "sky_height_map.hpp"
+
 namespace {
 
 // Calls fn(coord, index, plant, rule, volume) for plants whose volume can
@@ -71,8 +73,8 @@ bool advanceFlora(FloraLayer& layer, const DataStorage<Flora>& species,
 }
 
 FloraSimulation::FloraSimulation(ChunkManager& chunks, const IAssets& assets,
-                                 const World& world)
-    : chunks(chunks), assets(assets), world(world) {
+                                 const World& world, const SkyHeightMap& sky)
+    : chunks(chunks), assets(assets), world(world), sky(sky) {
     readyConnection = chunks.becameReady.connect([this](const ChunkCoord& c) {
         loaded.push_back(c);
         // Saved edits may have left topsoil without cover.
@@ -160,7 +162,7 @@ void FloraSimulation::update(double today) {
 
 void FloraSimulation::resolve(const ChunkCoord& coord, double today) {
     const auto live = chunks.flora(coord);
-    if (!live) return;
+    if (!live || !sky.tile(coord.x, coord.z)) return;
     const auto day = int32_t(std::floor(today));
     if (live->resolvedDay >= day) return;
     if (today - live->resolvedDay >= CatchUpDays) {
@@ -174,7 +176,7 @@ void FloraSimulation::resolve(const ChunkCoord& coord, double today) {
     const double since = live->resolvedDay;
     // Seeds come from the plants alive before this resolve (plants that died
     // since still seeded while they lived).
-    spread(coord, *live, since, today, changed);
+    if (!spread(coord, *live, since, today, changed)) return;
     for (auto& [c, l] : changed) {
         const bool self = c == coord;
         if (self) {
@@ -210,6 +212,10 @@ void FloraSimulation::regenerate(const ChunkCoord& coord, double today) {
     const auto& table = chunks.floraSpecies();
     std::erase_if(layer.instances, [&](const FloraInstance& p) {
         const auto* rule = table.find(p.species);
+        const int x = int(coord.x) * Chunk::SIZE_X + int(p.localX());
+        const int y = int(coord.y) * Chunk::SIZE_Y + p.y + 1;
+        const int z = int(coord.z) * Chunk::SIZE_Z + int(p.localZ());
+        if (sky.directSky(x, y, z).value_or(0) < 10) return true;
         if (!rule || !rule->large) return false;
         const auto v = floraVolume(p, coord, *rule);
         for (int dz = 0; dz < v.sizeZ; ++dz)
@@ -222,9 +228,10 @@ void FloraSimulation::regenerate(const ChunkCoord& coord, double today) {
     chunks.setFlora(coord, std::make_shared<const FloraLayer>(layer));
 }
 
-void FloraSimulation::spread(
+bool FloraSimulation::spread(
     const ChunkCoord& coord, const FloraLayer& layer, double since,
     double today, std::unordered_map<ChunkCoord, FloraLayer>& changed) {
+    bool skyPending = false;
     const auto& species = assets.getStorage<Flora>();
     const auto& table = chunks.floraSpecies();
     for (const auto& p : layer.instances) {
@@ -273,10 +280,12 @@ void FloraSimulation::spread(
                     std::ceil(dropDay + 1 + 9 * flora_growth::unit(child, 31)));
                 plant(*rule, x, z, anchorY, birth, child,
                       flora_growth::unit(child, 400), g.spread_germination,
-                      changed);
+                      changed, skyPending);
+                if (skyPending) return false;
             }
         }
     }
+    return true;
 }
 
 const FloraLayer* FloraSimulation::layerOf(
@@ -299,10 +308,11 @@ bool FloraSimulation::inFootprint(
     return inside;
 }
 
-bool FloraSimulation::plant(
-    const FloraSpeciesRule& rule, double x, double z, int nearY,
-    int32_t birthDay, uint16_t seed, double roll, double germination,
-    std::unordered_map<ChunkCoord, FloraLayer>& changed) {
+bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
+                            int nearY, int32_t birthDay, uint16_t seed,
+                            double roll, double germination,
+                            std::unordered_map<ChunkCoord, FloraLayer>& changed,
+                            bool& skyPending) {
     // Cheapest test first: most seeds fail on their own.
     if (roll >= germination) return false;
     if (world.regions.empty() || world.width <= 0) return false;
@@ -321,20 +331,32 @@ bool FloraSimulation::plant(
     // The ground near the parent's height: solid with open air above.
     int anchorY = -1;
     const Tile* ground = nullptr;
-    const Tile* above = nullptr;
+    const auto open = [&](int px, int y, int pz) {
+        if (const Tile* tile = chunks.tileAt(px, y, pz)) return tile->isAir();
+        const auto column = sky.column(px, pz);
+        if (!column) {
+            skyPending = true;
+            return false;
+        }
+        return column->opacityAt(y) == 0;
+    };
     for (int y = nearY + 3; y >= std::max(0, nearY - 3); --y) {
         const Tile* t = chunks.tileAt(int(tx), y, int(tz));
-        const Tile* a = chunks.tileAt(int(tx), y + 1, int(tz));
-        if (t && a && t->isSolid() && a->isAir()) {
+        if (t && t->isSolid() && open(int(tx), y + 1, int(tz))) {
             anchorY = y;
             ground = t;
-            above = a;
             break;
         }
     }
     if (anchorY < 0) return false;
-    // Plants need daylight to grow.
-    if (above->lightLevel.sun_exposure < 10) return false;
+    // Germination and catch-up use direct overhead light, including the
+    // attenuation of translucent roofs.
+    const auto direct = sky.directSky(tx, anchorY + 1, tz);
+    if (!direct) {
+        skyPending = true;
+        return false;
+    }
+    if (*direct < 10) return false;
     FloraSite site;
     site.surfaceY = anchorY;
     const auto [soil, topsoil] =
@@ -369,11 +391,8 @@ bool FloraSimulation::plant(
             if (under) {
                 const Tile* t = chunks.tileAt(px, anchorY, pz);
                 if (!t || !t->isSolid()) return false;
-                for (int h = 1; h <= rule.heightTiles; ++h) {
-                    const Tile* a = chunks.tileAt(px, anchorY + h, pz);
-                    if (a && !a->isAir()) return false;
-                    if (!a && h == 1) return false;
-                }
+                for (int h = 1; h <= rule.heightTiles; ++h)
+                    if (!open(px, anchorY + h, pz)) return false;
             } else if (dx >= -1 && dx <= sizeX && dz >= -1 && dz <= sizeZ) {
                 // The ring right next to the footprint.
                 const Tile* beside = chunks.tileAt(px, anchorY + 1, pz);
@@ -482,6 +501,8 @@ int FloraSimulation::crowd(
 bool FloraSimulation::regrowCover(const ChunkCoord& coord, double today) {
     const auto columns = chunks.generatedColumns(coord.x, coord.z);
     if (!columns) return false;
+    const auto skyTile = sky.tile(coord.x, coord.z);
+    if (!skyTile) return true;
     const auto since = coverSince.try_emplace(coord, today).first->second;
     const double elapsed = today - since;
     if (elapsed < CoverAppearDays) return true;
@@ -506,14 +527,16 @@ bool FloraSimulation::regrowCover(const ChunkCoord& coord, double today) {
                                             ? &chunk.tiles[z][y + 1][x]
                                         : upper ? &upper->tiles[z][0][x]
                                                 : nullptr;
-                    if (!above || !above->isAir()) continue;
+                    const int worldY = int(coord.y) * Chunk::SIZE_Y + y + 1;
+                    const int index = sky::Tile::index(x, z);
+                    if (above && !above->isAir()) continue;
                     const int density = tile.cover ? tile.coverDensity() : 0;
                     if (density >= column.coverDensity) continue;
-                    if (above->lightLevel.sun_exposure < 15) {
-                        // Shaded, or sunlight not computed yet.
+                    if (skyTile->direct(index, worldY) < 15) {
                         pending = true;
                         continue;
                     }
+                    if (!above && skyTile->top(index) == worldY) continue;
                     const int next = std::min<int>(column.coverDensity, levels);
                     if (next > density) {
                         tile.setCover(column.cover, uint8_t(next));

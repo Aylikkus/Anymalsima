@@ -39,20 +39,15 @@ TreeRenderer::TreeDraw TreeRenderer::describe(const TreeInstancePtr& tree) {
     TreeDraw draw{tree, 1, 0, 0, BareGround};
     const auto& k = *tree->skeleton;
     const auto& a = tree->anchor;
-    // Light of the tree: the brightest air tiles among rings of samples
-    // around the trunk. Sky light from the crown and above it; block light
-    // separately near the ground (by the trunk) and through the crown. New
-    // chunks start with a sky-light estimate (ChunkManager::
-    // estimateSkyLight), so open air reads full sky even before its
-    // sunlight sweep. No air sampled at all means "unknown": full sky until
-    // a later gather finds light.
+    // Sky light from the crown and above it. Sample lamp light separately
+    // near the ground and through the crown.
     const int height = std::max(2, int(std::ceil(k.boundsMax.y)));
     const int crownLow = a.y + 1 + std::max(2, int(k.height * 0.4f));
     const int crownHigh = a.y + 1 + height;
     const int ring = int(k.crownRadius * 0.6f + k.trunkRadius) + 1;
     const int near = int(k.trunkRadius) + 1;
     float sun = 0, blockBase = 0, blockCrown = 0;
-    bool air = false;
+    bool sampledSky = false;
     // Colour of the brightest block light sampled (one per tree).
     int brightest = 0;
     std::array<int, 3> brightestAt{};
@@ -62,30 +57,31 @@ TreeRenderer::TreeDraw TreeRenderer::describe(const TreeInstancePtr& tree) {
               std::pair{0, -r}, std::pair{r, r}, std::pair{-r, r},
               std::pair{r, -r}, std::pair{-r, -r}}) {
             const Tile* t = chunks.tileAt(a.x + dx, y, a.z + dz);
-            if (!t || !t->isAir()) continue;
-            air = true;
+            if (t && !t->isAir()) continue;
+            if (sky) {
+                sun = std::max(sun, foliage_light::sky(chunks, skyMap, a.x + dx,
+                                                       y, a.z + dz));
+                sampledSky = true;
+            }
+            if (!t) continue;
             const int level = t->lightLevel.artificial_light;
             block = std::max(block, level / 15.f);
             if (level > brightest) {
                 brightest = level;
                 brightestAt = {a.x + dx, y, a.z + dz};
             }
-            if (sky) sun = std::max(sun, t->lightLevel.sun_exposure / 15.f);
         }
     };
     for (int y = a.y + 1; y <= a.y + 3; ++y) sample(y, near, blockBase, false);
     for (const int y : {crownLow, (crownLow + crownHigh) / 2, crownHigh})
         sample(y, ring, blockCrown, true);
     sample(crownHigh + 1, ring, blockCrown, true);
-    if (air) {
-        draw.sun = sun;
-        draw.blockBase = blockBase;
-        draw.blockCrown = blockCrown;
-        if (brightest > 0)
-            draw.blockChroma =
-                foliage_light::at(chunks, blockLight, brightestAt[0],
-                                  brightestAt[1], brightestAt[2]);
-    }
+    if (sampledSky) draw.sun = sun;
+    draw.blockBase = blockBase;
+    draw.blockCrown = blockCrown;
+    if (brightest > 0)
+        draw.blockChroma = foliage_light::at(chunks, blockLight, brightestAt[0],
+                                             brightestAt[1], brightestAt[2]);
     // Ground colour under the tree: its cover's climate tint.
     if (const Tile* ground = chunks.tileAt(a.x, a.y, a.z);
         ground && ground->cover && assets.hasStorage<GroundCover>()) {
@@ -113,10 +109,15 @@ void TreeRenderer::gather(double eyeX, double eyeZ, double viewDistance) {
         const double reach = range + (rule ? rule->species.extent() : 0);
         if (dx * dx + dz * dz > reach * reach) return;
         auto draw = TreeDraw{tree, 1, 0, 0, BareGround};
-        // Light and ground come from loaded tiles: only near trees have
-        // them (distant ones keep full sky).
+        // Near trees also sample local lamps and ground colour.
         if (dx * dx + dz * dz < double(FadeEnd + 48) * (FadeEnd + 48))
             draw = describe(tree);
+        else
+            draw.sun = foliage_light::sky(
+                chunks, skyMap,
+                tree->anchor.x + int(tree->skeleton->trunkRadius) + 1,
+                tree->anchor.y + 1 + int(tree->skeleton->height * 0.75f),
+                tree->anchor.z);
         next.insert_or_assign(tree->key, draw);
     };
     chunks.forEachTree([&](const TreeInstancePtr& t) { add(t, DistantEnd); });
@@ -178,7 +179,7 @@ bool TreeRenderer::woodPending(const TreeInstance& tree) const {
 }
 
 std::vector<structure_voxels::SourcePtr> TreeRenderer::landmarkVoxels(
-    double today) const {
+    double today, bool quantizeAge) const {
     std::vector<structure_voxels::SourcePtr> out;
     const auto& table = chunks.treeSpecies();
     for (const auto& [key, draw] : trees) {
@@ -192,12 +193,15 @@ std::vector<structure_voxels::SourcePtr> TreeRenderer::landmarkVoxels(
         // dozen times over the tree's maturity, not every day, and never
         // for a day before the latest cut's regrowth or settling.
         const auto& k = *tree.skeleton;
-        const float quantized = tree_foliage::bucketAge(
-            tree_foliage::bucket(age, k.matureAge(), k.growthPhaseStart()),
-            k.matureAge(), k.growthPhaseStart());
-        if (quantized <= 0) continue;
-        out.push_back(
-            tree_wood_lod::voxels({draw.tree, quantized, rule->woodBlock}));
+        const float woodAge =
+            quantizeAge ? tree_foliage::bucketAge(
+                              tree_foliage::bucket(age, k.matureAge(),
+                                                   k.growthPhaseStart()),
+                              k.matureAge(), k.growthPhaseStart())
+                        : age;
+        if (woodAge > 0)
+            out.push_back(
+                tree_wood_lod::voxels({draw.tree, woodAge, rule->woodBlock}));
     }
     return out;
 }
@@ -286,6 +290,7 @@ void TreeRenderer::drawBillboards(RenderTarget& target, const Camera& camera,
     const double end = std::min<double>(BillboardEnd, camera.viewDistance);
     const double tiles = TerrainTuning::RegionX;
     std::unordered_map<uint8_t, std::vector<float>> groups;
+    const auto coarseSky = skyMap ? skyMap->skyOcclusion() : nullptr;
     for (const auto& r : billboardRegions) {
         const double x0 = ex + wrap.deltaX(r.region.x * tiles, ex);
         const double z0 = r.region.y * tiles;
@@ -314,6 +319,9 @@ void TreeRenderer::drawBillboards(RenderTarget& target, const Camera& camera,
             auto& out = groups[b.species];
             const float crown = b.crown * g * boost;
             const float h = b.height * g * std::sqrt(boost);
+            const float sun =
+                coarseSky ? coarseSky->sky(b.x + shift, b.y + h * .75f, b.z)
+                          : 1.f;
             const float data[16] = {
                 float(b.x + shift - ex),
                 float(b.y - ey),
@@ -327,7 +335,7 @@ void TreeRenderer::drawBillboards(RenderTarget& target, const Camera& camera,
                 BareGround.g,
                 BareGround.b,
                 0,
-                1,
+                sun,
                 foliage_light::pack(0, 0, foliage_light::White),
                 float(end),
                 r.fallback ? 0.f : DistantEnd};

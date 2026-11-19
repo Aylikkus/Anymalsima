@@ -332,7 +332,19 @@ void TerrainLodManager::update(const Camera& camera, Vec2 viewport) {
     collect();
     choose(camera, viewport);
     request();
-    if (structures) structures->update(camera.eye(), edits->snapshot());
+    if (structures) {
+        // Keep full voxels through the real chunk draw box and for two
+        // slabs beyond it, so an approaching camera has time to refine.
+        constexpr int Radius = DETAIL_CHUNK_RADIUS + 2;
+        const int x = int(camera.position.x) / Chunk::SIZE_X;
+        const int y = int(camera.position.y) / Chunk::SIZE_Y;
+        const int z = int(camera.position.z) / Chunk::SIZE_Z;
+        const TileBox detail{
+            (x - Radius) * Chunk::SIZE_X,     (y - Radius) * Chunk::SIZE_Y,
+            (z - Radius) * Chunk::SIZE_Z,     (x + Radius + 1) * Chunk::SIZE_X,
+            (y + Radius + 1) * Chunk::SIZE_Y, (z + Radius + 1) * Chunk::SIZE_Z};
+        structures->update(camera.eye(), detail, edits->snapshot());
+    }
 }
 void TerrainLodManager::upload(IRenderer& renderer) {
     for (const auto& p : queue) {

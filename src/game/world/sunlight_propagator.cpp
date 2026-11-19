@@ -27,12 +27,16 @@ SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
         [this](const ChunkCoord& coord) { removed(coord); });
     chunks.forEachReady(
         [this](const ChunkCoord& coord, Chunk&) { ready(coord); });
+    if (sky) sky->voxelLight = this;
 }
 
 SunLightPropagator::~SunLightPropagator() {
     chunks.becameReady.disconnect(readyConnection);
     chunks.removed.disconnect(removedConnection);
-    if (sky) sky->changed.disconnect(skyConnection);
+    if (sky) {
+        sky->changed.disconnect(skyConnection);
+        if (sky->voxelLight == this) sky->voxelLight = nullptr;
+    }
     for (auto& job : directJobs) job.future.wait();
     for (auto& job : indirectJobs) job.future.wait();
 }

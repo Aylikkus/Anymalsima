@@ -49,8 +49,7 @@ class LightRenderer {
     void renderShadows(RenderTarget& target,
                        const LightShadows::Casters& casters, double now);
     LightShadows& shadows() { return *shadowMaps; }
-    // The structures' sky occlusion (TerrainLodManager::skyOcclusion);
-    // uploaded when it changes, null for full sky.
+    // The coarse heightmap from SkyHeightMap, uploaded when it changes.
     void setSkyOcclusion(std::shared_ptr<const SkyOcclusionMap> map);
     // Appends the light uniforms for a program including world_surface.sh.
     void appendUniforms(std::vector<ShaderProperty*>& uniforms,

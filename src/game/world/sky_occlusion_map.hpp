@@ -3,15 +3,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
-#include "structure_voxels.hpp"
-
-// Sky light under structures at distance (docs/handoff/structures.md, step
-// 2): a top-down map around the camera of what structures cast, for
-// surfaces drawn without a voxel light volume (distant terrain, joins,
-// structure slabs). Any structure kind shades this way: the limbs of a
-// massive tree, a castle's overhangs and covered yards, a bridge.
+// Coarse sky light from SkyHeightMap (docs/handoff/sky-light.md).
+// Stores opaque heights around the camera for surfaces drawn without a
+// voxel light volume (distant terrain, joins, structure slabs).
 //
 // It follows the voxel sunlight (SunLightPropagator): sky light falls
 // straight down at full strength until something opaque stops it, then
@@ -26,7 +23,7 @@
 // on the pool.
 class SkyOcclusionMap {
    public:
-    static constexpr int TilesPerTexel = structure_voxels::Footprint::Cell;
+    static constexpr int TilesPerTexel = 4;
     static constexpr int Size = 1024;
     static constexpr int Extent = Size * TilesPerTexel;  // tiles per side
     // The map recentres on the camera in steps of this many tiles.
@@ -41,10 +38,10 @@ class SkyOcclusionMap {
     bool recentres(double eyeX, double eyeZ) const {
         return !built || snapped(eyeX) != centreX || snapped(eyeZ) != centreZ;
     }
-    // footprints: each structure's casters (unwrapped X, placed at their
-    // copy nearest the centre); periodX: world width when X wraps.
-    void build(const std::vector<structure_voxels::FootprintPtr>& footprints,
-               double eyeX, double eyeZ, int periodX);
+    // Fill the row-major array with coarse heights (exclusive), starting
+    // at the supplied world origin. Unset texels retain Open.
+    using Raster = std::function<void(int, int, std::vector<float>&)>;
+    void build(double eyeX, double eyeZ, const Raster& raster);
 
     bool valid() const { return built; }
     double originX() const { return minX; }

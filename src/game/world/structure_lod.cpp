@@ -32,9 +32,7 @@ StructureLod::~StructureLod() {
     for (auto& [key, structure] : structures) {
         if (structure.job) structure.job->future.wait();
         if (structure.occupancyJob) structure.occupancyJob->wait();
-        if (structure.footprintJob) structure.footprintJob->wait();
     }
-    if (occlusionJob) occlusionJob->wait();
 }
 
 void StructureLod::setStructures(
@@ -57,7 +55,7 @@ void StructureLod::setStructures(
         }
 }
 
-void StructureLod::planStructures(Vec3 eye) {
+void StructureLod::planStructures(Vec3 eye, const TileBox& fullDetail) {
     using namespace std::chrono_literals;
     const std::array<int, 3> cell{int(eye.x) / 32, int(eye.y) / 32,
                                   int(eye.z) / 32};
@@ -74,9 +72,10 @@ void StructureLod::planStructures(Vec3 eye) {
             structure.occupancyJob.reset();
             replan = true;
         }
-    if (!replan && cell == plannedCell) return;
+    if (!replan && cell == plannedCell && fullDetail == plannedDetail) return;
     replan = false;
     plannedCell = cell;
+    plannedDetail = fullDetail;
     for (auto& [key, structure] : structures) {
         if (!structure.wanted || structure.job) continue;
         // Its occupancy first (once per source object, on the pool); the
@@ -94,10 +93,12 @@ void StructureLod::planStructures(Vec3 eye) {
         // Same eye cell, source and built slabs as the last plan: the same
         // plan (its pending slabs, if any, are still listed).
         if (structure.plannedCell == cell &&
+            structure.plannedDetail == fullDetail &&
             structure.plannedWanted == structure.wanted &&
             structure.plannedBuilt == structure.built)
             continue;
         structure.plannedCell = cell;
+        structure.plannedDetail = fullDetail;
         structure.plannedWanted = structure.wanted;
         structure.plannedBuilt = structure.built;
         structure.pending.clear();
@@ -105,7 +106,7 @@ void StructureLod::planStructures(Vec3 eye) {
         const auto& source = *structure.wanted;
         auto planned = structure_voxels::plan(
             source.bounds, eye.x, eye.y, eye.z, world.wrap(), structure.covered,
-            structure.occupancy.get());
+            structure.occupancy.get(), fullDetail);
         structure.distance = planned.empty() ? 0 : planned.front().distance;
         const bool same =
             structure.built && structure.built->revision == source.revision;
@@ -233,12 +234,6 @@ void StructureLod::collectStructures() {
         // Out of view: its slabs go once no job uses the entry.
         if (!structure.wanted && !structure.job) {
             touched(structure.slabs);
-            if (structure.footprint && !structure.footprintJob) {
-                if (footprintCache.size() >= FootprintCacheSize)
-                    footprintCache.erase(footprintCache.begin());
-                footprintCache[it->first] = {structure.footprintFor,
-                                             structure.footprint};
-            }
             it = structures.erase(it);
             continue;
         }
@@ -284,93 +279,6 @@ void StructureLod::mergeVoxels(const std::vector<ChunkCoord>& changed) {
         if (stale.contains(coord)) proxy->staleRevision = revision;
 }
 
-void StructureLod::updateFootprints(Vec3 eye) {
-    using namespace std::chrono_literals;
-    for (auto& [key, structure] : structures) {
-        if (structure.footprintJob &&
-            structure.footprintJob->wait_for(0s) == std::future_status::ready) {
-            try {
-                structure.footprint = structure.footprintJob->get();
-            } catch (const std::exception& e) {
-                std::cerr << "Structure footprint failed: " << e.what() << '\n';
-                structure.footprint = nullptr;
-            }
-            structure.footprintJob.reset();
-            occlusionStale = true;
-        }
-        if (!structure.wanted || structure.footprintJob ||
-            structure.footprintFor == structure.wanted)
-            continue;
-        // Back in view: its footprint from before.
-        if (!structure.footprint)
-            if (const auto cached = footprintCache.find(key);
-                cached != footprintCache.end()) {
-                structure.footprintFor = cached->second.source;
-                structure.footprint = cached->second.footprint;
-                footprintCache.erase(cached);
-                occlusionStale = true;
-            }
-        // The same voxels (another Source object of the same revision).
-        if (structure.footprint && structure.footprintFor &&
-            structure.footprintFor->revision == structure.wanted->revision) {
-            structure.footprintFor = structure.wanted;
-            continue;
-        }
-        // After the occupancy of the same source (planning starts it).
-        if (structure.occupancyFor != structure.wanted ||
-            structure.occupancyJob)
-            continue;
-        // A new revision of the same structure: only where it changed.
-        std::optional<TileBox> changed;
-        if (structure.footprint && structure.footprintFor)
-            changed = structure.wanted->changedSince(*structure.footprintFor);
-        structure.footprintJob = pool.submit_task(
-            [source = structure.wanted, occupancy = structure.occupancy,
-             previous = changed ? structure.footprint : nullptr, changed] {
-                return structure_voxels::footprint(*source, occupancy.get(),
-                                                   previous.get(), changed);
-            },
-            BS::pr::low);
-        structure.footprintFor = structure.wanted;
-    }
-    if (occlusionJob &&
-        occlusionJob->wait_for(0s) == std::future_status::ready) {
-        try {
-            occlusion = occlusionJob->get();
-        } catch (const std::exception& e) {
-            std::cerr << "Sky occlusion failed: " << e.what() << '\n';
-        }
-        occlusionJob.reset();
-    }
-    if (occlusionJob) return;
-    std::vector<structure_voxels::FootprintPtr> inputs;
-    for (const auto& [key, structure] : structures)
-        if (structure.wanted && structure.footprint &&
-            !structure.footprint->tops.empty())
-            inputs.push_back(structure.footprint);
-    std::sort(inputs.begin(), inputs.end());
-    if (inputs != occlusionInputs) occlusionStale = true;
-    occlusionStale =
-        occlusionStale || (occlusion && occlusion->recentres(eye.x, eye.z));
-    if (!occlusionStale) return;
-    occlusionStale = false;
-    // Nothing casts: no map (surfaces get full sky).
-    if (inputs.empty()) {
-        occlusion = nullptr;
-        occlusionInputs.clear();
-        return;
-    }
-    occlusionInputs = inputs;
-    occlusionJob = pool.submit_task(
-        [inputs = std::move(inputs), x = double(eye.x), z = double(eye.z),
-         period = world.wrap().tiles] {
-            auto map = std::make_shared<SkyOcclusionMap>();
-            map->build(inputs, x, z, period);
-            return std::shared_ptr<const SkyOcclusionMap>(std::move(map));
-        },
-        BS::pr::low);
-}
-
 size_t StructureLod::voxelSlabCount(int level) const {
     if (!voxels) return 0;
     if (level < 0) return voxels->size();
@@ -392,11 +300,11 @@ void StructureLod::edited(uint64_t column) {
     chosenFor = nullptr;
 }
 
-void StructureLod::update(Vec3 eye, std::shared_ptr<const EditMap> edits) {
+void StructureLod::update(Vec3 eye, const TileBox& fullDetail,
+                          std::shared_ptr<const EditMap> edits) {
     snapshot = std::move(edits);
     collectStructures();
-    planStructures(eye);
-    updateFootprints(eye);
+    planStructures(eye, fullDetail);
     requestStructures();
     collect();
     choose(eye);
@@ -818,9 +726,9 @@ size_t StructureLod::backlog() const {
     return pendingStructures +
            std::count_if(wanted.begin(), wanted.end(), [&](const auto& c) {
                const auto it = proxies.find(c);
-               if (it == proxies.end() || !it->second->drawable ||
-                   it->second->stale())
-                   return true;
+               if (it == proxies.end() || !it->second->drawable)
+                   return !coveredByChunks(c);
+               if (it->second->stale()) return true;
                // Coarse: drawn once in its group's mesh.
                return levelOf(c) > 0 && it->second->hasMesh && !inGroupMesh(c);
            });
