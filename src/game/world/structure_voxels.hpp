@@ -1,0 +1,133 @@
+#pragma once
+
+#include <bitset>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "chunk.hpp"
+#include "chunk_coord.hpp"
+#include "consts.hpp"
+#include "tile_box.hpp"
+#include "world_wrap.hpp"
+
+// Voxels of structures at distance (docs/handoff/structures.md): any kind of
+// structure (massive trees today; towns and castles later) describes its
+// voxels through a Source, and StructureLod draws them as 16^3 slabs beyond
+// the loaded chunks. Slabs come at three levels: full tiles (level 0, the
+// same voxels the chunks hold, so the hand-over is seamless) and cells of 2
+// or 4 tiles for far parts. The level is chosen per slab by its distance from
+// the eye, so one structure a kilometre wide is detailed only near the
+// player. Pure; runs on the pool.
+namespace structure_voxels {
+
+inline constexpr int Side = Chunk::SIZE_X;
+static_assert(Chunk::SIZE_X == Chunk::SIZE_Y && Chunk::SIZE_Y == Chunk::SIZE_Z);
+inline constexpr size_t Cells = size_t(Side) * Side * Side;
+inline size_t cellIndex(int x, int y, int z) {
+    return size_t((z * Side + y) * Side + x);
+}
+
+// Slab keys: level 0 slabs are ordinary chunk coordinates; coarser ones
+// count slabs of 16 cells and carry the level in the high bits of y.
+inline constexpr unsigned LevelShift = 12;
+inline constexpr int MaxLevel = 2;
+inline int levelOf(const ChunkCoord& c) { return int(c.y >> LevelShift); }
+inline ChunkCoord baseOf(ChunkCoord c) {
+    c.y &= (1u << LevelShift) - 1;
+    return c;
+}
+inline ChunkCoord withLevel(ChunkCoord c, int level) {
+    c.y |= unsigned(level) << LevelShift;
+    return c;
+}
+// Tiles per side of a slab of the level.
+inline int spanOf(int level) { return Side << level; }
+
+// The voxels of one slab: a cell is solid when its bit is set, with `block`,
+// or the per-cell id in `blocks` (Cells entries) for structures of several
+// blocks.
+struct Slab {
+    std::bitset<Cells> bits;
+    uint8_t block = 0;
+    std::vector<uint8_t> blocks;  // empty: every set cell is `block`
+    // Full, with full slabs on all six sides: no visible face, so no proxy
+    // (kept so the neighbours' border faces stay hidden).
+    bool enclosed = false;
+
+    uint8_t blockAt(size_t cell) const {
+        return blocks.empty() ? block : blocks[cell];
+    }
+    // Adds `other`'s cells where this slab is empty (overlapping structures:
+    // the first one keeps its cells).
+    void merge(const Slab& other);
+};
+using Slabs = std::unordered_map<ChunkCoord, Slab>;
+
+// A structure's voxels. Immutable: a structure that changes (growth, damage,
+// building) is described by a new Source with the same key and another
+// revision. Implementations must be safe to call from any thread.
+class Source {
+   public:
+    virtual ~Source() = default;
+    // Stable identity of the structure across revisions.
+    uint64_t key = 0;
+    // Differs whenever the voxels may differ.
+    uint64_t revision = 0;
+    // Tiles that may hold voxels (X contiguous around the structure, not
+    // wrapped).
+    TileBox bounds;
+    // The slab at slab coordinates (sx, sy, sz) of `level` (unwrapped X, as
+    // `bounds`), or nothing when it holds no voxel. Coarse cells of 2^level
+    // tiles are solid when at least a quarter of their tiles are.
+    virtual std::optional<Slab> rasterize(int level, int sx, int sy,
+                                          int sz) const = 0;
+    // Where this revision's voxels may differ from `older` (same key, an
+    // earlier revision), in the same frame as `bounds`; std::nullopt when
+    // anywhere (rebuild everything). A local change (a cut, damage, a new
+    // room) rebuilds only the slabs it touches.
+    virtual std::optional<TileBox> changedSince(const Source& older) const {
+        (void)older;
+        return std::nullopt;
+    }
+};
+using SourcePtr = std::shared_ptr<const Source>;
+
+// Distances (tiles) where slabs coarsen: level 0 below Limits[0], level 1
+// below Limits[1], level 2 beyond; with Margin of hysteresis.
+inline constexpr float Limits[MaxLevel] = {512, 1536};
+inline constexpr float Margin = 64;
+
+struct Planned {
+    ChunkCoord key;              // canonical X, level in y
+    int sx = 0, sy = 0, sz = 0;  // unwrapped slab coordinates of the level
+    float distance = 0;          // eye to the slab box
+};
+
+// The slabs covering `bounds`, each at the level its distance allows: cells
+// of MaxLevel split into finer ones near the eye, so the result covers the
+// box exactly once, without overlap. previous: the last plan's keys of the
+// same structure (hysteresis; empty for none). Nearest first.
+// Tiles of a planned slab (unwrapped X).
+TileBox boxOf(const Planned& planned);
+
+std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
+                          double eyeZ, const WorldWrap& wrap,
+                          const std::unordered_set<ChunkCoord>& previous);
+
+// Canonical key of unwrapped slab coordinates (std::nullopt: outside a
+// world that does not wrap).
+std::optional<ChunkCoord> keyOf(int level, int sx, int sy, int sz,
+                                const WorldWrap& wrap);
+
+// Rasterizes every slab of `source` at one level (tests and tools; the
+// renderer plans per slab).
+Slabs rasterizeAll(const Source& source, int level, const WorldWrap& wrap);
+
+// Sets `enclosed` on full slabs whose six same-level neighbours are full.
+void markEnclosed(Slabs& slabs, const WorldWrap& wrap);
+
+}  // namespace structure_voxels

@@ -59,6 +59,10 @@ struct TreeSegment {
     uint8_t order = 0;  // 0: trunk (and giant limbs), 1+: branches
     uint8_t flags = 0;
     uint16_t cut = 0;  // 1-based index of the cut that pruned or grew it
+    // Tree age from which the segment exists (0: always). A settled part
+    // (TreeFell::Settle) appears at its cut, replacing the pruned original,
+    // so the wood of any day before the cut is still the original's.
+    float appear = 0;
 
     bool live() const { return !(flags & Pruned); }
 };
@@ -139,7 +143,7 @@ struct TreeSkeleton {
     }
     // How far along the segment the tip has grown (0..1) at `age`.
     float visible(const TreeSegment& s, float age) const {
-        if (age < s.birthA) return -1;
+        if (age < s.birthA || age < s.appear) return -1;
         if (s.birthB <= s.birthA) return 1;
         return std::min(1.f, (age - s.birthA) / (s.birthB - s.birthA));
     }

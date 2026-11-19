@@ -58,7 +58,7 @@ class Builder {
         reach = std::max(1.f, k.crownRadius);
     }
 
-    FloraMesh run() {
+    std::vector<FloraMesh> run() {
         markCarriers();
         if (detail == Detail::Distant)
             prisms();
@@ -70,12 +70,15 @@ class Builder {
             else
                 clumps();
         }
-        mesh.height = 0;
-        for (const auto& v : mesh.vertices) {
-            mesh.height = std::max(mesh.height, v.y);
-            mesh.radius = std::max(mesh.radius, std::hypot(v.x, v.z));
+        if (!mesh.empty()) parts.push_back(std::move(mesh));
+        for (auto& part : parts) {
+            part.height = 0;
+            for (const auto& v : part.vertices) {
+                part.height = std::max(part.height, v.y);
+                part.radius = std::max(part.radius, std::hypot(v.x, v.z));
+            }
         }
-        return std::move(mesh);
+        return std::move(parts);
     }
 
    private:
@@ -95,8 +98,15 @@ class Builder {
         const float up = std::clamp(p.y / std::max(1.f, k.height), 0.f, 1.f);
         return std::clamp(0.75f * out + 0.25f * up * up, 0.f, 1.f);
     }
-    bool room(size_t vertices) const {
-        return mesh.vertices.size() + vertices <= MaxVertices;
+    // Indices are 16-bit: a full part is set aside and a new one begun, so
+    // massive crowns are several meshes instead of losing clumps.
+    bool room(size_t vertices) {
+        if (mesh.vertices.size() + vertices > MaxVertices &&
+            !mesh.vertices.empty()) {
+            parts.push_back(std::move(mesh));
+            mesh = {};
+        }
+        return vertices <= MaxVertices;
     }
     void vertex(TreeVec p, TreeVec n, float u, float v, float layerIndex,
                 float weight, const FoliageMaterial* m, Color3 color,
@@ -387,7 +397,8 @@ class Builder {
     Rng rng{0};
     float reach = 1;
     std::vector<uint8_t> carries;  // segments holding up a kept clump
-    FloraMesh mesh;
+    FloraMesh mesh;                // the part being filled
+    std::vector<FloraMesh> parts;  // full ones
 };
 
 }  // namespace
@@ -413,6 +424,14 @@ std::optional<std::pair<float, float>> tubeSpan(const TreeSkeleton& k,
 FloraMesh build(const TreeSkeleton& skeleton, const Tree& species,
                 const DataStorage<FoliageMaterial>& materials, float age,
                 Detail detail, bool bare) {
+    auto parts = buildParts(skeleton, species, materials, age, detail, bare);
+    return parts.empty() ? FloraMesh{} : std::move(parts.front());
+}
+
+std::vector<FloraMesh> buildParts(const TreeSkeleton& skeleton,
+                                  const Tree& species,
+                                  const DataStorage<FoliageMaterial>& materials,
+                                  float age, Detail detail, bool bare) {
     if (age <= 0) return {};
     return Builder(skeleton, species, materials, age, detail, bare).run();
 }

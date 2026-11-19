@@ -52,6 +52,8 @@ class TreeSpeciesTable {
     // anchor, and the widest spacing between two trees.
     double maxExtent() const { return extent; }
     double maxSpacing() const { return spacing; }
+    // Landmarks: the furthest one reaches from its anchor (0 without any).
+    double maxLandmarkExtent() const { return landmarkExtent; }
     // Ordinary trees share a few shapes per species (TreeVariants, each in
     // four quarter turns), so their crown meshes are shared and drawn
     // instanced. Cached; safe from any thread.
@@ -63,7 +65,7 @@ class TreeSpeciesTable {
     std::vector<int> byId;
     FloraSpeciesTable siteTable;
     GrownBlockSet grownBlocks;
-    double extent = 0, spacing = 0;
+    double extent = 0, spacing = 0, landmarkExtent = 0;
     std::shared_ptr<TreeSkeletonCache> variants =
         std::make_shared<TreeSkeletonCache>(1024);
 };
@@ -188,6 +190,29 @@ std::vector<TreeWoodChange> treeWoodChanges(const Chunk& chunk,
                                             const TreeColumn& column,
                                             const TreeSpeciesTable& table,
                                             double since, double today);
+// The same change before the tiles are consulted: pure rasterization, safe
+// on any thread (a massive tree costs milliseconds per chunk). `remove`
+// lists tiles to clear where they still hold that wood block, `add` tiles
+// to fill with it where they are air; filterTreeWood applies those tests.
+struct TreeWoodDelta {
+    std::vector<TreeWoodChange> remove, add;
+};
+TreeWoodDelta treeWoodDelta(const ChunkCoord& coord, const TreeColumn& column,
+                            const TreeSpeciesTable& table, double since,
+                            double today);
+// One cut of one immutable tree snapshot, without unrelated growth or cuts.
+// Settling also fills the new wood which appears at this cut's age.
+TreeWoodDelta treeCutWoodDelta(const ChunkCoord& coord,
+                               const TreeInstance& tree, TreeAnchor anchor,
+                               uint8_t woodBlock, uint16_t cut, double today,
+                               bool settles, int periodTiles);
+// All of one tree's wood in a chunk at `age` (a removed tree), as removals.
+// anchor: the column copy the chunk sees.
+TreeWoodDelta treeWoodRemoval(const ChunkCoord& coord, const TreeInstance& tree,
+                              TreeAnchor anchor, uint8_t woodBlock, float age,
+                              int periodTiles);
+std::vector<TreeWoodChange> filterTreeWood(const Chunk& chunk,
+                                           const TreeWoodDelta& delta);
 inline void applyTreeWoodChanges(Chunk& chunk,
                                  const std::vector<TreeWoodChange>& changes) {
     for (const auto& c : changes) {

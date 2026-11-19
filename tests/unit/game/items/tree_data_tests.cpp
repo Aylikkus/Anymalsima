@@ -57,6 +57,7 @@ TEST(tree_species_parsing) {
     EQUAL(oak.form_params.branch_orders, 3, "branch orders");
     CHECK(oak.foliage.type == TreeFoliageType::LeafClump);
     CHECK(oak.cut.stump_resprouts);
+    CHECK(oak.cut.fell == TreeFell::Fall);  // the default
     // Spacing lives in placement next to the flora fields.
     CHECK(oak.spacing_m == ValueRange(7, 10));
     EQUAL(oak.placement.priority, 15, "placement priority");
@@ -71,10 +72,17 @@ TEST(tree_species_parsing) {
         test::expectThrows([&] { bad.get<Tree>(); }, "rejects " + what);
     };
     rejects("unknown form", [](Json& j) { j["form"] = "bonsai"; });
+    rejects("unknown fell", [](Json& j) { j["cut"]["fell"] = "explode"; });
+    {
+        auto settling = oakJson();
+        settling["cut"]["fell"] = "settle";
+        CHECK(settling.get<Tree>().cut.fell == TreeFell::Settle);
+    }
     rejects("missing size", [](Json& j) { j.erase("size"); });
     rejects("missing trunk",
             [](Json& j) { j["size"].erase("trunk_radius_m"); });
-    rejects("too tall", [](Json& j) { j["size"]["height_m"] = 129; });
+    rejects("too tall",
+            [](Json& j) { j["size"]["height_m"] = TreeMaxHeight + 1; });
     rejects("trunk wider than 64",
             [](Json& j) { j["size"]["trunk_radius_m"] = {32, 65}; });
     rejects("reversed range",
@@ -107,7 +115,7 @@ TEST(tree_species_parsing) {
     const auto elder = giant.get<Tree>();
     CHECK(elder.landmark());
     CHECK(elder.sizeClass() == TreeSizeClass::Massive);
-    giant["size"]["crown_radius_m"] = 193;
+    giant["size"]["crown_radius_m"] = TreeMaxLandmarkReach + 1;
     test::expectThrows([&] { giant.get<Tree>(); }, "landmark extent");
 }
 

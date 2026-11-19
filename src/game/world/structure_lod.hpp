@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "chunk_mesher.hpp"
@@ -14,9 +15,9 @@
 #include "render/frustrum.hpp"
 #include "render/render_target.hpp"
 #include "render/ui_context.hpp"
+#include "structure_voxels.hpp"
 #include "surface_sampler.hpp"
 #include "terrain_edits.hpp"
-#include "tree_wood_lod.hpp"
 
 // Voxel proxies for built structures at distance: one mesh per structure
 // slab (16x16x16) of every ColumnEdit in view. A structure is just its
@@ -25,15 +26,15 @@
 // Meshes are built on the pool from immutable edit snapshots and uploaded on
 // the main thread. A rebuilt proxy replaces its old mesh only once ready.
 //
-// Massive trees (landmarks) are drawn the same way: their living wood is
-// air to edit detection, so it never reaches the edit snapshots; setTrees
-// lists them, their wood is rasterized per slab on the pool (the real
-// rasterizer, so the voxels match the chunks exactly) and merged into the
-// slabs' voxels. Slabs whose real chunk is drawn hide, as for structures.
-// Far trees use coarser voxels (cells of 2 or 4 tiles, by the tree's
-// distance), so a forest of landmarks fits the budget: such proxies are
-// keyed with their level in the high bits of y (levelOf/baseOf) and their
-// coordinates count slabs of 16 cells.
+// Generated structures (massive trees today; docs/handoff/structures.md)
+// are drawn the same way: they never reach the edit snapshots, so
+// setStructures lists their voxel sources (structure_voxels::Source). Each
+// is planned per slab around the eye (full tiles near, cells of 2 or 4
+// tiles far: structure_voxels::plan), rasterized on the pool and merged
+// into the slabs' voxels. Only slabs whose level changes are rebuilt as the
+// eye moves. Slabs whose real chunk is drawn hide, as for edits. Coarse
+// proxies are keyed with their level in the high bits of y
+// (levelOf/baseOf) and their coordinates count slabs of 16 cells.
 class StructureLod {
    public:
     StructureLod(const World& world, IAssets& assets, ThreadPool& pool,
@@ -46,8 +47,9 @@ class StructureLod {
     // A column's edit changed: it and its 4 side columns need new meshes.
     void edited(uint64_t column);
     void update(Vec3 eye, std::shared_ptr<const EditMap> snapshot);
-    // The massive trees in view (main thread; cheap when unchanged).
-    void setTrees(std::vector<TreeWoodSource> trees);
+    // The generated structures in view (main thread; sources with an
+    // unchanged key and revision are kept).
+    void setStructures(std::vector<structure_voxels::SourcePtr> sources);
     // Returns the uploaded bytes, at most about `budget` (one oversized mesh
     // may use a whole frame).
     size_t upload(IRenderer& renderer, size_t budget);
@@ -116,7 +118,7 @@ class StructureLod {
                                     std::move(transform), view);
         }
     }
-    size_t residentBytes() const { return resident + treeResident; }
+    size_t residentBytes() const { return resident + voxelResident; }
     // World X of chunk column cx at its copy nearest refX.
     float drawX(unsigned cx, float refX) const {
         return drawTileX(double(cx) * Chunk::SIZE_X, Chunk::SIZE_X, refX);
@@ -130,14 +132,16 @@ class StructureLod {
         const double image = world.wrap().imageX(x + span / 2, refX) - span / 2;
         return float(x + std::round((image - x) / period) * period);
     }
-    // Proxy keys of coarse tree wood (see the class comment).
-    static constexpr int MaxLevel = tree_wood_lod::MaxLevel;
+    // Proxy keys of coarse structure voxels (see the class comment).
+    static constexpr int MaxLevel = structure_voxels::MaxLevel;
     static int levelOf(const ChunkCoord& c) {
-        return tree_wood_lod::levelOf(c);
+        return structure_voxels::levelOf(c);
     }
-    static ChunkCoord baseOf(ChunkCoord c) { return tree_wood_lod::baseOf(c); }
+    static ChunkCoord baseOf(ChunkCoord c) {
+        return structure_voxels::baseOf(c);
+    }
     static ChunkCoord withLevel(ChunkCoord c, int level) {
-        return tree_wood_lod::withLevel(c, level);
+        return structure_voxels::withLevel(c, level);
     }
     // Tiles per side of a slab of the level.
     static double spanOf(int level) { return double(Chunk::SIZE_X << level); }
@@ -148,11 +152,12 @@ class StructureLod {
         m[10] *= s;
     }
     size_t count() const { return proxies.size(); }
-    // Slabs holding tree wood (debug).
-    size_t treeSlabCount() const { return wood ? wood->size() : 0; }
-    using WoodSlab = tree_wood_lod::Slab;
-    using WoodSlabs = tree_wood_lod::Slabs;
-    // Wanted slabs without a current mesh, and trees not rasterized yet.
+    // Slabs holding structure voxels, all levels or one (debug).
+    size_t voxelSlabCount(int level = -1) const;
+    using VoxelSlab = structure_voxels::Slab;
+    using VoxelSlabs = structure_voxels::Slabs;
+    // Wanted slabs without a current mesh, and structures whose planned
+    // slabs are not rasterized yet.
     size_t backlog() const;
 
    private:
@@ -162,7 +167,8 @@ class StructureLod {
         size_t bytes = 0;
         bool drawable = false;
         bool hasMesh = false;
-        bool tree = false;  // holds tree wood: counts toward treeBudget
+        // Holds structure voxels: counts toward voxelBudget.
+        bool voxels = false;
         // Edits changed after this mesh was built.
         uint64_t staleRevision = 0, builtRevision = 0;
         std::optional<ChunkMesh> cpu;
@@ -175,24 +181,39 @@ class StructureLod {
         std::future<ChunkMesh> future;
     };
 
-    struct TreeWood {
-        TreeWoodSource wanted;  // tree empty: no longer in view
-        TreeWoodSource built;
-        std::shared_ptr<const WoodSlabs> slabs;
-        std::optional<std::future<std::shared_ptr<const WoodSlabs>>> job;
-        TreeWoodSource building;
-        int wantedLevel = 0, builtLevel = -1, buildingLevel = 0;
-        float distance = 0;  // from the eye, at the last update
+    // One generated structure's voxels, planned per slab around the eye.
+    struct Structure {
+        structure_voxels::SourcePtr wanted;       // null: no longer in view
+        structure_voxels::SourcePtr built;        // source of `slabs`
+        std::shared_ptr<const VoxelSlabs> slabs;  // non-empty ones
+        // Slab keys rasterized for `built` (empty ones too): the plan.
+        std::unordered_set<ChunkCoord> covered;
+        struct Build {
+            structure_voxels::SourcePtr source;
+            std::unordered_set<ChunkCoord> plan;
+            std::future<VoxelSlabs> future;
+            // Keys rasterized by the job (empty results included).
+            std::unordered_set<ChunkCoord> rebuilt;
+            // The built slabs outside `rebuilt` stay (same voxels there).
+            bool keep = false;
+        };
+        std::optional<Build> job;
+        // A plan with slabs to rasterize, waiting for a job slot.
+        std::vector<structure_voxels::Planned> pending;
+        std::unordered_set<ChunkCoord> pendingPlan;
+        bool pendingKeep = false;
+        float distance = 0;  // nearest planned slab, at the last plan
     };
 
-    // Voxel level of a tree's wood by its distance (with hysteresis).
-    void chooseLevels(Vec3 eye);
+    // Plans every structure's slabs for the eye (only after it moved, or
+    // a source changed) and lists the slabs to rasterize.
+    void planStructures(Vec3 eye);
     void collect();
-    void collectTrees();
-    void requestTrees();
-    // Rebuilds the merged wood map and marks the proxies of `changed`
+    void collectStructures();
+    void requestStructures();
+    // Rebuilds the merged voxel map and marks the proxies of `changed`
     // slabs (and their neighbours, whose border faces they hide) stale.
-    void mergeWood(const std::vector<ChunkCoord>& changed);
+    void mergeVoxels(const std::vector<ChunkCoord>& changed);
     void choose(Vec3 eye);
     void request();
 
@@ -205,9 +226,11 @@ class StructureLod {
     float viewDistance;
     std::shared_ptr<const EditMap> snapshot;
     std::shared_ptr<const EditMap> chosenFor;
-    std::unordered_map<uint64_t, TreeWood> trees;  // by TreeInstance::key
-    std::shared_ptr<const WoodSlabs> wood;         // all trees, merged
-    std::shared_ptr<const WoodSlabs> woodChosenFor;
+    std::unordered_map<uint64_t, Structure> structures;  // by Source::key
+    std::shared_ptr<const VoxelSlabs> voxels;  // all structures, merged
+    std::shared_ptr<const VoxelSlabs> voxelsChosenFor;
+    std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
+    bool replan = true;  // a source changed or a build finished
     std::array<int, 3> chosenCell{INT32_MIN, 0, 0};
     // Wanted slabs, nearest first.
     std::vector<ChunkCoord> wanted;
@@ -215,15 +238,16 @@ class StructureLod {
     std::vector<Job> jobs;
     uint64_t revision = 1;
     size_t resident = 0;
-    // Tree wood has its own cap: one massive tree is a few MiB of faces.
-    size_t treeBudget;
-    size_t treeResident = 0;
+    // Structure voxels have their own cap: one massive tree is a few MiB
+    // of faces.
+    size_t voxelBudget;
+    size_t voxelResident = 0;
     size_t& residentOf(const Proxy& proxy) {
-        return proxy.tree ? treeResident : resident;
+        return proxy.voxels ? voxelResident : resident;
     }
     size_t budgetOf(const Proxy& proxy) const {
-        return proxy.tree ? treeBudget : budget;
+        return proxy.voxels ? voxelBudget : budget;
     }
     static constexpr size_t MaxJobs = 2;
-    static constexpr size_t MaxTreeJobs = 2;
+    static constexpr size_t MaxVoxelJobs = 2;
 };

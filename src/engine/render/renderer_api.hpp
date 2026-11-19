@@ -120,6 +120,12 @@ class IRenderer {
             mesh.ibh = bgfx::createDynamicIndexBuffer(mesh.capacityIndices,
                                                       BGFX_BUFFER_INDEX32);
         }
+        // Out of bgfx handles (BGFX_CONFIG_MAX_DYNAMIC_*): drop the mesh
+        // instead of updating an invalid handle (a crash in release builds).
+        if (!validDynamic(mesh)) {
+            releaseDynamic(mesh);
+            return;
+        }
 
         const bgfx::Memory* vert_mem;
         const bgfx::Memory* index_mem;
@@ -157,9 +163,28 @@ class IRenderer {
 
         mesh.activeIndices = uint32_t(indexCount);
         mesh.activeVertices = uint32_t(vertCount);
+        // Out of handles: an empty mesh; the next update tries again.
+        if (!validDynamic(mesh)) releaseDynamic(mesh);
 
         return mesh;
     }
+
+    // Both buffers exist (creation fails once bgfx runs out of handles).
+    static bool validDynamic(const DynamicMesh& mesh) {
+        return bgfx::isValid(mesh.vbh) && bgfx::isValid(mesh.ibh);
+    }
+    // Number of dynamic meshes whose buffers could not be created.
+    static inline size_t failedDynamicMeshes = 0;
+
+   private:
+    static void releaseDynamic(DynamicMesh& mesh) {
+        if (bgfx::isValid(mesh.vbh)) bgfx::destroy(mesh.vbh);
+        if (bgfx::isValid(mesh.ibh)) bgfx::destroy(mesh.ibh);
+        mesh = {};
+        ++failedDynamicMeshes;
+    }
+
+   public:
     virtual void scheduleDelete(const MeshVariant& mesh) = 0;
 
     // Rebuilds rows + glyph positions if dirty.
@@ -209,6 +234,15 @@ class MeshHandle {
     ~MeshHandle() { release(); }
 
     const MeshVariant& get() const { return mesh; }
+    // Initialised with GPU buffers (creation fails once bgfx runs out of
+    // handles).
+    bool drawable() const {
+        if (!valid) return false;
+        if (const auto* d = std::get_if<DynamicMesh>(&mesh))
+            return IRenderer::validDynamic(*d);
+        const auto& m = std::get<StaticMesh>(mesh);
+        return bgfx::isValid(m.vbh) && bgfx::isValid(m.ibh);
+    }
 
     template <typename VertexT>
     void initStatic(IRenderer* r, const VertexT* verts, size_t vertCount,

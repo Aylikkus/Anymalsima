@@ -717,6 +717,12 @@ class Builder {
             below.r1 = r;
             below.birthB = birth;
             below.flags |= TreeSegment::CutEnd;
+            // Surviving children keep their physical attachment point on
+            // the shortened parent. Later cuts use this new parameter range.
+            for (const int32_t c : children[index]) {
+                auto& child = s.segments[size_t(c)];
+                if (child.live()) child.attachT = t > 0 ? child.attachT / t : 0;
+            }
             for (auto& f : s.foliage) {
                 if (f.pruned || f.segment < 0) continue;
                 if (!s.segments[size_t(f.segment)].live()) {
@@ -729,6 +735,11 @@ class Builder {
             }
             const uint8_t order = below.order;
             s.segments.push_back(above);  // invalidates `below`
+            if (order == 0 && tree.cut.fell == TreeFell::Settle) {
+                settle(index, s.segments.size() - 1, t, tag, cutPoint,
+                       axis.normalized(), cut.age);
+                continue;
+            }
 
             const bool root =
                 order == 0 &&
@@ -744,6 +755,72 @@ class Builder {
                            : remaining;
             sprout(int32_t(index), cutPoint, axis.normalized(), r, order,
                    std::max(1.f, length), cut.age, tag);
+        }
+    }
+
+    // TreeFell::Settle: what the cut pruned comes down one tile along the
+    // cut axis onto the stump, closing the sawn ring. The copies appear at
+    // the cut (TreeSegment::appear), so earlier days keep the original.
+    // index: the stump (the cut segment's part below); piece: the pruned
+    // part of it above the cut; t: where it was cut.
+    void settle(size_t index, size_t piece, float t, uint16_t tag,
+                TreeVec cutPoint, TreeVec dir, float age) {
+        auto& s = skeleton;
+        // The stump keeps its flat cut (no end cap poking into the sawn
+        // ring); the cut plane clips only the stump's own axis, not the
+        // settled part resting on it.
+        const TreeVec drop = dir * -1.f;
+        const size_t count = s.segments.size();
+        std::vector<int32_t> copyOf(count, -1);
+        for (size_t k = 0; k < count; ++k) {
+            TreeSegment c = s.segments[k];
+            if (c.live() || c.cut != tag) continue;
+            copyOf[k] = int32_t(s.segments.size());
+            c.flags &= uint8_t(~TreeSegment::Pruned);
+            c.appear = age;
+            c.a = c.a + drop;
+            c.b = c.b + drop;
+            s.segments.push_back(c);
+        }
+        // The piece above the cut starts on the stump, one tile shorter.
+        if (copyOf[piece] >= 0) {
+            auto& c = s.segments[size_t(copyOf[piece])];
+            const float length = (c.b - cutPoint).dot(dir);
+            c.a = cutPoint;
+            if (length <= 0) c.b = cutPoint;
+        }
+        for (size_t k = 0; k < count; ++k) {
+            if (copyOf[k] < 0) continue;
+            auto& c = s.segments[size_t(copyOf[k])];
+            const int32_t parent = s.segments[k].parent;
+            if (parent >= 0 && copyOf[size_t(parent)] >= 0) {
+                c.parent = copyOf[size_t(parent)];
+            } else if (parent == int32_t(index) && k != piece &&
+                       copyOf[piece] >= 0) {
+                // Attached above the cut on the original segment: now on
+                // the settled piece.
+                c.parent = copyOf[piece];
+                c.attachT = std::clamp((c.attachT - t) / std::max(1e-3f, 1 - t),
+                                       0.f, 1.f);
+            }
+        }
+        // Foliage this cut pruned comes down with its branches.
+        const TreeVec pieceAxis = s.segments[piece].b - cutPoint;
+        const size_t sites = s.foliage.size();
+        for (size_t i = 0; i < sites; ++i) {
+            TreeFoliageSite f = s.foliage[i];
+            if (!f.pruned || f.segment < 0) continue;
+            int32_t to = copyOf[size_t(f.segment)];
+            if (to < 0 && size_t(f.segment) == index) {
+                const float along = (f.position - cutPoint).dot(dir);
+                if (along > 0 && along <= pieceAxis.length() + 1e-3f)
+                    to = copyOf[piece];
+            }
+            if (to < 0) continue;
+            f.pruned = false;
+            f.segment = to;
+            f.position = f.position + drop;
+            s.foliage.push_back(f);
         }
     }
 
@@ -894,7 +971,7 @@ float TreeSkeleton::fullRadius(const TreeSegment& s, float t,
 float TreeSkeleton::radius(const TreeSegment& s, float t, float age,
                            float angle) const {
     const float born = std::lerp(s.birthA, s.birthB, t);
-    if (age <= born) return 0;
+    if (age <= born || age < s.appear) return 0;
     const float span = std::max(1e-3f, s.matureAge - born);
     return fullRadius(s, t, angle) * growth((age - born) / span);
 }
@@ -906,18 +983,24 @@ float TreeSkeleton::growthPhaseStart() const {
     for (const auto& s : segments)
         if (s.live() && (s.flags & TreeSegment::Sprout))
             latest = std::max(latest, s.cut);
-    if (!latest) return 0;
+    // A settled part appears at its cut: crowns are quantized from there
+    // too, so no mesh is built for a day before it existed.
+    float settled = 0;
+    for (const auto& s : segments)
+        if (s.live()) settled = std::max(settled, s.appear);
+    if (!latest) return settled;
     float start = INFINITY;
     for (const auto& s : segments)
         if (s.live() && (s.flags & TreeSegment::Sprout) && s.cut == latest)
             start = std::min(start, s.birthA);
-    return start;
+    return std::max(start, settled);
 }
 
 float TreeSkeleton::matureAge() const {
+    // A settled part appears at its cut: the tree is final only from then.
     float age = 0;
     for (const auto& s : segments)
-        if (s.live()) age = std::max(age, s.matureAge);
+        if (s.live()) age = std::max({age, s.matureAge, s.appear});
     return age;
 }
 

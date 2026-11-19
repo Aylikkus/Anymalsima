@@ -58,10 +58,17 @@ std::optional<std::pair<float, float>> tubeSpan(const TreeSkeleton& k,
                                                 const TreeSegment& s,
                                                 float age);
 
-// bare: a dead tree, twigs only (its leaves have fallen).
+// bare: a dead tree, twigs only (its leaves have fallen). One mesh: the
+// first part only for crowns beyond 16-bit indices (massive trees); use
+// buildParts for those.
 FloraMesh build(const TreeSkeleton& skeleton, const Tree& species,
                 const DataStorage<FoliageMaterial>& materials, float age,
                 Detail detail, bool bare);
+// The crown as meshes of at most 65535 vertices each (one for most trees).
+std::vector<FloraMesh> buildParts(const TreeSkeleton& skeleton,
+                                  const Tree& species,
+                                  const DataStorage<FoliageMaterial>& materials,
+                                  float age, Detail detail, bool bare);
 
 // A far billboard of a species, normalized: x and z span [-1, 1] (times the
 // tree's crown radius), y spans [0, 1] (times its height); instances scale

@@ -35,6 +35,7 @@ add_library(game
     world/flora_simulation.cpp
     world/tree_skeleton.cpp
     world/tree_rasterizer.cpp
+    world/structure_voxels.cpp
     world/tree_wood_lod.cpp
     world/tree_generator.cpp
     world/flora_renderer.cpp

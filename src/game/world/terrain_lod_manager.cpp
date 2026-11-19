@@ -493,6 +493,15 @@ void TerrainLodManager::selectDrawn() {
 bool TerrainLodManager::drawsColumn(unsigned x, unsigned z) const {
     return detailCoverage.contains(int(x), int(z));
 }
+bool TerrainLodManager::drawsChunk(const ChunkCoord& c) const {
+    if (detailCoverage.contains(int(c.x), int(c.z))) return true;
+    // Above the column's whole surface band distant terrain draws nothing
+    // (structure voxels hand over per chunk), so the chunk can be drawn
+    // while its ground is out of the detail range: the wood of a massive
+    // tree seen from high above.
+    const auto band = surfaceBands.find({int(c.x), int(c.z)});
+    return band != surfaceBands.end() && int(c.y) > band->second.maxY;
+}
 void TerrainLodManager::updateCoverage(ChunkManager& chunks,
                                        const Camera& camera) {
     const int cx = int(camera.position.x) / 16,
@@ -661,14 +670,15 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         underwater = tile->liquid == LiquidType::Water;
     } else if (eye.y < SEA_LEVEL_Y + 1.f && y >= 0 && z >= 0 &&
                z < detailSampler.depth() &&
-               (world.wrap().enabled() || (x >= 0 && x < detailSampler.width()))) {
+               (world.wrap().enabled() ||
+                (x >= 0 && x < detailSampler.width()))) {
         // The orbit camera can be outside loaded chunks. Use the same
         // surface (including edits) as distant terrain, not altitude alone.
         const auto column = detailSampler.column(x, z);
         underwater = y > column.surfaceY && eye.y < column.waterY;
     }
-    water.setVec4({SEA_LEVEL_Y + 1.f, underwater ? 1.f : 0.f,
-                   debugEdges ? 1.f : 0.f, 0});
+    water.setVec4(
+        {SEA_LEVEL_Y + 1.f, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
     float view[16], proj[16], vp[16];
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
                   {camera.position.x, camera.position.y, camera.position.z},
@@ -690,11 +700,17 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         entry.patchUniform.setVec4({float(p.x) + shift, float(p.z),
                                     float(p.size()), float(p.spacing)});
         entry.shiftUniform.setVec4({shift, 0, 0, 0});
-        std::vector<ShaderProperty*> uniforms{
-            &textureArray,   &entry.mapUniform,   &entry.patchUniform,
-            &detailUniform,  &detailOrigin,       &fogUniform,
-            &patchNormals,   &entry.shiftUniform, &entry.coverUniform,
-            &entry.coverInfo, &water};
+        std::vector<ShaderProperty*> uniforms{&textureArray,
+                                              &entry.mapUniform,
+                                              &entry.patchUniform,
+                                              &detailUniform,
+                                              &detailOrigin,
+                                              &fogUniform,
+                                              &patchNormals,
+                                              &entry.shiftUniform,
+                                              &entry.coverUniform,
+                                              &entry.coverInfo,
+                                              &water};
         uniforms.insert(uniforms.end(), extraUniforms.begin(),
                         extraUniforms.end());
         target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
@@ -704,7 +720,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         // World-space vertices, placed relative to the eye.
         auto transform = relativeTransform(camera, 0, 0, 0);
         std::vector<ShaderProperty*> uniforms{
-            &textureArray,  &joinNormals,     &fogUniform,     &joinLightChunk,
+            &textureArray,  &joinNormals,     &fogUniform,      &joinLightChunk,
             &joinLightSlot, &joinLightVolume, &joinCoverVolume, &water};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
@@ -714,13 +730,13 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     }
     if (structures) {
         // A structure slab hands over to its real chunk exactly when
-        // GameplayState draws that chunk: detailed column, uploaded mesh,
+        // GameplayState draws that chunk: drawsChunk, uploaded mesh,
         // inside the detail chunk box.
         const int cx = int(camera.position.x) / Chunk::SIZE_X,
                   cy = int(camera.position.y) / Chunk::SIZE_Y,
                   cz = int(camera.position.z) / Chunk::SIZE_Z;
         std::vector<ShaderProperty*> uniforms{
-            &textureArray,  &joinNormals,     &fogUniform,     &joinLightChunk,
+            &textureArray,  &joinNormals,     &fogUniform,      &joinLightChunk,
             &joinLightSlot, &joinLightVolume, &joinCoverVolume, &water};
         uniforms.insert(uniforms.end(), extraBlockUniforms.begin(),
                         extraBlockUniforms.end());
@@ -731,8 +747,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                            DETAIL_CHUNK_RADIUS &&
                        std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
                        std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
-                       detailCoverage.contains(int(c.x), int(c.z)) &&
-                       chunks.hasUploadedMesh(c);
+                       drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
     }
     ++frame;
@@ -784,8 +799,7 @@ void TerrainLodManager::submitShadowCasters(RenderTarget& target,
                            DETAIL_CHUNK_RADIUS &&
                        std::abs(int(c.y) - cy) <= DETAIL_CHUNK_RADIUS &&
                        std::abs(int(c.z) - cz) <= DETAIL_CHUNK_RADIUS &&
-                       detailCoverage.contains(int(c.x), int(c.z)) &&
-                       chunks.hasUploadedMesh(c);
+                       drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
     }
 }

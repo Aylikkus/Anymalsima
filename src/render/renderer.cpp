@@ -338,7 +338,7 @@ void Renderer::drawVB(const DrawVertexBufferCmd &cmd) {
         // Handle static mesh
         auto mesh = std::get<StaticMesh>(cmd.mesh);
 
-        if (cmd.shader) {
+        if (cmd.shader && bgfx::isValid(mesh.vbh) && bgfx::isValid(mesh.ibh)) {
             bgfx::setTransform(cmd.transform.data());
             bgfx::setVertexBuffer(0, mesh.vbh);
             bgfx::setIndexBuffer(mesh.ibh);
@@ -362,7 +362,9 @@ void Renderer::drawVB(const DrawVertexBufferCmd &cmd) {
         // Handle dynamic mesh
         auto mesh = std::get<DynamicMesh>(cmd.mesh);
 
-        if (cmd.shader) {
+        // Not created (out of bgfx handles) or nothing to draw.
+        if (cmd.shader && IRenderer::validDynamic(mesh) &&
+            mesh.activeIndices > 0) {
             bgfx::setTransform(cmd.transform.data());
             bgfx::setVertexBuffer(0, mesh.vbh, 0, mesh.activeVertices);
             bgfx::setIndexBuffer(mesh.ibh, 0, mesh.activeIndices);

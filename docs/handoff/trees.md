@@ -706,9 +706,12 @@ outside the loaded chunks are no longer missing.
   bits of the key's y. Full slabs surrounded by full slabs are marked
   `enclosed` and get no proxy. Test: `tree_wood_lod_slabs` (level 0 equals
   the rasterizer, coarse cells meet the threshold, keys wrap on X).
-- `StructureLod::setTrees` takes the landmarks in view
-  (`TreeRenderer::landmarkWood`, whose age is quantized to the crown growth
-  buckets, so a tree is re-rasterized a few dozen times over its maturity).
+- `StructureLod::setStructures` takes the landmarks in view as structure
+  voxel sources (`TreeRenderer::landmarkVoxels`, whose age is quantized to
+  the crown growth buckets, so a tree is re-rasterized a few dozen times over
+  its maturity). Since the structure voxel API (`docs/handoff/structures.md`)
+  the level is chosen per slab, not per tree; the paragraph below describes
+  the original per-tree version.
   Each tree is rasterized on the pool (two jobs, nearest tree first) at a
   level chosen by its distance: full voxels within 512 m, 2-tile cells to
   1536 m and 4-tile cells beyond, with 64 m of hysteresis. The old slabs stay
@@ -728,3 +731,119 @@ outside the loaded chunks are no longer missing.
   dug into the trunk) are not shown at distance until the cut is recorded;
   the wood comes from the skeleton, not from saved chunks. Coarse cells are
   textured as 2x or 4x larger blocks.
+### Massive tree performance (the elder sample)
+
+The elder is the optimization sample for big trees: `tree_benchmark`
+(`cmake --build build --target tree_benchmark`, then
+`build/tests/tree_benchmark [crown_m height_m trunk_m]`) streams one elder
+and times a trunk-surface break, a thin-branch cut, its crown meshes and
+its distant voxels. Measured with a 1000 m crown, 500 m tall, 64 m trunk
+(1752 segments, 24k foliage sites, wood box 1507x589x1749):
+
+| Work | Before | Now |
+| --- | --- | --- |
+| Break without a cut (`TreeSimulation`) | 0.07 ms | 0.07 ms |
+| Thin-branch cut (`TreeSimulation`) | 3.3 ms | 3.3 ms (mostly `applyTreeCuts`) |
+| Clearing the cut wood | in the same frame | queued per chunk, nearest first, 2 ms per update |
+| Removing a dead tree's wood | one mask of the whole wood box (1.5 GB here) | queued per chunk, one chunk box at a time |
+| Near crown mesh | 14 ms on the main thread, truncated at 65532 vertices | 29 ms on the pool, 3 parts, 143640 vertices |
+| Distant voxels after a cut | every slab of the tree (11 s of pool time at level 0) | the slabs near the cut (2 here) |
+
+- `TreeSimulation::lastBreak()` gives the stage times of the last removal;
+  `pendingClears()` / `finishClears()` expose the clearing queue. Cuts keep
+  an immutable snapshot of the cut tree, so column rebuilding, later cuts
+  and tree death cannot lose the pending cut's wood.
+- `tree_foliage::buildParts` splits a crown into meshes of at most 65535
+  vertices; `build` returns the first part (enough for ordinary trees).
+- `TreeRenderer` builds crowns on the pool (up to 8 jobs, 8 starts per
+  frame) and draws a tree's previous mesh meanwhile (`drawnMesh`), so cuts,
+  growth steps and detail changes never blink a crown out.
+- `structure_voxels::Source::changedSince`: trees diff their skeleton
+  segments and return the bounds of those that differ (clamped to the
+  tree), so `StructureLod` rebuilds only those slabs. A cut resets the
+  renderer's quantized age: unchanged mature segments remain reusable
+  across that age change, and unborn sprouts contribute no dirty bounds
+  (`tree_wood_lod_cut_is_local`).
+- Clearing runs on the pool: `treeCutWoodDelta` / `treeWoodRemoval` (pure
+  rasterization) per chunk, at most 8 high-priority jobs; the main thread
+  applies `filterTreeWood` edits within the 2 ms budget. A cut queues only
+  loaded chunks overlapping its removed pieces, found by
+  `treeCutWoodBounds`, and processes only that cut of that tree. Empty
+  removal masks skip the living-tree rasterization. Settling also compares
+  live wood with the day before the cut to find additions (float tree ages:
+  1e-3 day rounds away at elder ages). `tree_cut_delta_local` checks both
+  falling and settling against the catch-up path across the X seam.
+- `TREE_BENCH_CUT_ONLY=1 build/tests/tree_benchmark` measures a thin elder
+  cut and exits before full-tree rasterization. On the default fixture the
+  cleanup queue shrank from 143 chunks to 2, and drained in about 0.09 ms
+  instead of 39 ms, without rendering contention. Use
+  `TREE_BENCH_LARGE_CUT=1` to measure the mixed-resolution proxy update of
+  the thickest primary limb cut at one quarter of its root segment.
+  With the renderer's quantized ages, the small cut rebuilds 2 of 131444
+  planned slabs; the primary-limb cut rebuilds 23684 of 144205 in about
+  1.9 seconds of worker time. These are CPU fixture measurements, not
+  end-to-end in-game latency with meshing, uploads and other pool work.
+- A removal tests every segment whose wood holds the tile (`owners`) and
+  cuts the thickest one it severs: a flared trunk shares its outer
+  tiles with buttresses, which used to win. The thin-part shortcut (any
+  block cuts a part up to 2 m) applies to the best match only.
+- Thick-branch detection checks transverse voxel-grid slices through the
+  removed row, including overlapping capsules at joints. A plane normal to
+  a sloping limb incorrectly samples intact wood beside a complete vertical
+  slit. The cut parameter now comes from the retained face of the cleared
+  row, keeping the stump and regrowth at that face. Unloaded supporting wood
+  still prevents a cut; cheap exact cell probes avoid building large masks
+  while obvious support remains. Ownership uses the actual azimuth of the
+  tile for lobed root flares, and candidates are not capped at four.
+  Trunks retain their shared ring test for overlapping flare and buttress
+  capsules.
+  `tree_cut_angled_branch` checks a 12-block-wide sloping limb with a
+  one-tile slit and one last support; `TREE_BENCH_SAW_ONLY=1` runs the elder
+  trunk sawing benchmark without full-tree distant rasterization afterward.
+- Open: falling branches (physics); withering of massive trees;
+  `refreshTreeColumns` after a cut (about 5 ms with the elder's loaded
+  columns) and `applyTreeCuts` are the main-thread cost of a cut.
+
+### Settling trunks (`cut.fell`, done)
+
+Repeated cuts rescale surviving children's `attachT` to the shortened
+parent segment. This keeps later cuts pruning the correct branches and
+their foliage when working back from a limb's tip. Crown mesh cache keys
+also include the cut count so reusing a skeleton allocation cannot bring
+back a crown from an earlier cut. `tree_repeated_branch_cuts` checks wood,
+foliage and replay of a sequence of tip-to-base cuts.
+
+Agreed 2026-11-18: a massive trunk cut through comes down onto its stump
+and closes the gap; trees that fall (redwoods) will be hazards later, with
+physics, and today still lose the part above.
+
+- Data: `Tree::cut.fell` (`TreeFell::Fall` default, `Settle`); the elder
+  settles. Modder docs: `docs/modding/trees.md`, `cut`.
+- Skeleton (`applyTreeCuts` -> `Builder::settle`): a trunk cut (order 0) of
+  a settling species prunes as usual, then adds a live copy of everything
+  it pruned, one tile lower along the cut axis; the piece of the cut
+  segment above the cut starts on the stump, one tile shorter; foliage the
+  cut pruned comes down with it. No regrowth, never dead. The stump keeps
+  its flat cut (`CutEnd`); the cut plane clips only the stump's own axis.
+- `TreeSegment::appear`: a settled copy exists from the cut's age on, so
+  any day before the cut still has the original. That is what lets the
+  usual wood reconciliation (`treeWoodDelta`: wood now but not before is
+  added into air, cut wood not wood now is removed) fill the sawn ring in
+  loaded chunks and in chunks saved before the cut. `matureAge()` and
+  `growthPhaseStart()` include `appear`, so crowns and distant voxels are
+  never built for a day before the settle (a settle on an old tree comes
+  long after its maturity).
+- `TreeSimulation`: a settling trunk is cut only through a whole
+  cross-section, however thin; losing its first wood row does not kill it
+  (losing the ground does); while its clears are pending, its trunk is not
+  cut again (the sawn ring is still air, which would cut it again and again).
+- Tests: `tree_settle_closes_gap` (rasterizer: ring wood again, one tile
+  shorter, every clump kept, nothing before the cut), `tree_settle_in_world`
+  (sawing a ring in a streamed world). Benchmark: `TREE_BENCH_SAW=1
+  build/tests/tree_benchmark` saws the elder's trunk (16160 tiles, 0.03 ms
+  per block on average; one cut at 6.6 ms; 886 chunk updates done on the
+  pool in about 0.3 s; the ring refilled except buttress tiles below the
+  cut).
+- `TreeVersion` was not bumped (only cuts of settling species change, and a
+  bump stops growth in every saved chunk): elders cut before this change
+  keep wood without their top in chunks saved then.

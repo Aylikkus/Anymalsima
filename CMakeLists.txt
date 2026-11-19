@@ -32,6 +32,13 @@ add_subdirectory(${CMAKE_SOURCE_DIR}/external/entt-3.16.0)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/external/SDL3-3.4.8)
 
+# Every non-empty chunk, distant terrain patch, structure slab and tree wood
+# slab holds a dynamic vertex and index buffer: the default 4096 handles run
+# out near big trees (docs/handoff/structures.md). Handles are 16-bit.
+foreach(limit VERTEX_BUFFERS DYNAMIC_VERTEX_BUFFERS INDEX_BUFFERS
+        DYNAMIC_INDEX_BUFFERS)
+    set(BGFX_CONFIG_MAX_${limit} 16384 CACHE STRING "" FORCE)
+endforeach()
 add_subdirectory(${CMAKE_SOURCE_DIR}/external/bgfx.cmake-1.143-9241-532)
 
 add_subdirectory(${CMAKE_SOURCE_DIR}/external/miniaudio-0.11.25)

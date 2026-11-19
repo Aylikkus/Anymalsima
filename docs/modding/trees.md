@@ -209,11 +209,18 @@ and `persistent_sites`.
 
 ### `cut`
 
-Cutting through a trunk or branch removes everything above the cut (until
-physics exists to fell it), and the tree regrows from the cut as a young
-tree of its own species standing on the stump. Removing the whole first
-row of a trunk, or the ground under a tree's base, kills the tree and
-removes it from the world. Thin parts
+Cutting through a branch removes everything above the cut, and the tree
+regrows from the cut. What a cut trunk does depends on `fell`: by default
+the part above falls (for now it disappears; later it will fall with
+physics in some direction and can crush what it lands on, so think before
+felling a redwood next to a house) and the tree regrows from the cut as a
+young tree of its own species standing on the stump. A trunk that
+`settle`s is too heavy to topple: the part above comes down one block onto
+the stump and closes the cut, so the tree stays whole, one block shorter
+(the elder). A settling trunk is cut only once its whole cross-section at
+that height is broken, however thin it is there. Removing the whole first
+row of a trunk (unless it settles), or the ground under a tree's base,
+kills the tree and removes it from the world. Thin parts
 (up to 2 m radius) are cut by breaking any of their wood; thicker ones only
 once their whole cross-section at that height is broken, so felling a
 giant takes work. Cuts and planted trees are saved in the world's
@@ -223,6 +230,7 @@ giant takes work. Cuts and planted trees are saved in the world's
 | --- | --- | --- |
 | `stump_resprouts` | false | when cut at the root: the stump grows a new trunk (`true`, like oak) or the tree dies and the stump stays (`false`, like spruce and palm) |
 | `resprout_days` | 30 | days before new growth starts at a cut |
+| `fell` | `"fall"` | what a cut trunk does: `"fall"` (the part above falls; for now it disappears) or `"settle"` (it comes down onto the stump and closes the cut; no regrowth needed) |
 
 ## Shipped species
 

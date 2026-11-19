@@ -11,6 +11,7 @@
 #include "world/save/chunk_codec.hpp"
 #include "world/save/region_file.hpp"
 #include "world/save/trees_codec.hpp"
+#include "world/structure_voxels.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_edits.hpp"
 #include "world/tree_foliage_builder.hpp"
@@ -1260,33 +1261,65 @@ TEST(tree_crown_mesh_never_ahead_of_wood) {
 
 TEST(tree_foliage_meshes) {
     const auto& materials = content().getStorage<FoliageMaterial>();
+    // A crown as its parts (massive crowns need several 16-bit meshes):
+    // every part is a valid mesh; vertices are compared over the whole.
+    struct Whole {
+        std::vector<FoliageVertex> vertices;
+        float height = 0;
+        size_t parts = 0;
+        bool empty() const { return vertices.empty(); }
+    };
+    const auto whole = [&](const TreeSkeleton& k, const Tree& tree, float age,
+                           tree_foliage::Detail detail, bool bare) {
+        Whole out;
+        for (const auto& part :
+             tree_foliage::buildParts(k, tree, materials, age, detail, bare)) {
+            CHECK(!part.empty());
+            CHECK(part.vertices.size() <= 65535);
+            CHECK(part.indices.size() % 3 == 0);
+            for (const auto i : part.indices) CHECK(i < part.vertices.size());
+            out.vertices.insert(out.vertices.end(), part.vertices.begin(),
+                                part.vertices.end());
+            out.height = std::max(out.height, part.height);
+            ++out.parts;
+        }
+        return out;
+    };
     for (const auto* name : {"trees.spruce", "trees.mountain_pine", "trees.oak",
                              "trees.palm", "trees.redwood", "trees.elder"}) {
         const auto& tree = species(name);
         const auto k = build(name, 5);
         const float mature = k->matureAge();
-        const auto near = tree_foliage::build(
-            *k, tree, materials, mature, tree_foliage::Detail::Near, false);
-        const auto far = tree_foliage::build(*k, tree, materials, mature,
-                                             tree_foliage::Detail::Far, false);
-        const auto again = tree_foliage::build(
-            *k, tree, materials, mature, tree_foliage::Detail::Near, false);
+        const auto near =
+            whole(*k, tree, mature, tree_foliage::Detail::Near, false);
+        const auto far =
+            whole(*k, tree, mature, tree_foliage::Detail::Far, false);
+        const auto again =
+            whole(*k, tree, mature, tree_foliage::Detail::Near, false);
         CHECK(!near.empty());
         CHECK(!far.empty());
         CHECK(far.vertices.size() < near.vertices.size());
         // Distant: few large clumps and the wood as bark prisms.
-        const auto distant = tree_foliage::build(
-            *k, tree, materials, mature, tree_foliage::Detail::Distant, false);
+        const auto distant =
+            whole(*k, tree, mature, tree_foliage::Detail::Distant, false);
         CHECK(!distant.empty());
-        CHECK(distant.vertices.size() <= 65535);
         size_t distantLeaves = 0, nearLeaves = 0;
         for (const auto& v : distant.vertices) distantLeaves += v.layer >= 0;
         for (const auto& v : near.vertices) nearLeaves += v.layer >= 0;
         CHECK(distantLeaves < nearLeaves);
-        CHECK(near.vertices.size() <= 65535);
-        CHECK(near.indices.size() % 3 == 0);
-        for (const auto i : near.indices) CHECK(i < near.vertices.size());
         EQUAL(again.vertices.size(), near.vertices.size(), name);
+        EQUAL(again.parts, near.parts, name);
+        // build() is the first part.
+        EQUAL(tree_foliage::build(*k, tree, materials, mature,
+                                  tree_foliage::Detail::Near, false)
+                  .vertices.size(),
+              near.parts == 1 ? near.vertices.size()
+                              : size_t(tree_foliage::buildParts(
+                                           *k, tree, materials, mature,
+                                           tree_foliage::Detail::Near, false)
+                                           .front()
+                                           .vertices.size()),
+              "build is the first part");
         // Leaves are textured, bark untextured; the wind weight is 0..1.
         bool leaves = false;
         for (const auto& v : near.vertices) {
@@ -1297,12 +1330,11 @@ TEST(tree_foliage_meshes) {
         // Within the tree's bounds (plus a clump).
         CHECK(near.height <= k->boundsMax.y + 4);
         // A sapling has a smaller crown; a dead tree has no leaves.
-        const auto young = tree_foliage::build(
-            *k, tree, materials, tree_foliage::bucketAge(3, mature),
-            tree_foliage::Detail::Near, false);
+        const auto young = whole(*k, tree, tree_foliage::bucketAge(3, mature),
+                                 tree_foliage::Detail::Near, false);
         CHECK(young.vertices.size() < near.vertices.size());
-        const auto dead = tree_foliage::build(*k, tree, materials, mature,
-                                              tree_foliage::Detail::Near, true);
+        const auto dead =
+            whole(*k, tree, mature, tree_foliage::Detail::Near, true);
         for (const auto& v : dead.vertices) CHECK(v.layer < 0);
     }
     // Buckets: 32 growth steps, then one mature mesh.
@@ -1393,6 +1425,114 @@ TEST(trees_codec_roundtrip) {
     }
 }
 
+TEST(tree_repeated_branch_cuts) {
+    TreeSkeleton base;
+    base.height = 20;
+    base.trunkRadius = 2;
+    base.maturity = 100;
+    base.headroom = TreeMaxHeight;
+    TreeSegment limb;
+    limb.a = {0, 6, 0};
+    limb.b = {10, 6, 0};
+    limb.r0 = limb.r1 = 1.2f;
+    limb.birthB = limb.matureAge = 1;
+    limb.order = 1;
+    base.segments.push_back(limb);
+    TreeSegment branch = limb;
+    branch.a = {6, 6, 0};
+    branch.b = {6, 6, 5};
+    branch.parent = 0;
+    branch.attachT = 0.6f;
+    branch.order = 2;
+    base.segments.push_back(branch);
+    TreeFoliageSite leaf;
+    leaf.position = branch.b;
+    leaf.segment = 1;
+    base.foliage.push_back(leaf);
+    const auto& rule = species("trees.elder");
+    std::vector<TreeCut> cuts;
+    auto current = std::make_shared<const TreeSkeleton>(base);
+    const TreeTileBox branchBox{Origin.x + 5, Origin.y + 6, Origin.z + 2,
+                                Origin.x + 8, Origin.y + 8, Origin.z + 5};
+    CHECK(countWood(base, branchBox, 100) > 0);
+    for (const float t : {0.8f, 0.9f, 0.7f}) {
+        cuts.push_back({0, t, 100});
+        current = applyTreeCuts(*current, rule, cuts, cuts.size() - 1);
+        const bool attached = cuts.size() < 3;
+        CHECK(current->segments[1].live() == attached);
+        CHECK(current->foliage[0].pruned == !attached);
+        CHECK((countWood(*current, branchBox, 100) > 0) == attached);
+        if (attached)
+            CHECK(std::abs(current->segments[1].attachT *
+                               current->segments[0].b.x -
+                           6.f) < 1e-4f);
+    }
+    const auto replay = applyTreeCuts(base, rule, cuts);
+    CHECK(!replay->segments[1].live());
+    CHECK(replay->foliage[0].pruned);
+    EQUAL(countWood(*replay, branchBox, 100), size_t(0),
+          "detached branch stays removed after replay");
+}
+
+TEST(tree_cut_delta_local) {
+    const TreeSpeciesTable table(content());
+    const TreeSpeciesRule* rule = nullptr;
+    for (const auto& r : table.species())
+        if (r.species.name == "trees.test_oak") rule = &r;
+    CHECK(rule);
+    for (const bool settles : {false, true}) {
+        Tree species = rule->species;
+        species.cut.fell = settles ? TreeFell::Settle : TreeFell::Fall;
+        TreeSkeletonInput input;
+        input.seed = 7;
+        const auto base = buildTreeSkeleton(species, input);
+        const float age = std::ceil(base->matureAge() * 2);
+        const int32_t trunk = trunkAt(*base, 3);
+        CHECK(trunk >= 0);
+        const auto& s = base->segments[size_t(trunk)];
+        input.cuts = {{trunk, (3 - s.a.y) / (s.b.y - s.a.y), age}};
+        auto tree = std::make_shared<TreeInstance>();
+        tree->species = rule->id;
+        tree->birthDay = -int(age);
+        tree->anchor = {2, 400, 100};  // cross the X seam
+        tree->cuts = input.cuts;
+        tree->skeleton = buildTreeSkeleton(species, input);
+        finishTreeInstance(*tree);
+        size_t removals = 0, additions = 0;
+        constexpr int Period = 256;
+        for (unsigned z = unsigned(tree->wood.z0 / 16);
+             z <= unsigned((tree->wood.z1 - 1) / 16); ++z)
+            for (unsigned y = unsigned(tree->wood.y0 / 16);
+                 y <= unsigned((tree->wood.y1 - 1) / 16); ++y)
+                for (int x = int(std::floor(double(tree->wood.x0) / 16));
+                     x <= int(std::floor(double(tree->wood.x1 - 1) / 16));
+                     ++x) {
+                    const ChunkCoord coord{
+                        unsigned(WorldWrap::mod(x, Period / 16)), y, z};
+                    TreeAnchor image = tree->anchor;
+                    image.x += int(coord.x) * 16 - x * 16;
+                    TreeColumn column;
+                    column.trees.push_back({tree, image});
+                    const auto expected =
+                        treeWoodDelta(coord, column, table, -1, 0);
+                    const auto actual = treeCutWoodDelta(
+                        coord, *tree, tree->anchor, rule->woodBlock, 1, 0,
+                        settles, Period);
+                    const auto cells = [](const auto& changes) {
+                        std::set<int> out;
+                        for (const auto& c : changes) out.insert(c.index);
+                        return out;
+                    };
+                    CHECK(cells(actual.remove) == cells(expected.remove));
+                    CHECK(cells(actual.add) == cells(expected.add));
+                    removals += actual.remove.size();
+                    additions += actual.add.size();
+                }
+        CHECK(removals > 0);
+        CHECK((additions > 0) == settles);
+    }
+}
+
 TEST(tree_cuts_incremental) {
     // A tree cut twice while the game runs equals one rebuilt with both cuts
     // (what a region job does from trees.dat), turned or not.
@@ -1472,6 +1612,73 @@ void sweepAll(TreeSimulation& sim, double day) {
 }
 }  // namespace
 
+TEST(tree_cut_angled_branch) {
+    for (const int direction : {-1, 1}) {
+        TreeStream f;
+        unsigned cx = 0, cz = 0;
+        const auto found = findTree(f, "trees.test_oak", cx, cz);
+        CHECK(found.has_value());
+        for (unsigned z = cz - 1; z <= cz + 1; ++z)
+            for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
+        const auto a = found->anchor;
+        const uint8_t wood =
+            f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+        auto skeleton = std::make_shared<TreeSkeleton>();
+        skeleton->trunkRadius = 3;
+        skeleton->height = 50;
+        skeleton->lifespan = 1000000;
+        skeleton->headroom = TreeMaxHeight;
+        TreeSegment limb;
+        limb.a = {float(-12 * direction), 20, float(-4 * direction)};
+        limb.b = {float(12 * direction), 28, float(4 * direction)};
+        limb.r0 = limb.r1 = 6.f;
+        limb.birthB = limb.matureAge = 1;
+        limb.order = 1;
+        skeleton->segments.push_back(limb);
+        TreeFoliageSite leaves;
+        leaves.segment = 0;
+        leaves.position = limb.b;
+        skeleton->foliage.push_back(leaves);
+        auto tree = std::make_shared<TreeInstance>(*found->tree);
+        tree->skeleton = skeleton;
+        tree->birthDay = -100;
+        finishTreeInstance(*tree);
+        f.chunks->updateTree(tree, found->tree->bounds);
+        // Replace this fixture's wood with the isolated angled limb.
+        TreeColumn column;
+        column.trees.push_back({tree, a});
+        f.chunks->forEachReady([&](const ChunkCoord& coord, Chunk& chunk) {
+            for (auto& slab : chunk.tiles)
+                for (auto& row : slab)
+                    for (auto& tile : row)
+                        if (tile.block_id == wood) tile.block_id = 0;
+            placeTreeWood(chunk, coord, column, f.chunks->treeSpecies(), 0);
+        });
+        WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+        TreeSimulation sim(*f.chunks, editor);
+        sim.update(0);
+        std::vector<TilePos> slice;
+        for (int y = a.y + 17; y <= a.y + 31; ++y)
+            for (int z = a.z - 9; z <= a.z + 9; ++z)
+                if (const Tile* tile = f.chunks->tileAt(a.x, y, z);
+                    tile && tile->block_id == wood)
+                    slice.push_back({a.x, y, z});
+        CHECK(slice.size() > 10);
+        const TilePos tip{a.x + 8 * direction, a.y + 27, a.z + 3 * direction};
+        CHECK(f.chunks->tileAt(tip.x, tip.y, tip.z)->block_id == wood);
+        // A support left in the slice keeps the limb attached.
+        for (size_t i = 0; i + 1 < slice.size(); ++i) {
+            CHECK(editor.removeBlock(slice[i]) == EditStatus::Applied);
+            EQUAL(sim.cutCount(), size_t(0), "remaining wood supports limb");
+        }
+        CHECK(editor.removeBlock(slice.back()) == EditStatus::Applied);
+        EQUAL(sim.cutCount(), size_t(1), "one-tile slit severs sloping limb");
+        sim.finishClears();
+        EQUAL(int(f.chunks->tileAt(tip.x, tip.y, tip.z)->block_id), 0,
+              "detached wood removed");
+    }
+}
+
 TEST(tree_cut_and_regrowth) {
     TreeStream f;
     unsigned cx = 0, cz = 0;
@@ -1499,7 +1706,12 @@ TEST(tree_cut_and_regrowth) {
     const auto record = f.chunks->treeOverrides()->find(tree.key);
     CHECK(record != f.chunks->treeOverrides()->end());
     EQUAL(record->second.cuts.size(), size_t(1), "recorded");
-    // The trunk above the cut is gone (no physics: it disappears).
+    // The trunk above the cut goes chunk by chunk over the next updates
+    // (no physics: it disappears), the sawn blocks at once.
+    CHECK(sim.pendingClears() > 0);
+    sim.update(0);
+    sim.finishClears();
+    EQUAL(sim.pendingClears(), size_t(0), "all cleared");
     EQUAL(woodNear(f, a, cutY + 1, cutY + 8, 3, wood), size_t(0),
           "nothing above the cut");
     // The tree regrows from the cut (oaks resprout) over the following
@@ -1524,6 +1736,48 @@ TEST(tree_cut_and_regrowth) {
     for (unsigned y = TreeStream::Low; y < TreeStream::High; ++y)
         CHECK(sameTiles(*g.chunks->getChunk({cx, y, cz}),
                         *f.chunks->getChunk({cx, y, cz})));
+}
+
+TEST(tree_settle_in_world) {
+    // A settling species in a streamed world: sawing through its trunk
+    // leaves the tree standing; the sawn ring fills again once the queued
+    // clears run (the trunk came down one tile).
+    std::ifstream trees(std::string(SOIL_CONTENT_DIR) + "/trees/trees.json");
+    Json settling;
+    for (auto tree : Json::parse(trees))
+        if (tree.at("name") == "trees.oak") settling = tree;
+    settling["name"] = "trees.test_settling_oak";
+    settling["size"]["trunk_radius_m"] = Json::array({1.6, 2.6});
+    settling["wood"]["block"] = "blocks.test_oak_wood";
+    settling["cut"]["fell"] = "settle";
+    TreeStream f(forestWorld(), Json::array({settling}));
+    unsigned cx = 0, cz = 0;
+    const auto found = findTree(f, "trees.test_settling_oak", cx, cz);
+    CHECK(found.has_value());
+    if (!found) return;
+    for (unsigned z = cz - 1; z <= cz + 1; ++z)
+        for (unsigned x = cx - 1; x <= cx + 1; ++x) f.load(x, z);
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+    TreeSimulation sim(*f.chunks, editor);
+    sim.update(0);
+    const auto a = found->anchor;
+    const uint8_t wood =
+        f.chunks->treeSpecies().find(found->tree->species)->woodBlock;
+    const int cutY = a.y + 3;
+    const size_t above = woodNear(f, a, cutY + 1, cutY + 8, 3, wood);
+    CHECK(above > 0);
+    for (int z = a.z - 6; z <= a.z + 6; ++z)
+        for (int x = a.x - 6; x <= a.x + 6; ++x)
+            if (const Tile* t = f.chunks->tileAt(x, cutY, z);
+                t && t->block_id == wood)
+                editor.removeBlock({x, cutY, z});
+    EQUAL(sim.cutCount(), size_t(1), "one cut");
+    EQUAL(sim.removedCount(), size_t(0), "still alive");
+    EQUAL(woodNear(f, a, cutY, cutY + 1, 6, wood), size_t(0), "sawn");
+    sim.update(0);
+    sim.finishClears();
+    CHECK(woodNear(f, a, cutY, cutY + 1, 6, wood) > 0);
+    CHECK(woodNear(f, a, cutY + 1, cutY + 8, 3, wood) > 0);
 }
 
 TEST(tree_regrowth_starts_on_stump) {
@@ -1767,6 +2021,9 @@ TEST(tree_dies_without_base_wood) {
                 editor.removeBlock({x, row, z});
     EQUAL(sim.removedCount(), size_t(1), "died");
     CHECK(!inColumn(f, cx, cz, key));
+    // Its wood goes chunk by chunk over the next updates.
+    CHECK(sim.pendingClears() > 0);
+    sim.finishClears();
     EQUAL(woodNear(f, a, a.y + 1, a.y + 10, 3, wood), size_t(0),
           "no wood left");
     TreeStream g;
@@ -1895,4 +2152,158 @@ TEST(tree_wood_lod_slabs) {
         }
     }
     CHECK(cells > 0 && cells * 16 <= wood);
+}
+
+TEST(tree_settle_closes_gap) {
+    // cut.fell = settle (massive trunks): the part above a trunk cut comes
+    // down one tile onto the stump instead of being removed, so the sawn
+    // ring closes and the tree stays whole, one tile shorter.
+    Tree settling = species("trees.test_oak");
+    settling.cut.fell = TreeFell::Settle;
+    TreeSkeletonInput input;
+    input.seed = 7;
+    const auto whole = buildTreeSkeleton(settling, input);
+    const float age = whole->matureAge();
+    // The trunk segment at 3 m: cut on the lower face of the tile row
+    // 3..4 m above the anchor point (layer 4).
+    int32_t trunk = -1;
+    float t = 0;
+    for (size_t i = 0; i < whole->segments.size(); ++i) {
+        const auto& s = whole->segments[i];
+        if (!s.live() || s.order != 0 || s.b.y - s.a.y < 0.5f) continue;
+        if (s.a.y <= 3 && s.b.y > 3) {
+            trunk = int32_t(i);
+            t = (3 - s.a.y) / (s.b.y - s.a.y);
+        }
+    }
+    CHECK(trunk >= 0);
+    input.cuts = {{trunk, t, age}};
+    const auto settled = buildTreeSkeleton(settling, input);
+    CHECK(!settled->dead);
+    // No regrowth: the tree is whole.
+    for (const auto& s : settled->segments)
+        CHECK(!(s.live() && (s.flags & TreeSegment::Sprout) && s.cut == 1));
+    CHECK(settled->matureAge() >= age);
+    // Before the cut nothing settled exists; from the cut on the ring at
+    // layer 4 is wood again.
+    const int half = 12;
+    EQUAL(countWood(*settled, layer(5, half), age - 1), size_t(0),
+          "the settled part appears at the cut");
+    EQUAL(countWood(*settled, layer(4, half), age - 1), size_t(0),
+          "the stump stops flat at the cut");
+    CHECK(countWood(*settled, layer(4, half), age) > 0);
+    // treeWoodChanges' rule: wood now but not just before is added into
+    // air (the sawn ring), cut wood not wood now is removed (the old top).
+    std::vector<uint8_t> now, then, cutWood;
+    const auto box = treeWoodBounds(*whole, Origin, true);
+    markTreeWood(*settled, Origin, box, age, now);
+    markTreeWood(*settled, Origin, box, age - 1e-3f, then);
+    markTreeWood(*settled, Origin, box, age, cutWood, {1});
+    size_t ringAdded = 0, removed = 0;
+    for (int y = box.y0; y < box.y1; ++y)
+        for (int z = box.z0; z < box.z1; ++z)
+            for (int x = box.x0; x < box.x1; ++x) {
+                const size_t m = box.index(x, y, z);
+                if (y == Origin.y + 4 && now[m] && !then[m]) ++ringAdded;
+                if (cutWood[m] && !now[m]) ++removed;
+            }
+    CHECK(ringAdded > 0);
+    CHECK(removed > 0);
+    // One tile shorter: the highest wood row comes down by one.
+    const auto top = [&](const TreeSkeleton& k) {
+        std::vector<uint8_t> mask;
+        markTreeWood(k, Origin, box, age, mask);
+        int highest = INT_MIN;
+        for (int y = box.y0; y < box.y1; ++y)
+            for (int z = box.z0; z < box.z1; ++z)
+                for (int x = box.x0; x < box.x1; ++x)
+                    if (mask[box.index(x, y, z)]) highest = y;
+        return highest;
+    };
+    EQUAL(top(*settled), top(*whole) - 1, "one tile shorter");
+    // Foliage came down with its branches.
+    size_t leaves = 0, wholeLeaves = 0;
+    for (const auto& f : settled->foliage) leaves += !f.pruned;
+    for (const auto& f : whole->foliage) wholeLeaves += !f.pruned;
+    EQUAL(leaves, wholeLeaves, "every clump kept");
+    // A species that falls loses the part instead.
+    Tree falling = species("trees.test_oak");
+    const auto fallen = buildTreeSkeleton(falling, input);
+    EQUAL(countWood(*fallen, layer(8, half), age), size_t(0),
+          "no wood above a fallen cut");
+}
+
+TEST(tree_wood_lod_cut_is_local) {
+    // A cut changes the voxels only around the cut branch: changedSince
+    // bounds every slab that differs, and is much smaller than the tree.
+    const auto skeleton = build("trees.redwood");
+    const float age = skeleton->matureAge();
+    // The trunk near its top (block wood; redwood branches are thinner
+    // than a block): cut it there.
+    int32_t branch = -1;
+    float best = INFINITY;
+    for (size_t i = 0; i < skeleton->segments.size(); ++i) {
+        const auto& s = skeleton->segments[i];
+        if (!s.live() || s.order != 0) continue;
+        if (skeleton->radius(s, 0.5f, age) < 1) continue;
+        const float off = std::abs(s.a.y - 0.85f * skeleton->height);
+        if (off < best) {
+            best = off;
+            branch = int32_t(i);
+        }
+    }
+    CHECK(branch >= 0);
+    CHECK(branch >= 0);
+    const float cutAge = age * 2;
+    const auto cut =
+        build("trees.redwood", 7, TreeMaxHeight, {{branch, 0.5f, cutAge}});
+    const auto instance = [&](const TreeSkeletonPtr& k) {
+        auto t = std::make_shared<TreeInstance>();
+        t->key = 42;
+        t->skeleton = k;
+        t->anchor = {300, 300, 300};
+        t->wood = treeWoodBounds(*k, t->anchor, true);
+        return t;
+    };
+    const auto before = tree_wood_lod::voxels({instance(skeleton), age, 9});
+    // Match TreeRenderer: a cut resets the quantized age to its regrowth
+    // phase. Different ages must not force all mature wood to rebuild.
+    const float phase = cut->growthPhaseStart();
+    const float afterAge = tree_foliage::bucketAge(
+        tree_foliage::bucket(cutAge, cut->matureAge(), phase), cut->matureAge(),
+        phase);
+    CHECK(afterAge != age);
+    const auto after = tree_wood_lod::voxels({instance(cut), afterAge, 9});
+    CHECK(before->revision != after->revision);
+    const auto changed = after->changedSince(*before);
+    CHECK(changed.has_value());
+    CHECK(!changed->empty());
+    CHECK(changed->volume() * 3 < before->bounds.volume());
+    // Nothing differs outside the box (level 0: the real rasterizer).
+    const WorldWrap none{};
+    const auto a = structure_voxels::rasterizeAll(*before, 0, none);
+    const auto b = structure_voxels::rasterizeAll(*after, 0, none);
+    size_t differing = 0;
+    for (const auto& [key, slab] : a) {
+        const auto other = b.find(key);
+        const bool same = other != b.end() && other->second.bits == slab.bits;
+        if (same) continue;
+        ++differing;
+        const TileBox box{int(key.x) * 16,     int(key.y) * 16,
+                          int(key.z) * 16,     int(key.x + 1) * 16,
+                          int(key.y + 1) * 16, int(key.z + 1) * 16};
+        CHECK(!changed->intersect(box).empty());
+    }
+    for (const auto& [key, slab] : b)
+        if (!a.contains(key)) {
+            const TileBox box{int(key.x) * 16,     int(key.y) * 16,
+                              int(key.z) * 16,     int(key.x + 1) * 16,
+                              int(key.y + 1) * 16, int(key.z + 1) * 16};
+            CHECK(!changed->intersect(box).empty());
+        }
+    CHECK(differing > 0);
+    // Age changes on the same mature skeleton require no wood rebuild.
+    const auto mature = tree_wood_lod::voxels({instance(skeleton), age * 2, 9});
+    const auto unchanged = mature->changedSince(*before);
+    CHECK(unchanged.has_value() && unchanged->empty());
 }

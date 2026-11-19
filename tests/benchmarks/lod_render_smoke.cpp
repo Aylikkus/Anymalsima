@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
         // Plants, in the lights scenario (the only one binding light
         // volumes, like the game).
         FloraRenderer flora(chunks, assets, world, renderer);
-        TreeRenderer trees(chunks, assets, world, renderer);
+        TreeRenderer trees(chunks, assets, world, renderer, pool);
         flora.setBlockLight(&blockLight);
         trees.setBlockLight(&blockLight);
         double treesMaxMs = 0;
@@ -264,10 +264,10 @@ int main(int argc, char** argv) {
             TerrainLodManager lod(
                 world, assets, pool, TerrainLod::Qualities[0],
                 structure || std::getenv("SMOKE_FOREST") ? &edits : nullptr);
-            trees.setVoxelLandmarks(lod.drawsTreeWood());
+            trees.setVoxelLandmarks(lod.drawsStructureVoxels());
             // As the handover pass below draws chunks.
             trees.setChunkDrawn([&](const ChunkCoord& c) {
-                return lod.drawsColumn(c.x, c.z) && chunks.hasUploadedMesh(c);
+                return lod.drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
             if (lights) {
                 std::vector<ShaderProperty*> patchLights, blockLights;
@@ -323,7 +323,7 @@ int main(int argc, char** argv) {
                                        .count();
                 if (lights)
                     lightRenderer.update(registry, camera, world.wrap(), now);
-                lod.setTreeWood(trees.landmarkWood(0));
+                lod.setStructures(trees.landmarkVoxels(0));
                 lod.update(camera, {1280, 720});
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720});
@@ -341,7 +341,7 @@ int main(int argc, char** argv) {
                             const auto& l = face.light;
                             chunks.forEachReady([&](const ChunkCoord& coord,
                                                     Chunk&) {
-                                if (!lod.drawsColumn(coord.x, coord.z) ||
+                                if (!lod.drawsChunk(coord) ||
                                     std::abs(world.wrap().deltaChunk(coord.x,
                                                                      ccx)) > 3)
                                     return;
@@ -414,7 +414,7 @@ int main(int argc, char** argv) {
                 if (handover) {
                     blockEye.setVec4({eye.x, eye.y, eye.z, 4096});
                     chunks.forEachReady([&](const ChunkCoord& coord, Chunk&) {
-                        if (!lod.drawsColumn(coord.x, coord.z)) return;
+                        if (!lod.drawsChunk(coord)) return;
                         auto* mesh = chunks.getMesh(coord);
                         if (!mesh) return;
                         // The copy nearest the camera (X wraps).
@@ -426,8 +426,8 @@ int main(int argc, char** argv) {
                         auto transform = relativeTransform(
                             camera, wx, double(coord.y) * Chunk::SIZE_Y,
                             double(coord.z) * Chunk::SIZE_Z);
-                        std::vector<ShaderProperty*> uniforms{&blockTexture,
-                                                              &blockEye, &water};
+                        std::vector<ShaderProperty*> uniforms{
+                            &blockTexture, &blockEye, &water};
                         if (lights) {
                             if (!volumes.bind(coord, uniforms, wx)) return;
                             lightRenderer.appendUniforms(
@@ -714,7 +714,10 @@ int main(int argc, char** argv) {
                         << " detail_regressions=" << detailRegressions
                         << " edited_columns=" << edits.size()
                         << " structure_slabs=" << lod.structureCount()
-                        << " tree_wood_slabs=" << lod.treeWoodSlabs()
+                        << " voxel_slabs=" << lod.voxelSlabs()
+                        << " voxel_slabs_l0=" << lod.voxelSlabs(0)
+                        << " voxel_slabs_l1=" << lod.voxelSlabs(1)
+                        << " voxel_slabs_l2=" << lod.voxelSlabs(2)
                         << " plants=" << flora.drawnPlants()
                         << " plant_draws=" << flora.drawCalls()
                         << " plant_meshes=" << flora.meshCount()
@@ -725,6 +728,7 @@ int main(int argc, char** argv) {
                         << " tree_draws=" << trees.drawCalls()
                         << " tree_meshes=" << trees.meshCount()
                         << " tree_cpu_ms=" << trees.cpuMilliseconds()
+                        << " failed_meshes=" << IRenderer::failedDynamicMeshes
                         << " tree_max_cpu_ms=" << treesMaxMs << '\n';
                     if ((!transition && lod.backlog() != 0) || draws == 0 ||
                         (handover && detailed == 0 && !farLights) ||

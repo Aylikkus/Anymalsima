@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "tile_box.hpp"
 #include "tree_skeleton.hpp"
 
 // Turns a tree skeleton into wood tiles (docs/handoff/trees.md). A tile is
@@ -18,32 +19,16 @@ struct TreeAnchor {
     bool operator==(const TreeAnchor&) const = default;
 };
 
-// World tiles [x0, x1) x [y0, y1) x [z0, z1).
-struct TreeTileBox {
-    int x0 = 0, y0 = 0, z0 = 0, x1 = 0, y1 = 0, z1 = 0;
-    int sizeX() const { return x1 - x0; }
-    int sizeY() const { return y1 - y0; }
-    int sizeZ() const { return z1 - z0; }
-    bool empty() const { return x1 <= x0 || y1 <= y0 || z1 <= z0; }
-    size_t volume() const {
-        return empty() ? 0
-                       : size_t(sizeX()) * size_t(sizeY()) * size_t(sizeZ());
-    }
-    size_t index(int x, int y, int z) const {
-        return (size_t(y - y0) * size_t(sizeZ()) + size_t(z - z0)) *
-                   size_t(sizeX()) +
-               size_t(x - x0);
-    }
-    TreeTileBox intersect(const TreeTileBox& o) const {
-        return {std::max(x0, o.x0), std::max(y0, o.y0), std::max(z0, o.z0),
-                std::min(x1, o.x1), std::min(y1, o.y1), std::min(z1, o.z1)};
-    }
-};
+// Tile boxes are shared with other structures (tile_box.hpp).
+using TreeTileBox = TileBox;
 
 // Tiles that may hold the full-grown tree's wood (live segments).
 // includePruned: also the wood cuts removed (where it must be cleared).
 TreeTileBox treeWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
                            bool includePruned = false);
+// Only the pieces removed by one cut (1-based), for local cleanup jobs.
+TreeTileBox treeCutWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                              uint16_t cut);
 
 // Which segments to rasterize: live ones, or the pruned pieces of one cut
 // (1-based cut index), for removing the wood a cut took away.

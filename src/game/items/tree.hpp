@@ -30,13 +30,16 @@ enum class TreeSizeClass : uint8_t { Thin, Small, Medium, Large, Massive };
 // Parts of at least this radius (m) become wood blocks; 0.5 gives the
 // single column of a small trunk.
 inline constexpr float TreeVoxelRadius = 0.5f;
-inline constexpr float TreeMaxHeight = 128;
+inline constexpr float TreeMaxHeight = 512;
 inline constexpr float TreeMaxTrunkRadius = 64;
 // How far an ordinary tree (crown and spacing) may reach from its anchor:
 // generation reads terrain only within one region of the chunk. Massive
 // trees are placed from a world-wide landmark list instead.
 inline constexpr float TreeMaxReach = 96;
-inline constexpr float TreeMaxLandmarkReach = 192;
+// Massive trees: chunks look for them this far (in regions) around, so the
+// cost of a larger reach is more region lookups, not a hard limit
+// (ChunkManager::landmarkRadius).
+inline constexpr float TreeMaxLandmarkReach = 1024;
 
 inline TreeSizeClass treeSizeClass(float trunkRadius) {
     if (trunkRadius < TreeVoxelRadius) return TreeSizeClass::Thin;
@@ -90,12 +93,24 @@ struct TreeFoliage {
     float density = 1;  // [0, 4]: clumps per metre of foliage-bearing twig
 };
 
+// What the part above a trunk cut does.
+enum class TreeFell : uint8_t {
+    // Falls (for now: disappears; later a physics hazard that can crush
+    // what it lands on). Thin trees and redwoods.
+    Fall,
+    // Settles onto the stump and closes the gap (massive trunks too heavy
+    // to topple): the tree stays whole, one tile shorter.
+    Settle,
+};
+
 struct TreeCutRule {
     // A cut above the root always regrows from the cut; a cut at the root
     // regrows only when the stump resprouts, otherwise the tree dies and
     // the stump stays.
     bool stump_resprouts = false;
     ValueRange resprout_days{30};
+    // Trunk cuts (branches always fall).
+    TreeFell fell = TreeFell::Fall;
 };
 
 struct Tree {
@@ -232,9 +247,15 @@ inline void from_json(const Json& j, Tree& t) {
 
         if (j.contains("cut")) {
             const auto& c = j.at("cut");
-            known(c, "cut", {"stump_resprouts", "resprout_days"});
+            known(c, "cut", {"stump_resprouts", "resprout_days", "fell"});
             t.cut.stump_resprouts = boolean(c, "stump_resprouts", false);
             range(c, "resprout_days", t.cut.resprout_days, 0, 100000);
+            if (c.contains("fell"))
+                t.cut.fell = keyword(
+                    c.at("fell"), "cut.fell",
+                    std::array<std::pair<std::string_view, TreeFell>, 2>{
+                        {{"fall", TreeFell::Fall},
+                         {"settle", TreeFell::Settle}}});
         }
 
         if (t.landmark()) {

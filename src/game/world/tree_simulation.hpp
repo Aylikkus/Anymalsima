@@ -1,7 +1,9 @@
 #pragma once
 
 #include <deque>
+#include <future>
 #include <string>
+#include <unordered_map>
 
 #include "chunk_manager.hpp"
 #include "world_editor.hpp"
@@ -32,6 +34,13 @@
 class TreeSimulation {
    public:
     static constexpr int ChunksPerUpdate = 4;
+    // Wood a cut or a fallen tree takes away (or a settling trunk moves)
+    // goes chunk by chunk, nearest to the cut first: each chunk's change is
+    // rasterized on the pool (MaxClearJobs at once) and applied on the main
+    // thread within ClearBudgetMs per update. The broken block shows at
+    // once, the branch follows.
+    static constexpr double ClearBudgetMs = 2;
+    static constexpr size_t MaxClearJobs = 8;
 
     TreeSimulation(ChunkManager& chunks, WorldEditor& editor);
     ~TreeSimulation();
@@ -47,12 +56,28 @@ class TreeSimulation {
     // A line about the tree a tile belongs to (debug panel), or empty.
     std::string describe(TilePos tile, double today) const;
 
+    // Loaded chunks still waiting for wood to be cleared.
+    size_t pendingClears() const { return clears.size() + clearJobs.size(); }
+    // Clears all of them now (tests, tools).
+    void finishClears();
+
     // trees.dat must be written (a cut or a planted tree).
     bool dirty() const { return changed; }
     void clearDirty() { changed = false; }
     // Debug counters.
     size_t cutCount() const { return cuts; }
     size_t removedCount() const { return deaths; }
+    // Main-thread time of the last removal of living wood, by stage (ms):
+    // finding the segment, the cross-section test, and for a cut the
+    // skeleton rebuild, the commit (overrides, tree sets, columns) and
+    // queuing the chunks whose wood goes (cleared over the next updates).
+    struct BreakTimes {
+        double owner = 0, severed = 0, rebuild = 0, commit = 0, clear = 0;
+        double total() const {
+            return owner + severed + rebuild + commit + clear;
+        }
+    };
+    const BreakTimes& lastBreak() const { return times; }
 
    private:
     struct Owner {
@@ -66,8 +91,15 @@ class TreeSimulation {
     void checkBases(TilePos pos);
     bool baseLost(const TreeColumn::Entry& entry);
     void kill(const TreeColumn::Entry& entry);
-    std::optional<Owner> owner(TilePos pos, uint8_t block) const;
-    bool severed(const Owner& owner, TilePos removed) const;
+    // The segments whose wood holds the tile, best match first (one inside
+    // a segment's length before an end cap, then the nearest surface). A
+    // flared trunk and its buttresses share tiles, so a removal may sever
+    // any of them.
+    std::vector<Owner> owners(TilePos pos, uint8_t block) const;
+    // thin: parts up to ThinCut are cut by any removal (the best match
+    // only; other candidates need their whole cross-section broken).
+    // Branch cuts update owner.t to the retained face of the cleared row.
+    bool severed(Owner& owner, TilePos removed, bool thin) const;
     void cut(const Owner& owner);
     // Applies tile changes through the editor without reacting to them.
     void applyChanges(const ChunkCoord& coord,
@@ -83,6 +115,33 @@ class TreeSimulation {
     double today = 0;
     size_t cuts = 0;
     size_t deaths = 0;
+    BreakTimes times;
+    // A loaded chunk losing wood from one cut, or all of a removed tree's.
+    struct Clear {
+        ChunkCoord coord;
+        double cutDay = 0;
+        TreeInstancePtr removed;  // set: remove this tree's wood
+        TreeAnchor anchor;        // its column copy
+        // The exact cut snapshot, independent of column rebuilds and later
+        // cuts. Its last cut is the only one this job processes.
+        TreeInstancePtr tree;
+        uint64_t settling = 0;  // tree key of a settling trunk cut, or 0
+    };
+    struct ClearJob {
+        Clear clear;
+        std::future<TreeWoodDelta> delta;
+    };
+    std::deque<Clear> clears;
+    std::vector<ClearJob> clearJobs;
+    // Trees whose trunk is settling (clears still pending): their trunk is
+    // not cut again meanwhile (its sawn ring is still air).
+    std::unordered_map<uint64_t, size_t> settling;
+    void finishClear(const Clear& clear);
+    void startClear(const Clear& clear);
+    // Queues the loaded chunks of `box` (column copy), nearest to `from`.
+    void queueClears(const TreeTileBox& box, TilePos from, Clear clear);
+    void clearSome(double budgetMs);
+
     std::deque<ChunkCoord> sweep;
     uint64_t sweepRevision = ~0ULL;
     size_t updates = 0;

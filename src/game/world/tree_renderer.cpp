@@ -6,11 +6,13 @@
 #include "foliage_light.hpp"
 #include "ground_cover_climate.hpp"
 #include "items/ground_cover.hpp"
+#include "tree_wood_lod.hpp"
 
 namespace {
-// Crown meshes built per frame (a forest needs only a few dozen shared
-// ones; landmarks are a few thousand cards each).
+// Crown mesh jobs started per frame, and running at once (a forest needs
+// only a few dozen shared meshes; a massive crown takes tens of ms).
 constexpr int MeshBuildsPerFrame = 8;
+constexpr size_t MaxMeshJobs = 8;
 // Tree list refresh, frames (also when the eye changes chunk column).
 constexpr uint64_t GatherInterval = 120;
 // Meshes unused this many frames are released.
@@ -20,8 +22,13 @@ constexpr float QuarterTurn = 1.57079632679f;
 }  // namespace
 
 TreeRenderer::TreeRenderer(ChunkManager& chunks, const IAssets& assets,
-                           const World& world, IRenderer& renderer)
-    : chunks(chunks), assets(assets), world(world), renderer(renderer) {
+                           const World& world, IRenderer& renderer,
+                           ThreadPool& pool)
+    : chunks(chunks),
+      assets(assets),
+      world(world),
+      renderer(renderer),
+      pool(pool) {
     albedo.initTexture("u_texture_array", 0, assets.getFoliageAlbedoArray());
     normals.initTexture("u_normal_array", 1, assets.getFoliageNormalArray());
     eyeUniform.initVec4("u_world_eye", {0, 0, 0, 4096});
@@ -170,8 +177,9 @@ bool TreeRenderer::woodPending(const TreeInstance& tree) const {
     return false;
 }
 
-std::vector<TreeWoodSource> TreeRenderer::landmarkWood(double today) const {
-    std::vector<TreeWoodSource> out;
+std::vector<structure_voxels::SourcePtr> TreeRenderer::landmarkVoxels(
+    double today) const {
+    std::vector<structure_voxels::SourcePtr> out;
     const auto& table = chunks.treeSpecies();
     for (const auto& [key, draw] : trees) {
         const auto& tree = *draw.tree;
@@ -181,11 +189,15 @@ std::vector<TreeWoodSource> TreeRenderer::landmarkWood(double today) const {
         const float age = tree.growthAge(today);
         if (age <= 0) continue;
         // Growth steps of the crown meshes: the proxies are rebuilt a few
-        // dozen times over the tree's maturity, not every day.
-        const float step = tree.skeleton->matureAge() / tree_foliage::Buckets;
-        const float quantized = step > 0 ? std::floor(age / step) * step : age;
+        // dozen times over the tree's maturity, not every day, and never
+        // for a day before the latest cut's regrowth or settling.
+        const auto& k = *tree.skeleton;
+        const float quantized = tree_foliage::bucketAge(
+            tree_foliage::bucket(age, k.matureAge(), k.growthPhaseStart()),
+            k.matureAge(), k.growthPhaseStart());
         if (quantized <= 0) continue;
-        out.push_back({draw.tree, quantized, rule->woodBlock});
+        out.push_back(
+            tree_wood_lod::voxels({draw.tree, quantized, rule->woodBlock}));
     }
     return out;
 }
@@ -239,7 +251,13 @@ void TreeRenderer::gatherBillboards(double eyeX, double eyeZ, double range) {
     chunks.releaseBillboards(eyeX, eyeZ, range + 2 * tiles);
 }
 
-const TreeRenderer::MeshEntry* TreeRenderer::billboardMesh(uint8_t species) {
+TreeRenderer::~TreeRenderer() {
+    for (auto& [key, entry] : meshes)
+        if (entry.job) entry.job->wait();
+}
+
+const TreeRenderer::BillboardEntry* TreeRenderer::billboardMesh(
+    uint8_t species) {
     if (const auto it = billboardMeshes.find(species);
         it != billboardMeshes.end())
         return it->second.cpu.empty() ? nullptr : &it->second;
@@ -339,13 +357,29 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
                                                   const TreeInstance& tree,
                                                   int bucket,
                                                   tree_foliage::Detail detail,
-                                                  bool bare, int& budget) {
+                                                  bool bare, int& starts) {
+    using namespace std::chrono_literals;
     if (auto it = meshes.find(key); it != meshes.end()) {
-        it->second.lastUsed = frame;
-        return it->second.cpu.empty() ? nullptr : &it->second;
+        auto& entry = it->second;
+        entry.lastUsed = frame;
+        if (entry.job && entry.job->wait_for(0s) == std::future_status::ready) {
+            --meshJobs;
+            try {
+                entry.cpu = entry.job->get();
+            } catch (const std::exception&) {
+                entry.cpu.clear();
+            }
+            entry.job.reset();
+            for (const auto& part : entry.cpu) {
+                if (part.empty()) continue;
+                entry.gpu.emplace_back().initStatic(
+                    &renderer, part.vertices.data(), part.vertices.size(),
+                    part.indices.data(), part.indices.size());
+            }
+        }
+        return entry.ready() ? &entry : nullptr;
     }
-    if (budget <= 0) return nullptr;
-    --budget;
+    if (starts <= 0 || meshJobs >= MaxMeshJobs) return nullptr;
     const auto& table = chunks.treeSpecies();
     const auto* rule = table.find(tree.species);
     auto& entry = meshes[key];
@@ -356,16 +390,22 @@ const TreeRenderer::MeshEntry* TreeRenderer::mesh(uint64_t key,
                               ? table.variant(tree.species, tree.variant, 0)
                               : tree.skeleton;
     if (!skeleton) return nullptr;
-    entry.cpu = tree_foliage::build(
-        *skeleton, rule->species, assets.getStorage<FoliageMaterial>(),
-        tree_foliage::bucketAge(bucket, skeleton->matureAge(),
-                                skeleton->growthPhaseStart()),
-        detail, bare);
-    if (entry.cpu.empty()) return nullptr;
-    entry.gpu.initStatic(&renderer, entry.cpu.vertices.data(),
-                         entry.cpu.vertices.size(), entry.cpu.indices.data(),
-                         entry.cpu.indices.size());
-    return &entry;
+    --starts;
+    ++meshJobs;
+    // The species table and materials outlive the renderer, which waits
+    // for its jobs.
+    entry.job = pool.submit_task(
+        [skeleton, species = &rule->species,
+         materials = &assets.getStorage<FoliageMaterial>(), bucket, detail,
+         bare] {
+            return tree_foliage::buildParts(
+                *skeleton, *species, *materials,
+                tree_foliage::bucketAge(bucket, skeleton->matureAge(),
+                                        skeleton->growthPhaseStart()),
+                detail, bare);
+        },
+        BS::pr::high);
+    return nullptr;
 }
 
 void TreeRenderer::render(RenderTarget& target, const Camera& camera,
@@ -430,10 +470,12 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
         double x, y, z;  // anchor point, nearest copy
         float yaw, wither, fade;
     };
+    // Instances by the mesh they draw: their own when built, else the one
+    // last drawn for the tree (a cut, a growth step or a detail change
+    // never blinks a crown out while its next mesh builds).
     std::unordered_map<uint64_t, std::vector<Instance>> groups;
-    std::unordered_map<uint64_t, std::tuple<const TreeInstance*, int,
-                                            tree_foliage::Detail, bool>>
-        requests;
+    std::unordered_map<uint64_t, const MeshEntry*> resolved;
+    int starts = MeshBuildsPerFrame;
     for (const auto& [key, draw] : trees) {
         const auto& tree = *draw.tree;
         const auto& k = *tree.skeleton;
@@ -459,11 +501,13 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
                                      float(b.y1), float(b.z1)}))
             continue;
         const double ax = x - ex, az = tree.anchor.z + 0.5 - ez;
+        // Landmarks with distant voxel wood never miss wood: their structure
+        // slabs hide only where the chunk is drawn, so they need not wait.
+        const bool voxelWood = voxelLandmarks && rule && rule->landmark;
         const auto detail =
-            !near || woodPending(tree)
-                ? (voxelLandmarks && rule && rule->landmark && !near
-                       ? tree_foliage::Detail::DistantCrown
-                       : tree_foliage::Detail::Distant)
+            !near || (!voxelWood && woodPending(tree))
+                ? (voxelWood && !near ? tree_foliage::Detail::DistantCrown
+                                      : tree_foliage::Detail::Distant)
             : std::sqrt(ax * ax + az * az) < NearDistance + k.crownRadius * 0.5
                 ? tree_foliage::Detail::Near
                 : tree_foliage::Detail::Far;
@@ -478,17 +522,33 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
             tree.variant >= 0
                 ? (1ULL << 63) | uint64_t(tree.species) << 40 |
                       uint64_t(tree.variant) << 32 | tail
-                // Own shapes change when cut: the skeleton is in the key.
+                // Include the cut revision: allocators can reuse a previous
+                // skeleton's address while its crown mesh is still cached.
                 : ((tree.key * 0x9e3779b97f4a7c15ULL) ^
+                   (uint64_t(tree.cuts.size()) * 0x94d049bb133111ebULL) ^
                    (uint64_t(reinterpret_cast<uintptr_t>(k.segments.data())) *
                     0xbf58476d1ce4e5b9ULL) ^
                    tail) &
                       ~(1ULL << 63);
-        groups[meshKey].push_back(
+        auto [found, first] = resolved.try_emplace(meshKey, nullptr);
+        if (first)
+            found->second = mesh(meshKey, tree, bucket, detail, bare, starts);
+        uint64_t drawKey = meshKey;
+        if (found->second) {
+            drawnMesh[key] = meshKey;
+        } else {
+            const auto last = drawnMesh.find(key);
+            const auto old = last == drawnMesh.end()
+                                 ? meshes.end()
+                                 : meshes.find(last->second);
+            if (old == meshes.end() || !old->second.ready()) continue;
+            old->second.lastUsed = frame;
+            drawKey = last->second;
+        }
+        groups[drawKey].push_back(
             {&draw, x, double(tree.anchor.y + 1), tree.anchor.z + 0.5,
              tree.variant >= 0 ? float(tree.rotation) * QuarterTurn : 0.f,
              wither, fade});
-        requests.try_emplace(meshKey, &tree, bucket, detail, bare);
     }
 
     std::vector<ShaderProperty*> base{&albedo, &normals, &eyeUniform, &params,
@@ -497,11 +557,8 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
     eyeUniform.setVec4({float(ex), float(ey), float(ez), camera.viewDistance});
     // z = 1: tree mode (wind by vertex weight, no root darkening).
     params.setVec4({float(std::fmod(now, 3600.0)), 1, 1, 0});
-    int builds = MeshBuildsPerFrame;
     for (const auto& [key, list] : groups) {
-        const auto& [tree, bucket, detail, bare] = requests.at(key);
-        const auto* entry = mesh(key, *tree, bucket, detail, bare, builds);
-        if (!entry) continue;
+        const auto& entry = meshes.at(key);
         const auto count = bgfx::getAvailInstanceDataBuffer(
             uint32_t(list.size()), InstanceStride);
         if (!count) break;
@@ -524,17 +581,24 @@ void TreeRenderer::render(RenderTarget& target, const Camera& camera,
                 in.fade, 0};
             std::copy(std::begin(data), std::end(data), v);
         }
-        target.drawInstanced(entry->gpu.get(), &shader, std::vector(base), true,
-                             relativeTransform(camera, ex, ey, ez),
-                             DrawLayer::GAME, &buffer);
+        // Every part of the crown shares the instances.
+        for (const auto& part : entry.gpu) {
+            target.drawInstanced(part.get(), &shader, std::vector(base), true,
+                                 relativeTransform(camera, ex, ey, ez),
+                                 DrawLayer::GAME, &buffer);
+            ++calls;
+        }
         drawn += count;
-        ++calls;
     }
     drawBillboards(target, camera, frustum, base, ex, ey, ez, today);
-    if (frame % 300 == 0)
+    if (frame % 300 == 0) {
         std::erase_if(meshes, [&](const auto& e) {
-            return frame - e.second.lastUsed > MeshLifetime;
+            return !e.second.job && frame - e.second.lastUsed > MeshLifetime;
         });
+        std::erase_if(drawnMesh, [&](const auto& e) {
+            return !trees.contains(e.first) || !meshes.contains(e.second);
+        });
+    }
     cpuMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started)
                 .count();

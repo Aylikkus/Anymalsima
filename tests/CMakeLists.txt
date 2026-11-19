@@ -24,6 +24,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/flora_simulation.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_skeleton.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_rasterizer.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/structure_voxels.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_wood_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tree_foliage_builder.cpp
@@ -78,6 +79,7 @@ add_executable(world_logic_tests
     unit/game/items/flora_data_tests.cpp
     unit/game/items/tree_data_tests.cpp
     unit/game/world/tree_tests.cpp
+    unit/game/world/structure_voxels_tests.cpp
 )
 add_executable(lighting_benchmark benchmarks/lighting_benchmark.cpp)
 option(ANYMALSIMA_TEST_SANITIZERS "Instrument logic tests with ASan and UBSan" OFF)
@@ -283,6 +285,13 @@ foreach(case flora_value_ranges ground_cover_parsing foliage_material_parsing
     set_tests_properties(game.items.${case} PROPERTIES
         LABELS "unit;gameplay;data;flora" TIMEOUT 10)
 endforeach()
+# Distant structure voxels (docs/handoff/structures.md).
+foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
+             structure_voxels_plan_wraps structure_voxels_slab_merge)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;structures" TIMEOUT 10)
+endforeach()
 # Tree data (docs/handoff/trees.md).
 foreach(case tree_species_parsing tree_size_classes tree_references_validated
              tree_runtime_content)
@@ -298,9 +307,11 @@ foreach(case tree_skeleton_deterministic tree_sizes_follow_species
              tree_chunks_order_independent tree_chunks_air_and_tops
              tree_saved_chunks_not_edits tree_flora_avoids_trunks
              tree_landmarks tree_rotation_exact tree_foliage_meshes
-             trees_codec_roundtrip tree_cuts_incremental tree_cut_and_regrowth
+             trees_codec_roundtrip tree_cuts_incremental tree_repeated_branch_cuts
+             tree_cut_delta_local tree_cut_angled_branch tree_cut_and_regrowth
              tree_reload_catches_up tree_planted_indoors tree_billboards
-             tree_wood_lod_slabs tree_waiting_chunk_does_not_stall_streaming
+             tree_wood_lod_slabs tree_wood_lod_cut_is_local tree_settle_closes_gap tree_settle_in_world
+             tree_waiting_chunk_does_not_stall_streaming
              tree_dies_without_ground tree_dies_without_base_wood
              tree_trunk_foliage_on_stem tree_far_crowns_stay_attached
              tree_sets_wanted_by_renderer streaming_progresses_with_huge_queue
@@ -401,3 +412,11 @@ foreach(case wrap_helper_math wrap_noise_periodic wrap_terrain_seam
             ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
     endif()
 endforeach()
+
+# The elder as the tree optimization sample: break, cut, crown and voxel
+# costs of one massive tree (docs/handoff/trees.md).
+add_executable(tree_benchmark EXCLUDE_FROM_ALL benchmarks/tree_benchmark.cpp)
+target_link_libraries(tree_benchmark PRIVATE world_logic_cpu)
+target_include_directories(tree_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_compile_definitions(tree_benchmark PRIVATE
+    SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")

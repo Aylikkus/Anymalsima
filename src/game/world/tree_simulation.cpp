@@ -1,5 +1,8 @@
 #include "tree_simulation.hpp"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <sstream>
 
@@ -9,11 +12,15 @@ constexpr float ThinCut = 2;
 // The growth sweep rebuilds its chunk list this often (updates).
 constexpr size_t SweepListInterval = 600;
 
-TreeVec perpendicular(TreeVec d) {
-    const TreeVec ref =
-        std::abs(d.y) < 0.9f ? TreeVec{0, 1, 0} : TreeVec{1, 0, 0};
-    return d.cross(ref).normalized();
+// Milliseconds since `start`, restarting it.
+double lap(std::chrono::steady_clock::time_point& start) {
+    const auto now = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration<double, std::milli>(now - start).count();
+    start = now;
+    return ms;
 }
+
 }  // namespace
 
 TreeSimulation::TreeSimulation(ChunkManager& chunks, WorldEditor& editor)
@@ -23,6 +30,7 @@ TreeSimulation::TreeSimulation(ChunkManager& chunks, WorldEditor& editor)
 }
 
 TreeSimulation::~TreeSimulation() {
+    for (auto& job : clearJobs) job.delta.wait();
     editor.blockChanged.disconnect(connection);
 }
 
@@ -48,6 +56,7 @@ void TreeSimulation::applyChanges(const ChunkCoord& coord,
 
 void TreeSimulation::update(double now) {
     today = now;
+    clearSome(ClearBudgetMs);
     const int32_t day = int32_t(std::floor(now));
     if (sweep.empty() || chunks.treeRevision() != sweepRevision ||
         ++updates % SweepListInterval == 0) {
@@ -84,14 +93,17 @@ void TreeSimulation::update(double now) {
     }
 }
 
-std::optional<TreeSimulation::Owner> TreeSimulation::owner(
-    TilePos pos, uint8_t block) const {
+std::vector<TreeSimulation::Owner> TreeSimulation::owners(TilePos pos,
+                                                          uint8_t block) const {
     const auto column = chunks.treeColumn(unsigned(pos.x / Chunk::SIZE_X),
                                           unsigned(pos.z / Chunk::SIZE_Z));
-    if (!column) return std::nullopt;
-    std::optional<Owner> best;
-    float bestGap = INFINITY;
-    bool bestInside = false;
+    if (!column) return {};
+    struct Candidate {
+        Owner owner;
+        float gap;
+        bool inside;
+    };
+    std::vector<Candidate> found;
     for (const auto& entry : column->trees) {
         const auto& tree = *entry.tree;
         const auto* rule = chunks.treeSpecies().find(tree.species);
@@ -113,9 +125,9 @@ std::optional<TreeSimulation::Owner> TreeSimulation::owner(
             const float tu =
                 length2 > 1e-6f ? (q - s.a).dot(axis) / length2 : 0.f;
             const float t = std::clamp(tu, 0.f, visible);
-            const float r = k.radius(s, t, age);
-            if (r < TreeVoxelRadius) continue;
             const TreeVec d = q - lerp(s.a, s.b, t);
+            const float r = k.radius(s, t, age, std::atan2(d.z, d.x));
+            if (r < TreeVoxelRadius) continue;
             // The cut lies on the removed tile's lower face (half a tile
             // back along the axis): the face the stump keeps, where its
             // regrowth starts. At the tile centre it would float half a
@@ -128,18 +140,22 @@ std::optional<TreeSimulation::Owner> TreeSimulation::owner(
             // to the end cap of the segment below: a cut at that joint
             // would otherwise land on the lower end and cut nothing.
             const bool inside = tu >= 0 && tu <= visible;
-            if (gap < 0.75f && (!best || (inside && !bestInside) ||
-                                (inside == bestInside && gap < bestGap))) {
-                bestGap = gap;
-                bestInside = inside;
-                best = Owner{entry, int32_t(i), cutT};
-            }
+            if (gap < 0.75f)
+                found.push_back({Owner{entry, int32_t(i), cutT}, gap, inside});
         }
     }
-    return best;
+    std::stable_sort(found.begin(), found.end(),
+                     [](const Candidate& a, const Candidate& b) {
+                         if (a.inside != b.inside) return a.inside;
+                         return a.gap < b.gap;
+                     });
+    std::vector<Owner> out;
+    out.reserve(found.size());
+    for (auto& c : found) out.push_back(std::move(c.owner));
+    return out;
 }
 
-bool TreeSimulation::severed(const Owner& o, TilePos removed) const {
+bool TreeSimulation::severed(Owner& o, TilePos removed, bool thin) const {
     const auto& tree = *o.entry.tree;
     const auto& k = *tree.skeleton;
     const auto& s = k.segments[size_t(o.segment)];
@@ -149,37 +165,155 @@ bool TreeSimulation::severed(const Owner& o, TilePos removed) const {
     if (o.t >= 0.98f * k.visible(s, age)) {
         bool above = false;
         for (const auto& c : k.segments)
-            if (c.parent == o.segment && c.live() && k.visible(c, age) > 0)
+            if (c.parent == o.segment && c.attachT >= o.t && c.live() &&
+                k.visible(c, age) > 0)
                 above = true;
         if (!above) return false;
     }
     const float r = k.radius(s, o.t, age);
-    if (r <= ThinCut) return true;
-    // Thick parts: the cross-section at the cut must hold no wood at all.
     const auto* rule = chunks.treeSpecies().find(tree.species);
-    const TreeVec axis = (s.b - s.a).normalized();
-    const TreeVec u = perpendicular(axis), v = axis.cross(u).normalized();
-    // The slice through the removed row: half a tile past the cut face.
-    const TreeVec centre =
-        lerp(s.a, s.b, o.t) + (s.b - s.a).normalized() * 0.5f;
-    const float reach = std::sqrt(r * r + 0.4f);
-    const int steps = int(std::ceil(reach));
+    // A settling trunk closes up after each cut: only a sawn-through
+    // cross-section cuts it, however thin.
+    const bool settles =
+        rule && rule->species.cut.fell == TreeFell::Settle && s.order == 0;
+    if (r <= ThinCut && !settles && thin) return true;
+    if (!rule) return false;
+    // Preserve trunk felling's shared ring test: many flared trunk
+    // capsules and buttresses overlap, including their rounded end caps.
+    if (s.order == 0) {
+        const TreeVec axis = (s.b - s.a).normalized();
+        const TreeVec ref =
+            std::abs(axis.y) < 0.9f ? TreeVec{0, 1, 0} : TreeVec{1, 0, 0};
+        const TreeVec u = axis.cross(ref).normalized();
+        const TreeVec v = axis.cross(u).normalized();
+        const TreeVec centre = lerp(s.a, s.b, o.t) + axis * 0.5f;
+        const float reach = std::sqrt(r * r + 0.4f);
+        const int steps = int(std::ceil(reach));
+        const auto& a = o.entry.anchor;
+        for (int i = -steps; i <= steps; ++i)
+            for (int j = -steps; j <= steps; ++j) {
+                if (float(i * i + j * j) > reach * reach) continue;
+                const TreeVec p = centre + u * float(i) + v * float(j);
+                const TilePos tile{a.x + int(std::lround(p.x)),
+                                   a.y + int(std::lround(p.y + 0.5f)),
+                                   a.z + int(std::lround(p.z))};
+                if (tile.x == removed.x && tile.y == removed.y &&
+                    tile.z == removed.z)
+                    continue;
+                const Tile* t = chunks.tileAt(
+                    int(chunks.wrap().wrapTile(tile.x)), tile.y, tile.z);
+                if (!t || t->block_id == rule->woodBlock) return false;
+            }
+        return true;
+    }
+    // Players saw tile rows, not a continuous plane perpendicular to a
+    // sloping branch. Such a plane samples intact rows beside a complete
+    // one-tile slit and would leave the disconnected limb standing.
+    // Rasterize the owning segment on each transverse grid slice instead.
+    TreeSkeleton section;
+    section.trunkRadius = k.trunkRadius;
+    section.curve = k.curve;
+    section.flare = k.flare;
+    section.segments.push_back(s);
+    section.segments.back().parent = -1;
+    auto bounds = tree.wood;
+    bounds.x0 += o.entry.anchor.x - tree.anchor.x;
+    bounds.x1 += o.entry.anchor.x - tree.anchor.x;
+    const TreeVec axis = s.b - s.a;
+    const float length = axis.length();
+    if (length < 1e-6f) return false;
+    const float direction[3]{axis.x / length, axis.y / length, axis.z / length};
+    const float start[3]{s.a.x, s.a.y, s.a.z};
     const auto& a = o.entry.anchor;
-    for (int i = -steps; i <= steps; ++i)
-        for (int j = -steps; j <= steps; ++j) {
-            if (float(i * i + j * j) > reach * reach) continue;
-            const TreeVec p = centre + u * float(i) + v * float(j);
-            const TilePos tile{a.x + int(std::lround(p.x)),
-                               a.y + int(std::lround(p.y + 0.5f)),
-                               a.z + int(std::lround(p.z))};
-            if (tile.x == removed.x && tile.y == removed.y &&
-                tile.z == removed.z)
-                continue;
-            const Tile* t = chunks.tileAt(tile.x, tile.y, tile.z);
-            // Unloaded wood cannot be checked: the part still stands.
-            if (!t || t->block_id == rule->woodBlock) return false;
+    const int row[3]{removed.x, removed.y, removed.z};
+    const float relative[3]{float(removed.x - a.x),
+                            float(removed.y - a.y) - 0.5f,
+                            float(removed.z - a.z)};
+    std::array<int, 3> axes{0, 1, 2};
+    std::sort(axes.begin(), axes.end(), [&](int x, int y) {
+        return std::abs(direction[x]) > std::abs(direction[y]);
+    });
+    std::vector<uint8_t> mask;
+    for (const int dim : axes) {
+        // Nearly longitudinal slices do not separate the two ends of the
+        // branch. Bound their oblique footprint to keep per-edit work small.
+        if (std::abs(direction[dim]) < 0.25f) continue;
+        const float along = (relative[dim] - start[dim]) / direction[dim];
+        // Do not cut a rounded end cap of the previous segment after its
+        // continuing segment has already been sawn. That would move the
+        // stump down to the previous joint on another removal in this row.
+        if (along < 0 || along > length * k.visible(s, age)) continue;
+        const TreeVec centre = s.a + axis * (along / length);
+        // Most edits leave obvious support near the axis. Test a handful
+        // of exact rasterized cells before allocating the full slice;
+        // otherwise sawing a massive trunk repeats a large mask per block.
+        const int middle[3]{a.x + int(std::lround(centre.x)),
+                            a.y + int(std::lround(centre.y + 0.5f)),
+                            a.z + int(std::lround(centre.z))};
+        bool obviousSupport = false;
+        const int offset = std::max(1, int(r * 0.5f));
+        for (int probe = 0; probe < 5 && !obviousSupport; ++probe) {
+            int p[3]{middle[0], middle[1], middle[2]};
+            p[dim] = row[dim];
+            if (probe > 0)
+                p[(dim + (probe <= 2 ? 1 : 2)) % 3] +=
+                    probe % 2 ? offset : -offset;
+            const Tile* tile =
+                chunks.tileAt(int(chunks.wrap().wrapTile(p[0])), p[1], p[2]);
+            if (tile && tile->block_id != rule->woodBlock) continue;
+            markTreeWood(section, a,
+                         {p[0], p[1], p[2], p[0] + 1, p[1] + 1, p[2] + 1}, age,
+                         mask);
+            obviousSupport = mask[0] != 0;
         }
-    return true;
+        if (obviousSupport) continue;
+        const float flare = s.order == 0 ? 1 + k.flare.amount : 1;
+        const float reach =
+            (std::max(s.r0, s.r1) * flare + 1) / std::abs(direction[dim]);
+        TreeTileBox slice{a.x + int(std::floor(centre.x - reach)),
+                          a.y + int(std::floor(centre.y + 0.5f - reach)),
+                          a.z + int(std::floor(centre.z - reach)),
+                          a.x + int(std::ceil(centre.x + reach)) + 1,
+                          a.y + int(std::ceil(centre.y + 0.5f + reach)) + 1,
+                          a.z + int(std::ceil(centre.z + reach)) + 1};
+        int* low[3]{&slice.x0, &slice.y0, &slice.z0};
+        int* high[3]{&slice.x1, &slice.y1, &slice.z1};
+        *low[dim] = row[dim];
+        *high[dim] = row[dim] + 1;
+        slice = slice.intersect(bounds);
+        if (slice.empty()) continue;
+        // Consult actual tiles first. Rasterizing an entire massive trunk
+        // slice for every removed block repeats millions of radius tests.
+        // Only remaining wood (or unknown tiles) needs an ownership test;
+        // include adjacent capsules so their joints also count as support.
+        markTreeWood(k, a,
+                     {removed.x, removed.y, removed.z, removed.x + 1,
+                      removed.y + 1, removed.z + 1},
+                     age, mask);
+        const bool expected = mask[0] != 0;
+        bool supported = false;
+        for (int y = slice.y1 - 1; y >= slice.y0 && !supported; --y)
+            for (int z = slice.z1 - 1; z >= slice.z0 && !supported; --z)
+                for (int x = slice.x1 - 1; x >= slice.x0 && !supported; --x) {
+                    const Tile* tile =
+                        chunks.tileAt(int(chunks.wrap().wrapTile(x)), y, z);
+                    if (tile && tile->block_id != rule->woodBlock) continue;
+                    markTreeWood(k, a, {x, y, z, x + 1, y + 1, z + 1}, age,
+                                 mask);
+                    // Unloaded wood still counts as supporting the limb.
+                    supported = mask[0] != 0;
+                }
+        if (expected && !supported) {
+            // Put the stump on the retained face of the actual sawn row,
+            // rather than projecting the last (possibly off-axis) tile.
+            const float face =
+                relative[dim] - std::copysign(0.5f, direction[dim]);
+            o.t = std::clamp((face - start[dim]) / (direction[dim] * length),
+                             0.f, k.visible(s, age));
+            return true;
+        }
+    }
+    return false;
 }
 
 void TreeSimulation::blockChanged(const BlockChange& change) {
@@ -226,14 +360,20 @@ bool TreeSimulation::baseLost(const TreeColumn::Entry& entry) {
             ground = !t || t->isSolid();
         }
     if (!ground) return true;
-    // Wood: a trunk cut at the ground leaves no stump to grow from.
+    // Wood: a trunk cut at the ground leaves no stump to grow from (a
+    // settling trunk comes down onto it instead).
+    const auto* species = chunks.treeSpecies().find(tree.species);
+    if (species && species->species.cut.fell == TreeFell::Settle) return false;
     for (const auto& s : tree.skeleton->segments)
         if (s.live() && s.order == 0 && !(s.flags & TreeSegment::Sprout) &&
             (s.flags & TreeSegment::CutEnd) && s.b.y < 0.5f)
             return true;
-    // Otherwise the first row of trunk wood the tree has now, if any.
+    // Otherwise the first row of trunk wood the tree has now, if any. A
+    // trunk that settles closes a sawn ring, even at the root.
     const auto* rule = chunks.treeSpecies().find(tree.species);
-    if (!rule || tree.wood.empty()) return false;
+    if (!rule || tree.wood.empty() ||
+        rule->species.cut.fell == TreeFell::Settle)
+        return false;
     const int shift = a.x - tree.anchor.x;
     const TreeTileBox row =
         TreeTileBox{tree.wood.x0 + shift, a.y + 1, tree.wood.z0,
@@ -266,29 +406,16 @@ void TreeSimulation::kill(const TreeColumn::Entry& entry) {
         (*map)[tree->key] = std::move(record);
     }
     chunks.setTreeOverrides(std::move(map));
-    // Its remaining wood goes (loaded chunks; unloaded ones keep theirs
-    // until edited: their trees no longer know it).
+    // Its remaining wood goes (loaded chunks, over the next updates;
+    // unloaded ones keep theirs until edited: their trees no longer know
+    // it). Chunk by chunk: a massive tree's box is billions of tiles.
     if (!tree->wood.empty()) {
         const int shift = entry.anchor.x - tree->anchor.x;
         const TreeTileBox box{tree->wood.x0 + shift, tree->wood.y0,
                               tree->wood.z0,         tree->wood.x1 + shift,
                               tree->wood.y1,         tree->wood.z1};
-        std::vector<uint8_t> mask;
-        markTreeWood(*tree->skeleton, entry.anchor, box, tree->growthAge(today),
-                     mask);
-        const auto* rule = chunks.treeSpecies().find(tree->species);
-        std::vector<EditRequest> requests;
-        for (int y = box.y0; y < box.y1; ++y)
-            for (int z = box.z0; z < box.z1; ++z)
-                for (int x = box.x0; x < box.x1; ++x) {
-                    if (!mask[box.index(x, y, z)]) continue;
-                    const Tile* t = chunks.tileAt(x, y, z);
-                    if (rule && t && t->block_id == rule->woodBlock)
-                        requests.push_back({{x, y, z}, EditMode::Replace, 0});
-                }
-        applying = true;
-        editor.apply(requests);
-        applying = false;
+        queueClears(box, {entry.anchor.x, entry.anchor.y, entry.anchor.z},
+                    {{}, 0, tree, entry.anchor, nullptr, 0});
     }
     chunks.removeTree(tree);
     changed = true;
@@ -297,9 +424,30 @@ void TreeSimulation::kill(const TreeColumn::Entry& entry) {
 
 void TreeSimulation::woodRemoved(const BlockChange& change) {
     if (!chunks.grownBlocks().test(change.before.block_id)) return;
-    const auto o = owner(change.pos, change.before.block_id);
-    if (!o || !severed(*o, change.pos)) return;
-    cut(*o);
+    times = {};
+    auto start = std::chrono::steady_clock::now();
+    auto candidates = owners(change.pos, change.before.block_id);
+    times.owner = lap(start);
+    // Of the segments the removal cuts through (a few at most: the trunk,
+    // a buttress, a limb's joint), the thickest: a sawn trunk takes its
+    // buttresses' joint with it.
+    const Owner* through = nullptr;
+    float thickest = -1;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        auto& c = candidates[i];
+        const auto& k = *c.entry.tree->skeleton;
+        const auto& segment = k.segments[size_t(c.segment)];
+        // A settling trunk is not cut again before its ring has closed.
+        if (segment.order == 0 && settling.contains(c.entry.tree->key))
+            continue;
+        const float r = k.radius(segment, c.t, c.entry.tree->growthAge(today));
+        if (r > thickest && severed(c, change.pos, i == 0)) {
+            through = &c;
+            thickest = r;
+        }
+    }
+    times.severed = lap(start);
+    if (through) cut(*through);
 }
 
 void TreeSimulation::commitTree(TreeRecord record, const TreeInstancePtr& tree,
@@ -309,6 +457,122 @@ void TreeSimulation::commitTree(TreeRecord record, const TreeInstancePtr& tree,
     chunks.setTreeOverrides(std::move(map));
     chunks.updateTree(tree, oldBounds);
     changed = true;
+}
+
+void TreeSimulation::queueClears(const TreeTileBox& box, TilePos from,
+                                 Clear clear) {
+    const auto wrap = chunks.wrap();
+    struct Queued {
+        double distance;
+        ChunkCoord coord;
+    };
+    std::vector<Queued> order;
+    // Iterate residency, not the enormous mostly-unloaded tree box. The
+    // snapshot is already available; column rebuilds cannot delay a cut.
+    chunks.forEachReady([&](const ChunkCoord& coord, const Chunk&) {
+        const int x = int(wrap.imageX(int(coord.x) * Chunk::SIZE_X,
+                                      (double(box.x0) + box.x1) * 0.5));
+        const int y = int(coord.y) * Chunk::SIZE_Y;
+        const int z = int(coord.z) * Chunk::SIZE_Z;
+        if (box.intersect({x, y, z, x + Chunk::SIZE_X, y + Chunk::SIZE_Y,
+                           z + Chunk::SIZE_Z})
+                .empty())
+            return;
+        const double dx = x + Chunk::SIZE_X * 0.5 - from.x,
+                     dy = y + Chunk::SIZE_Y * 0.5 - from.y,
+                     dz = z + Chunk::SIZE_Z * 0.5 - from.z;
+        order.push_back({dx * dx + dy * dy + dz * dz, coord});
+    });
+    std::sort(order.begin(), order.end(), [](const auto& l, const auto& r) {
+        return l.distance < r.distance;
+    });
+    if (clear.settling && !order.empty())
+        settling[clear.settling] += order.size();
+    for (auto& q : order) {
+        clear.coord = q.coord;
+        clears.push_back(clear);
+    }
+}
+
+void TreeSimulation::startClear(const Clear& clear) {
+    if (!chunks.getChunk(clear.coord)) {
+        finishClear(clear);  // unloaded meanwhile: cleared when it loads
+        return;
+    }
+    auto& pool = chunks.threadPool();
+    if (clear.removed) {
+        const auto* rule = chunks.treeSpecies().find(clear.removed->species);
+        clearJobs.push_back(
+            {clear,
+             pool.submit_task(
+                 [tree = clear.removed, coord = clear.coord,
+                  anchor = clear.anchor, block = rule ? rule->woodBlock : 0,
+                  age = clear.removed->growthAge(today),
+                  period = chunks.wrap().tiles] {
+                     return treeWoodRemoval(coord, *tree, anchor, block, age,
+                                            period);
+                 },
+                 BS::pr::high)});
+        return;
+    }
+    const auto* rule = chunks.treeSpecies().find(clear.tree->species);
+    clearJobs.push_back(
+        {clear,
+         pool.submit_task(
+             [tree = clear.tree, coord = clear.coord, anchor = clear.anchor,
+              block = rule ? rule->woodBlock : 0, day = clear.cutDay,
+              settles = clear.settling != 0, period = chunks.wrap().tiles] {
+                 return treeCutWoodDelta(coord, *tree, anchor, block,
+                                         uint16_t(tree->cuts.size()), day,
+                                         settles, period);
+             },
+             BS::pr::high)});
+}
+
+void TreeSimulation::finishClear(const Clear& clear) {
+    if (!clear.settling) return;
+    const auto it = settling.find(clear.settling);
+    if (it != settling.end() && --it->second == 0) settling.erase(it);
+}
+
+void TreeSimulation::clearSome(double budgetMs) {
+    using namespace std::chrono_literals;
+    const auto started = std::chrono::steady_clock::now();
+    const auto spent = [&] {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - started)
+            .count();
+    };
+    // Finished chunks: their edits, within the budget.
+    for (size_t i = 0; i < clearJobs.size() && spent() < budgetMs;) {
+        if (clearJobs[i].delta.wait_for(0s) != std::future_status::ready) {
+            ++i;
+            continue;
+        }
+        auto job = std::move(clearJobs[i]);
+        clearJobs.erase(clearJobs.begin() + std::ptrdiff_t(i));
+        TreeWoodDelta delta;
+        try {
+            delta = job.delta.get();
+        } catch (const std::exception&) {
+        }
+        if (const auto tiles = chunks.getChunkShared(job.clear.coord))
+            applyChanges(job.clear.coord, filterTreeWood(*tiles, delta));
+        finishClear(job.clear);
+    }
+    // Keep the pool busy with the next nearby chunks.
+    while (!clears.empty() && clearJobs.size() < MaxClearJobs) {
+        auto clear = std::move(clears.front());
+        clears.pop_front();
+        startClear(clear);
+    }
+}
+
+void TreeSimulation::finishClears() {
+    while (!clearJobs.empty() || !clears.empty()) {
+        for (auto& job : clearJobs) job.delta.wait();
+        clearSome(INFINITY);
+    }
 }
 
 void TreeSimulation::cut(const Owner& o) {
@@ -322,40 +586,43 @@ void TreeSimulation::cut(const Owner& o) {
     record.key = old.key;
     record.cuts = old.cuts;
     record.cuts.push_back({o.segment, o.t, old.age(today)});
+    auto start = std::chrono::steady_clock::now();
     auto tree = std::make_shared<TreeInstance>(old);
     tree->skeleton = applyTreeCuts(*old.skeleton, rule->species, record.cuts,
                                    record.cuts.size() - 1);
     tree->variant = -1;
     tree->cuts = record.cuts;
     finishTreeInstance(*tree);
+    times.rebuild = lap(start);
     const auto oldBounds = old.bounds;
     commitTree(std::move(record), tree, oldBounds);
+    times.commit = lap(start);
     ++cuts;
-    // The wood above the cut goes now in loaded chunks; unloaded ones clear
-    // it when they load (their stamps are older than the cut).
+    // The wood above the cut goes in loaded chunks over the next updates,
+    // nearest first; unloaded ones clear it when they load (their stamps
+    // are older than the cut).
     const double cutDay = double(tree->birthDay) + tree->cuts.back().age;
-    const auto& box = tree->wood;
-    const auto wrap = chunks.wrap();
-    for (int cz = std::max(0, box.z0 / Chunk::SIZE_Z);
-         cz <= (box.z1 - 1) / Chunk::SIZE_Z; ++cz)
-        for (int cxi = int(std::floor(double(box.x0) / Chunk::SIZE_X));
-             cxi <= int(std::floor(double(box.x1 - 1) / Chunk::SIZE_X));
-             ++cxi) {
-            const int64_t cx = wrap.enabled() ? wrap.wrapChunk(cxi) : cxi;
-            if (cx < 0) continue;
-            const auto column = chunks.treeColumn(unsigned(cx), unsigned(cz));
-            if (!column) continue;
-            for (int cy = std::max(0, box.y0 / Chunk::SIZE_Y);
-                 cy <= (box.y1 - 1) / Chunk::SIZE_Y && cy < Y_CHUNKS; ++cy) {
-                const ChunkCoord coord{unsigned(cx), unsigned(cy),
-                                       unsigned(cz)};
-                const auto tiles = chunks.getChunkShared(coord);
-                if (!tiles) continue;
-                applyChanges(coord, treeWoodChanges(*tiles, coord, *column,
-                                                    chunks.treeSpecies(),
-                                                    cutDay - 1e-3, cutDay));
-            }
-        }
+    const auto& s = old.skeleton->segments[size_t(o.segment)];
+    const TreeVec at = lerp(s.a, s.b, o.t);
+    const auto& a = o.entry.anchor;
+    auto box =
+        treeCutWoodBounds(*tree->skeleton, a, uint16_t(tree->cuts.size()));
+    const bool settles =
+        rule->species.cut.fell == TreeFell::Settle && s.order == 0;
+    // Settling moves wood one tile along the axis as well as removing it.
+    if (settles && !box.empty()) {
+        --box.x0;
+        --box.y0;
+        --box.z0;
+        ++box.x1;
+        ++box.y1;
+        ++box.z1;
+    }
+    queueClears(box,
+                {a.x + int(std::lround(at.x)), a.y + int(std::lround(at.y)),
+                 a.z + int(std::lround(at.z))},
+                {{}, cutDay, nullptr, a, tree, settles ? tree->key : 0});
+    times.clear = lap(start);
 }
 
 bool TreeSimulation::plant(TilePos ground, uint8_t species, double now) {

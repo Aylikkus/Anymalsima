@@ -2,6 +2,8 @@
 
 #include <deque>
 #include <functional>
+#include <future>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -44,8 +46,11 @@ class TreeRenderer {
     static constexpr float NearDistance = 40;
     static constexpr int InstanceStride = 64;  // foliage.vert
 
+    // pool: crown meshes are built on it (a massive crown takes tens of
+    // milliseconds); the previous mesh of a tree is drawn meanwhile.
     TreeRenderer(ChunkManager& chunks, const IAssets& assets,
-                 const World& world, IRenderer& renderer);
+                 const World& world, IRenderer& renderer, ThreadPool& pool);
+    ~TreeRenderer();
     TreeRenderer(const TreeRenderer&) = delete;
     TreeRenderer& operator=(const TreeRenderer&) = delete;
 
@@ -60,9 +65,9 @@ class TreeRenderer {
     size_t knownTrees() const { return trees.size(); }
     size_t drawnBillboards() const { return billboardsDrawn; }
     // Landmarks whose block wood is drawn as distant voxels
-    // (TerrainLodManager::setTreeWood): they get crowns without bark
-    // prisms. landmarkWood lists them with their wood age, quantized to
-    // growth buckets.
+    // (TerrainLodManager::setStructures): they get crowns without bark
+    // prisms. landmarkVoxels lists their wood as structure voxels, its age
+    // quantized to growth buckets.
     void setVoxelLandmarks(bool on) { voxelLandmarks = on; }
     // Whether the caller draws this chunk's blocks this frame (detail
     // coverage, radius and an uploaded mesh, possibly empty). A tree with
@@ -75,14 +80,24 @@ class TreeRenderer {
     void setBlockLight(const BlockLightPropagator* light) {
         blockLight = light;
     }
-    std::vector<TreeWoodSource> landmarkWood(double today) const;
+    std::vector<structure_voxels::SourcePtr> landmarkVoxels(double today) const;
     double cpuMilliseconds() const { return cpuMs; }
 
    private:
+    // A crown: one mesh per part (16-bit indices; massive crowns have
+    // several), built on the pool.
     struct MeshEntry {
-        FloraMesh cpu;  // kept alive: the GPU mesh references its arrays
-        MeshHandle gpu;
+        // Kept alive: the GPU meshes reference their arrays.
+        std::vector<FloraMesh> cpu;
+        std::vector<MeshHandle> gpu;
+        std::optional<std::future<std::vector<FloraMesh>>> job;
         uint64_t lastUsed = 0;
+        bool ready() const { return !job && !gpu.empty(); }
+    };
+    // Billboards: one small mesh per species, built in place.
+    struct BillboardEntry {
+        FloraMesh cpu;
+        MeshHandle gpu;
     };
     struct TreeDraw {
         TreeInstancePtr tree;
@@ -106,9 +121,11 @@ class TreeRenderer {
                         const Frustum& frustum,
                         const std::vector<ShaderProperty*>& base, double ex,
                         double ey, double ez, double today);
-    const MeshEntry* billboardMesh(uint8_t species);
+    const BillboardEntry* billboardMesh(uint8_t species);
+    // The crown mesh, or null while it is built (`starts` limits new jobs
+    // per frame).
     const MeshEntry* mesh(uint64_t key, const TreeInstance& tree, int bucket,
-                          tree_foliage::Detail detail, bool bare, int& budget);
+                          tree_foliage::Detail detail, bool bare, int& starts);
 
     ChunkManager& chunks;
     const IAssets& assets;
@@ -116,7 +133,12 @@ class TreeRenderer {
     IRenderer& renderer;
     std::unordered_map<uint64_t, TreeDraw> trees;  // by TreeInstance::key
     std::unordered_map<uint64_t, MeshEntry> meshes;
-    std::unordered_map<uint8_t, MeshEntry> billboardMeshes;
+    std::unordered_map<uint8_t, BillboardEntry> billboardMeshes;
+    // The crown mesh last drawn for each tree (by TreeInstance::key): drawn
+    // while its next mesh (cut, growth step, detail change) is built.
+    std::unordered_map<uint64_t, uint64_t> drawnMesh;
+    ThreadPool& pool;
+    size_t meshJobs = 0;
     struct BillboardRegion {
         Vec2u region;
         ChunkManager::BillboardSet set;

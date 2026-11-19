@@ -139,8 +139,8 @@
     {
         "name": "trees.elder",
         "form": "giant",
-        "size": { "height_m": [100, 120], "trunk_radius_m": [28, 64],
-                  "crown_radius_m": [90, 140] },
+        "size": { "height_m": [450, 500], "trunk_radius_m": [28, 64],
+                  "crown_radius_m": [800, 1000] },
         "growth": { "maturity_days": [80000, 120000],
                     "lifespan_days": [2000000, 5000000], "curve": 1.4 },
         "form_params": { "limbs": [5, 8], "bole_height": [0.2, 0.35],
@@ -157,11 +157,11 @@
                            "temperature_range_c": [5, 22],
                            "humidity_range": [0.55, 1.0] } ],
             "max_slope": 0.6,
-            "density_per_100m2": 0.0000005,
+            "density_per_100m2": 0.0005,
             "spacing_m": [1500, 2500],
             "persistent_sites": true,
             "priority": 100
         },
-        "cut": { "stump_resprouts": true, "resprout_days": [200, 400] }
+        "cut": { "stump_resprouts": true, "resprout_days": [200, 400], "fell": "settle" }
     }
 ]

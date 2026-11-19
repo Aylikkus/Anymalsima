@@ -190,11 +190,12 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     floraRenderer = std::make_unique<FloraRenderer>(
         *chunkManager, *context.assets, *this->world, *context.renderer);
     treeRenderer = std::make_unique<TreeRenderer>(
-        *chunkManager, *context.assets, *this->world, *context.renderer);
+        *chunkManager, *context.assets, *this->world, *context.renderer,
+        context.threadPool);
     // Coloured lamps tint plants and crowns (declared after blockLight).
     floraRenderer->setBlockLight(blockLight.get());
     treeRenderer->setBlockLight(blockLight.get());
-    treeRenderer->setVoxelLandmarks(terrainLod->drawsTreeWood());
+    treeRenderer->setVoxelLandmarks(terrainLod->drawsStructureVoxels());
     // Trees hand their wood over to blocks only where render() draws them.
     treeRenderer->setChunkDrawn([this](const ChunkCoord& c) {
         return detailChunk(c) && chunkManager->hasUploadedMesh(c);
@@ -620,7 +621,7 @@ void GameplayState::update(Game& game, float dt) {
     locationMgr->update();
     regionStore->update();
     updateAutosave(dt);
-    terrainLod->setTreeWood(treeRenderer->landmarkWood(clock.days()));
+    terrainLod->setStructures(treeRenderer->landmarkVoxels(clock.days()));
     terrainLod->update(camera, uiContext->getWindowSize());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
@@ -814,7 +815,7 @@ bool GameplayState::detailChunk(const ChunkCoord& coord) const {
     return std::abs(world->wrap().deltaChunk(coord.x, camCX)) <= CHUNK_RADIUS &&
            std::abs(int(coord.y) - camCY) <= CHUNK_RADIUS &&
            std::abs(int(coord.z) - camCZ) <= CHUNK_RADIUS &&
-           terrainLod->drawsColumn(coord.x, coord.z);
+           terrainLod->drawsChunk(coord);
 }
 
 void GameplayState::renderShadowCasters(RenderTarget& target, double now) {

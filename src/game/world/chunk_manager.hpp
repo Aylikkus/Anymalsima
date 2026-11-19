@@ -221,36 +221,51 @@ class ChunkManager {
     // Uploads finished meshes. Call on the main thread before drawing. Kept
     // inline: the headless test library does not link bgfx.
     void uploadReadyMeshes(IRenderer& renderer) {
+        // Meshes whose GPU buffers could not be created (out of bgfx
+        // handles) wait for the next frame; the chunk stays not uploaded, so
+        // distant proxies and tree stand-ins keep covering it.
+        decltype(readyMeshes) retry;
         for (auto& result : readyMeshes) {
             auto it = chunks.find(result.coord);
             if (it == chunks.end() || it->second.identity != result.identity ||
                 it->second.meshRevision != result.revision)
                 continue;
             auto& handle = it->second;
-            handle.uploaded = true;
-            handle.uploadedRevision = result.revision;
-            handle.vertices = std::move(result.mesh.vertices);
-            handle.indices = std::move(result.mesh.indices);
-            if (handle.vertices.empty()) {
+            if (result.mesh.vertices.empty()) {
                 // Hide a previous mesh when geometry becomes empty.
                 handle.mesh.release();
                 handle.initialised = false;
+                handle.vertices.clear();
+                handle.indices.clear();
+                handle.uploaded = true;
+                handle.uploadedRevision = result.revision;
                 meshed.erase(result.coord);
                 meshUploaded.emit(result.coord);
                 continue;
             }
             if (!handle.initialised) {
                 handle.mesh.initDynamic<BlockVertex>(
-                    &renderer, handle.vertices.size(), handle.indices.size());
+                    &renderer, result.mesh.vertices.size(),
+                    result.mesh.indices.size());
                 handle.initialised = true;
             }
-            handle.mesh.update(handle.vertices.data(), handle.vertices.size(),
-                               handle.indices.data(), handle.indices.size(),
-                               true);
+            handle.mesh.update(
+                result.mesh.vertices.data(), result.mesh.vertices.size(),
+                result.mesh.indices.data(), result.mesh.indices.size(), true);
+            if (!handle.mesh.drawable()) {
+                handle.mesh.release();
+                handle.initialised = false;
+                retry.push_back(std::move(result));
+                continue;
+            }
+            handle.uploaded = true;
+            handle.uploadedRevision = result.revision;
+            handle.vertices = std::move(result.mesh.vertices);
+            handle.indices = std::move(result.mesh.indices);
             meshed.insert(result.coord);
             meshUploaded.emit(result.coord);
         }
-        readyMeshes.clear();
+        readyMeshes = std::move(retry);
     }
     MeshHandle* getMesh(const ChunkCoord& coord);
 
@@ -266,6 +281,9 @@ class ChunkManager {
     // keep a region's trees from building).
     void setMaxTreeJobs(size_t value) { maxTreeJobs = value; }
     size_t meshInFlight() const { return meshJobs.size(); }
+    // The worker pool (for systems that build on chunk data, like tree
+    // wood updates).
+    ThreadPool& threadPool() const { return pool; }
     bool meshInFlight(ChunkCoord coord) const {
         return std::any_of(meshJobs.begin(), meshJobs.end(),
                            [&](const auto& job) { return job.coord == coord; });
@@ -416,6 +434,9 @@ class ChunkManager {
     std::shared_ptr<const TreeSpeciesTable> treeTable;
     std::vector<TreeLandmark> landmarks;
     std::unordered_set<Vec2u> landmarkRegions;
+    // Regions around a chunk where a landmark anchor can still reach it
+    // (at least 2): from the widest landmark species.
+    int landmarkRadius = 2;
     uint32_t treeSeed = 0;
     std::unordered_map<Vec2u, std::shared_ptr<const TreeSet>> treeSets;
     struct TreeJob {

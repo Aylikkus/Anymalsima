@@ -65,14 +65,13 @@ std::vector<std::vector<CutPlane>> cutPlanes(const TreeSkeleton& k) {
     }
     return planes;
 }
-}  // namespace
-
-TreeTileBox treeWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
-                           bool includePruned) {
+TreeTileBox woodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                       bool includePruned, uint16_t cut) {
     if (!skeleton.formsWood()) return {};
     TreeVec lo{INFINITY, INFINITY, INFINITY},
         hi{-INFINITY, -INFINITY, -INFINITY};
     for (const auto& s : skeleton.segments) {
+        if (cut && (s.live() || s.cut != cut)) continue;
         if ((!s.live() && !includePruned) ||
             maxRadius(skeleton, s) < TreeVoxelRadius)
             continue;
@@ -92,6 +91,17 @@ TreeTileBox treeWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
             anchor.x + int(std::ceil(hi.x)) + 1,
             anchor.y + int(std::ceil(hi.y + 0.5f)) + 1,
             anchor.z + int(std::ceil(hi.z)) + 1};
+}
+}  // namespace
+
+TreeTileBox treeWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                           bool includePruned) {
+    return woodBounds(skeleton, anchor, includePruned, 0);
+}
+
+TreeTileBox treeCutWoodBounds(const TreeSkeleton& skeleton, TreeAnchor anchor,
+                              uint16_t cut) {
+    return cut ? woodBounds(skeleton, anchor, true, cut) : TreeTileBox{};
 }
 
 void markTreeWood(const TreeSkeleton& skeleton, TreeAnchor anchor,

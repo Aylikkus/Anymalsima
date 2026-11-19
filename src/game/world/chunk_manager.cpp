@@ -27,6 +27,12 @@ ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
     for (const auto& site : landmarks)
         landmarkRegions.insert({unsigned(site.x / TerrainTuning::RegionX),
                                 unsigned(site.z / TerrainTuning::RegionZ)});
+    // A chunk `extent` tiles from an anchor is at most this many regions
+    // away (plus a margin for clumps beyond the declared crown).
+    landmarkRadius =
+        std::max(2, int(std::ceil((treeTable->maxLandmarkExtent() + 16) /
+                                  std::min(TerrainTuning::RegionX,
+                                           TerrainTuning::RegionZ))));
     const size_t threads = std::max<size_t>(1, pool.get_thread_count());
     maxGenerationJobs = std::clamp<size_t>(threads * 2, 4, 32);
     maxMeshJobs = std::clamp<size_t>(threads, 2, 16);
@@ -1150,7 +1156,8 @@ std::vector<TreeLandmark> ChunkManager::landmarksNear(Vec2u region) const {
         const int64_t dx = WorldWrap::delta(site.x / TerrainTuning::RegionX,
                                             region.x, terrainWorld.width);
         const int64_t dz = site.z / TerrainTuning::RegionZ - int64_t(region.y);
-        if (std::abs(dx) <= 2 && std::abs(dz) <= 2) near.push_back(site);
+        if (std::abs(dx) <= landmarkRadius && std::abs(dz) <= landmarkRadius)
+            near.push_back(site);
     }
     return near;
 }
@@ -1159,9 +1166,9 @@ std::vector<Vec2u> ChunkManager::treeRegionsAround(Vec2u region) const {
     std::vector<Vec2u> out;
     const auto wrapX = wrap();
     // Ordinary trees reach at most one region from their anchor; landmarks
-    // two (only regions holding one are needed).
-    for (int dz = -2; dz <= 2; ++dz)
-        for (int dx = -2; dx <= 2; ++dx) {
+    // landmarkRadius (only regions holding one are needed).
+    for (int dz = -landmarkRadius; dz <= landmarkRadius; ++dz)
+        for (int dx = -landmarkRadius; dx <= landmarkRadius; ++dx) {
             const int64_t z = int64_t(region.y) + dz;
             if (z < 0 || z >= terrainWorld.height) continue;
             if (!wrapX.enabled() &&
@@ -1227,10 +1234,13 @@ void ChunkManager::releaseTreeSets() {
     std::erase_if(treeSets, [&](const auto& entry) {
         const Vec2u q = entry.first;
         if (treeWishes.contains(q)) return false;
+        // Chunks of registered regions read sets two regions around, and
+        // landmark sets up to landmarkRadius.
+        const int keep = landmarkRegions.contains(q) ? landmarkRadius : 2;
         for (const auto& [rc, count] : regionRegistrations) {
             const int64_t dx = WorldWrap::delta(rc.x, q.x, width);
             const int64_t dz = int64_t(rc.y) - int64_t(q.y);
-            if (std::abs(dx) <= 2 && std::abs(dz) <= 2) return false;
+            if (std::abs(dx) <= keep && std::abs(dz) <= keep) return false;
         }
         return true;
     });
