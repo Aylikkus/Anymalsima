@@ -64,6 +64,7 @@ inline int surfaceCeiling(int landHeight) {
 struct TerrainSample {
     int surface_y = 0;
     double slope = 0;
+    double originalSlope = 0;
 };
 
 struct TerrainRegion {
@@ -95,7 +96,10 @@ struct TerrainNeighborhood {
     // X wraps around the world; Z clamps to its edge rows.
     const TerrainRegion& at(int x, int z) const {
         z = std::clamp(z, 0, height - 1);
-        const int lx = int(WorldWrap::delta(x, int64_t(center.x), width)) + 2;
+        int64_t dx = int64_t(x) - center.x;
+        if (width > 0 && (dx < -width / 2 || dx >= width - width / 2))
+            dx = WorldWrap::delta(x, center.x, width);
+        const auto lx = dx + 2;
         const int lz = z - static_cast<int>(center.y) + 2;
         if (lx < 0 || lx >= 5 || lz < 0 || lz >= 5)
             throw std::out_of_range("Terrain sample outside neighborhood halo");
@@ -128,6 +132,12 @@ class TerrainSampler {
     ChunkColumnInputs columns(unsigned chunkX, unsigned chunkZ) const;
 
    private:
+    struct Heights {
+        double ground;
+        double original;
+    };
+    Heights heightsAt(double x, double z) const;
+
     const TerrainNeighborhood& data;
     double control(int gx, int gz, bool amplitude) const;
     double cliffLift(int rx, int rz, double x, double z) const;

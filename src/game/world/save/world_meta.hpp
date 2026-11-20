@@ -22,9 +22,16 @@ struct WorldMeta : ISerializable {
     // 10: prototype roots. 11: branching roots. 12: bark and inner wood.
     // 13: uphill root contact. 14: generated standing basins.
     static constexpr int HydrologyVersion = 14;
-    static constexpr int GeneratorVersion = HydrologyVersion;
-    // Oldest generator version whose surface heights match the current one.
-    // Bump it whenever surface heights change (not for material changes).
+    static constexpr int RiverVersion = 15;
+    static constexpr int NaturalRiverVersion = 16;
+    static constexpr int BoundedRiverVersion = 17;
+    static constexpr int RiverSedimentVersion = 18;
+    static constexpr int LakeOutletVersion = 19;
+    static constexpr int CoastalBasinVersion = 20;
+    static constexpr int OceanShoreVersion = 21;
+    static constexpr int GeneratorVersion = OceanShoreVersion;
+    // Oldest generator version supported by terrain edit comparisons.
+    // Later surface changes are selected by the saved generator version.
     static constexpr int SurfaceVersion = 9;
 
     struct CameraState {

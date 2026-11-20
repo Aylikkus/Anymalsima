@@ -5,6 +5,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/location_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_hydrology.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/generated_rivers.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
@@ -466,7 +467,14 @@ target_compile_definitions(tree_benchmark PRIVATE
 
 foreach(case hydrology_basin_outlets_and_wrap
              hydrology_saved_baseline_matches_new_chunk
-             hydrology_lod_fallback_refines_visible_water)
+             hydrology_lod_fallback_refines_visible_water
+             hydrology_wrapped_river_profiles_and_meshes
+             hydrology_natural_reach_profiles_and_coastal_preview
+             hydrology_river_banks_close_dry_faces
+             hydrology_river_sediment_matches_local_soil
+             hydrology_river_continues_from_lake
+             hydrology_coastal_basin_fills_at_sea_level
+             hydrology_sea_and_high_lake_share_region)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;water" TIMEOUT 30)

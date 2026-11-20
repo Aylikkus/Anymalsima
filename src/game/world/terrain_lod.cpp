@@ -22,6 +22,21 @@ struct Point {
 Point terrainPoint(const Patch&, SurfaceSampler& sampler, float x, float z) {
     return {x, float(sampler.height(int(x), int(z)) + 1), z};
 }
+int channelSpacing(const Patch& p) {
+    if (p.spacing >= RootSpacing) return 8;
+    if (p.spacing >= 16) return 4;
+    return p.spacing >= 4 ? 2 : 1;
+}
+
+Point riverTerrainPoint(const Patch& p, SurfaceSampler& sampler, float x,
+                        float z) {
+    auto point = terrainPoint(p, sampler, x, z);
+    const int level =
+        sampler.channelFloorLevel(int(x), int(z), channelSpacing(p));
+    if (level > 0)
+        point.y = std::clamp(float(level - 1), point.y - 96.f, point.y);
+    return point;
+}
 // Corners of one tessellation cell, counter-clockwise from (x, z).
 std::array<Point, 4> terrainRing(const Patch& p, SurfaceSampler& sampler,
                                  float x, float z, float x1, float z1) {
@@ -43,9 +58,8 @@ void triangle(Geometry& mesh, Point a, Point b, Point c, float layer,
     n = {n.x / length, n.y / length, n.z / length};
     const auto base = uint32_t(mesh.vertices.size());
     for (const auto& p : {a, b, c}) {
-        mesh.vertices.push_back(
-            {p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, top, edgeKind, layer,
-             0xffffffff});
+        mesh.vertices.push_back({p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, top,
+                                 edgeKind, layer, 0xffffffff});
         mesh.bounds.minY = std::min(mesh.bounds.minY, p.y);
         mesh.bounds.maxY = std::max(mesh.bounds.maxY, p.y);
     }
@@ -56,6 +70,135 @@ void quad(Geometry& mesh, Point a, Point b, Point c, Point d, float layer,
     triangle(mesh, a, b, c, layer, top, edgeKind);
     triangle(mesh, a, c, d, layer, top, edgeKind);
 }
+void waterTile(Geometry& mesh, SurfaceSampler& sampler, int x, int z,
+               WaterSurface water, bool wrapX, bool top = true) {
+    if (!water.wet()) return;
+    const float a = x, b = x + 1, c = z, d = z + 1;
+    const float y = water.surfaceY;
+    if (top)
+        quad(mesh, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
+             water.reach ? -3 : -2, water.reach ? water.flow.x : -1,
+             water.flow.y);
+    if (!water.reach && !water.edited &&
+        !sampler.hasChannel(x - 1, z - 1, x + 2, z + 2))
+        return;
+    for (const auto& [dx, dz] :
+         std::array<Vec2i, 4>{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}}) {
+        if (z + dz < 0 || z + dz >= sampler.depth() ||
+            (!wrapX && (x + dx < 0 || x + dx >= sampler.width())))
+            continue;
+        const auto other = sampler.waterAt(x + dx, z + dz);
+        if (other.surfaceY >= water.surfaceY ||
+            (!water.edited && !(other.wet() && (water.reach || other.reach))))
+            continue;
+        const float bottom =
+            water.dropBottom(other, sampler.height(x + dx, z + dz));
+        if (bottom >= y) continue;
+        const Vec2 flow = water.reach ? water.flow : Vec2(float(dx), float(dz));
+        const float sx = a + (dx > 0 || dz > 0);
+        const float sz = c + (dz > 0 || dx < 0);
+        quad(mesh, {sx, bottom, sz}, {sx, y, sz}, {sx - dz, y, sz + dx},
+             {sx - dz, bottom, sz + dx}, -3, flow.x, flow.y);
+    }
+}
+
+void channelWater(Geometry& out, SurfaceSampler& sampler, int x, int z, int x1,
+                  int z1, bool wrapX) {
+    constexpr int Side = 8;
+    std::array<WaterSurface, Side * Side> samples;
+    const auto at = [&](int xx, int zz) -> WaterSurface& {
+        return samples[(zz - z) * Side + xx - x];
+    };
+    for (int zz = z; zz < z1; ++zz)
+        for (int xx = x; xx < x1; ++xx) {
+            auto& sample = at(xx, zz);
+            sample = sampler.waterAt(xx, zz);
+            waterTile(out, sampler, xx, zz, sample, wrapX, false);
+        }
+    const auto same = [](WaterSurface a, WaterSurface b) {
+        return a.surfaceY == b.surfaceY && a.reach == b.reach &&
+               a.flow == b.flow;
+    };
+    for (int zz = z; zz < z1; ++zz)
+        for (int xx = x; xx < x1; ++xx) {
+            const auto water = at(xx, zz);
+            if (!water.wet()) continue;
+            int endX = xx + 1, endZ = zz + 1;
+            while (endX < x1 && same(water, at(endX, zz))) ++endX;
+            for (; endZ < z1; ++endZ) {
+                int probe = xx;
+                while (probe < endX && same(water, at(probe, endZ))) ++probe;
+                if (probe != endX) break;
+            }
+            const float a = xx, b = endX, c = zz, d = endZ, y = water.surfaceY;
+            quad(out, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
+                 water.reach ? -3 : -2, water.reach ? water.flow.x : -1,
+                 water.flow.y);
+            for (int iz = zz; iz < endZ; ++iz)
+                for (int ix = xx; ix < endX; ++ix) at(ix, iz) = {};
+        }
+}
+
+// Shared vertices on adjoining adaptive cells keep the banks closed even
+// where only one side of an edge needs tile-resolution terrain.
+struct TerrainCells {
+    struct Cell {
+        int x0, z0, x1, z1;
+        bool channel;
+    };
+    std::vector<Cell> leaves;
+    std::unordered_map<int, std::vector<int>> xs, zs;
+
+    void add(SurfaceSampler& sampler, int x, int z, int x1, int z1, int step) {
+        const bool channel = sampler.hasChannel(x - 1, z - 1, x1 + 1, z1 + 1);
+        if (channel && (x1 - x > step || z1 - z > step)) {
+            const int mx = std::max(x + 1, (x + x1) / 2);
+            const int mz = std::max(z + 1, (z + z1) / 2);
+            add(sampler, x, z, mx, mz, step);
+            if (mx < x1) add(sampler, mx, z, x1, mz, step);
+            if (mz < z1) add(sampler, x, mz, mx, z1, step);
+            if (mx < x1 && mz < z1) add(sampler, mx, mz, x1, z1, step);
+            return;
+        }
+        leaves.push_back({x, z, x1, z1, channel});
+        for (int u : {x, x1}) xs[u].insert(xs[u].end(), {z, z1});
+        for (int v : {z, z1}) zs[v].insert(zs[v].end(), {x, x1});
+    }
+
+    void sortEdges() {
+        const auto sort = [](auto& edges) {
+            for (auto& [_, positions] : edges) {
+                std::sort(positions.begin(), positions.end());
+                positions.erase(std::unique(positions.begin(), positions.end()),
+                                positions.end());
+            }
+        };
+        sort(xs);
+        sort(zs);
+    }
+
+    template <typename PointAt>
+    void ring(Cell cell, const PointAt& point, std::vector<Point>& out) const {
+        out.clear();
+        const auto [x, z, x1, z1, channel] = cell;
+        const auto append = [&](const auto& list, int begin, int end,
+                                auto position) {
+            if (begin < end) {
+                for (auto i = std::lower_bound(list.begin(), list.end(), begin);
+                     i != list.end() && *i < end; ++i)
+                    out.push_back(position(*i));
+            } else {
+                auto i = std::upper_bound(list.begin(), list.end(), begin);
+                while (i != list.begin() && *--i > end)
+                    out.push_back(position(*i));
+            }
+        };
+        append(xs.at(x), z, z1, [&](int a) { return point(x, a); });
+        append(zs.at(z1), x, x1, [&](int a) { return point(a, z1); });
+        append(xs.at(x1), z1, z, [&](int a) { return point(x1, a); });
+        append(zs.at(z), x1, x, [&](int a) { return point(a, z); });
+    }
+};
 }  // namespace
 
 std::array<Patch, 4> children(const Patch& p) {
@@ -204,20 +347,25 @@ float meshHeight(const Patch& p, SurfaceSampler& sampler, float x, float z) {
     if (p.spacing == 1) return sampler.height(int(x), int(z)) + 1;
     const int endX = std::min(p.x + p.size(), sampler.width());
     const int endZ = std::min(p.z + p.size(), sampler.depth());
+    const int step = channelSpacing(p);
+    const bool channel = sampler.hasChannel(
+        int(x) - step, int(z) - step, int(x) + step + 1, int(z) + step + 1);
+    const int spacing = channel ? step : p.spacing;
     const int ix =
-        std::clamp(int((x - p.x) / p.spacing), 0, (endX - p.x - 1) / p.spacing);
+        std::clamp(int((x - p.x) / spacing), 0, (endX - p.x - 1) / spacing);
     const int iz =
-        std::clamp(int((z - p.z) / p.spacing), 0, (endZ - p.z - 1) / p.spacing);
-    const float x0 = p.x + ix * p.spacing, z0 = p.z + iz * p.spacing;
-    const float x1 = std::min(int(x0) + p.spacing, endX),
-                z1 = std::min(int(z0) + p.spacing, endZ);
-    const auto center =
-        terrainPoint(p, sampler, (x0 + x1) * .5f, (z0 + z1) * .5f);
-    const auto ring = terrainRing(p, sampler, x0, z0, x1, z1);
-    const float error =
-        std::abs(center.y - (terrainPoint(p, sampler, x0, z0).y +
-                             terrainPoint(p, sampler, x1, z1).y) *
-                                .5f);
+        std::clamp(int((z - p.z) / spacing), 0, (endZ - p.z - 1) / spacing);
+    const float x0 = p.x + ix * spacing, z0 = p.z + iz * spacing;
+    const float x1 = std::min(int(x0) + spacing, endX),
+                z1 = std::min(int(z0) + spacing, endZ);
+    const auto point = [&](float xx, float zz) {
+        return channel ? riverTerrainPoint(p, sampler, xx, zz)
+                       : terrainPoint(p, sampler, xx, zz);
+    };
+    const auto center = point((x0 + x1) * .5f, (z0 + z1) * .5f);
+    const std::array ring{point(x0, z0), point(x0, z1), point(x1, z1),
+                          point(x1, z0)};
+    const float error = std::abs(center.y - (ring[0].y + ring[2].y) * .5f);
     const auto interpolate = [&](Point a, Point b,
                                  Point c) -> std::optional<float> {
         const float det = (b.z - c.z) * (a.x - c.x) + (c.x - b.x) * (a.z - c.z);
@@ -321,6 +469,16 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
             waterBand.levels[z * side + x] = int16_t(water.surfaceY);
             if (water.wet()) {
                 lowWater = std::min(lowWater, water.topTile());
+                if (water.reach || water.edited ||
+                    sampler.hasChannel(tx - 1, tz - 1, tx + 2, tz + 2))
+                    for (const auto& [dx, dz] : std::array<Vec2i, 4>{
+                             {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}})
+                        if (tz + dz >= 0 && tz + dz < sampler.depth())
+                            lowWater =
+                                std::min(lowWater,
+                                         water.dropBottom(
+                                             sampler.waterAt(tx + dx, tz + dz),
+                                             sampler.height(tx + dx, tz + dz)));
                 highWater = std::max(highWater, water.topTile());
             }
         }
@@ -345,10 +503,12 @@ bool WaterBand::matches(ChunkCoord coord,
 }
 
 Mesh build(const Patch& p, SurfaceSampler& sampler,
-           const std::atomic_bool& cancelled, int materialMap, bool wrapX) {
+           const std::atomic_bool& cancelled, int materialMap, bool wrapX,
+           bool waterOnly) {
     Mesh mesh;
     const int endX = std::min(p.x + p.size(), sampler.width());
     const int endZ = std::min(p.z + p.size(), sampler.depth());
+    if (endX <= p.x || endZ <= p.z) return mesh;
     mesh.provisionalWater = sampler.hasUnrefinedWater(p.x, p.z, endX, endZ);
     mesh.bounds = {float(p.x), float(Y_CHUNKS * Chunk::SIZE_Y),
                    float(p.z), float(endX),
@@ -358,228 +518,273 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     // Refine the shoreline at up to eight subdivisions per terrain cell.
     // Stepped and nearby patches can still represent each individual tile.
     const int waterSpacing = std::max(1, p.spacing / 8);
+    const int step = channelSpacing(p);
+    const bool riverPatch =
+        !stepped &&
+        sampler.hasChannel(p.x - step, p.z - step, endX + step, endZ + step);
+    std::unordered_map<uint64_t, float> corrected;
     const auto point = [&](float x, float z) {
-        return terrainPoint(p, sampler, x, z);
+        if (!riverPatch) return terrainPoint(p, sampler, x, z);
+        const uint64_t key = (uint64_t(unsigned(x)) << 32) | unsigned(z);
+        const auto [it, inserted] = corrected.try_emplace(key);
+        if (inserted) it->second = riverTerrainPoint(p, sampler, x, z).y;
+        return Point{x, it->second, z};
     };
-    const auto cellRing = [&](float x, float z, float x1, float z1) {
-        return terrainRing(p, sampler, x, z, x1, z1);
-    };
+    TerrainCells cells;
     for (int z = p.z; z < endZ; z += p.spacing) {
         if (cancelled.load(std::memory_order_relaxed)) return {};
         for (int x = p.x; x < endX; x += p.spacing) {
-            const float x1 = std::min(x + p.spacing, endX);
-            const float z1 = std::min(z + p.spacing, endZ);
-            if (stepped) {
-                const auto column = sampler.column(x, z);
-                const float y = column.surfaceY + 1;
-                quad(mesh, {float(x), y, float(z)}, {float(x), y, z1},
-                     {x1, y, z1}, {x1, y, float(z)}, column.material);
-                const int dx[4] = {-1, 1, 0, 0}, dz[4] = {0, 0, -1, 1};
-                for (int edge = 0; edge < 4; ++edge) {
-                    const bool boundary = edge == 0   ? x == p.x
-                                          : edge == 1 ? x1 == endX
-                                          : edge == 2 ? z == p.z
-                                                      : z1 == endZ;
-                    const int nx = x + dx[edge], nz = z + dz[edge];
-                    const bool outside =
-                        nz < 0 || nz >= sampler.depth() ||
-                        (!wrapX && (nx < 0 || nx >= sampler.width()));
-                    // Boundary walls reach below the lower column so they
-                    // overlap any neighbour patch's surface or skirt.
-                    const int neighbour = sampler.height(nx, nz) + 1;
-                    const int bottom =
-                        outside    ? 0
-                        : boundary ? std::max(0, std::min(neighbour, int(y)) -
-                                                     SteppedSkirt)
-                                   : neighbour;
-                    const auto wallLayer = [&](int tileY) {
-                        // The top of an overlap wall is a continuation of the
-                        // surface. Preserve the strata below it and on cliffs.
-                        return boundary && !outside && tileY >= int(y) - 2
-                                   ? column.material
-                                   : sampler.materialAt(x, tileY, z);
-                    };
-                    for (int y0 = bottom; y0 < int(y);) {
-                        const float layer = wallLayer(y0);
-                        int nextY = y0 + 1;
-                        while (nextY < int(y) && wallLayer(nextY) == layer)
-                            ++nextY;
-                        const float low = y0, high = nextY;
-                        y0 = nextY;
-                        if (edge == 0)
-                            quad(mesh, {float(x), low, float(z)},
-                                 {float(x), low, z1}, {float(x), high, z1},
-                                 {float(x), high, float(z)}, layer, y,
-                                 boundary ? 2.f : 0.f);
-                        if (edge == 1)
-                            quad(mesh, {x1, low, z1}, {x1, low, float(z)},
-                                 {x1, high, float(z)}, {x1, high, z1}, layer,
-                                 y, boundary ? 2.f : 0.f);
-                        if (edge == 2)
-                            quad(mesh, {x1, low, float(z)},
-                                 {float(x), low, float(z)},
-                                 {float(x), high, float(z)},
-                                 {x1, high, float(z)}, layer, y,
-                                 boundary ? 2.f : 0.f);
-                        if (edge == 3)
-                            quad(mesh, {float(x), low, z1}, {x1, low, z1},
-                                 {x1, high, z1}, {float(x), high, z1}, layer,
-                                 y, boundary ? 2.f : 0.f);
-                    }
-                }
-                if (column.water.wet()) {
-                    const float level = column.water.surfaceY;
-                    quad(mesh.water, {float(x), level, float(z)},
-                         {float(x), level, z1}, {x1, level, z1},
-                         {x1, level, float(z)}, -2);
-                }
+            const int x1 = std::min(x + p.spacing, endX),
+                      z1 = std::min(z + p.spacing, endZ);
+            if (riverPatch)
+                cells.add(sampler, x, z, x1, z1, step);
+            else
+                cells.leaves.push_back({x, z, x1, z1, false});
+        }
+    }
+    if (riverPatch) cells.sortEdges();
+    std::vector<Point> ring;
+    for (const auto cell : cells.leaves) {
+        if (cancelled.load(std::memory_order_relaxed)) return {};
+        const auto [x, z, endCellX, endCellZ, channel] = cell;
+        const float x1 = endCellX, z1 = endCellZ;
+        if (stepped) {
+            if (waterOnly) {
+                waterTile(mesh.water, sampler, x, z, sampler.waterAt(x, z),
+                          wrapX);
                 continue;
             }
-            const auto center = point((x + x1) * .5f, (z + z1) * .5f);
-            const auto ring = cellRing(x, z, x1, z1);
-            const float error =
-                std::abs(center.y - (ring[0].y + ring[2].y) * .5f);
-            mesh.error = std::max(mesh.error, error);
-            const bool flat = error <= 1.f;
+            const auto column = sampler.column(x, z);
+            const float y = column.surfaceY + 1;
+            quad(mesh, {float(x), y, float(z)}, {float(x), y, z1}, {x1, y, z1},
+                 {x1, y, float(z)}, column.material);
+            const int dx[4] = {-1, 1, 0, 0}, dz[4] = {0, 0, -1, 1};
+            for (int edge = 0; edge < 4; ++edge) {
+                const bool boundary = edge == 0   ? x == p.x
+                                      : edge == 1 ? x1 == endX
+                                      : edge == 2 ? z == p.z
+                                                  : z1 == endZ;
+                const int nx = x + dx[edge], nz = z + dz[edge];
+                const bool outside =
+                    nz < 0 || nz >= sampler.depth() ||
+                    (!wrapX && (nx < 0 || nx >= sampler.width()));
+                // Boundary walls reach below the lower column so they
+                // overlap any neighbour patch's surface or skirt.
+                const int neighbour = sampler.height(nx, nz) + 1;
+                const int bottom =
+                    outside    ? 0
+                    : boundary ? std::max(0, std::min(neighbour, int(y)) -
+                                                 SteppedSkirt)
+                               : neighbour;
+                const auto wallLayer = [&](int tileY) {
+                    // The top of an overlap wall is a continuation of the
+                    // surface. Preserve the strata below it and on cliffs.
+                    return boundary && !outside && tileY >= int(y) - 2
+                               ? column.material
+                               : sampler.materialAt(x, tileY, z);
+                };
+                for (int y0 = bottom; y0 < int(y);) {
+                    const float layer = wallLayer(y0);
+                    int nextY = y0 + 1;
+                    while (nextY < int(y) && wallLayer(nextY) == layer) ++nextY;
+                    const float low = y0, high = nextY;
+                    y0 = nextY;
+                    if (edge == 0)
+                        quad(mesh, {float(x), low, float(z)},
+                             {float(x), low, z1}, {float(x), high, z1},
+                             {float(x), high, float(z)}, layer, y,
+                             boundary ? 2.f : 0.f);
+                    if (edge == 1)
+                        quad(mesh, {x1, low, z1}, {x1, low, float(z)},
+                             {x1, high, float(z)}, {x1, high, z1}, layer, y,
+                             boundary ? 2.f : 0.f);
+                    if (edge == 2)
+                        quad(mesh, {x1, low, float(z)},
+                             {float(x), low, float(z)},
+                             {float(x), high, float(z)}, {x1, high, float(z)},
+                             layer, y, boundary ? 2.f : 0.f);
+                    if (edge == 3)
+                        quad(mesh, {float(x), low, z1}, {x1, low, z1},
+                             {x1, high, z1}, {float(x), high, z1}, layer, y,
+                             boundary ? 2.f : 0.f);
+                }
+            }
+            waterTile(mesh.water, sampler, x, z, column.water, wrapX);
+            continue;
+        }
+        if (channel && waterOnly) {
+            channelWater(mesh.water, sampler, x, z, endCellX, endCellZ, wrapX);
+            continue;
+        }
+        const auto center = point((x + x1) * .5f, (z + z1) * .5f);
+        if (riverPatch)
+            cells.ring(cell, point, ring);
+        else {
+            const auto corners = terrainRing(p, sampler, x, z, x1, z1);
+            ring.assign(corners.begin(), corners.end());
+        }
+        const float error =
+            std::abs(center.y - (ring[0].y + point(x1, z1).y) * .5f);
+        if (!channel) mesh.error = std::max(mesh.error, error);
+        const bool flat = ring.size() == 4 && error <= 1.f;
+        if (!waterOnly) {
             if (flat)
                 quad(mesh, ring[0], ring[1], ring[2], ring[3], -1);
             else
                 for (size_t i = 0; i < ring.size(); ++i)
                     triangle(mesh, center, ring[i], ring[(i + 1) % ring.size()],
                              -1);
-            const auto water = [&](auto&& self, int ax, int az, int bx,
-                                   int bz) -> void {
-                const int mx = (ax + bx) / 2, mz = (az + bz) / 2;
-                const auto sample = sampler.waterAt(mx, mz);
-                if (bx - ax > waterSpacing || bz - az > waterSpacing) {
-                    // Refine shore cells and any edited footprint. Broad areas
-                    // of deep sea and high land keep the coarse tessellation.
-                    if (!sampler.uniformWater(ax, az, bx, bz, sample)) {
-                        const int sx = std::max(ax + 1, mx);
-                        const int sz = std::max(az + 1, mz);
-                        self(self, ax, az, sx, sz);
-                        if (sx < bx) self(self, sx, az, bx, sz);
-                        if (sz < bz) self(self, ax, sz, sx, bz);
-                        if (sx < bx && sz < bz) self(self, sx, sz, bx, bz);
-                        return;
-                    }
+        }
+        if (channel) {
+            channelWater(mesh.water, sampler, x, z, endCellX, endCellZ, wrapX);
+            continue;
+        }
+        const auto water = [&](auto&& self, int ax, int az, int bx,
+                               int bz) -> void {
+            const int mx = (ax + bx) / 2, mz = (az + bz) / 2;
+            const auto sample = sampler.waterAt(mx, mz);
+            if (bx - ax > waterSpacing || bz - az > waterSpacing) {
+                // Refine shore cells and any edited footprint. Broad areas
+                // of deep sea and high land keep the coarse tessellation.
+                if (!sampler.uniformWater(ax, az, bx, bz, sample)) {
+                    const int sx = std::max(ax + 1, mx);
+                    const int sz = std::max(az + 1, mz);
+                    self(self, ax, az, sx, sz);
+                    if (sx < bx) self(self, sx, az, bx, sz);
+                    if (sz < bz) self(self, ax, sz, sx, bz);
+                    if (sx < bx && sz < bz) self(self, sx, sz, bx, bz);
+                    return;
                 }
-                if (!sample.wet()) return;
-                const float level = sample.surfaceY;
-                const auto cap = [&](Point a, Point b, Point c) {
-                    if (std::min({a.y, b.y, c.y}) >= level ||
-                        std::max({a.x, b.x, c.x}) <= ax ||
-                        std::min({a.x, b.x, c.x}) >= bx ||
-                        std::max({a.z, b.z, c.z}) <= az ||
-                        std::min({a.z, b.z, c.z}) >= bz)
-                        return;
-                    std::array<Point, 8> polygon{a, b, c};
-                    size_t count = 3;
-                    const auto clip = [&](auto distance) {
-                        std::array<Point, 8> next;
-                        size_t n = 0;
-                        for (size_t i = 0; i < count; ++i) {
-                            const auto u = polygon[i],
-                                       v = polygon[(i + 1) % count];
-                            const float du = distance(u), dv = distance(v);
-                            if (du >= 0) next[n++] = u;
-                            if ((du < 0) != (dv < 0) && du != 0 && dv != 0) {
-                                const float t = du / (du - dv);
-                                next[n++] = {std::lerp(u.x, v.x, t),
-                                             std::lerp(u.y, v.y, t),
-                                             std::lerp(u.z, v.z, t)};
-                            }
-                        }
-                        std::copy_n(next.begin(), n, polygon.begin());
-                        count = n;
-                    };
-                    clip([&](Point v) { return level - v.y; });
-                    clip([&](Point v) { return v.x - ax; });
-                    clip([&](Point v) { return bx - v.x; });
-                    clip([&](Point v) { return v.z - az; });
-                    clip([&](Point v) { return bz - v.z; });
-                    for (size_t i = 0; i < count; ++i) polygon[i].y = level;
-                    for (size_t i = 1; i + 1 < count; ++i)
-                        triangle(mesh.water, polygon[0], polygon[i],
-                                 polygon[i + 1], -2);
-                };
-                if (flat) {
-                    cap(ring[0], ring[1], ring[2]);
-                    cap(ring[0], ring[2], ring[3]);
-                } else
-                    for (size_t i = 0; i < ring.size(); ++i)
-                        cap(center, ring[i], ring[(i + 1) % ring.size()]);
-            };
-            water(water, x, z, int(x1), int(z1));
-        }
-    }
-    // Smooth patches: skirts on inner edges hide cracks against neighbours of
-    // any resolution; walls down to the floor close finite-world edges.
-    for (int edge = 0; edge < 4; ++edge) {
-        const bool outer = edge == 0   ? !wrapX && p.x == 0
-                           : edge == 1 ? !wrapX && endX == sampler.width()
-                           : edge == 2 ? p.z == 0
-                                       : endZ == sampler.depth();
-        if (stepped) continue;
-        const float skirt = skirtDepth(p, mesh.error);
-        const int length = edge < 2 ? endZ - p.z : endX - p.x;
-        const int stride = p.spacing;
-        for (int at = 0; at < length; at += stride) {
-            if (cancelled.load(std::memory_order_relaxed)) return {};
-            const int next = std::min(at + stride, length);
-            const float x = edge < 2 ? (edge == 0 ? p.x : endX) : p.x + at;
-            const float z = edge < 2 ? p.z + at : (edge == 2 ? p.z : endZ);
-            const float xx = edge < 2 ? x : p.x + next;
-            const float zz = edge < 2 ? p.z + next : z;
-            const auto a = point(x, z), b = point(xx, zz);
-            const float bottom =
-                outer ? 0 : std::max(0.f, std::min(a.y, b.y) - skirt);
-            const Point lowA{x, bottom, z}, lowB{xx, bottom, zz};
-            const float edgeKind = outer ? 0.f : 1.f;
-            // Outward normals are used to test detailed coverage on the
-            // owning side, even when the skirt is shaded as top terrain.
-            if (edge == 0 || edge == 3)
-                quad(mesh, b, a, lowA, lowB, -1, -1, edgeKind);
-            else
-                quad(mesh, a, b, lowB, lowA, -1, -1, edgeKind);
-        }
-    }
-    if (stepped) {
-        for (int cz = p.z / 16; cz < (endZ + 15) / 16; ++cz)
-            for (int cx = p.x / 16; cx < (endX + 15) / 16; ++cx) {
-                mesh.bands.push_back(sampleBands(cx, cz, sampler));
             }
+            if (!sample.wet()) return;
+            const float level = sample.surfaceY;
+            const auto cap = [&](Point a, Point b, Point c) {
+                if (std::min({a.y, b.y, c.y}) >= level ||
+                    std::max({a.x, b.x, c.x}) <= ax ||
+                    std::min({a.x, b.x, c.x}) >= bx ||
+                    std::max({a.z, b.z, c.z}) <= az ||
+                    std::min({a.z, b.z, c.z}) >= bz)
+                    return;
+                std::array<Point, 8> polygon{a, b, c};
+                size_t count = 3;
+                const auto clip = [&](auto distance) {
+                    std::array<Point, 8> next;
+                    size_t n = 0;
+                    for (size_t i = 0; i < count; ++i) {
+                        const auto u = polygon[i], v = polygon[(i + 1) % count];
+                        const float du = distance(u), dv = distance(v);
+                        if (du >= 0) next[n++] = u;
+                        if ((du < 0) != (dv < 0) && du != 0 && dv != 0) {
+                            const float t = du / (du - dv);
+                            next[n++] = {std::lerp(u.x, v.x, t),
+                                         std::lerp(u.y, v.y, t),
+                                         std::lerp(u.z, v.z, t)};
+                        }
+                    }
+                    std::copy_n(next.begin(), n, polygon.begin());
+                    count = n;
+                };
+                clip([&](Point v) { return level - v.y; });
+                clip([&](Point v) { return v.x - ax; });
+                clip([&](Point v) { return bx - v.x; });
+                clip([&](Point v) { return v.z - az; });
+                clip([&](Point v) { return bz - v.z; });
+                for (size_t i = 0; i < count; ++i) polygon[i].y = level;
+                for (size_t i = 1; i + 1 < count; ++i)
+                    triangle(mesh.water, polygon[0], polygon[i], polygon[i + 1],
+                             -2);
+            };
+            if (flat) {
+                cap(ring[0], ring[1], ring[2]);
+                cap(ring[0], ring[2], ring[3]);
+            } else
+                for (size_t i = 0; i < ring.size(); ++i)
+                    cap(center, ring[i], ring[(i + 1) % ring.size()]);
+        };
+        water(water, x, z, int(x1), int(z1));
     }
-    // Ground cover: one texel per tile on stepped patches, so the hand-over
-    // to detailed chunks matches; the material map's grid elsewhere.
-    mesh.coverSize = stepped ? p.size() : std::max(1, materialMap);
-    mesh.covers.resize(size_t(mesh.coverSize) * mesh.coverSize * 4);
-    for (int z = 0; z < mesh.coverSize; ++z) {
-        if (cancelled.load(std::memory_order_relaxed)) return {};
-        for (int x = 0; x < mesh.coverSize; ++x) {
-            const auto c =
-                sampler.cover(p.x + (x + .5) * p.size() / mesh.coverSize,
-                              p.z + (z + .5) * p.size() / mesh.coverSize);
-            const size_t i = (size_t(z) * mesh.coverSize + x) * 4;
-            mesh.covers[i] = c.layer;
-            mesh.covers[i + 1] = c.density;
-            mesh.covers[i + 2] = uint8_t(c.tint & 255);
-            mesh.covers[i + 3] = uint8_t(c.tint >> 8);
+    if (!waterOnly) {
+        // Smooth patches: skirts on inner edges hide cracks against neighbours
+        // of any resolution; walls down to the floor close finite-world edges.
+        for (int edge = 0; edge < 4; ++edge) {
+            const bool outer = edge == 0   ? !wrapX && p.x == 0
+                               : edge == 1 ? !wrapX && endX == sampler.width()
+                               : edge == 2 ? p.z == 0
+                                           : endZ == sampler.depth();
+            if (stepped) continue;
+            const float skirt = skirtDepth(p, mesh.error);
+            const int length = edge < 2 ? endZ - p.z : endX - p.x;
+            std::vector<int> offsets;
+            if (riverPatch) {
+                const auto& edgeVertices =
+                    edge < 2 ? cells.xs.at(edge == 0 ? p.x : endX)
+                             : cells.zs.at(edge == 2 ? p.z : endZ);
+                const int start = edge < 2 ? p.z : p.x;
+                for (int coordinate : edgeVertices)
+                    offsets.push_back(coordinate - start);
+            } else {
+                for (int at = 0; at < length; at += p.spacing)
+                    offsets.push_back(at);
+                offsets.push_back(length);
+            }
+            for (size_t i = 1; i < offsets.size(); ++i) {
+                const int at = offsets[i - 1];
+                if (cancelled.load(std::memory_order_relaxed)) return {};
+                const int next = offsets[i];
+                const float x = edge < 2 ? (edge == 0 ? p.x : endX) : p.x + at;
+                const float z = edge < 2 ? p.z + at : (edge == 2 ? p.z : endZ);
+                const float xx = edge < 2 ? x : p.x + next;
+                const float zz = edge < 2 ? p.z + next : z;
+                const auto a = point(x, z), b = point(xx, zz);
+                const float bottom =
+                    outer ? 0 : std::max(0.f, std::min(a.y, b.y) - skirt);
+                const Point lowA{x, bottom, z}, lowB{xx, bottom, zz};
+                const float edgeKind = outer ? 0.f : 1.f;
+                // Outward normals are used to test detailed coverage on the
+                // owning side, even when the skirt is shaded as top terrain.
+                if (edge == 0 || edge == 3)
+                    quad(mesh, b, a, lowA, lowB, -1, -1, edgeKind);
+                else
+                    quad(mesh, a, b, lowB, lowA, -1, -1, edgeKind);
+            }
         }
-    }
-    mesh.mapSize = stepped ? 1 : std::max(1, materialMap);
-    mesh.materials.resize(mesh.mapSize * mesh.mapSize * 4);
-    for (int z = 0; z < mesh.mapSize; ++z) {
-        if (cancelled.load(std::memory_order_relaxed)) return {};
-        for (int x = 0; x < mesh.mapSize; ++x) {
-            const auto c =
-                sampler.column(p.x + (x + .5) * p.size() / mesh.mapSize,
-                               p.z + (z + .5) * p.size() / mesh.mapSize);
-            const int i = (z * mesh.mapSize + x) * 4;
-            mesh.materials[i] = c.material & 255;
-            mesh.materials[i + 1] = c.material >> 8;
-            mesh.materials[i + 2] = c.rockMaterial & 255;
-            mesh.materials[i + 3] = c.rockMaterial >> 8;
+        if (stepped) {
+            for (int cz = p.z / 16; cz < (endZ + 15) / 16; ++cz)
+                for (int cx = p.x / 16; cx < (endX + 15) / 16; ++cx) {
+                    mesh.bands.push_back(sampleBands(cx, cz, sampler));
+                }
+        }
+        // Ground cover: one texel per tile on stepped patches, so the hand-over
+        // to detailed chunks matches; the material map's grid elsewhere.
+        mesh.coverSize = stepped ? p.size() : std::max(1, materialMap);
+        mesh.covers.resize(size_t(mesh.coverSize) * mesh.coverSize * 4);
+        for (int z = 0; z < mesh.coverSize; ++z) {
+            if (cancelled.load(std::memory_order_relaxed)) return {};
+            for (int x = 0; x < mesh.coverSize; ++x) {
+                const auto c =
+                    sampler.cover(p.x + (x + .5) * p.size() / mesh.coverSize,
+                                  p.z + (z + .5) * p.size() / mesh.coverSize);
+                const size_t i = (size_t(z) * mesh.coverSize + x) * 4;
+                mesh.covers[i] = c.layer;
+                mesh.covers[i + 1] = c.density;
+                mesh.covers[i + 2] = uint8_t(c.tint & 255);
+                mesh.covers[i + 3] = uint8_t(c.tint >> 8);
+            }
+        }
+        mesh.mapSize = stepped ? 1 : std::max(1, materialMap);
+        mesh.materials.resize(mesh.mapSize * mesh.mapSize * 4);
+        for (int z = 0; z < mesh.mapSize; ++z) {
+            if (cancelled.load(std::memory_order_relaxed)) return {};
+            for (int x = 0; x < mesh.mapSize; ++x) {
+                const auto c =
+                    sampler.column(p.x + (x + .5) * p.size() / mesh.mapSize,
+                                   p.z + (z + .5) * p.size() / mesh.mapSize);
+                const int i = (z * mesh.mapSize + x) * 4;
+                mesh.materials[i] = c.material & 255;
+                mesh.materials[i + 1] = c.material >> 8;
+                mesh.materials[i + 2] = c.rockMaterial & 255;
+                mesh.materials[i + 3] = c.rockMaterial >> 8;
+            }
         }
     }
     mesh.waterMapSize = stepped ? p.size() : std::max(1, materialMap);
@@ -600,7 +805,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     // Share smooth normals and indexed vertices. Water and coplanar voxel
     // faces in particular should not consume six vertices per quad.
     for (auto& v : mesh.vertices)
-        if (v.layer == -1 && v.ny > 0.01f) {
+        if (v.layer == -1 && v.ny > 0.01f && !riverPatch) {
             // Grid-aligned differences reuse the heights sampled for the
             // surface instead of four fresh off-grid samples per vertex.
             const int x = int(v.x), z = int(v.z), step = p.spacing;
@@ -626,6 +831,8 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     const auto indexVertices = [](Geometry& geometry) {
         std::unordered_map<Key, uint32_t, Hash> unique;
         std::vector<BlockVertex> vertices;
+        unique.reserve(geometry.vertices.size() / 2);
+        vertices.reserve(geometry.vertices.size() / 2);
         for (auto& index : geometry.indices) {
             const auto& v = geometry.vertices[index];
             const auto [it, inserted] = unique.emplace(

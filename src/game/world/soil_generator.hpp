@@ -31,6 +31,7 @@ struct SoilColumn {
     // none) and its density 0-15. Set by TerrainSampler::soil.
     uint8_t cover = 0;
     uint8_t coverDensity = 0;
+    bool riverSediment = false;
 };
 
 class SoilGenerator {

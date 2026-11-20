@@ -22,7 +22,8 @@ World WorldGenerator::generate(const WorldGenSettings &settings,
 
     if (shouldCancel()) return {};
     world.genSettings = settings;
-    world.hydrology = GeneratedHydrology::build(world, shouldCancel);
+    world.hydrology = GeneratedHydrology::build(world, shouldCancel, true, true,
+                                                true, true, true, true, true);
     if (!world.hydrology) return {};
     for (int i = 0; i < int(world.regions.size()); ++i) {
         if (world.hydrology->candidateBody(i) > GeneratedHydrology::Sea)

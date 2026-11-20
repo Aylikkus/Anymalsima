@@ -30,6 +30,13 @@ class Cover {
             if (inView(child) && !coverable(child)) return false;
         return true;
     }
+    bool coveredByDescendants(const Patch& p) const {
+        if (p.spacing == 1) return false;
+        const auto parts = children(p);
+        return std::all_of(parts.begin(), parts.end(), [&](const auto& child) {
+            return !inView(child) || coverable(child);
+        });
+    }
     void select(const Patch& p, std::vector<Patch>& out) const {
         if (!inView(p)) return;
         const bool splitHere = split.contains(p);
@@ -38,11 +45,8 @@ class Cover {
             return;
         }
         if (p.spacing > 1 && (splitHere || below(p))) {
-            const auto parts = children(p);
-            if (std::all_of(parts.begin(), parts.end(), [&](const auto& c) {
-                    return !inView(c) || coverable(c);
-                })) {
-                for (const auto& child : parts) select(child, out);
+            if (coveredByDescendants(p)) {
+                for (const auto& child : children(p)) select(child, out);
                 return;
             }
         }

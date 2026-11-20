@@ -394,6 +394,15 @@ TEST(lod_cover_fallback) {
     // Only the coarse root has arrived: it stays until all children exist.
     drawable = {root, parts[0], parts[1], parts[2]};
     CHECK(choose(splitRoot) == std::vector{root});
+    const TerrainLod::Cover prospective(
+        splitRoot, [](const Patch&) { return true; },
+        [&](const Patch& p) { return drawable.contains(p) || p == parts[3]; },
+        [](const Patch&) { return false; });
+    CHECK(prospective.coveredByDescendants(root));
+    // A transaction cannot also evict a sibling supporting the replacement.
+    drawable.erase(parts[2]);
+    CHECK(!prospective.coveredByDescendants(root));
+    drawable.insert(parts[2]);
     drawable.insert(parts[3]);
     EQUAL(choose(splitRoot).size(), size_t(4), "children replace root");
     // Zooming out: the desired root is missing, finer leftovers stay.

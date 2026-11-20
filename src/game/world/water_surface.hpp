@@ -1,9 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
 #include "consts.hpp"
+#include "core/geometry.hpp"
 #include "tile.hpp"
 
 // Integer boundary above the last occupied tile. Body IDs identify generated
@@ -12,6 +14,22 @@ struct WaterSurface {
     static constexpr int SeaBoundary = SEA_LEVEL_Y + 1;
     int surfaceY = -1;
     uint32_t body = 0;
+    uint32_t reach = 0;
+    Vec2 flow{0, 0};
+    bool edited = false;
+
+    // A vertical face is owned by the higher column. The lower water or
+    // neighboring solid terrain covers the portion beneath this boundary.
+    constexpr int dropBottom(WaterSurface neighbor, int neighborGround) const {
+        if (!wet() ||
+            !(edited || (neighbor.wet() && (reach || neighbor.reach))))
+            return surfaceY;
+        return std::max(neighbor.surfaceY, neighborGround + 1);
+    }
+
+    constexpr int depth(int groundY) const {
+        return wet() ? surfaceY - groundY - 1 : 0;
+    }
 
     static constexpr WaterSurface sea(int groundY) {
         return {groundY < SEA_LEVEL_Y ? SeaBoundary : -1};

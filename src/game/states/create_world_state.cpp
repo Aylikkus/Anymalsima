@@ -47,8 +47,9 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context)
     generate_btn->setText(_("GENERATE"));
     generate_btn->setFontRole(FontRole::Bold);
     generate_btn->setGridPlacement({5, 14, 3, 1});
-    generate_btn->onClick.connect([&context, this]() {
-        if (entering.valid()) return;
+    generate_btn->onClick.connect([&context, this, generate_btn]() {
+        if (generating || entering.valid()) return;
+        generate_btn->setText(_("Loading..."));
         generating = true;
         std::random_device rd;
         std::mt19937_64 gen((uint64_t(rd()) << 32) ^ rd());
@@ -149,8 +150,9 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context)
         cell_info_text->setText(ss.str());
     });
 
-    world_gen.onFinished.connect([preview, this]() {
+    world_gen.onFinished.connect([preview, this, generate_btn]() {
         generating = false;
+        generate_btn->setText(_("GENERATE"));
         world = world_gen.takeResult();
         preview->setWorld(world.get());
     });

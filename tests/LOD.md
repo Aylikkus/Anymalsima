@@ -31,8 +31,8 @@ and the original strata underneath. Set `ANYMALSIMA_LOD_DEBUG_EDGES=1` for
 magenta smooth skirts, cyan stepped boundary walls and orange detail joins.
 
 `TerrainLodManager` runs up to `clamp(threads / 2, 2, 6)` CPU jobs on the
-shared pool: root patches at normal priority, the rest low. Each job owns its
-sampler, cancellation flag and result; region inputs (terrain neighbourhoods,
+shared pool for terrain, with one additional low-priority water refinement
+slot. Each job owns its sampler, cancellation flag and result; region inputs (terrain neighbourhoods,
 rock layers) come from a mutex-guarded `SurfaceInputCache` shared by all jobs.
 Jobs read world/assets that remain immutable throughout gameplay. The manager
 cancels and joins these jobs before its world/assets can be destroyed. A
@@ -43,12 +43,15 @@ Patches are independent cache entries. Each frame `TerrainLod::Cover`
 (`lod_cover.hpp`) draws, for every in-view part of each root, the finest
 available patch: a split patch is replaced only once all of its in-view
 children can be covered, and finer leftovers stay while a coarser desired
-patch loads. Root patches are always requested first and kept, so startup
-shows coarse roots as they arrive and no layout change waits for, or
-discards, unrelated patches. When the GPU budget is full, cached patches that
-are not wanted and were not drawn in the previous frame are evicted, least
-recently drawn first; if that is not enough the pixel-error target is raised
-by 1.5x (up to 16x) and relaxed again once residency falls below half. Loaded
+patch loads. The manager builds nearby fallback subtrees before spending
+the budget on the horizon. Coarse fallback meshes become reclaimable when
+their finer patches cover the same area. An upload may trade a fallback for
+the final patch that completes its replacement. The manager first verifies
+that the proposed evictions keep visible coverage, then creates the new GPU
+buffers and commits the eviction. Measured patch sizes guide later
+selection. Under sustained pressure the renderer relaxes distant detail
+and can shorten the fogged range while preserving the exact band around the
+camera. Loaded
 chunks replace LODs only in complete horizontal chunk footprints: all surface
 slabs must initially have current uploaded meshes and ready neighbors. After
 handover, chunk visibility belongs to a separate coverage tracker. Already
@@ -77,7 +80,8 @@ selected by the `terrainDetail` setting (main menu, applied on world load):
 | Medium | 128 MiB    | 3 MiB        | 6144          | 192          | 1.4         | 64           | 6            |
 | High   | 256 MiB    | 4 MiB        | 8192          | 256          | 1.0         | 64           | 8            |
 
-The view distance also drives fog and the far plane. The residency budget
+The active view distance, capped by the preset, also drives terrain fog
+and culling. The residency budget
 reserves 2 MiB for detail-to-LOD joins; joins are rebuilt in the frame their
 patches change. The
 small global coverage texture is additional (4 KiB).

@@ -11,11 +11,16 @@ uniform vec4 u_lod_shift;
 void main()
 {
     gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
+    // Move waterfall faces off the terrain wall in the rendered image.
+    // Keep the unshifted position for LOD ownership, lighting and flow phase.
+    if (a_texcoord1 < -2.5 && abs(a_normal.y) < 0.5)
+        gl_Position += mul(u_modelViewProj, vec4(a_normal / 64.0, 0.0));
     v_position = a_position + vec3(u_lod_shift.x, 0.0, 0.0);
     v_normal = a_normal;
     v_layer = a_texcoord1;
     v_color0 = a_color0;
     // x: column top above a stepped wall (ground-cover fringe), else -1;
     // y: ordinary face (0), smooth skirt (1), stepped boundary wall (2).
+    // Flowing water uses these two components for its horizontal direction.
     v_cover = a_texcoord0;
 }

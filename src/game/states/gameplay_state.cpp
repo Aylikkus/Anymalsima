@@ -760,8 +760,11 @@ void GameplayState::update(Game& game, float dt) {
                 std::to_string(terrainLod->patchCount()) + " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
                 std::to_string(terrainLod->jobCount()) + " LOD jobs, " +
-                std::to_string(terrainLod->backlog()) + " LOD pending\n" +
-                std::to_string(edits->size()) + " edited columns, " +
+                std::to_string(terrainLod->terrainBacklog()) +
+                " terrain pending, " +
+                std::to_string(terrainLod->structureBacklog()) +
+                " structure pending\n" + std::to_string(edits->size()) +
+                " edited columns, " +
                 std::to_string(terrainLod->structureCount()) +
                 " structure slabs");
         } else {
@@ -850,7 +853,9 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize(), lightVolumes.get());
     camera.underwater = terrainLod->eyeUnderwater();
-    context.renderer->setCamera(camera);
+    Camera displayedCamera = camera;
+    displayedCamera.viewDistance = terrainLod->visibleDistance();
+    context.renderer->setCamera(displayedCamera);
     auto& water = terrainLod->waterUniform();
     if (terrainLod->drawnVersion() != shadowLodVersion) {
         shadowLodVersion = terrainLod->drawnVersion();
@@ -858,7 +863,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     }
     renderShadowCasters(target, now);
     const Vec3 eye = camera.eye();
-    worldEye.setVec4({eye.x, eye.y, eye.z, camera.viewDistance});
+    worldEye.setVec4({eye.x, eye.y, eye.z, displayedCamera.viewDistance});
 
     float vp[16], view[16], proj[16];
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
@@ -866,7 +871,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                   {0, 1, 0});
     const auto viewport = context.getWindowSize();
     bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y), 1.f,
-                camera.viewDistance + 512.f, bgfx::getCaps()->homogeneousDepth);
+                displayedCamera.viewDistance + 512.f,
+                bgfx::getCaps()->homogeneousDepth);
     bx::mtxMul(vp, view, proj);
 
     Frustum frustum = Frustum::fromViewProj(vp);
@@ -917,11 +923,11 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                                     std::move(uniforms), false,
                                     std::move(transform), DrawLayer::GAME);
     });
-    floraRenderer->render(target, camera, frustum, *lightRenderer, now,
+    floraRenderer->render(target, displayedCamera, frustum, *lightRenderer, now,
                           clock.days(), water);
-    treeRenderer->render(target, camera, frustum, *lightRenderer, now,
+    treeRenderer->render(target, displayedCamera, frustum, *lightRenderer, now,
                          clock.days(), water);
-    lightRenderer->drawGlare(target, camera, viewport);
+    lightRenderer->drawGlare(target, displayedCamera, viewport);
 
     ui_manager->render(target, context);
 }

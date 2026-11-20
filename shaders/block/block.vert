@@ -15,6 +15,10 @@ void main()
     // texturing, fog and light while the projection stays precise.
     vec3 world = mul(u_model[0], vec4(a_position, 1.0)).xyz + u_world_eye.xyz;
     gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
+    // Move waterfall faces off the terrain wall in the rendered image.
+    // Keep the unshifted position for LOD ownership, lighting and flow phase.
+    if (a_texcoord1 < -2.5 && abs(a_normal.y) < 0.5)
+        gl_Position += mul(u_modelViewProj, vec4(a_normal / 64.0, 0.0));
     v_position = world;
     v_normal = a_normal;
     v_layer = a_texcoord1;
@@ -24,5 +28,6 @@ void main()
     // Ground cover (ChunkMesher::build): x = overlay layer or -1, y = side
     // fringe range; a_color0 is then the cover tint.
     v_color0 = a_color0;
+    // Flowing water uses these two components for its horizontal direction.
     v_cover = a_texcoord0;
 }

@@ -23,9 +23,11 @@
 #include "resource_manager.hpp"
 #include "world/block_light_propagator.hpp"
 #include "world/flora_renderer.hpp"
+#include "world/generated_hydrology.hpp"
 #include "world/light_renderer.hpp"
 #include "world/light_volume_manager.hpp"
 #include "world/location_manager.hpp"
+#include "world/save/save_catalog.hpp"
 #include "world/sky_height_map.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
@@ -43,6 +45,10 @@ int main(int argc, char** argv) {
     if (!bgfx::init(init)) return 2;
     int result = 0;
     const std::string scenario = argc > 3 ? argv[3] : "mountains";
+    const bool riverScene = scenario == "river";
+    const char* savedScene = std::getenv("SMOKE_SAVE");
+    const bool savedWalk = savedScene && (scenario == "saved_walk" ||
+                                          scenario == "saved_walk_full");
     const bool walking = scenario == "handover_walk";
     // Edit terrain near the camera, then look back at it from 400 tiles away
     // after its regions unloaded: the pit and structure must remain in LOD.
@@ -60,10 +66,13 @@ int main(int argc, char** argv) {
     const bool lights = scenario == "lights";
     // Allow forest captures (including handover) to exercise sky shading
     // independently of the lamp and shadow phases of the lights scenario.
-    const bool forestLighting = lights || std::getenv("SMOKE_FOREST");
+    const bool forestLighting =
+        savedScene || lights || std::getenv("SMOKE_FOREST");
     const bool occlusion = forestLighting && !std::getenv("SMOKE_NO_OCCLUSION");
     const bool handover = scenario == "handover" || walking || structure ||
-                          seams || wrapScene || lights;
+                          seams || wrapScene || lights || riverScene ||
+                          savedScene;
+    const bool useVolumes = forestLighting || riverScene;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -76,7 +85,26 @@ int main(int argc, char** argv) {
         assets.buildMaterialTextureArrays();
         // Seams need coordinates as large as a full-size world (~64k tiles).
         // Wrap: 128 regions = 16384 tiles, a whole number of LOD roots.
-        auto world = lodScene(wrapScene ? 128 : seams ? 480 : 96);
+        auto world = riverScene ? riverLodScene(256)
+                                : lodScene(wrapScene ? 128
+                                           : seams   ? 480
+                                                     : 96);
+        std::optional<WorldMeta::CameraState> savedCamera;
+        if (savedScene) {
+            SaveSlot slot{savedScene, {}};
+            slot.meta.deserialize(
+                FileIO::readJson((slot.directory / "world.json").string()));
+            savedCamera = slot.meta.camera;
+            world = std::move(*save_catalog::readWorldMap(slot));
+        }
+        const GeneratedHydrology::Reach* river = nullptr;
+        if (riverScene) {
+            world.hydrology = GeneratedHydrology::build(world);
+            if (world.hydrology->riverReaches().empty() ||
+                world.hydrology->riverReaches().front().falls.empty())
+                return 2;
+            river = &world.hydrology->riverReaches().front();
+        }
         // SMOKE_FOREST: trees everywhere (docs/handoff/trees.md). Values:
         // taiga (spruces), tropical (palms on plains), mountain (thin
         // pines on the hills), anything else: humid temperate forest
@@ -175,6 +203,8 @@ int main(int argc, char** argv) {
                            : 0,
                        0, TerrainLod::QualityCount - 1);
         auto terrainSettings = TerrainLod::Qualities[terrainQuality];
+        if (savedWalk && scenario == "saved_walk")
+            terrainSettings.gpuBudget /= 2;
         if (const char* radius = std::getenv("SMOKE_RADIUS"))
             terrainSettings.chunkRadius =
                 std::clamp(std::atoi(radius), 1, TerrainLod::MaxChunkRadius);
@@ -270,6 +300,23 @@ int main(int argc, char** argv) {
                       -.1f,
                       10};
         }
+        const auto aboveWater = [&](Camera& view) {
+            const auto eye = view.eye();
+            const int x = int(std::floor(eye.x)), z = int(std::floor(eye.z));
+            const float clearance = std::max(surface.height(x, z) + 1,
+                                             surface.waterAt(x, z).surfaceY) +
+                                    12;
+            view.position.y += std::max(0.f, clearance - eye.y);
+        };
+        if (river) {
+            camera = {
+                {float(river->outlet.x - 24),
+                 float(WaterSurface::SeaBoundary + 24), river->outlet.y + .5f},
+                bx::kPiHalf,
+                -.36f,
+                80};
+            aboveWater(camera);
+        }
         if (wrapScene)
             camera = {
                 {float(surface.width() - 24), 0, 6144}, bx::kPiHalf, -.3f, 40};
@@ -277,6 +324,9 @@ int main(int argc, char** argv) {
             camera.position.y, float(surface.height(int(camera.position.x),
                                                     int(camera.position.z)) +
                                      20));
+        if (savedCamera)
+            camera = {savedCamera->position, savedCamera->yaw,
+                      savedCamera->pitch, savedCamera->distance};
         // SMOKE_CAMERA="x z yaw pitch distance above": look at (x, z) from
         // `above` tiles over its surface (close-ups of plants and cover).
         if (const char* override = std::getenv("SMOKE_CAMERA")) {
@@ -379,7 +429,7 @@ int main(int argc, char** argv) {
             trees.setChunkDrawn([&](const ChunkCoord& c) {
                 return lod.drawsChunk(c) && chunks.hasUploadedMesh(c);
             });
-            if (forestLighting) {
+            if (useVolumes) {
                 std::vector<ShaderProperty*> patchLights, blockLights;
                 lightRenderer.appendUniforms(patchLights,
                                              LightRenderer::Program::Lod);
@@ -391,6 +441,19 @@ int main(int argc, char** argv) {
             size_t maxResident = 0, maxUpload = 0;
             double maxFrame = 0;
             int frame = 0, settled = 0, phase = 0;
+            int riverFlight = 0;
+            size_t peakBacklog = 0;
+            bool firstPatch = false;
+            int idleBacklogFrames = 0, longestIdleBacklog = 0;
+            constexpr int WalkEnd = 640;
+            int finishedSpacing = 0;
+            const auto perfStart = std::chrono::steady_clock::now();
+            std::vector<double> cpuFrames, gpuFrames, lodFrames;
+            const auto pctl = [](std::vector<double> values, double q) {
+                if (values.empty()) return 0.0;
+                std::sort(values.begin(), values.end());
+                return values[size_t(q * (values.size() - 1))];
+            };
             size_t preservedChecks = 0, detailRegressions = 0, seamPixels = 0;
             bool capturedTransition = false;
             std::set<std::pair<int, int>> previousVisible;
@@ -426,6 +489,31 @@ int main(int argc, char** argv) {
                                   3);
                     }
                 }
+                if (riverFlight > 0) {
+                    const float t = float(61 - riverFlight--) / 60;
+                    camera.position.x = float(world.wrap().wrapX(
+                        std::lerp(river->outlet.x - 24.f,
+                                  world.wrap().tiles + 24.5f, t)));
+                    const int x = int(camera.position.x), z = river->outlet.y;
+                    camera.position.y =
+                        std::max(surface.height(x, z) + 1,
+                                 surface.waterAt(x, z).surfaceY) +
+                        18;
+                    const float u = std::clamp((t - .8f) * 5, 0.f, 1.f);
+                    camera.yaw = std::lerp(bx::kPiHalf, -bx::kPiHalf, u);
+                    aboveWater(camera);
+                }
+                if (savedWalk && frame >= 140 && frame < WalkEnd) {
+                    camera.position.x =
+                        float(world.wrap().wrapX(camera.position.x - 2.f));
+                    camera.position.z =
+                        std::clamp(camera.position.z + 1.5f, 32.f,
+                                   float(surface.depth() - 32));
+                    camera.position.y =
+                        float(surface.height(int(camera.position.x),
+                                             int(camera.position.z)) +
+                              24);
+                }
                 if (handover) {
                     const int cx = int(camera.position.x) / 16,
                               cy = int(camera.position.y) / 16,
@@ -450,7 +538,7 @@ int main(int argc, char** argv) {
                     sunlight.update();
                     blockLight.update();
                     chunks.uploadReadyMeshes(renderer);
-                    if (forestLighting) volumes.update(camera.position);
+                    if (useVolumes) volumes.update(camera.position);
                 }
                 sections[0] = since(mark);
                 mark = SmokeClock::now();
@@ -473,7 +561,7 @@ int main(int argc, char** argv) {
                 mark = SmokeClock::now();
                 RenderTarget target;
                 lod.render(target, renderer, chunks, camera, {1280, 720},
-                           forestLighting ? &volumes : nullptr);
+                           useVolumes ? &volumes : nullptr);
                 sections[2] = since(mark);
                 auto& water = lod.waterUniform();
                 if (lights) {
@@ -580,7 +668,7 @@ int main(int argc, char** argv) {
                             double(coord.z) * Chunk::SIZE_Z);
                         std::vector<ShaderProperty*> uniforms{
                             &blockTexture, &blockEye, &water};
-                        if (forestLighting) {
+                        if (useVolumes) {
                             if (!volumes.bind(coord, uniforms, wx)) return;
                             lightRenderer.appendUniforms(
                                 uniforms, LightRenderer::Program::Block);
@@ -679,16 +767,18 @@ int main(int argc, char** argv) {
                 }
                 // Keep frames bounded, while allowing background generators to
                 // progress without busy spinning the headless renderer.
-                if (lod.backlog() == 0 && lod.jobCount() == 0 &&
+                if (!riverFlight && lod.backlog() == 0 && lod.jobCount() == 0 &&
                     (!handover || (sunlight.isIdle() && blockLight.isIdle() &&
                                    !chunks.hasGenerationWork() &&
                                    (detailed > 0 || farLights))))
                     ++settled;
                 else
                     settled = 0;
-                const bool transition = walking && phase == 1 &&
-                                        lod.patchCount() < 32 && detailed > 0 &&
-                                        !capturedTransition;
+                const bool transition =
+                    !capturedTransition &&
+                    ((walking && phase == 1 && lod.patchCount() < 32 &&
+                      detailed > 0) ||
+                     (river && phase == 2 && !settled));
                 // SMOKE_FLORA_GALLERY=1: before the first capture, plant every
                 // species in rows by growth stage (seedling .. withering)
                 // around the camera target, replacing generated plants.
@@ -747,7 +837,8 @@ int main(int argc, char** argv) {
                     while (rendered < readyFrame) rendered = bgfx::frame();
                     std::ofstream image(
                         output +
-                            (travel || structure || seams || wrapScene || lights
+                            (travel || structure || seams || wrapScene ||
+                                     lights || riverScene
                                  ? "_" + std::to_string(phase)
                                  : "") +
                             (transition ? "_transition" : "") + ".ppm",
@@ -896,11 +987,18 @@ int main(int argc, char** argv) {
                         << " tree_cpu_ms=" << trees.cpuMilliseconds()
                         << " failed_meshes=" << IRenderer::failedDynamicMeshes
                         << " tree_max_cpu_ms=" << treesMaxMs << '\n';
-                    if ((!transition && lod.backlog() != 0) || draws == 0 ||
-                        (handover && detailed == 0 && !farLights) ||
-                        // Structure proxies have their own 1/8 cap.
-                        maxResident > TerrainLod::GpuBudget * 9 / 8 ||
-                        maxUpload > TerrainLod::UploadBudget)
+                    // A saved-camera profile uses a fixed frame budget
+                    // and intentionally records any remaining queue.
+                    if (draws == 0 ||
+                        (!savedScene &&
+                         ((!transition && lod.backlog() != 0) ||
+                          (handover && detailed == 0 && !farLights &&
+                           !transition) ||
+                          // Structure proxies have their own 1/8 cap.
+                          maxResident > terrainSettings.gpuBudget * 9 / 8 ||
+                          // A single oversized river fallback can upload alone.
+                          (!river &&
+                           maxUpload > terrainSettings.uploadBudget))))
                         result = 1;
                 }
                 mark = SmokeClock::now();
@@ -908,6 +1006,35 @@ int main(int argc, char** argv) {
                 renderer.flush();
                 sections[5] = since(mark);
                 sections[4] = since(frameStart);
+                if (savedScene) {
+                    if (savedWalk && frame >= WalkEnd) {
+                        if (lod.terrainBacklog() && !lod.jobCount() &&
+                            !lod.uploadedBytes())
+                            longestIdleBacklog = std::max(longestIdleBacklog,
+                                                          ++idleBacklogFrames);
+                        else
+                            idleBacklogFrames = 0;
+                        finishedSpacing = lod.drawnSpacingAt(
+                            int(camera.position.x), int(camera.position.z));
+                    }
+                    peakBacklog = std::max(peakBacklog, lod.backlog());
+                    if (!firstPatch && lod.patchCount()) {
+                        std::cout << "first_terrain_ms=" << since(perfStart)
+                                  << " initial_queue=" << peakBacklog
+                                  << std::endl;
+                        firstPatch = true;
+                    }
+                    if (frame >= 10) {
+                        cpuFrames.push_back(sections[4]);
+                        lodFrames.push_back(sections[1] + sections[2]);
+                        const auto* stats = bgfx::getStats();
+                        if (stats && stats->gpuTimerFreq > 0)
+                            gpuFrames.push_back(
+                                1000.0 *
+                                (stats->gpuTimeEnd - stats->gpuTimeBegin) /
+                                stats->gpuTimerFreq);
+                    }
+                }
                 if (cutting) {
                     treeSim->update(0);
                     const auto sunAt = [&](const TilePos& p) {
@@ -1610,6 +1737,40 @@ int main(int argc, char** argv) {
                         addBeacon();
                     }
                 }
+                if (settled >= 10 && river) {
+                    std::cout << "river_phase=" << phase
+                              << " underwater=" << lod.eyeUnderwater() << '\n';
+                    if (lod.eyeUnderwater() != (phase == 3)) result = 1;
+                    if (phase >= 3) break;
+                    ++phase;
+                    settled = 0;
+                    const auto& fall = river->falls.front();
+                    if (phase == 1) {
+                        riverFlight = 60;
+                        camera.pitch = -.25f;
+                        camera.distance = 55;
+                    } else if (phase == 2) {
+                        // Look up the landing channel while uploads catch up.
+                        camera = {
+                            {fall.landing.x + .5f, float(fall.landingY + 9),
+                             fall.landing.y + .5f},
+                            bx::kPiHalf,
+                            -.25f,
+                            45};
+                        chunks.markAllDirty();
+                    } else {
+                        camera = {{fall.landing.x - 3.5f,
+                                   float(surface
+                                             .waterAt(fall.landing.x - 4,
+                                                      fall.landing.y)
+                                             .surfaceY -
+                                         2),
+                                   fall.landing.y + .5f},
+                                  bx::kPiHalf,
+                                  0,
+                                  .5f};
+                    }
+                }
                 if (settled >= 10 && wrapScene) {
                     if (phase >= 1) break;
                     ++phase;
@@ -1665,7 +1826,11 @@ int main(int argc, char** argv) {
                             30;
                     }
                 }
+                if (savedWalk && frame >= WalkEnd && settled >= 60 &&
+                    finishedSpacing == 1)
+                    break;
                 if (settled >= 10) {
+                    if (savedScene) continue;
                     if (!travel || phase >= 2) break;
                     ++phase;
                     settled = 0;
@@ -1685,6 +1850,29 @@ int main(int argc, char** argv) {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
+            if (savedScene)
+                std::cout << "perf_frames=" << cpuFrames.size()
+                          << " peak_queue=" << peakBacklog
+                          << " end_queue=" << lod.backlog()
+                          << " cpu_p50_ms=" << pctl(cpuFrames, .50)
+                          << " cpu_p95_ms=" << pctl(cpuFrames, .95)
+                          << " lod_p95_ms=" << pctl(lodFrames, .95)
+                          << " gpu_p50_ms=" << pctl(gpuFrames, .50)
+                          << " gpu_p95_ms=" << pctl(gpuFrames, .95) << '\n';
+            if (savedWalk) {
+                std::cout << "walk_idle_pending_frames=" << longestIdleBacklog
+                          << " terrain_pending=" << lod.terrainBacklog()
+                          << " final_spacing=" << finishedSpacing
+                          << " view_range=" << lod.visibleDistance()
+                          << " gpu_budget_mib="
+                          << terrainSettings.gpuBudget / (1u << 20) << '\n';
+                if (longestIdleBacklog > 30 || lod.terrainBacklog() ||
+                    finishedSpacing != 1)
+                    result = 1;
+            }
+            if (riverScene &&
+                (phase < 3 || settled < 10 || !capturedTransition))
+                result = 1;
             if (lights && (phase < 8 || settled < 10)) result = 1;
             if (travel && (phase < 2 || settled < 10)) result = 1;
             if (structure &&

@@ -38,6 +38,7 @@ struct ChunkHandle {
     uint64_t meshRevision = 0;
     MeshHandle mesh, waterMesh;
     std::vector<float> waterTops;
+    bool hasWaterGeometry = false;
     bool initialised = false;
     bool uploaded = false;
     uint64_t uploadedRevision = 0;
@@ -333,7 +334,8 @@ class ChunkManager {
             handle.vertices = std::move(result.mesh.vertices);
             handle.indices = std::move(result.mesh.indices);
             handle.waterTops = std::move(result.mesh.waterTops);
-            if (handle.initialised || !handle.waterTops.empty())
+            handle.hasWaterGeometry = !result.mesh.water.indices.empty();
+            if (handle.initialised || handle.hasWaterGeometry)
                 meshed.insert(result.coord);
             else
                 meshed.erase(result.coord);

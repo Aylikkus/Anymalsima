@@ -60,7 +60,7 @@ class SurfaceInputCache {
 // lighting, live voxel access or GPU calls. Owner must outlive the sampler.
 class SurfaceSampler {
    public:
-    enum class WaterDetail { Exact, CertifiedSea };
+    enum class WaterDetail { Exact, CertifiedSea, Preview };
     // edits: gameplay changes to show instead of generated terrain (ground
     // height, top block, water). Structures above the generated surface are
     // not part of the height field; see structureTop().
@@ -87,6 +87,8 @@ class SurfaceSampler {
     int height(int x, int z);
     WaterSurface waterAt(int x, int z);
     bool submerged(int x, int z, float y);
+    int channelFloorLevel(int x, int z, int radius) const;
+    bool hasChannel(int x0, int z0, int x1, int z1) const;
     bool hasUnrefinedWater(int x0, int z0, int x1, int z1) const;
     bool uniformWater(int x0, int z0, int x1, int z1, WaterSurface sample);
     // Ground cover of the column's surface after edits (none where an edit
@@ -97,7 +99,7 @@ class SurfaceSampler {
     // Replaces the edits and drops the derived caches.
     void setEdits(std::shared_ptr<const EditMap> value);
     bool provisionalWater() const {
-        return world.hydrology && waterDetail == WaterDetail::CertifiedSea;
+        return world.hydrology && waterDetail != WaterDetail::Exact;
     }
     int width() const { return world.width * TerrainTuning::RegionX; }
     int depth() const { return world.height * TerrainTuning::RegionZ; }
@@ -122,6 +124,7 @@ class SurfaceSampler {
     const ColumnEdit* lastEdit = nullptr;
     std::unordered_map<uint64_t, std::shared_ptr<const RegionInput>> regions;
     std::unordered_map<uint64_t, int> heights;
+    std::unordered_map<uint64_t, WaterSurface> waterSamples;
     std::unordered_map<uint64_t, SurfaceColumn> columns;
     uint16_t material(const RegionInput& data, const SurfaceColumn& column,
                       int y) const;

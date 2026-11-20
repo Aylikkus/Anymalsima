@@ -1,11 +1,43 @@
 #include <chrono>
 #include <iostream>
+#include <string_view>
 
 #include "lod_scene.hpp"
 #include "test_assets.hpp"
+#include "world/generated_hydrology.hpp"
 #include "world/terrain_lod.hpp"
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--river") {
+        auto world = riverLodScene(32);
+        world.hydrology = GeneratedHydrology::build(world);
+        const std::atomic_bool cancelled{false};
+        test::Assets assets;
+        for (int quality = 0; quality < TerrainLod::QualityCount; ++quality) {
+            size_t total = 0, vertices = 0, triangles = 0;
+            auto start = std::chrono::steady_clock::now();
+            for (int x : {0, world.wrap().tiles -
+                                 TerrainLod::Cells * TerrainLod::RootSpacing}) {
+                SurfaceSampler sampler(
+                    world, assets, nullptr, nullptr,
+                    SurfaceSampler::WaterDetail::CertifiedSea);
+                const auto mesh = TerrainLod::build(
+                    {x, 0, TerrainLod::RootSpacing}, sampler, cancelled,
+                    TerrainLod::Qualities[quality].materialMap, true);
+                total += mesh.bytes();
+                vertices += mesh.water.vertices.size();
+                triangles += mesh.water.indices.size() / 3;
+            }
+            const auto elapsed = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start);
+            std::cout << "river_terrain_preset=" << quality
+                      << " root_patches=2 bytes=" << total
+                      << " water_vertices=" << vertices
+                      << " water_triangles=" << triangles
+                      << " build_ms=" << elapsed.count() << '\n';
+        }
+        return 0;
+    }
     test::Assets assets;
     const auto world = lodScene();
     const Vec3 eye{6144, 450, 6144};

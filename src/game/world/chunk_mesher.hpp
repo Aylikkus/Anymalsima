@@ -8,6 +8,7 @@
 #include "core/assets_api.hpp"
 #include "items/ground_cover.hpp"
 #include "render/vertex.hpp"
+#include "water_surface.hpp"
 
 struct ChunkGeometry {
     std::vector<BlockVertex> vertices;
@@ -52,6 +53,8 @@ class ChunkMesher {
 
     using NeighbourFn = std::function<const Tile*(int tx, int ty, int tz)>;
 
+    using WaterColumnFn = std::function<std::pair<int, WaterSurface>(int, int)>;
+
     // Every quad grows by this much on all four sides within its plane. The
     // overlap closes sub-pixel cracks where greedy quads meet in T-junctions
     // (and at wall/floor corners); coplanar overlap is invisible.
@@ -71,7 +74,8 @@ class ChunkMesher {
     ChunkMesh build(const Chunk& chunk, const ChunkCoord& coord,
                     const NeighbourFn& neighbour,
                     const CoverClimate& climate = {},
-                    const NeighbourFn& generatedWaterHalo = {}) const;
+                    const NeighbourFn& generatedWaterHalo = {},
+                    const WaterColumnFn& waterColumn = {}) const;
 
     // Packs the side-fringe range for the v attribute (see build).
     static float packFringe(const ValueRange& metres);

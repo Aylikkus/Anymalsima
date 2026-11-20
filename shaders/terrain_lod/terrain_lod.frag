@@ -81,19 +81,19 @@ void main()
         vec2 coverage = texture2D(u_detail_map, detailUv).rg;
         if ((v_layer < -1.5 ? coverage.g : coverage.r) > 0.5) discard;
     }
-    if (u_world_water.z > 0.5 && v_cover.y > 0.5) {
+    if (v_layer >= -1.5 && u_world_water.z > 0.5 && v_cover.y > 0.5) {
         gl_FragColor = v_cover.y < 1.5 ? vec4(1.0, 0.0, 1.0, 1.0)
                                        : vec4(0.0, 1.0, 1.0, 1.0);
         return;
     }
     // Skirts are vertical only to close a gap. Sample the owning patch's
     // top material and light it like the ground, not an exposed rock face.
-    bool skirt = v_cover.y > 0.5 && v_cover.y < 1.5;
+    bool skirt = v_layer >= -1.5 && v_cover.y > 0.5 && v_cover.y < 1.5;
     vec3 normal = skirt ? vec3(0.0, 1.0, 0.0) : normalize(v_normal);
     vec3 color;
     vec3 surface = normal;
     if (v_layer < -1.5) {
-        color = vec3(0.055, 0.24, 0.32);
+        color = surfaceWaterColor(v_position, normal, v_cover, v_layer < -2.5);
     } else {
         float layer = floor(v_layer + 0.5);
         if (v_layer < -0.5) {

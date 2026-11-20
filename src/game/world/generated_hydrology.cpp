@@ -29,7 +29,10 @@ bool stopped(const std::function<bool()>& cancelled) {
 }  // namespace
 
 std::shared_ptr<const GeneratedHydrology> GeneratedHydrology::build(
-    const World& world, const std::function<bool()>& cancelled) {
+    const World& world, const std::function<bool()>& cancelled,
+    bool carveRivers, bool naturalRivers, bool boundRivers, bool riverSediment,
+    bool connectLakeOutlets, bool connectCoastalBasins,
+    bool oceanAcrossBasins) {
     if (world.width <= 0 || world.height <= 0 ||
         world.regions.size() != size_t(world.width) * world.height)
         throw std::invalid_argument("Invalid hydrology world");
@@ -37,6 +40,11 @@ std::shared_ptr<const GeneratedHydrology> GeneratedHydrology::build(
     auto result = std::make_shared<GeneratedHydrology>();
     result->width = world.width;
     result->height = world.height;
+    result->naturalProfiles = naturalRivers;
+    result->boundedBanks = boundRivers;
+    result->riverSediment = riverSediment;
+    result->connectCoastalBasins = connectCoastalBasins;
+    result->oceanAcrossBasins = oceanAcrossBasins;
     result->heightSeed = world.genSettings.height_seed;
     result->featureSeed = world.genSettings.feature_seed;
     result->ground.reserve(world.regions.size());
@@ -46,7 +54,9 @@ std::shared_ptr<const GeneratedHydrology> GeneratedHydrology::build(
             {std::clamp(region.land_height_m, 0, WORLD_HEIGHT_Y - 1),
              region.land, region.features});
     if (!result->buildOcean(cancelled) || !result->buildBasins(cancelled) ||
-        !result->buildRiverBeds(world, cancelled))
+        !result->buildRiverBeds(world, cancelled) ||
+        (carveRivers &&
+         !result->buildReaches(cancelled, naturalRivers, connectLakeOutlets)))
         return {};
     return result;
 }
@@ -277,7 +287,12 @@ bool GeneratedHydrology::buildBasins(const std::function<bool()>& cancelled) {
         }
         if (seed < 0) continue;
         const auto id = uint32_t(seed) + 2;
-        basins.emplace(id, Basin{id, seed, outlet, spill[i]});
+        const bool coastal = connectCoastalBasins &&
+                             ground[seed].y < SEA_LEVEL_Y &&
+                             std::any_of(
+                                 component.begin(), component.end(),
+                                 [&](int j) { return regions[j].nearOcean; });
+        basins.emplace(id, Basin{id, seed, outlet, spill[i], coastal});
         for (int j : component) {
             regions[j].body = id;
             regions[j].shore = seed;
@@ -346,7 +361,8 @@ bool GeneratedHydrology::buildRiverBeds(
                 data = terrain(i);
                 last = i;
             }
-            bed.push_back({{x, z}, groundAt(data, {x, z}), catchment(i)});
+            bed.push_back(
+                {{x, z}, groundAt(data, {x, z}), catchment(i), strength});
         }
     }
     return true;
@@ -355,6 +371,10 @@ bool GeneratedHydrology::buildRiverBeds(
 GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
     uint32_t body) const {
     const auto& basin = basins.at(body);
+    if (basin.coastal) {
+        auto coast = refineCoastalBasin(basin);
+        if (coast.ocean) return coast;
+    }
     Footprint result;
     result.lake.sillY = basin.sillY;
     struct SearchRegion {
@@ -375,11 +395,21 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
     };
     std::array<std::vector<Vec2i>, WORLD_HEIGHT_Y + 1> frontier;
     const auto index = [](Vec2i p) { return p.y % Side * Side + p.x % Side; };
+    std::unordered_map<int, std::shared_ptr<const Footprint>> ocean;
+    const auto reachesSea = [&](int region, Vec2i tile) {
+        if (!oceanAcrossBasins || !canSurveyOcean(regions[region]))
+            return false;
+        auto& survey = ocean[region];
+        if (!survey) survey = footprint(uint64_t(region) << 1);
+        return survey->masks.at(region).test(index(tile));
+    };
     const auto seed = center(basin.seed);
     auto& start =
         search.try_emplace(basin.seed, terrain(basin.seed)).first->second;
     const int minimum = groundAt(start.data, seed) + 2;
-    if (minimum > basin.sillY) return {};
+    if (minimum > basin.sillY ||
+        (minimum <= SeaY && reachesSea(basin.seed, seed)))
+        return {};
     start.levels[index(seed)] = int16_t(minimum);
     frontier[minimum].push_back(seed);
     const int period = width * Side;
@@ -426,11 +456,19 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
                 }
                 auto& visited = it->second.levels[index(next)];
                 if (visited >= 0) continue;
-                const int threshold =
-                    std::max(level, groundAt(it->second.data, next) + 2);
+                const int bottom = groundAt(it->second.data, next) + 2;
+                const int threshold = std::max(level, bottom);
                 visited = int16_t(threshold);
-                if (threshold <= searchLimit)
+                if (threshold > searchLimit) continue;
+                // One coarse region can hold both a lake and a separate
+                // piece of coast. The surveyed sea is also an open spill.
+                if (bottom <= SeaY && reachesSea(i, next)) {
+                    searchLimit = threshold - 1;
+                    result.lake.sillY = searchLimit;
+                    result.lake.outlet = next;
+                } else {
                     frontier[threshold].push_back(next);
+                }
             }
         }
     }
@@ -439,6 +477,73 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
             if (cells.levels[j] >= minimum && cells.levels[j] <= searchLimit)
                 result.masks[i].set(j);
     if (!result.masks.empty()) result.lake.surfaceY = searchLimit;
+    return result;
+}
+
+GeneratedHydrology::Footprint GeneratedHydrology::refineCoastalBasin(
+    const Basin& basin) const {
+    // Follow the basin's original submerged terrain to a surveyed ocean
+    // tile. Using uncarved ground keeps nearby river cuts from flooding it.
+    struct Cells {
+        TerrainNeighborhood terrain;
+        Mask seen;
+    };
+    struct Coast {
+        TerrainNeighborhood terrain;
+        std::shared_ptr<const Footprint> survey;
+    };
+    Footprint result;
+    const int period = width * Side;
+    std::unordered_map<int, Cells> surveyed;
+    std::unordered_map<int, Coast> coast;
+    std::vector<Vec2i> wet;
+    bool exceededBudget = false;
+    const auto admit = [&](Vec2i tile) {
+        const int i = regionAt(tile.x, tile.y);
+        if (i < 0) return;
+        const auto& region = regions[i];
+        const int index = tile.y % Side * Side + tile.x % Side;
+        if (!result.ocean && canSurveyOcean(region)) {
+            if (region.deep && region.oceanSource) {
+                result.ocean = true;
+            } else {
+                auto it = coast.find(i);
+                if (it == coast.end())
+                    it = coast.emplace(i, Coast{terrain(i), {}}).first;
+                auto& candidate = it->second;
+                // A dry boundary cannot justify a full ocean survey.
+                if (!candidate.survey &&
+                    TerrainSampler(candidate.terrain).belowSea(tile.x, tile.y))
+                    candidate.survey = footprint(uint64_t(i) << 1);
+                if (candidate.survey)
+                    result.ocean = candidate.survey->masks.at(i).test(index);
+            }
+        }
+        if (region.oceanSource || lakeSeedAt(i, tile) != basin.seed) return;
+        auto it = surveyed.find(i);
+        if (it == surveyed.end()) {
+            if (surveyed.size() == MaxLakeRegions) {
+                exceededBudget = true;
+                return;
+            }
+            it = surveyed.emplace(i, Cells{terrain(i), {}}).first;
+        }
+        auto& cells = it->second;
+        if (cells.seen.test(index)) return;
+        cells.seen.set(index);
+        if (!TerrainSampler(cells.terrain).belowSea(tile.x, tile.y)) return;
+        result.masks[i].set(index);
+        wet.push_back(tile);
+    };
+    admit(center(basin.seed));
+    for (size_t k = 0; k < wet.size() && !exceededBudget; ++k) {
+        const auto tile = wet[k];
+        for (const auto dir : Directions)
+            admit(
+                {int(WorldWrap::mod(tile.x + dir.x, period)), tile.y + dir.y});
+    }
+    if (!result.ocean || exceededBudget) return {};
+    result.lake = {SeaY, SeaY, {}};
     return result;
 }
 
@@ -453,7 +558,7 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineOcean(
     Mask& mask = result.masks[region];
     int admitted = 0;
     const auto admit = [&](Vec2i tile, int i) {
-        if (regions[i].body > Sea) return;
+        if (!canCrossOcean(regions[i])) return;
         auto& checked = seen[i];
         const int index = tile.y % Side * Side + tile.x % Side;
         if (checked.test(index)) return;
@@ -496,8 +601,113 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineOcean(
     return result;
 }
 
+bool GeneratedHydrology::oceanConnectedAt(int region, Vec2i tile) const {
+    // River derivation runs before the hydrology snapshot is published.
+    // Reuse a full survey if an earlier outlet already needed one.
+    const auto key = uint64_t(region) << 1;
+    const int index = tile.y % Side * Side + tile.x % Side;
+    const auto surveyed = [&] {
+        return footprint(key)->masks.at(region).test(index);
+    };
+    if (cache.contains(key)) return surveyed();
+
+    // Search from the mouth toward the same sources used by refineOcean.
+    // A matching path proves membership without filling the whole window.
+    const auto adjacent = shoreNeighborhood(region);
+    const int period = width * Side;
+    const int rx = region % width, rz = region / width;
+    struct Source {
+        Vec2i center;
+        int openZ;
+        bool certified;
+    };
+    std::vector<Source> sources;
+    for (const int i : adjacent) {
+        if (i < 0 || !regions[i].ocean || !canCrossOcean(regions[i])) continue;
+        const int row = i / width;
+        const int openZ = row == 0            ? 0
+                          : row == height - 1 ? height * Side - 1
+                                              : -1;
+        if (regions[i].oceanSource || openZ >= 0)
+            sources.push_back({center(i), openZ, regions[i].oceanSource});
+    }
+    if (sources.empty()) return false;
+
+    std::array<std::bitset<Area>, 9> seen;
+    std::unordered_map<int, TerrainNeighborhood> neighborhoods;
+    struct Visit {
+        int distance;
+        Vec2i tile;
+        bool operator>(const Visit& other) const {
+            return distance > other.distance;
+        }
+    };
+    std::priority_queue<Visit, std::vector<Visit>, std::greater<>> pending;
+    const auto enqueue = [&](Vec2i p) {
+        const int i = regionAt(p.x, p.y);
+        if (i < 0 || !canCrossOcean(regions[i])) return;
+        const int dx = int(WorldWrap::delta(i % width, rx, width));
+        const int dz = i / width - rz;
+        if (std::abs(dx) > 1 || std::abs(dz) > 1) return;
+        auto& checked = seen[(dz + 1) * 3 + dx + 1];
+        const int local = p.y % Side * Side + p.x % Side;
+        if (checked.test(local)) return;
+        checked.set(local);
+        int distance = INT_MAX;
+        for (const auto& source : sources) {
+            const int x =
+                int(std::abs(WorldWrap::delta(p.x, source.center.x, period)));
+            if (source.certified)
+                distance =
+                    std::min(distance, x + std::abs(p.y - source.center.y));
+            if (source.openZ >= 0)
+                distance = std::min(distance, std::max(0, x - Side / 2) +
+                                                  std::abs(p.y - source.openZ));
+        }
+        pending.push({distance, p});
+    };
+    enqueue(tile);
+    constexpr int ProbeBudget = 1024;
+    for (int count = 0; count < ProbeBudget && !pending.empty(); ++count) {
+        const auto p = pending.top().tile;
+        pending.pop();
+        const int i = regionAt(p.x, p.y);
+        const auto& r = regions[i];
+        if (!r.deep && p != tile) {
+            auto it = neighborhoods.find(i);
+            if (it == neighborhoods.end())
+                it = neighborhoods.emplace(i, terrain(i)).first;
+            if (!TerrainSampler(it->second).belowSea(p.x, p.y)) continue;
+        }
+        const int row = i / width;
+        if ((r.oceanSource && (r.deep || p == center(i))) ||
+            (r.ocean &&
+             (row == 0 ? p.y == 0
+                       : row == height - 1 && p.y == height * Side - 1)))
+            return true;
+        for (const auto dir : Directions)
+            enqueue({int(WorldWrap::mod(p.x + dir.x, period)), p.y + dir.y});
+    }
+    return !pending.empty() && surveyed();
+}
+
+void GeneratedHydrology::retainOutletLake(uint32_t body) {
+    if (outletLakes.contains(body) || outletLakeBytes >= OutletLakeBudget)
+        return;
+    const auto lake = footprint((uint64_t(body) << 1) | 1);
+    const size_t cost =
+        sizeof(Footprint) + 128 + lake->masks.size() * (sizeof(Mask) + 128);
+    if (outletLakeBytes + cost > OutletLakeBudget) return;
+    outletLakes.emplace(body, lake);
+    outletLakeBytes += cost;
+}
+
 std::shared_ptr<const GeneratedHydrology::Footprint>
 GeneratedHydrology::footprint(uint64_t key) const {
+    if (key & 1)
+        if (const auto it = outletLakes.find(uint32_t(key >> 1));
+            it != outletLakes.end())
+            return it->second;
     std::optional<std::promise<std::shared_ptr<const Footprint>>> producer;
     Cached value;
     {
@@ -555,14 +765,19 @@ GeneratedHydrology::Lake GeneratedHydrology::lake(uint32_t id) const {
 
 int GeneratedHydrology::ceiling(int region) const {
     const auto& r = regions[region];
-    int top = r.nearOcean ? SEA_LEVEL_Y : -1;
+    const auto channel = riverCeilings.find(region);
+    int top = channel != riverCeilings.end() ? channel->second : -1;
+    if (r.nearOcean) top = std::max(top, SEA_LEVEL_Y);
+    const auto include = [&](const Basin& basin) {
+        top = std::max(top, basin.sillY - 1);
+        if (basin.coastal) top = std::max(top, SEA_LEVEL_Y);
+    };
     if (r.shore == SharedShore) {
         for (int i : shoreNeighborhood(region))
             if (i >= 0)
-                if (const auto* b = basin(regions[i].body))
-                    top = std::max(top, b->sillY - 1);
+                if (const auto* b = basin(regions[i].body)) include(*b);
     } else if (r.shore >= 0) {
-        top = std::max(top, basins.at(uint32_t(r.shore) + 2).sillY - 1);
+        include(basins.at(uint32_t(r.shore) + 2));
     }
     return top;
 }
@@ -574,7 +789,7 @@ bool GeneratedHydrology::needsRefinement(int x0, int z0, int x1, int z1) const {
             if (i < 0) continue;
             const auto& r = regions[i];
             if (r.shore != -1 ||
-                (r.nearOcean && r.body <= Sea && !(r.deep && r.oceanSource)))
+                (canSurveyOcean(r) && !(r.deep && r.oceanSource)))
                 return true;
         }
     return false;
@@ -591,22 +806,94 @@ WaterSurface GeneratedHydrology::certifiedSeaAt(int x, int z) const {
     return {};
 }
 
+bool GeneratedHydrology::potentialSeaAt(int x, int z) const {
+    const int i = regionAt(x, z);
+    return i >= 0 && canSurveyOcean(regions[i]) &&
+           !(regions[i].deep && regions[i].oceanSource);
+}
+
+WaterSurface GeneratedHydrology::previewWaterAt(int x, int z,
+                                                int groundY) const {
+    const auto channel = riverAt(x, z);
+    const int i = regionAt(x, z);
+    if (i < 0) return {};
+    const auto& r = regions[i];
+    WaterSurface standing;
+    if ((r.deep && r.oceanSource) ||
+        (groundY >= 0 && groundY < SEA_LEVEL_Y && canSurveyOcean(r)))
+        standing = {SeaY, Sea};
+    const auto ready = [&](uint32_t body) -> std::shared_ptr<const Footprint> {
+        if (const auto it = outletLakes.find(body); it != outletLakes.end())
+            return it->second;
+        const uint64_t key = (uint64_t(body) << 1) | 1;
+        Cached cached;
+        {
+            std::lock_guard lock(cacheMutex);
+            const auto it = cache.find(key);
+            if (it == cache.end()) return {};
+            cached = it->second.value;
+        }
+        if (cached.wait_for(std::chrono::seconds(0)) !=
+            std::future_status::ready)
+            return {};
+        return cached.get();
+    };
+    if (r.shore != -1) {
+        const int seed = lakeSeedAt(i, {x, z});
+        if (seed >= 0) {
+            const uint32_t id = uint32_t(seed) + 2;
+            if (const auto lake = ready(id)) {
+                const auto mask = lake->masks.find(i);
+                const int index =
+                    z % Side * Side + int(WorldWrap::mod(x, Side));
+                if (mask != lake->masks.end() && mask->second.test(index))
+                    standing = {lake->lake.surfaceY, lake->ocean ? Sea : id};
+            }
+        }
+    }
+    if (channel && channel->distance <= channel->radius &&
+        (!boundedBanks || !standing.wet()) &&
+        channel->water.surfaceY > standing.surfaceY &&
+        channel->water.depth(groundY) > 0 &&
+        channel->water.depth(groundY) <= MaxRiverDepth)
+        return channel->water;
+    return standing;
+}
+
 WaterSurface GeneratedHydrology::waterAt(int x, int z, int groundY) const {
+    const auto channel = riverAt(x, z);
+    if (groundY < 0 && channel) return sampleRiverColumn(x, z).second;
+    const auto standing = standingWaterAt(x, z, groundY);
+    if (channel && channel->distance <= channel->radius &&
+        (!boundedBanks || !standing.wet()) &&
+        channel->water.surfaceY > standing.surfaceY &&
+        channel->water.surfaceY > groundY + 1 &&
+        channel->water.depth(groundY) <= MaxRiverDepth)
+        return channel->water;
+    return standing;
+}
+
+WaterSurface GeneratedHydrology::standingWaterAt(int x, int z, int groundY,
+                                                 bool probeOutlet) const {
     const int i = regionAt(x, z);
     if (i < 0) return {};
     const auto& r = regions[i];
     if (r.deep && r.oceanSource) return {SeaY, Sea};
     const int index = z % Side * Side + int(WorldWrap::mod(x, Side));
-    if (r.nearOcean && r.body <= Sea && groundY < SEA_LEVEL_Y &&
-        footprint(uint64_t(i) << 1)->masks.at(i).test(index))
+    if (canSurveyOcean(r) && groundY < SEA_LEVEL_Y &&
+        (probeOutlet ? oceanConnectedAt(i, {x, z})
+                     : footprint(uint64_t(i) << 1)->masks.at(i).test(index)))
         return {SeaY, Sea};
     if (const int seed = lakeSeedAt(i, {x, z}); seed >= 0) {
         const uint32_t id = uint32_t(seed) + 2;
-        if (groundY + 1 >= basins.at(id).sillY) return {};
+        const auto& basin = basins.at(id);
+        if (groundY + 1 >= basin.sillY &&
+            !(basin.coastal && groundY < SEA_LEVEL_Y))
+            return {};
         const auto wet = footprint((uint64_t(id) << 1) | 1);
         if (const auto it = wet->masks.find(i);
             it != wet->masks.end() && it->second.test(index))
-            return {wet->lake.surfaceY, id};
+            return {wet->lake.surfaceY, wet->ocean ? Sea : id};
     }
     return {};
 }
@@ -654,17 +941,28 @@ bool GeneratedHydrology::uniformWater(int x0, int z0, int x1, int z1,
             } else if (certifiedOnly) {
                 if (expectedBody) return false;
             } else {
-                if (r.nearOcean && r.body <= Sea) {
+                bool seaMatches = false;
+                if (canSurveyOcean(r)) {
                     const auto sea = footprint(uint64_t(i) << 1);
-                    if (!matches(sea->masks.at(i), expectedBody == Sea))
+                    if (expectedBody == Sea)
+                        seaMatches = matches(sea->masks.at(i), true);
+                    else if (!matches(sea->masks.at(i), false))
                         return false;
-                } else if (expectedBody == Sea) {
-                    return false;
                 }
-                if (expectedBody != Sea) {
+                if (expectedBody == Sea && !seaMatches) {
+                    if (r.shore < 0) return false;
+                    const auto& basin = basins.at(uint32_t(r.shore) + 2);
+                    if (!basin.coastal) return false;
+                    const auto coast = footprint((uint64_t(basin.id) << 1) | 1);
+                    const auto mask = coast->masks.find(i);
+                    if (!coast->ocean || mask == coast->masks.end() ||
+                        !matches(mask->second, true))
+                        return false;
+                } else if (expectedBody != Sea) {
                     const auto lakeMatches = [&](uint32_t id) {
                         const auto lake = footprint((uint64_t(id) << 1) | 1);
                         const auto mask = lake->masks.find(i);
+                        if (expectedBody == id && lake->ocean) return false;
                         const bool wet = expectedBody == id;
                         return mask == lake->masks.end()
                                    ? !wet

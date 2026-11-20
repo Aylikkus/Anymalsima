@@ -122,6 +122,42 @@ cmake --build build --target lod_render_smoke
 build/tests/lod_render_smoke /tmp/capture 900 lights
 ```
 
+The river flyover starts at the mouth, crosses the X seam, approaches the
+waterfall during a remesh, and finishes below the landing's water surface.
+Compare the PPM captures for missing or doubled water, submerged banks,
+visible seams during handoff, and underwater fog.
+
+```bash
+for preset in 0 1 2; do
+  SMOKE_TERRAIN="$preset" build/tests/lod_render_smoke "/tmp/river-$preset" 5000 river
+done
+```
+
+The headless benchmark reports the build time and mesh size for the two
+fallback patches that meet at the same seam.
+
+```bash
+cmake --build build --target lod_benchmark
+build/tests/lod_benchmark --river
+```
+
+To profile a real location, point the smoke test at a save. This reads the
+world map and starts at its saved camera. It generates nearby chunks from
+the map for repeatability, without writing to the save.
+
+```bash
+SMOKE_SAVE=/path/to/save SMOKE_TERRAIN=2   build/tests/lod_render_smoke /tmp/saved-view 850 saved
+```
+
+The walking variant halves the chosen terrain budget, moves the saved
+camera through new regions for 500 frames and checks that the stationary
+camera regains tile-spacing terrain and the terrain queue drains. Use
+`saved_walk_full` for the same route with the full preset budget.
+
+```bash
+SMOKE_SAVE=/path/to/save SMOKE_TERRAIN=2   build/tests/lod_render_smoke /tmp/lod-budget-walk 2800 saved_walk
+```
+
 Massive tree approach (`docs/handoff/trees.md`, "Approaching massive trees"):
 one elder in view, the game's chunk radius, the High terrain preset; it walks
 from 1200 m to 40 m and prints per-section frame times and holes in the

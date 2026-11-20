@@ -5,10 +5,28 @@
 // array uses the same layer index as the albedo array), u_shadow_atlas
 // (shadow_sampling.sh), u_lod_light_map and u_sky_occlusion.
 uniform vec4 u_world_eye;
-// x = ocean surface Y, y = 1 when the eye is in water, z = debug LOD edges.
+// x = flow time in seconds, y = eye submerged, z = debug LOD edges.
 uniform vec4 u_world_water;
 #include "shadow_sampling.sh"
 #include "water_fog.sh"
+
+// The horizontal wavelengths divide the world wrap period (128 * regions).
+// Both voxel and proxy meshes pass world position and the same flow vector.
+vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing)
+{
+    vec3 color = vec3(0.055, 0.24, 0.32);
+    if (!flowing) return color;
+    float t = u_world_water.x;
+    vec2 phase = position.xz / 8.0 - t * flow * 0.5;
+    float riffle = sin(6.2831853 * phase.x) + sin(6.2831853 * phase.y);
+    if (abs(normal.y) < 0.5) {
+        float stripe = dot(position.xz, vec2(-normal.z, normal.x)) / 4.0;
+        riffle = sin(6.2831853 * (-position.y / 4.0 - t + stripe))
+               + sin(6.2831853 * (-position.y / 8.0 - t * 0.5 - stripe));
+    }
+    return color * (1.0 + 0.10 * riffle);
+}
+
 
 // Light response: ambient + diffuse * N.L, both scaled by the light level.
 #define SURFACE_AMBIENT 0.6

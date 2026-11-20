@@ -51,7 +51,7 @@ struct Vec2 {
 
     Vec2(){}
 
-    Vec2(float x, float y){
+    constexpr Vec2(float x, float y){
         this->x = x;
         this->y = y;
     }

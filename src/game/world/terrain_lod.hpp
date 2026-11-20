@@ -118,7 +118,7 @@ inline constexpr int SteppedSkirt = 8;
 // across the seam instead of walls down to the floor.
 Mesh build(const Patch& patch, SurfaceSampler& sampler,
            const std::atomic_bool& cancelled, int materialMap = Cells * 2,
-           bool wrapX = false);
+           bool wrapX = false, bool waterOnly = false);
 // Height of the actual triangulated LOD surface, for joining it to loaded
 // column boundaries independently of the current LOD resolution.
 float meshHeight(const Patch& patch, SurfaceSampler& sampler, float x, float z);

@@ -84,6 +84,7 @@ void SurfaceSampler::setEdits(std::shared_ptr<const EditMap> value) {
     lastEdit = nullptr;
     // Generated columns stay valid; heights include edits.
     heights.clear();
+    waterSamples.clear();
 }
 
 uint16_t SurfaceSampler::material(const RegionInput& data,
@@ -146,9 +147,16 @@ SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     result.water = generatedWater(x, z, result.surfaceY);
     result.soil = sampler.soil(x, z, terrain, result.water);
     result.material = material(data, result, result.surfaceY);
-    auto rockOnly = result;
-    rockOnly.soil = {};
-    result.rockMaterial = material(data, rockOnly, result.surfaceY);
+    // The smooth LOD uses one side material per column. Use the sediment
+    // below the surface here; stepped LODs sample the actual layers by Y.
+    if (result.soil.riverSediment) {
+        result.rockMaterial =
+            material(data, result, result.surfaceY - result.soil.depth_m + 1);
+    } else {
+        auto rockOnly = result;
+        rockOnly.soil = {};
+        result.rockMaterial = material(data, rockOnly, result.surfaceY);
+    }
     columns[key] = result;
     return result;
 }
@@ -159,6 +167,15 @@ bool SurfaceSampler::hasEdits(int x0, int z0, int x1, int z1) {
         for (int x = x0 / Chunk::SIZE_X; x <= (x1 - 1) / Chunk::SIZE_X; ++x)
             if (editAt(x * Chunk::SIZE_X, z * Chunk::SIZE_Z)) return true;
     return false;
+}
+
+int SurfaceSampler::channelFloorLevel(int x, int z, int radius) const {
+    return world.hydrology ? world.hydrology->channelFloorLevel(x, z, radius)
+                           : -1;
+}
+
+bool SurfaceSampler::hasChannel(int x0, int z0, int x1, int z1) const {
+    return world.hydrology && world.hydrology->hasChannel(x0, z0, x1, z1);
 }
 
 bool SurfaceSampler::hasUnrefinedWater(int x0, int z0, int x1, int z1) const {
@@ -178,8 +195,8 @@ bool SurfaceSampler::submerged(int x, int z, float y) {
 
 bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
                                   WaterSurface sample) {
-    if (hasEdits(x0, z0, x1, z1)) return false;
-    if (world.hydrology)
+    if (hasChannel(x0, z0, x1, z1) || hasEdits(x0, z0, x1, z1)) return false;
+    if (world.hydrology && waterDetail != WaterDetail::Preview)
         return world.hydrology->uniformWater(x0, z0, x1, z1, sample.body,
                                              provisionalWater());
     for (int x : {x0, (x0 + x1) / 2, x1 - 1})
@@ -193,16 +210,38 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
         const int i =
             ColumnEdit::index(wrapX(x) % Chunk::SIZE_X,
                               std::clamp(z, 0, depth() - 1) % Chunk::SIZE_Z);
-        return {edit->waterY[i] > edit->groundY[i] + 1 ? edit->waterY[i] : -1};
+        const int level = edit->waterY[i];
+        if (level <= edit->groundY[i] + 1) return {};
+        const auto generated = generatedWater(x, z, edit->groundY[i]);
+        if (generated.surfaceY == level) return generated;
+        return {level, 0, generated.reach, generated.flow, true};
     }
-    const int ground = world.hydrology ? -1 : height(x, z);
-    return generatedWater(x, std::clamp(z, 0, depth() - 1), ground);
+    x = wrapX(x);
+    z = std::clamp(z, 0, depth() - 1);
+    const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
+    if (auto it = waterSamples.find(key); it != waterSamples.end())
+        return it->second;
+    const bool needsHeight = !world.hydrology ||
+                             world.hydrology->riverAt(x, z) ||
+                             (waterDetail == WaterDetail::Preview &&
+                              world.hydrology->potentialSeaAt(x, z));
+    const auto result = generatedWater(x, z, needsHeight ? height(x, z) : -1);
+    if (waterSamples.size() >= 65536) waterSamples.clear();
+    waterSamples.emplace(key, result);
+    return result;
 }
 
 WaterSurface SurfaceSampler::generatedWater(int x, int z, int groundY) const {
     if (!world.hydrology) return WaterSurface::sea(groundY);
-    if (provisionalWater()) return world.hydrology->certifiedSeaAt(x, z);
-    return world.hydrology->waterAt(x, z, groundY);
+    if (!provisionalWater()) return world.hydrology->waterAt(x, z, groundY);
+    if (waterDetail == WaterDetail::Preview)
+        return world.hydrology->previewWaterAt(x, z, groundY);
+    // Include the exact interface with a standing body at river mouths,
+    // even while the wider shoreline of a fallback patch is pending.
+    if (const auto channel = world.hydrology->riverAt(x, z);
+        channel && channel->distance <= channel->radius)
+        return world.hydrology->waterAt(x, z, groundY);
+    return world.hydrology->certifiedSeaAt(x, z);
 }
 
 uint16_t SurfaceSampler::materialAt(int x, int y, int z) {

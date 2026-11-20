@@ -827,7 +827,7 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
     auto future = pool.submit_task(
         [coord, data, neighbors = std::move(neighbors), builder = *mesher,
          identity, revision, wrapX, depth = terrainWorld.height * 128, climate,
-         terrain, structures]() {
+         terrain, structures, hydrology = terrainWorld.hydrology]() {
             const unsigned aboveY = coord.y + 1;
             const std::optional<structure_voxels::Slab> above =
                 !neighbors.contains({coord.x, aboveY, coord.z}) && structures &&
@@ -871,6 +871,18 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                         return &solid;
                     return column.water.fills(y, column.surface_y) ? &water
                                                                    : &air;
+                },
+                [&](int x, int z) -> std::pair<int, WaterSurface> {
+                    const int lx = x - int(coord.x) * Chunk::SIZE_X;
+                    const int lz = z - int(coord.z) * Chunk::SIZE_Z;
+                    if (terrain && lx >= 0 && lx < Chunk::SIZE_X && lz >= 0 &&
+                        lz < Chunk::SIZE_Z) {
+                        const auto& column =
+                            terrain->columns[lz * Chunk::SIZE_X + lx];
+                        return {column.surface_y, column.water};
+                    }
+                    return hydrology ? hydrology->sampleRiverColumn(x, z)
+                                     : std::pair<int, WaterSurface>{-1, {}};
                 });
             return FinishedMesh{coord, std::move(mesh), identity, revision};
         },
@@ -1577,7 +1589,7 @@ void ChunkManager::update(WorldEditor* editor) {
 
 MeshHandle* ChunkManager::getWaterMesh(const ChunkCoord& coord) {
     const auto it = chunks.find(coord);
-    return it != chunks.end() && !it->second.waterTops.empty()
+    return it != chunks.end() && it->second.hasWaterGeometry
                ? &it->second.waterMesh
                : nullptr;
 }

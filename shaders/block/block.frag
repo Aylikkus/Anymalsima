@@ -76,7 +76,7 @@ void applyCover(vec3 position, vec3 lightCell, vec2 cover, vec3 coverTint,
 
 void main()
 {
-    if (u_world_water.z > 0.5 && u_light_chunk.w < 0.5 &&
+    if (v_layer >= -1.5 && u_world_water.z > 0.5 && u_light_chunk.w < 0.5 &&
         v_cover.x < -0.5 && v_cover.y > 2.5) {
         gl_FragColor = vec4(1.0, 0.5, 0.0, 1.0);
         return;
@@ -85,7 +85,8 @@ void main()
     vec3 color;
     vec3 normal = geometric;
     if (v_layer < -1.5) {
-        color = vec3(0.055, 0.24, 0.32) * v_color0.rgb;
+        color = surfaceWaterColor(v_position, geometric, v_cover, v_layer < -2.5)
+              * v_color0.rgb;
     } else {
         float layer = floor(v_layer + 0.5);
         color = surfaceTexture(v_position, geometric, layer).rgb;
@@ -127,7 +128,7 @@ void main()
     } else {
         // Distant joins and structure slabs: the ocean's attenuation and
         // the shade of structures above.
-        light.x = surfaceWaterSky(v_position.y, -2.0 - v_cover.x)
+        light.x = surfaceWaterSky(v_position.y, v_layer < -1.5 ? v_position.y : -2.0 - v_cover.x)
                 * surfaceStructureSky(v_position, geometric);
     }
     vec3 far = surfaceFarLight(v_position, normal, geometric, u_light_chunk.w);

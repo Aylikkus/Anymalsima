@@ -261,6 +261,76 @@ shore-to-river flyover at each terrain preset. Check for disappearing water,
 double surfaces, drowned banks, popping during upload, and underwater fog.
 This is the visual gate before live levels and simulation.
 
+Generator version 15 derives the river graph from the saved paths and
+terrain seeds. Paths are processed longest first, with saved order breaking
+ties. A route joins an established reach where its centerline meets it and
+ends at the first verified lake or sea footprint it can reach. A closed
+route ends in a level channel pool. A route that exceeds the carve limits or
+would need to climb into its receiver terminates at the last valid column.
+Version 14 saves keep their standing basins and original terrain.
+
+Each accepted headwater maps a spring to its exposed rock tile. Reach spans
+carry a water level, bed depth, and direction, with banks indexed in wrapped
+region and 16-tile buckets. The profile limits river depth to 32 tiles and
+rock cuts to 96 tiles. Generated waterfalls concentrate an existing descent
+of 8 to 32 tiles within a 32-tile profile window. The lower water level
+defines the bottom of the visible sheet, which can extend over the exposed
+cliff below the lip's channel bed. The voxel and adaptive distant meshes
+use the same tile footprint and flow animation. Distant terrain subdivides
+around the indexed channel, including in fallback patches.
+
+Generator version 16 rounds river turns, adds seeded bends and width
+variation, and leaves shallow shelves at the channel edges. A reach keeps
+at most one waterfall. The waterfall needs a natural drop of at least
+18 blocks over eight sampled stations. Other declines are graded upstream.
+Version 15 saves continue to use their original river beds and waterfalls.
+
+Initial smooth patches use a sampled coastal proxy and reuse already
+surveyed lake footprints. The proxy can temporarily fill a low coastal
+pocket while its exact connectivity is pending. A separate low-priority
+job replaces the water mesh and depth map without rebuilding the ground.
+Outlet lakes keep their exact masks within a bounded memory budget. At
+coarse spacing the terrain uses fewer subdivisions along channels, while
+merged water quads preserve narrow streams and significant drop faces.
+
+Generator version 17 closes exposed dry sides of generated river
+columns with solid banks up to the local waterline. Downstream channels
+and verified standing receivers remain open. The carve also fills deep
+holes under a reach to keep the water depth within its channel limit.
+These checks operate on the baseline before chunk generation or LOD
+sampling, including at chunk and wrap edges. Existing worlds retain their
+saved generator's terrain.
+
+Generator version 18 uses local soil and sand on riverbeds and banks.
+Soil depth follows the terrain grade before the river cut, and submerged
+sediment has no vegetation or topsoil. Springs still emerge from rock.
+Chunks and terrain LODs use the same sediment layers.
+
+Generator version 19 follows saved river routes through surveyed lakes.
+The inlet ends at the lake and an outgoing reach starts at the last wet
+tile on the far shore. Each lake can supply one generated outlet. The
+outlet starts at the lake's water level and must reach a downstream body
+or channel within the existing cut and grade limits. A lake-fed reach
+draws from the lake and has no spring source.
+
+Generator version 20 checks low coastal basins for face-connected paths
+to surveyed seawater. A connected basin fills to sea level across region
+boundaries, and the same footprint supplies chunks and terrain LODs.
+The survey uses the natural terrain before river cuts.
+
+Generator version 21 allows a map region to contain both a coastal shelf
+and an inland lake. Seawater follows submerged faces across the region
+border. The lake keeps its own level up to the point where it can spill
+into the surveyed sea.
+
+The spring record supplies a bounded per-step input for the fluid solver.
+Water introduced by edits can render exposed faces. Opening new aquifer
+outlets, redirecting flow, and transferring water over runtime drops
+depend on the fluid solver in steps 4–5.
+
+See [the river flyover](../../tests/README.md#device-targets-gpu-and-display)
+for the graphics acceptance check and the CPU patch benchmark.
+
 ## 4. Drain and refill standing bodies with lazy reconciliation
 
 Store the body volume in wide fixed-point units sized for large maps and

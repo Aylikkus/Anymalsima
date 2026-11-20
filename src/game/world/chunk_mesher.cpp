@@ -159,7 +159,8 @@ void ChunkMesher::emitQuad(ChunkGeometry& mesh, float ox, float oy, float oz,
 ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                              const NeighbourFn& neighbour,
                              const CoverClimate& climate,
-                             const NeighbourFn& generatedWaterHalo) const {
+                             const NeighbourFn& generatedWaterHalo,
+                             const WaterColumnFn& waterColumn) const {
     ChunkMesh mesh;
 
     // World-space origin of this chunk (tile units).
@@ -375,29 +376,99 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
         }
     }
 
-    for (int z = 0; z < Chunk::SIZE_Z; ++z)
-        for (int y = 0; y < Chunk::SIZE_Y; ++y)
-            for (int x = 0; x < Chunk::SIZE_X; ++x) {
-                const auto& tile = chunk.tiles[z][y][x];
-                if (tile.liquid != LiquidType::Water || tile.block_id != 0)
-                    continue;
-                const Tile* above =
-                    y + 1 < Chunk::SIZE_Y
-                        ? &chunk.tiles[z][y + 1][x]
-                        : neighbour(originX + x, originY + y + 1, originZ + z);
-                if (!above && generatedWaterHalo)
-                    above = generatedWaterHalo(originX + x, originY + y + 1,
-                                               originZ + z);
-                if (!above || above->liquid != LiquidType::None ||
-                    above->block_id)
-                    continue;
-                const float top = y + 1;
-                if (mesh.waterTops.empty())
-                    mesh.waterTops.resize(Chunk::SIZE_X * Chunk::SIZE_Z, -1);
-                mesh.waterTops[z * Chunk::SIZE_X + x] = top;
-                emitQuad(mesh.water, x, top, z, 0, 0, 1, 1, 0, 0, Face::PosY,
-                         {nullptr, UINT16_MAX, NeutralTint}, climate);
+    const auto emitWater = [&](float x, float y, float z, float ux, float uy,
+                               float uz, float vx, float vy, float vz,
+                               Face face, Vec2 flow) {
+        const size_t base = mesh.water.vertices.size();
+        emitQuad(mesh.water, x, y, z, ux, uy, uz, vx, vy, vz, face,
+                 {nullptr, UINT16_MAX, NeutralTint}, climate);
+        if (flow.x || flow.y)
+            for (size_t i = base; i < mesh.water.vertices.size(); ++i) {
+                auto& vertex = mesh.water.vertices[i];
+                vertex.layer = -3;
+                vertex.u = flow.x;
+                vertex.v = flow.y;
             }
+    };
+    static constexpr std::array<Vec2i, 4> sides{
+        {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+    static constexpr std::array<Face, 4> faces{Face::PosX, Face::NegX,
+                                               Face::PosZ, Face::NegZ};
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            const int wx = originX + x, wz = originZ + z;
+            const auto at = [&](int dx, int y, int dz) -> const Tile* {
+                const int xx = x + dx, zz = z + dz;
+                if (xx >= 0 && xx < Chunk::SIZE_X && zz >= 0 &&
+                    zz < Chunk::SIZE_Z && y >= 0 && y < Chunk::SIZE_Y)
+                    return &chunk.tiles[zz][y][xx];
+                return neighbour(wx + dx, originY + y, wz + dz);
+            };
+            std::pair<int, WaterSurface> generated{-1, {}};
+            std::array<std::pair<int, WaterSurface>, 4> adjacent;
+            if (waterColumn) generated = waterColumn(wx, wz);
+            bool sampled = false;
+            for (int y = 0; y < Chunk::SIZE_Y; ++y) {
+                const auto& tile = chunk.tiles[z][y][x];
+                const bool fluid =
+                    tile.liquid == LiquidType::Water && !tile.block_id;
+                const auto [ground, water] = generated;
+                const int wy = originY + y;
+                // A generated sheet can run down the lip's exposed rock
+                // underneath the upstream water cells.
+                const bool cliff = water.reach && wy <= ground &&
+                                   wy < water.surfaceY && tile.block_id;
+                if (!fluid && !cliff) continue;
+                if (waterColumn && !sampled) {
+                    for (size_t i = 0; i < sides.size(); ++i)
+                        adjacent[i] =
+                            waterColumn(wx + sides[i].x, wz + sides[i].y);
+                    sampled = true;
+                }
+                const float height = fluid ? WaterSurface::cellHeight(tile) : 1;
+                const Tile* above = at(0, y + 1, 0);
+                if (!above && generatedWaterHalo)
+                    above = generatedWaterHalo(wx, originY + y + 1, wz);
+                if (fluid && above && above->liquid == LiquidType::None &&
+                    !above->block_id) {
+                    const float top = y + height;
+                    if (mesh.waterTops.empty())
+                        mesh.waterTops.resize(Chunk::SIZE_X * Chunk::SIZE_Z,
+                                              -1);
+                    mesh.waterTops[z * Chunk::SIZE_X + x] = top;
+                    emitWater(x, top, z, 0, 0, 1, 1, 0, 0, Face::PosY,
+                              generated.second.flow);
+                }
+
+                if (!sampled) continue;
+                for (size_t i = 0; i < sides.size(); ++i) {
+                    const auto [dx, dz] = sides[i];
+                    const auto [bank, lower] = adjacent[i];
+                    const Tile* other = at(dx, y, dz);
+                    if (other && other->block_id) continue;
+                    const bool drop = water.wet() && wy < water.surfaceY &&
+                                      wy >= water.dropBottom(lower, bank);
+                    const bool changed =
+                        fluid && (!water.fills(wy, ground) || height < 1 ||
+                                  (other && lower.fills(wy, bank) &&
+                                   other->liquid == LiquidType::None));
+                    if (!drop && !(changed && other && fluid)) continue;
+                    const float bottom = other && other->isLiquid()
+                                             ? WaterSurface::cellHeight(*other)
+                                             : 0;
+                    if (bottom >= height) continue;
+                    const float length = height - bottom;
+                    const Vec2 flow =
+                        water.reach ? water.flow : Vec2(float(dx), float(dz));
+                    // Match the outward winding of FACES.
+                    // Move the sheet just in front of the solid face.
+                    const float offset = drop ? 2 * SeamOverlap : 0.f;
+                    emitWater(x + (dx > 0 || dz > 0) + dx * offset, y + bottom,
+                              z + (dz > 0 || dx < 0) + dz * offset, 0, length,
+                              0, -dz, 0, dx, faces[i], flow);
+                }
+            }
+        }
 
     return mesh;
 }

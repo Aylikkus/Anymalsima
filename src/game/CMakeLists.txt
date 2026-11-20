@@ -11,6 +11,7 @@ add_library(game
     world/location_generator.cpp
     world/terrain_sampler.cpp
     world/generated_hydrology.cpp
+    world/generated_rivers.cpp
     world/surface_sampler.cpp
     world/terrain_lod.cpp
     world/terrain_lod_manager.cpp

@@ -88,7 +88,11 @@ class TerrainLodManager {
                          float radius) const;
     size_t patchCount() const { return drawn.size(); }
     size_t jobCount() const { return jobs.size(); }
+    float visibleDistance() const { return selectionRange; }
+    size_t terrainBacklog() const;
+    size_t structureBacklog() const;
     size_t backlog() const;
+    int drawnSpacingAt(int x, int z) const;
     size_t uploadedBytes() const { return uploaded; }
     const TerrainLod::Quality& settings() const { return quality; }
 
@@ -115,7 +119,7 @@ class TerrainLodManager {
         std::optional<TerrainLod::Mesh> cpu;
         std::vector<TerrainLod::ColumnBands> bands;
         AABB bounds{};
-        size_t bytes = 0;
+        size_t bytes = 0, waterBytes = 0;
         bool drawable = false;
         bool provisionalWater = false;
         // Frame in which the patch was last selected for drawing.
@@ -125,7 +129,7 @@ class TerrainLodManager {
         // replaces it.
         bool stale = false;
         uint64_t staleRevision = 0;
-        std::optional<TerrainLod::Mesh> replacement;
+        std::optional<TerrainLod::Mesh> replacement, waterReplacement;
         uint64_t replacementRevision = 0;
         bool needsBuild() const {
             return stale &&
@@ -146,6 +150,9 @@ class TerrainLodManager {
     void request();
     void upload(IRenderer& renderer);
     void uploadReplacements(IRenderer& renderer);
+    void uploadWater(IRenderer& renderer);
+    bool createWater(Entry& entry, const TerrainLod::Mesh& cpu,
+                     IRenderer& renderer);
     // Creates the GPU mesh, material map and uniforms of an entry.
     bool createGpu(Entry& entry, const TerrainLod::Patch& patch,
                    const TerrainLod::Mesh& cpu, IRenderer& renderer);
@@ -155,11 +162,12 @@ class TerrainLodManager {
     bool isDrawable(const TerrainLod::Patch& patch) const;
     // Inside the world and the view distance at the last selection.
     bool inView(const TerrainLod::Patch& patch) const;
-    // Evicts unwanted cached patches, least recently drawn first, until
-    // `bytes` more fit in the GPU budget. What was drawn in the previous
-    // frame is kept, except finer leftovers inside `incoming`, a desired leaf
-    // uploaded in the same frame that replaces them on screen.
-    bool makeRoom(size_t bytes, const TerrainLod::Patch* incoming = nullptr);
+    bool fallbackSatisfied(const TerrainLod::Patch& patch) const;
+    // Plan against the prospective layout. Publish the new GPU buffers
+    // before discarding anything that still provides visible coverage.
+    std::optional<std::vector<Entries::iterator>> roomFor(
+        size_t bytes, const TerrainLod::Patch* incoming = nullptr);
+    bool makeRoom(size_t bytes);
     void erase(Entries::iterator it);
     void markDrawable(const TerrainLod::Patch& patch, int delta);
     // Not enough budget: select a coarser layout once per selection.
@@ -204,19 +212,27 @@ class TerrainLodManager {
     Entries entries;
     // Drawable entries strictly below each patch; bounds the fallback search.
     std::map<TerrainLod::Patch, int> drawableBelow;
-    std::map<std::array<int, 3>, float> errors;
-    bool errorsChanged = false;
+    struct Estimate {
+        float error;
+        size_t bytes;
+    };
+    std::map<std::array<int, 3>, Estimate> estimates;
+    bool errorsChanged = false, selectionDirty = true;
     std::vector<Job> jobs;
     size_t maxJobs = 2;
     std::array<int, 4> lastFocus{-1, -1, -1, -1};
     float errorScale = 1, selectedScale = 0;
-    Vec3 selectionEye{0, 0, 0};
+    float rangeLimit = 0, selectionRange = 0, selectedRangeLimit = 0;
+    Vec3 selectionEye{0, 0, 0}, viewForward{0, 0, 0};
     std::vector<TerrainLod::Patch> drawn;
     uint64_t frame = 1;
     size_t resident = 0, uploaded = 0;
     int detailX = 0, detailZ = 0;
     static constexpr int DetailSize = 32;
     std::array<uint8_t, DetailSize * DetailSize * 4> coverage{};
+    uint64_t groundCoverageUploaded = UINT64_MAX;
+    uint64_t waterCoverageUploaded = UINT64_MAX;
+    int uploadedDetailX = 0, uploadedDetailZ = 0;
     bgfx::TextureHandle detailMap = BGFX_INVALID_HANDLE;
     ShaderProperty detailUniform, detailOrigin, textureArray, fogUniform;
     ShaderProperty water;

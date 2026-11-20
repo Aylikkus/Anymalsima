@@ -167,6 +167,22 @@ double TerrainSampler::cliffLift(int rx, int rz, double x, double z) const {
 // CoastWarpTotal, so any boundary outside them is farther than CoastCap.
 double TerrainSampler::coastDistance(int rx, int rz, double x, double z) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
+    // A bounded warp cannot reach outside this neighborhood. If all
+    // regions agree, even the jittered distance is beyond the beach and
+    // shelf bands. Their clamped weights and belowSea are identical.
+    static_assert(
+        TerrainTuning::CoastCap - TerrainTuning::CoastJitter >=
+        std::max({TerrainTuning::BeachWidth, TerrainTuning::ShelfWidth,
+                  TerrainTuning::BlendWidth}));
+    const bool ownerLand = data.at(rx, rz).region.land_height_m >= SEA_LEVEL_Y;
+    bool uniform = true;
+    for (int dz = -1; dz <= 1 && uniform; ++dz)
+        for (int dx = -1; dx <= 1 && uniform; ++dx)
+            uniform = (data.at(rx + dx, rz + dz).region.land_height_m >=
+                       SEA_LEVEL_Y) == ownerLand;
+    if (uniform)
+        return ownerLand ? TerrainTuning::CoastCap : -TerrainTuning::CoastCap;
+
     const uint32_t seed = data.height_seed;
     const auto warp = [&](uint32_t salt) {
         double offset = 0;
@@ -206,10 +222,18 @@ double TerrainSampler::coastDistance(int rx, int rz, double x, double z) const {
 }
 
 double TerrainSampler::surface(double x, double z) const {
+    return heightsAt(x, z).ground;
+}
+
+TerrainSampler::Heights TerrainSampler::heightsAt(double x, double z) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     // X wraps around the world; Z clamps to its edges.
-    x = data.periodX() > 0 ? WorldWrap::modf(x, data.periodX())
-                           : std::max(x, 0.0);
+    const int period = data.periodX();
+    if (period > 0) {
+        if (x < 0 || x >= period) x = WorldWrap::modf(x, period);
+    } else {
+        x = std::max(x, 0.0);
+    }
     z = std::clamp(z, 0.0, double(data.height) * sz - 1);
     const int rx = int(x / sx), rz = int(z / sz);
     const int gx = int(x / (sx / 2)), gz = int(z / (sz / 2));
@@ -228,25 +252,28 @@ double TerrainSampler::surface(double x, double z) const {
         std::max(0.0, base - double(HeightProfile::PlainsTopY));
     base =
         std::lerp(base, double(owner.land_height_m), cliffLift(rx, rz, x, z));
-    const int period = data.periodX();
     const double broad = SoilGenerator::field(
         x, z, TerrainTuning::BroadScale, data.height_seed ^ 0x1459u, period);
     const double fine = SoilGenerator::field(
         x, z, TerrainTuning::FineScale, data.height_seed ^ 0x43a1u, period);
-    // Ridged fBm: sharp crests where each octave crosses 0.5, wide valleys
-    // between them. 1 on a crest, 0 deep in a valley.
-    double ridge = 0;
-    uint32_t salt = 0x6c2fu;
-    for (const auto& octave : TerrainTuning::RidgeOctaves) {
-        const double crest =
-            1 - std::abs(2 * gradientField(x, z, octave.scale,
+    double valleys = broad;
+    if (elevation > 0) {
+        // Ridged fBm: sharp crests where each octave crosses 0.5, wide valleys
+        // between them. 1 on a crest, 0 deep in a valley.
+        double ridge = 0;
+        uint32_t salt = 0x6c2fu;
+        for (const auto& octave : TerrainTuning::RidgeOctaves) {
+            const double crest =
+                1 -
+                std::abs(2 * gradientField(x, z, octave.scale,
                                            data.height_seed ^ salt, period) -
                          1);
-        ridge += octave.amplitude * crest * crest;
-        salt = salt * 0x9e3779b1u + 0x51edu;
+            ridge += octave.amplitude * crest * crest;
+            salt = salt * 0x9e3779b1u + 0x51edu;
+        }
+        valleys = std::lerp(broad, 1 - ridge,
+                            smooth(elevation / TerrainTuning::RidgeBlend));
     }
-    const double valleys = std::lerp(
-        broad, 1 - ridge, smooth(elevation / TerrainTuning::RidgeBlend));
     const double reduction =
         interpolate(true) * (.75 * broad + .25 * fine) +
         TerrainTuning::ReliefPerMetre * elevation * valleys;
@@ -288,7 +315,10 @@ double TerrainSampler::surface(double x, double z) const {
                              data.at(rx + (ix ? dx : 0), rz + (iz ? dz : 0))
                                  .region.land_height_m);
         }
-    return std::clamp(shore, 0.0, ceiling);
+    const double original = std::clamp(shore, 0.0, ceiling);
+    return {data.hydrology ? data.hydrology->carve(int(x), int(z), original)
+                           : original,
+            original};
 }
 
 bool TerrainSampler::belowSea(int x, int z) const {
@@ -303,14 +333,20 @@ bool TerrainSampler::belowSea(int x, int z) const {
 }
 
 TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
-    const double center = surface(x, z);
+    const auto center = heightsAt(x, z);
     // Compare against the center as well: central differences alone can hide
     // the slope at a narrow ridge or one-column cliff.
-    double slope = 0;
-    for (const auto& [dx, dz] :
-         std::array<std::pair<int, int>, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
-        slope = std::max(slope, std::abs(surface(x + dx, z + dz) - center));
-    return {int(std::floor(center)), slope};
+    TerrainSample result{int(std::floor(center.ground))};
+    for (const auto& [dx, dz] : std::array<std::pair<int, int>, 4>{
+             {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+        const auto neighbor = heightsAt(x + dx, z + dz);
+        result.slope =
+            std::max(result.slope, std::abs(neighbor.ground - center.ground));
+        result.originalSlope =
+            std::max(result.originalSlope,
+                     std::abs(neighbor.original - center.original));
+    }
+    return result;
 }
 
 WaterSurface TerrainSampler::water(int64_t x, int64_t z, int groundY) const {
@@ -348,6 +384,10 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     };
     std::array<Choice, 4> choices{};
     const bool submerged = surfaceWater.wet();
+    const bool riverSediment =
+        data.hydrology && data.hydrology->usesRiverSediment() &&
+        (surfaceWater.reach ||
+         (!submerged && terrain.slope > terrain.originalSlope));
     double total = 0;
     int count = 0;
     for (int iz = 0; iz < 2; ++iz)
@@ -361,14 +401,16 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
             // priority). Its rules are checked against that region's own
             // features and climate, at this column's height, so a soil
             // blends across the border instead of stopping at it, while the
-            // underwater rule still follows the actual shoreline.
+            // underwater rule follows the shoreline of standing water.
+            // River deposits inherit the local soil of the surrounding land.
             Region source = candidate.region;
             source.land_height_m = terrain.surface_y;
-            const bool eligible = std::any_of(
-                candidate.soil_rules.begin(), candidate.soil_rules.end(),
-                [&](const auto& rule) {
-                    return SoilGenerator::allowed(rule, source, submerged);
-                });
+            const bool eligible =
+                std::any_of(candidate.soil_rules.begin(),
+                            candidate.soil_rules.end(), [&](const auto& rule) {
+                                return SoilGenerator::allowed(
+                                    rule, source, submerged && !riverSediment);
+                            });
             if (!eligible) continue;
             choices[count++] = {&candidate, weight};
             total += weight;
@@ -415,17 +457,25 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     // use the same soil (e.g. a bare beach next to a vegetated one).
     Region source = selected->region;
     source.land_height_m = terrain.surface_y;
+    if (data.hydrology &&
+        data.hydrology->springRockAt(int(x), terrain.surface_y, int(z)))
+        return {};
     auto profile = selected->soil;
     if (submerged || source.vegetation == VegetationType::NONE)
         profile.topsoil_block_id = 0;
     auto cover = SoilGenerator::sample(profile, source, x, z, data.periodX());
+    // River cuts can create abrupt one-block steps on otherwise gentle land.
+    const double slope = riverSediment
+                             ? std::min(terrain.slope, terrain.originalSlope)
+                             : terrain.slope;
     const double retention =
         1 -
-        smooth((terrain.slope - TerrainTuning::SoilSlopeStart) /
+        smooth((slope - TerrainTuning::SoilSlopeStart) /
                (TerrainTuning::SoilSlopeEnd - TerrainTuning::SoilSlopeStart));
     const int depth = int(std::floor(cover.depth_m * retention));
     SoilColumn result;
     result.depth_m = depth;
+    result.riverSediment = riverSediment && depth > 0;
     for (int i = 0; i < cover.count; ++i) {
         auto layer = cover.layers[i];
         layer.thickness_m =
@@ -447,30 +497,34 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
 ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
                                           unsigned chunkZ) const {
     constexpr int pitch = Chunk::SIZE_X + 2;
-    std::array<double, pitch*(Chunk::SIZE_Z + 2)> heights{};
+    std::array<Heights, pitch*(Chunk::SIZE_Z + 2)> heights{};
     const int64_t originX = int64_t(chunkX) * Chunk::SIZE_X;
     const int64_t originZ = int64_t(chunkZ) * Chunk::SIZE_Z;
     // Evaluate the halo once, then reuse adjacent samples for every slope.
     for (int z = -1; z <= Chunk::SIZE_Z; ++z)
         for (int x = -1; x <= Chunk::SIZE_X; ++x)
             heights[(z + 1) * pitch + x + 1] =
-                surface(originX + x, originZ + z);
+                heightsAt(originX + x, originZ + z);
     ChunkColumnInputs out;
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
         for (int x = 0; x < Chunk::SIZE_X; ++x) {
             const int index = (z + 1) * pitch + x + 1;
-            const double center = heights[index];
-            double slope = 0;
-            for (const int offset : {-1, 1, -pitch, pitch})
-                slope =
-                    std::max(slope, std::abs(heights[index + offset] - center));
-            const TerrainSample terrain{int(std::floor(center)), slope};
+            const auto center = heights[index];
+            TerrainSample terrain{int(std::floor(center.ground))};
+            for (const int offset : {-1, 1, -pitch, pitch}) {
+                const auto neighbor = heights[index + offset];
+                terrain.slope = std::max(
+                    terrain.slope, std::abs(neighbor.ground - center.ground));
+                terrain.originalSlope =
+                    std::max(terrain.originalSlope,
+                             std::abs(neighbor.original - center.original));
+            }
             const auto surfaceWater =
                 water(originX + x, originZ + z, terrain.surface_y);
             out.columns[z * Chunk::SIZE_X + x] = {
                 terrain.surface_y,
-                soil(originX + x, originZ + z, terrain, surfaceWater), slope,
-                surfaceWater};
+                soil(originX + x, originZ + z, terrain, surfaceWater),
+                terrain.slope, surfaceWater};
         }
     return out;
 }
