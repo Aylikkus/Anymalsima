@@ -5,6 +5,9 @@
 
 // Compact per-chunk encoding for save files.
 //
+// v5: the high bit of paletteCount marks slabs eligible for reservoir
+//     projection. Derived water is omitted from the palette and rebuilt
+//     from the reservoir ledger on load.
 // v4: v3 layout with the shallow root shape. Flag bit 1 retains a pending
 //     shape migration if a decoded chunk is encoded before reconciliation.
 // v3: v2 palette and indices, with an optional tail for root terrain.
@@ -22,7 +25,7 @@
 // and decoded tiles have zeroed light.
 namespace chunk_codec {
 
-inline constexpr uint8_t Version = 4;
+inline constexpr uint8_t Version = 5;
 inline constexpr uint8_t MinVersion = 1;
 
 Bytes encode(const Chunk& chunk);

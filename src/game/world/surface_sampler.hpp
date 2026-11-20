@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 #include "layers_generator.hpp"
+#include "reservoirs.hpp"
 #include "terrain_edits.hpp"
 #include "terrain_sampler.hpp"
 
@@ -64,16 +65,21 @@ class SurfaceSampler {
     // edits: gameplay changes to show instead of generated terrain (ground
     // height, top block, water). Structures above the generated surface are
     // not part of the height field; see structureTop().
-    SurfaceSampler(const World& world, IAssets& assets,
-                   std::shared_ptr<SurfaceInputCache> shared = nullptr,
-                   std::shared_ptr<const EditMap> edits = nullptr,
-                   WaterDetail waterDetail = WaterDetail::Exact)
+    SurfaceSampler(
+        const World& world, IAssets& assets,
+        std::shared_ptr<SurfaceInputCache> shared = nullptr,
+        std::shared_ptr<const EditMap> edits = nullptr,
+        WaterDetail waterDetail = WaterDetail::Exact,
+        std::shared_ptr<const ReservoirSnapshot> reservoirs = nullptr)
         : world(world),
           assets(assets),
           layers(world.genSettings, &assets),
           shared(std::move(shared)),
           edits(std::move(edits)),
-          waterDetail(waterDetail) {
+          waterDetail(waterDetail),
+          reservoirs(reservoirs         ? std::move(reservoirs)
+                     : world.reservoirs ? world.reservoirs->snapshot()
+                                        : nullptr) {
         if (world.width <= 0 || world.height <= 0 ||
             world.regions.size() != size_t(world.width) * world.height)
             throw std::invalid_argument("Invalid surface sampling world");
@@ -97,6 +103,7 @@ class SurfaceSampler {
     // Highest structure tile of the chunk column containing (x, z), or -1.
     int structureTop(int x, int z);
     // Replaces the edits and drops the derived caches.
+    void setReservoirs(std::shared_ptr<const ReservoirSnapshot> value);
     void setEdits(std::shared_ptr<const EditMap> value);
     bool provisionalWater() const {
         return world.hydrology && waterDetail != WaterDetail::Exact;
@@ -120,6 +127,7 @@ class SurfaceSampler {
     std::shared_ptr<SurfaceInputCache> shared;
     std::shared_ptr<const EditMap> edits;
     WaterDetail waterDetail;
+    std::shared_ptr<const ReservoirSnapshot> reservoirs;
     uint64_t lastEditKey = UINT64_MAX;
     const ColumnEdit* lastEdit = nullptr;
     std::unordered_map<uint64_t, std::shared_ptr<const RegionInput>> regions;

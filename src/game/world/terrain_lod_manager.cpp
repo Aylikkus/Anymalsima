@@ -55,6 +55,11 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
       waterCoverage(quality.chunkRadius),
       rangeLimit(quality.viewDistance),
       selectionRange(quality.viewDistance) {
+    if (world.reservoirs)
+        waterConnection = world.reservoirs->changed.connect(
+            [this](const ReservoirChange& change) {
+                reservoirsChanged(change);
+            });
     if (edits) {
         // Structures get their own cap next to the patch budget.
         structures = std::make_unique<StructureLod>(world, assets, pool, inputs,
@@ -104,6 +109,7 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
     joinLightSlot.initVec4("u_light_slot", {0, 0, 0, 0});
 }
 TerrainLodManager::~TerrainLodManager() {
+    if (world.reservoirs) world.reservoirs->changed.disconnect(waterConnection);
     if (edits) edits->changed.disconnect(editConnection);
     for (auto& job : jobs) job.cancel->store(true, std::memory_order_relaxed);
     for (auto& job : jobs) {
@@ -444,12 +450,14 @@ void TerrainLodManager::request() {
         auto future = pool.submit_task(
             [source = &world, definitions = &assets, shared = inputs, cancel, p,
              map = quality.materialMap, wrapX = periodX > 0, provisional,
-             refiningWater, changes = edits ? edits->snapshot() : nullptr] {
+             refiningWater, changes = edits ? edits->snapshot() : nullptr,
+             reservoirs =
+                 world.reservoirs ? world.reservoirs->snapshot() : nullptr] {
                 const auto water = provisional
                                        ? SurfaceSampler::WaterDetail::Preview
                                        : SurfaceSampler::WaterDetail::Exact;
                 SurfaceSampler sampler(*source, *definitions, shared, changes,
-                                       water);
+                                       water, reservoirs);
                 return TerrainLod::build(p, sampler, *cancel, map, wrapX,
                                          refiningWater);
             },
@@ -743,7 +751,6 @@ void TerrainLodManager::editChanged(uint64_t column) {
     const int x0 = int(column >> 32) * Chunk::SIZE_X - 1,
               z0 = int(uint32_t(column)) * Chunk::SIZE_Z - 1;
     const int x1 = x0 + Chunk::SIZE_X + 2, z1 = z0 + Chunk::SIZE_Z + 2;
-    const auto revision = edits->revision();
     const auto touches = [&](const TerrainLod::Patch& p) {
         // Normals and skirts sample up to one spacing outside the patch.
         const auto at = [&](int shift) {
@@ -753,6 +760,19 @@ void TerrainLodManager::editChanged(uint64_t column) {
         };
         return at(0) || (periodX > 0 && (at(periodX) || at(-periodX)));
     };
+    invalidatePatches(touches);
+    detailSampler.setEdits(edits->snapshot());
+    if (structures) structures->edited(column);
+    const TerrainLod::DetailCoverage::Key key{int(column >> 32),
+                                              int(uint32_t(column))};
+    surfaceBands.erase(key);
+    waterCoverage.remove(key);
+    joinedCoverageVersion = UINT64_MAX;
+}
+
+void TerrainLodManager::invalidatePatches(
+    const std::function<bool(const TerrainLod::Patch&)>& touches) {
+    const auto revision = edits ? edits->revision() : 0;
     for (auto& job : jobs)
         if (touches(job.patch))
             job.cancel->store(true, std::memory_order_relaxed);
@@ -768,16 +788,31 @@ void TerrainLodManager::editChanged(uint64_t column) {
         }
         it->second->stale = true;
         it->second->waterReplacement.reset();
+        it->second->replacement.reset();
         it->second->staleRevision = revision;
         ++it;
     }
-    detailSampler.setEdits(edits->snapshot());
-    if (structures) structures->edited(column);
-    const TerrainLod::DetailCoverage::Key key{int(column >> 32),
-                                              int(uint32_t(column))};
-    surfaceBands.erase(key);
-    waterCoverage.remove(key);
-    joinedCoverageVersion = UINT64_MAX;
+}
+
+void TerrainLodManager::reservoirsChanged(const ReservoirChange& change) {
+    detailSampler.setReservoirs(world.reservoirs->snapshot());
+    invalidatePatches([&](const TerrainLod::Patch& p) {
+        return change.affects(world.hydrology.get(), p.x - p.spacing,
+                              p.z - p.spacing, p.x + p.size() + p.spacing,
+                              p.z + p.size() + p.spacing, periodX);
+    });
+    for (auto it = surfaceBands.begin(); it != surfaceBands.end();) {
+        const auto key = it->first;
+        const int x = key.first * Chunk::SIZE_X, z = key.second * Chunk::SIZE_Z;
+        if (!change.affects(world.hydrology.get(), x - 1, z - 1,
+                            x + Chunk::SIZE_X + 1, z + Chunk::SIZE_Z + 1,
+                            periodX)) {
+            ++it;
+            continue;
+        }
+        waterCoverage.remove(key);
+        it = surfaceBands.erase(it);
+    }
 }
 
 void TerrainLodManager::selectDrawn() {

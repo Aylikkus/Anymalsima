@@ -49,6 +49,7 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context)
     generate_btn->setGridPlacement({5, 14, 3, 1});
     generate_btn->onClick.connect([&context, this, generate_btn]() {
         if (generating || entering.valid()) return;
+        status->setText("");
         generate_btn->setText(_("Loading..."));
         generating = true;
         std::random_device rd;
@@ -70,6 +71,9 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context)
     choose_btn->setText(_("CHOOSE"));
     choose_btn->setFontRole(FontRole::Bold);
     choose_btn->setGridPlacement({5, 12, 3, 1});
+
+    status = ui_manager->createWidget(std::make_unique<Text>(), settings_panel);
+    status->setGridPlacement({1, 11, 7, 1});
 
     auto cell_info_container = ui_manager->createWidget(
         std::make_unique<ScrollContainer>(), root.get());
@@ -161,6 +165,7 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context)
         if (generating || entering.valid()) return;
         auto r = preview->getSelectedRegion();
         if (!r || !world) return;
+        status->setText("");
         try {
             entering =
                 std::async(std::launch::async, [source = world.get(),
@@ -174,6 +179,7 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context)
                 });
             chooseButton->setText(_("Loading..."));
         } catch (const std::exception &e) {
+            status->setText(_("This world could not be loaded"));
             std::cerr << "Creating world failed: " << e.what() << '\n';
         }
     });
@@ -193,12 +199,13 @@ void CreateWorldState::update(Game &game, float dt) {
         return;
     try {
         auto ready = entering.get();
-        worldPreview->setWorld(nullptr);
-        game.changeState<GameplayState>(game, context, std::move(world),
+        game.changeState<GameplayState>(game, context, world,
                                         std::move(ready.slot),
                                         std::move(ready.landmarks));
+        worldPreview->setWorld(nullptr);
     } catch (const std::exception &e) {
         chooseButton->setText(_("CHOOSE"));
+        status->setText(_("This world could not be loaded"));
         std::cerr << "Creating world failed: " << e.what() << '\n';
     }
 }

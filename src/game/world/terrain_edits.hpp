@@ -11,6 +11,7 @@
 #include "core/signal.hpp"
 #include "save/region_file.hpp"
 #include "structure_voxels.hpp"
+#include "water_surface.hpp"
 
 // Differences of one chunk column (16x16 tiles) from generated terrain and
 // structure sources.
@@ -18,6 +19,7 @@
 // Distant terrain samples the ground override. Structure proxies draw
 // additions and apply suppression masks above the ground.
 struct ColumnEdit {
+    static constexpr int16_t GeneratedWater = -2;
     static constexpr int Tiles = Chunk::SIZE_X * Chunk::SIZE_Z;
     static constexpr int index(int localX, int localZ) {
         return localZ * Chunk::SIZE_X + localX;
@@ -26,8 +28,11 @@ struct ColumnEdit {
     std::array<int16_t, Tiles> groundY{};
     // Block id at groundY (0 when groundY is -1).
     std::array<uint8_t, Tiles> groundBlock{};
-    // Top of the liquid above the ground plus one, or -1 without liquid.
+    // Fixed water boundary, or GeneratedWater where the column inherits
+    // the generated profile. A positive cap can coexist with fixed water.
     std::array<int16_t, Tiles> waterY{};
+    std::array<int16_t, Tiles> reservoirCeiling{};
+    WaterSurface waterAt(int index, WaterSurface generated) const;
     // Added or replacement solid tiles above the generated surface. Each
     // blob contains only the positive differences.
     std::vector<std::pair<uint16_t, ChunkBlob>> structure;

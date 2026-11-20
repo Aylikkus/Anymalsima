@@ -286,3 +286,16 @@ structure_voxels::SourcePtr TerrainEdits::maskStructure(
     cached = {result, source->revision, keepWounds};
     return result;
 }
+
+WaterSurface ColumnEdit::waterAt(int index, WaterSurface water) const {
+    const int cap = reservoirCeiling[index];
+    const int fixed = waterY[index];
+    if (fixed != GeneratedWater && !cap) {
+        if (fixed == water.surfaceY && fixed > groundY[index] + 1) return water;
+        water = {fixed, 0, water.reach, water.flow, true};
+    } else if (cap) {
+        water.surfaceY = std::min(water.surfaceY, cap);
+        if (fixed > water.surfaceY) water = {fixed, 0, 0, {}, true};
+    }
+    return water.surfaceY > groundY[index] + 1 ? water : WaterSurface{};
+}

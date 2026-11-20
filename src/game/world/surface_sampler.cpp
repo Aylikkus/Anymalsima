@@ -78,6 +78,12 @@ int SurfaceSampler::structureTop(int x, int z) {
     return edit ? edit->structureTopY() : -1;
 }
 
+void SurfaceSampler::setReservoirs(
+    std::shared_ptr<const ReservoirSnapshot> value) {
+    reservoirs = std::move(value);
+    waterSamples.clear();
+}
+
 void SurfaceSampler::setEdits(std::shared_ptr<const EditMap> value) {
     edits = std::move(value);
     lastEditKey = UINT64_MAX;
@@ -116,11 +122,11 @@ uint16_t SurfaceSampler::material(const RegionInput& data,
 SurfaceColumn SurfaceSampler::column(int x, int z) {
     auto result = generatedColumn(x, z);
     const auto* edit = editAt(x, z);
+    result.water = waterAt(x, z);
     if (!edit) return result;
     x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
-    result.water = waterAt(x, z);
     // Unchanged tiles keep generated soil and rock materials; a replaced
     // block at the original height is not shown.
     if (edit->groundY[i] != result.surfaceY) {
@@ -184,7 +190,7 @@ bool SurfaceSampler::hasUnrefinedWater(int x0, int z0, int x1, int z1) const {
 }
 
 bool SurfaceSampler::submerged(int x, int z, float y) {
-    if (!editAt(x, z)) {
+    if (!editAt(x, z) && (!reservoirs || reservoirs->cells.empty())) {
         const int ceiling = world.hydrology
                                 ? world.hydrology->waterCeilingAt(x, z)
                                 : WaterSurface::SeaBoundary;
@@ -196,6 +202,25 @@ bool SurfaceSampler::submerged(int x, int z, float y) {
 bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
                                   WaterSurface sample) {
     if (hasChannel(x0, z0, x1, z1) || hasEdits(x0, z0, x1, z1)) return false;
+    if (reservoirs) {
+        if (std::any_of(reservoirs->localTops.begin(),
+                        reservoirs->localTops.end(), [&](const auto& local) {
+                            const auto x = int(local.first >> 32),
+                                       z = int(uint32_t(local.first));
+                            return (x >= x0 && x < x1) && (z >= z0 && z < z1);
+                        }))
+            return false;
+        if (world.hydrology)
+            for (const auto& [body, level] : reservoirs->levels)
+                if (world.hydrology->mayContainBody(body, x0, z0, x1, z1)) {
+                    if (body == GeneratedHydrology::Sea &&
+                        sample.body == body &&
+                        world.hydrology->uniformLoweredSea(x0, z0, x1, z1,
+                                                           level))
+                        continue;
+                    return false;
+                }
+    }
     if (world.hydrology && waterDetail != WaterDetail::Preview)
         return world.hydrology->uniformWater(x0, z0, x1, z1, sample.body,
                                              provisionalWater());
@@ -206,16 +231,6 @@ bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
 }
 
 WaterSurface SurfaceSampler::waterAt(int x, int z) {
-    if (const auto* edit = editAt(x, z)) {
-        const int i =
-            ColumnEdit::index(wrapX(x) % Chunk::SIZE_X,
-                              std::clamp(z, 0, depth() - 1) % Chunk::SIZE_Z);
-        const int level = edit->waterY[i];
-        if (level <= edit->groundY[i] + 1) return {};
-        const auto generated = generatedWater(x, z, edit->groundY[i]);
-        if (generated.surfaceY == level) return generated;
-        return {level, 0, generated.reach, generated.flow, true};
-    }
     x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
@@ -225,7 +240,22 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
                              world.hydrology->riverAt(x, z) ||
                              (waterDetail == WaterDetail::Preview &&
                               world.hydrology->potentialSeaAt(x, z));
-    const auto result = generatedWater(x, z, needsHeight ? height(x, z) : -1);
+    auto result = generatedWater(x, z, needsHeight ? height(x, z) : -1);
+    if (reservoirs && (reservoirs->levels.contains(result.body) ||
+                       reservoirs->localTop(x, z) >= 0)) {
+        const int ground = height(x, z);
+        // A provisional coastal sample does not prove membership as the
+        // ocean recedes. Resolve the actual baseline before applying a level.
+        if (provisionalWater() && world.hydrology &&
+            reservoirs->levels.contains(result.body))
+            result = world.hydrology->waterAt(x, z, ground);
+        result =
+            reservoirs->project(world.hydrology.get(), x, z, ground, result);
+    }
+    if (const auto* edit = editAt(x, z)) {
+        const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
+        result = edit->waterAt(i, result);
+    }
     if (waterSamples.size() >= 65536) waterSamples.clear();
     waterSamples.emplace(key, result);
     return result;

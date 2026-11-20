@@ -28,6 +28,8 @@ BlockLightPropagator::BlockLightPropagator(ChunkManager& chunks,
     for (const auto& block : blocks.items)
         if (block.light && block.light->emits())
             emissions[block.id] = &*block.light;
+    waterConnection = chunks.waterChanged.connect(
+        [this](const ChunkCoord& coord) { invalidateAround(coord, false); });
     readyConnection = chunks.becameReady.connect(
         [this](const ChunkCoord& coord) { ready(coord); });
     removedConnection = chunks.removed.connect(
@@ -40,6 +42,7 @@ BlockLightPropagator::BlockLightPropagator(ChunkManager& chunks,
 }
 
 BlockLightPropagator::~BlockLightPropagator() {
+    chunks.waterChanged.disconnect(waterConnection);
     chunks.becameReady.disconnect(readyConnection);
     chunks.removed.disconnect(removedConnection);
     if (registry) registry->entityChanged.disconnect(entityConnection);

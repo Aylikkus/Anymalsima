@@ -6,7 +6,7 @@
 
 namespace terrain_edits_codec {
 namespace {
-constexpr uint16_t EditSectionVersion = 2;
+constexpr uint16_t EditSectionVersion = 3;
 constexpr uint16_t TilesPerSlab = Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
 constexpr uint32_t MaxColumns = 1u << 24;
 }  // namespace
@@ -26,6 +26,7 @@ Bytes encode(const EditMap& columns, const SectionContainer& extra) {
         for (const auto y : edit.groundY) out.write(y);
         for (const auto block : edit.groundBlock) out.write(block);
         for (const auto y : edit.waterY) out.write(y);
+        for (const auto y : edit.reservoirCeiling) out.write(y);
         out.write(uint16_t(edit.structure.size()));
         for (const auto& [slabY, blob] : edit.structure) {
             out.write(slabY);
@@ -47,7 +48,7 @@ File decode(ByteView bytes) {
     File file;
     file.extra = SectionContainer::decode(bytes);
     if (const auto* section = file.extra.find("EDIT")) {
-        if (section->version != 1 && section->version != EditSectionVersion)
+        if (section->version < 1 || section->version > EditSectionVersion)
             throw SerializationError("unsupported EDIT version");
         BinaryReader in(section->data);
         const auto count = in.read<uint32_t>();
@@ -65,9 +66,18 @@ File decode(ByteView bytes) {
             for (auto& block : edit->groundBlock) block = in.read<uint8_t>();
             for (auto& y : edit->waterY) {
                 y = in.read<int16_t>();
-                if (y < -1 || y > WORLD_HEIGHT_Y)
+                if (y < (section->version >= 3 ? ColumnEdit::GeneratedWater
+                                               : -1) ||
+                    y > WORLD_HEIGHT_Y)
                     throw SerializationError("water height out of range");
             }
+            if (section->version >= 3)
+                for (auto& y : edit->reservoirCeiling) {
+                    y = in.read<int16_t>();
+                    if (y < -1 || y > WORLD_HEIGHT_Y)
+                        throw SerializationError(
+                            "reservoir ceiling out of range");
+                }
             const auto slabs = in.read<uint16_t>();
             if (slabs > Y_CHUNKS)
                 throw SerializationError("too many structure slabs");

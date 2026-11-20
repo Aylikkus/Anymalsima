@@ -11,7 +11,7 @@
 // How many chunks out from the camera chunk to request and draw.
 
 GameplayState::GameplayState(Game& game, UIContext& context,
-                             std::unique_ptr<World>&& world, SaveSlot saveSlot,
+                             std::shared_ptr<World> world, SaveSlot saveSlot,
                              std::optional<std::vector<TreeLandmark>> landmarks)
     : slot(std::move(saveSlot)) {
     // name, stage, texture_handle
@@ -21,6 +21,12 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     u_normal_array.initTexture("u_normal_array", 1,
                                context.assets->getMaterialNormalArray());
     this->world = std::move(world);
+    if (this->world->hydrology) {
+        this->world->reservoirs = std::make_shared<Reservoirs>(
+            this->world->hydrology, uint64_t(slot.meta.worldDays * 86400));
+        save_catalog::readReservoirs(slot, *this->world->reservoirs);
+        savedWaterRevision = this->world->reservoirs->revision();
+    }
     regionStore =
         std::make_unique<RegionStore>(slot.directory, context.threadPool);
     uiContext = &context;
@@ -308,6 +314,7 @@ GameplayState::~GameplayState() {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();
         saveStructures(true);
+        saveReservoirs();
         locationMgr->saveAll(true);
         regionStore->flush();
         saveTerrainEdits(true);
@@ -316,6 +323,18 @@ GameplayState::~GameplayState() {
         writeMeta();
     } catch (const std::exception& e) {
         std::cerr << "Saving world failed: " << e.what() << '\n';
+    }
+}
+
+void GameplayState::saveReservoirs() {
+    if (!world->reservoirs ||
+        savedWaterRevision == world->reservoirs->revision())
+        return;
+    try {
+        save_catalog::writeReservoirs(slot, *world->reservoirs);
+        savedWaterRevision = world->reservoirs->revision();
+    } catch (const std::exception& e) {
+        std::cerr << "Saving reservoirs failed: " << e.what() << '\n';
     }
 }
 
@@ -488,6 +507,7 @@ void GameplayState::updateAutosave(float dt) {
         locationMgr->saveRegion(autosaveQueue.back());
         autosaveQueue.pop_back();
         if (autosaveQueue.empty()) {
+            saveReservoirs();
             saveTerrainEdits(false);
             saveLightSources(false);
             saveSky(false);
@@ -500,6 +520,7 @@ void GameplayState::updateAutosave(float dt) {
     autosaveTimer = 0;
     autosaveQueue = locationMgr->loaded();
     if (autosaveQueue.empty()) {
+        saveReservoirs();
         saveTerrainEdits(false);
         saveLightSources(false);
         saveSky(false);
@@ -725,6 +746,8 @@ void GameplayState::update(Game& game, float dt) {
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
+    if (world->reservoirs)
+        world->reservoirs->advanceTo(uint64_t(clock.days() * 86400));
     floraSim->update(clock.days());
     treeSim->update(clock.days());
     saveStructures();

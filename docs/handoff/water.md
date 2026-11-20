@@ -19,7 +19,7 @@ a river, see water pool and spill, or expose a spring and create a new river.
 | Chunk generation | `TerrainSampler` supplies ground, soils and a generated water surface to `LocationGenerator`. The sea surface is Y=385. Inland lakes have their own spill-capped levels and face-connected footprints. Earlier generator versions retain the original sea fill. |
 | Detailed rendering | `ChunkMesher` emits opaque horizontal water tops at tile Y+1 when the tile above is known and empty. The detailed draw also depends on a usable light volume. Fractional tops and waterfall faces are planned for later steps. |
 | Distant rendering | Stepped and smooth patches use the same water query, including terrain edit summaries. Smooth patches clip water to sampled wet coverage and the patch triangles. Water bounds and slab readiness drive the proxy handoff. Camera submersion uses a loaded tile when available and the shared surface otherwise. |
-| Save and edits | `RIVR` stores the candidate polylines. The saved generator version selects the terrain-edit baseline and water generation rules. The chunk codec stores liquid type and level. Source provenance is planned with live reservoir levels. |
+| Save and edits | `RIVR` stores the candidate polylines. The saved generator version selects the terrain-edit baseline. `water.dat` stores runtime volumes, river holds and local credits. Chunk v5 reprojects water owned by that ledger when a slab loads. |
 
 The create-world UI currently generates 512 × 300 regions. A region is
 128 × 128 horizontal tiles and a voxel chunk is 16³. At the proposed
@@ -382,6 +382,41 @@ and new chunk results. Include a newer revision arriving during a job,
 a deliberately dry isolated edit, and restart between saves. Assert that
 no distant chunks are streamed for this test. No manual ocean-draining
 playthrough is needed.
+
+Standing bodies use 255 integer units per block. An owner-thread transfer
+returns the accepted signed amount and records its source or sink. A
+transfer to a confirmed isolated cell commits the reservoir debit and the
+cell credit in the same ledger. Visible standing levels follow whole storage
+bands. Withdrawals within a band accumulate until the next level threshold.
+Refills stop at the generated waterline, which is the surveyed spill level
+for lakes.
+
+Lake curves use the surveyed tile floors and the lowest face-connected path
+to the basin seed. The ocean uses weighted region depths in the interior
+and a 32-tile sampling grid in surveyed coastal regions. This keeps first-use
+cost proportional to region count. The shoreline query checks a bounded
+tile survey at the current level. Deep drawdowns can leave a connection
+outside the survey unverified. The resulting ocean curve approximates shelf
+and beach volume, especially in narrow coastal pockets.
+
+The river budget advances in game seconds. Generated springs feed the reach
+graph, confluences combine deliveries, and a full through-lake passes its
+surplus to its generated outlet. Background losses match normal delivery
+at terminal bodies and use half of normal delivery at lakes with an outlet.
+Gameplay can report a reduced delivery rate or supply a confirmed alternate
+outlet. Withheld water stays on the reach until it has an open outlet.
+Step 5 supplies detection of edited channels, dam crests, and runtime
+spill geometry.
+
+The versioned `RSVR` section in `water.dat` is the authoritative record of
+body storage, the budget step, reach holds, and local credits. The atomic
+file replacement commits both sides of a diversion together. Chunk v5
+records reservoir eligibility and omits projected water from the saved tile
+palette. Chunk v1–v4 liquids and deliberately dry gaps retain their saved
+state as their original ownership is ambiguous. Version 3 terrain edit
+summaries carry the cap where a solid or deliberately dry voxel truncates a
+projected column. A chunk published after a worker finishes uses the latest
+ledger, and changes invalidate intersecting LOD and lighting work.
 
 ## 5. Add local finite-volume flow and edited connections
 

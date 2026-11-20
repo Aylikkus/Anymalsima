@@ -13,8 +13,8 @@ bool hasTileEdits(const Chunk& chunk) {
 
 bool sameEdit(const ColumnEdit& a, const ColumnEdit& b) {
     if (a.groundY != b.groundY || a.groundBlock != b.groundBlock ||
-        a.waterY != b.waterY || a.structure.size() != b.structure.size() ||
-        a.removed != b.removed)
+        a.waterY != b.waterY || a.reservoirCeiling != b.reservoirCeiling ||
+        a.structure.size() != b.structure.size() || a.removed != b.removed)
         return false;
     for (size_t i = 0; i < a.structure.size(); ++i)
         if (a.structure[i].first != b.structure[i].first ||
@@ -97,7 +97,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             const auto& baseline = inputs->columns[i];
             const int surface = baseline.surface_y;
             lowestSurface = std::min(lowestSurface, surface);
-            int ground = -1, water = -1;
+            int ground = -1, water = -1, reservoirTop = -1;
+            bool projected = false;
             uint8_t block = 0;
             for (int y = std::max({surface, baseline.water.topTile(),
                                    old ? old->waterY[i] - 1 : -1});
@@ -110,8 +111,18 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     if (old) {
                         ground = old->groundY[i];
                         block = old->groundBlock[i];
-                        if (water < 0 && old->waterY[i] >= 0 && y > ground)
-                            water = std::min(y + 1, int(old->waterY[i]));
+                        const int oldCap = old->reservoirCeiling[i];
+                        const int oldWater = old->waterY[i];
+                        if (water < 0 && oldWater >= 0 && y > ground)
+                            water = std::min(y + 1, oldWater);
+                        if (reservoirTop < 0 && y > ground &&
+                            (oldCap ||
+                             oldWater == ColumnEdit::GeneratedWater)) {
+                            projected = true;
+                            const int ceiling =
+                                oldCap ? oldCap : baseline.water.surfaceY;
+                            reservoirTop = std::min(y + 1, ceiling);
+                        }
                     } else {
                         ground = y;
                         complete = false;
@@ -127,14 +138,38 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     block = root ? root->block : tile.block_id;
                     break;
                 }
-                if (water < 0 && tile.liquid == LiquidType::Water)
+                const auto cell = Chunk::cell(lx, y % Chunk::SIZE_Y, lz);
+                const bool inReservoir =
+                    chunk->projectsWater && baseline.water.body &&
+                    !baseline.water.reach && baseline.water.fills(y, surface);
+                projected |= inReservoir;
+                if (reservoirTop < 0 && inReservoir && !tile.isSolid() &&
+                    !chunk->rootEdited(cell) &&
+                    (!tile.isLiquid() ||
+                     tile.waterOrigin == WaterOrigin::Reservoir))
+                    reservoirTop = y + 1;
+                if (water < 0 && tile.liquid == LiquidType::Water &&
+                    tile.waterOrigin == WaterOrigin::Independent)
                     water = y + 1;
             }
             next->groundY[i] = int16_t(ground);
             next->groundBlock[i] = block;
-            next->waterY[i] = int16_t(water);
             const int generatedWater = baseline.water.surfaceY;
-            generated &= ground == surface && water == generatedWater;
+            if (projected) {
+                const bool unchanged =
+                    reservoirTop == generatedWater && water < 0;
+                next->waterY[i] =
+                    unchanged ? ColumnEdit::GeneratedWater : int16_t(water);
+                if (!unchanged)
+                    next->reservoirCeiling[i] = int16_t(reservoirTop);
+                generated &= ground == surface && unchanged;
+            } else {
+                next->waterY[i] = chunks.reservoirs() && !baseline.water.body &&
+                                          water == generatedWater
+                                      ? ColumnEdit::GeneratedWater
+                                      : int16_t(water);
+                generated &= ground == surface && water == generatedWater;
+            }
         }
     // Compare each loaded slab with the source snapshot it was built against.
     int top = chunks.getColumnTopY(cx, cz);

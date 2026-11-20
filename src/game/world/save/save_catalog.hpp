@@ -32,6 +32,8 @@ std::vector<SaveSlot> list(const std::filesystem::path& root = DefaultRoot);
 SaveSlot create(const World& world, Vec2u startRegion,
                 const std::filesystem::path& root = DefaultRoot);
 void writeMeta(const SaveSlot& slot);
+void readReservoirs(const SaveSlot& slot, Reservoirs& reservoirs);
+void writeReservoirs(const SaveSlot& slot, const Reservoirs& reservoirs);
 void writeWorldMap(const SaveSlot& slot, const World& world);
 // Loads the world map. Throws on missing or corrupt data.
 std::unique_ptr<World> readWorldMap(const SaveSlot& slot);

@@ -128,6 +128,11 @@ ChunkManager::ChunkManager(
       layersGenerator(world.genSettings, assets),
       soilAssets(assets),
       soilSeed(world.genSettings.feature_seed) {
+    if (world.reservoirs)
+        reservoirConnection = world.reservoirs->changed.connect(
+            [this](const ReservoirChange& change) {
+                reservoirChanged(change);
+            });
     floraTable = assets ? std::make_shared<const FloraSpeciesTable>(*assets)
                         : std::make_shared<const FloraSpeciesTable>();
     floraSeed_ = world.genSettings.feature_seed ^ 0x5f10a7u;
@@ -153,6 +158,8 @@ ChunkManager::ChunkManager(
 }
 
 ChunkManager::~ChunkManager() {
+    if (terrainWorld.reservoirs)
+        terrainWorld.reservoirs->changed.disconnect(reservoirConnection);
     for (auto& job : generationJobs) job.future.wait();
     for (auto& job : meshJobs) job.future.wait();
     for (auto& job : treeJobs) job.future.wait();
@@ -263,7 +270,10 @@ std::optional<ChunkManager::ColumnSources> ChunkManager::columnSources(
     const auto& region = terrainWorld.regions[rc.y * terrainWorld.width + rc.x];
     auto trees = prepareTrees({chunkX, 0, chunkZ}, rc);
     if (!trees) return std::nullopt;
-    return ColumnSources{prepareColumns({chunkX, 0, chunkZ}, region),
+    auto terrain = prepareColumns({chunkX, 0, chunkZ}, region);
+    if (const auto* water = reservoirs())
+        terrain = projectedColumns(terrain, chunkX, chunkZ, *water->snapshot());
+    return ColumnSources{terrain,
                          prepareStructures({chunkX, 0, chunkZ}, *trees),
                          !trees->trees.empty()};
 }
@@ -347,31 +357,41 @@ ChunkManager::snapshotColumnSources(unsigned cx, unsigned cz) {
             else
                 inputs.push_back({q, {}, landmarksNear(q)});
         }
-    return [world = &terrainWorld, assets = soilAssets, table = treeTable,
-            seed = treeSeed, overrides = overrides, inputs = std::move(inputs),
-            kinds = structureKinds, day = floraDay, region, cx, cz]() mutable {
-        const auto terrain =
-            TerrainNeighborhood::capture(*world, region, *assets);
-        std::vector<const TreeSet*> sets;
-        for (auto& input : inputs) {
-            if (!input.set) {
-                const auto halo =
-                    TerrainNeighborhood::capture(*world, input.region, *assets);
-                const RegionTreesInput treeInput{
-                    table.get(),      &halo,          input.region, seed,
-                    &input.landmarks, overrides.get()};
-                input.set = std::make_shared<const TreeSet>(
-                    generateRegionTrees(treeInput));
+    return
+        [world = &terrainWorld, assets = soilAssets, table = treeTable,
+         seed = treeSeed, overrides = overrides, inputs = std::move(inputs),
+         kinds = structureKinds, day = floraDay, region, cx, cz,
+         water = reservoirs() ? reservoirs()->snapshot() : nullptr]() mutable {
+            const auto terrain =
+                TerrainNeighborhood::capture(*world, region, *assets);
+            std::vector<const TreeSet*> sets;
+            for (auto& input : inputs) {
+                if (!input.set) {
+                    const auto halo = TerrainNeighborhood::capture(
+                        *world, input.region, *assets);
+                    const RegionTreesInput treeInput{
+                        table.get(),      &halo,          input.region, seed,
+                        &input.landmarks, overrides.get()};
+                    input.set = std::make_shared<const TreeSet>(
+                        generateRegionTrees(treeInput));
+                }
+                sets.push_back(input.set.get());
             }
-            sets.push_back(input.set.get());
-        }
-        return ColumnSources{
-            std::make_shared<const ChunkColumnInputs>(
-                TerrainSampler(terrain).columns(cx, cz)),
-            tree_wood_lod::columnVoxels(
-                cx, cz, makeTreeColumn(cx, cz, sets, world->wrap().tiles),
-                *table, day, world->wrap(), *kinds)};
-    };
+            auto columns = TerrainSampler(terrain).columns(cx, cz);
+            if (water)
+                for (int z = 0; z < Chunk::SIZE_Z; ++z)
+                    for (int x = 0; x < Chunk::SIZE_X; ++x) {
+                        auto& c = columns.columns[z * Chunk::SIZE_X + x];
+                        c.water = water->project(
+                            world->hydrology.get(), int(cx) * Chunk::SIZE_X + x,
+                            int(cz) * Chunk::SIZE_Z + z, c.surface_y, c.water);
+                    }
+            return ColumnSources{
+                std::make_shared<const ChunkColumnInputs>(std::move(columns)),
+                tree_wood_lod::columnVoxels(
+                    cx, cz, makeTreeColumn(cx, cz, sets, world->wrap().tiles),
+                    *table, day, world->wrap(), *kinds)};
+        };
 }
 
 std::shared_ptr<const ChunkColumnInputs> ChunkManager::generatedColumns(
@@ -435,6 +455,11 @@ void ChunkManager::unregister(const ChunkCoord& coord) {
     const bool existed = found != chunks.end();
     if (existed) {
         const auto rc = found->second.regionCoord;
+        for (const auto body : found->second.waterBodies) {
+            auto it = waterChunks.find(body);
+            it->second.erase(coord);
+            if (it->second.empty()) waterChunks.erase(it);
+        }
         chunks.erase(found);
         meshed.erase(coord);
         if (--regionRegistrations.at(rc) == 0) {
@@ -809,8 +834,9 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
             neighbors[neighbor] = std::make_shared<Chunk>(*chunk);
     }
     const auto column = columnInputs.find((uint64_t{coord.x} << 32) | coord.z);
-    const auto terrain =
-        column == columnInputs.end() ? nullptr : column->second.data;
+    auto terrain = column == columnInputs.end() ? nullptr : column->second.data;
+    const auto water = reservoirs() ? reservoirs()->snapshot() : nullptr;
+    if (water) terrain = projectedColumns(terrain, coord.x, coord.z, *water);
     const auto structures =
         column == columnInputs.end() ? nullptr : column->second.structures;
     CoverClimate climate;
@@ -827,7 +853,7 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
     auto future = pool.submit_task(
         [coord, data, neighbors = std::move(neighbors), builder = *mesher,
          identity, revision, wrapX, depth = terrainWorld.height * 128, climate,
-         terrain, structures, hydrology = terrainWorld.hydrology]() {
+         terrain, structures, water, hydrology = terrainWorld.hydrology]() {
             const unsigned aboveY = coord.y + 1;
             const std::optional<structure_voxels::Slab> above =
                 !neighbors.contains({coord.x, aboveY, coord.z}) && structures &&
@@ -881,8 +907,21 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                             terrain->columns[lz * Chunk::SIZE_X + lx];
                         return {column.surface_y, column.water};
                     }
-                    return hydrology ? hydrology->sampleRiverColumn(x, z)
-                                     : std::pair<int, WaterSurface>{-1, {}};
+                    if (!hydrology) return {-1, {}};
+                    x = int(wrapX.wrapTile(x));
+                    if (!water ||
+                        (water->localTop(x, z) < 0 &&
+                         std::none_of(
+                             water->levels.begin(), water->levels.end(),
+                             [&](const auto& changed) {
+                                 return hydrology->mayContainBody(
+                                     changed.first, x, z, x + 1, z + 1);
+                             })))
+                        return hydrology->sampleRiverColumn(x, z);
+                    const auto [ground, baseline] =
+                        hydrology->sampleColumn(x, z);
+                    return {ground, water->project(hydrology.get(), x, z,
+                                                   ground, baseline)};
                 });
             return FinishedMesh{coord, std::move(mesh), identity, revision};
         },
@@ -1023,16 +1062,34 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
             return;
         }
     }
-    // Sunlight sweeps can lag far behind generation (wide chunk radii, fast
-    // travel): start from an estimate so a new chunk never shows unlit
-    // (black) until its sweep arrives; the sweep then refines it.
+    const auto inputs =
+        column != columnInputs.end() ? column->second.data : nullptr;
+    if (data.data && reservoirs() && inputs) {
+        if (!data.fromDisk) {
+            data.data->projectsWater = true;
+            for (int z = 0; z < Chunk::SIZE_Z; ++z)
+                for (int x = 0; x < Chunk::SIZE_X; ++x) {
+                    const auto baseline =
+                        inputs->columns[z * Chunk::SIZE_X + x].water;
+                    if (!baseline.body || baseline.reach) continue;
+                    for (auto& row : data.data->tiles[z])
+                        if (row[x].liquid == LiquidType::Water)
+                            row[x].waterOrigin = WaterOrigin::Reservoir;
+                }
+        }
+        reconcileWater(*data.data, coord, inputs.get());
+        if (data.data->projectsWater) indexWater(coord, *inputs);
+    }
+    // Start new chunks with estimated sunlight until their sweep arrives.
     if (data.data) {
-        const auto* inputs =
-            column != columnInputs.end() ? column->second.data.get() : nullptr;
+        auto projected = inputs;
+        if (const auto* water = reservoirs())
+            projected =
+                projectedColumns(inputs, coord.x, coord.z, *water->snapshot());
         const int top = getColumnTopY(coord.x, coord.z);
         estimateSkyLight(*data.data, coord, [&](int x, int z) {
-            if (!inputs) return std::pair{top, WaterSurface::sea(top)};
-            const auto& sample = inputs->columns[z * Chunk::SIZE_X + x];
+            if (!projected) return std::pair{top, WaterSurface::sea(top)};
+            const auto& sample = projected->columns[z * Chunk::SIZE_X + x];
             return std::pair{sample.surface_y, sample.water};
         });
     }
@@ -1268,7 +1325,12 @@ void ChunkManager::dispatchGeneration() {
                                         if ((worldY <= surface
                                                  ? actual == 0
                                                  : actual != expected) ||
-                                            tile.liquid != liquid) {
+                                            tile.liquid !=
+                                                (result->projectsWater &&
+                                                         column.water.body &&
+                                                         !column.water.reach
+                                                     ? LiquidType::None
+                                                     : liquid)) {
                                             edited = true;
                                             break;
                                         }
@@ -1824,4 +1886,154 @@ void ChunkManager::releaseTreeSets() {
             return entry.second.source.expired();
         });
     }
+}
+
+WaterVolume ChunkManager::transferWater(uint32_t body, WaterVolume amount,
+                                        ReservoirExchange reason) {
+    if (!terrainWorld.reservoirs) return 0;
+    return terrainWorld.reservoirs->transfer(body, amount, reason);
+}
+
+WaterVolume ChunkManager::divertWater(uint32_t body, TilePos p,
+                                      WaterVolume amount) {
+    if (!terrainWorld.reservoirs) return 0;
+    p.x = int(wrap().wrapTile(p.x));
+    if (p.x < 0 || p.y < 0 || p.z < 0) return 0;
+    const ChunkCoord coord{unsigned(p.x / Chunk::SIZE_X),
+                           unsigned(p.y / Chunk::SIZE_Y),
+                           unsigned(p.z / Chunk::SIZE_Z)};
+    const auto* chunk = getChunk(coord);
+    if (!chunk || !chunk->projectsWater) return 0;
+    const auto& tile = chunk->tiles[p.z % Chunk::SIZE_Z][p.y % Chunk::SIZE_Y]
+                                   [p.x % Chunk::SIZE_X];
+    if (tile.isSolid() ||
+        (tile.isLiquid() && tile.waterOrigin != WaterOrigin::Local))
+        return 0;
+    const auto& columns =
+        columnInputs.at((uint64_t{coord.x} << 32) | coord.z).data;
+    if (!columns) return 0;
+    const auto& c = columns->columns[(p.z % Chunk::SIZE_Z) * Chunk::SIZE_X +
+                                     p.x % Chunk::SIZE_X];
+    if (c.water.fills(p.y, c.surface_y)) return 0;
+    return terrainWorld.reservoirs->divert(body, p, amount);
+}
+
+std::shared_ptr<const ChunkColumnInputs> ChunkManager::projectedColumns(
+    std::shared_ptr<const ChunkColumnInputs> columns, unsigned cx, unsigned cz,
+    const ReservoirSnapshot& snapshot) const {
+    if (!columns || (snapshot.levels.empty() && snapshot.cells.empty()))
+        return columns;
+    auto result = std::make_shared<ChunkColumnInputs>(*columns);
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            auto& c = result->columns[z * Chunk::SIZE_X + x];
+            c.water = snapshot.project(
+                terrainWorld.hydrology.get(), int(cx) * Chunk::SIZE_X + x,
+                int(cz) * Chunk::SIZE_Z + z, c.surface_y, c.water);
+        }
+    return result;
+}
+
+bool ChunkManager::reconcileWater(Chunk& chunk, ChunkCoord coord,
+                                  const ChunkColumnInputs* columns) const {
+    if (!chunk.projectsWater || !columns || !reservoirs()) return false;
+    const auto snapshot = reservoirs()->snapshot();
+    bool changed = false;
+    const int y0 = int(coord.y) * Chunk::SIZE_Y;
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            const auto& c = columns->columns[z * Chunk::SIZE_X + x];
+            const int wx = int(coord.x) * Chunk::SIZE_X + x;
+            const int wz = int(coord.z) * Chunk::SIZE_Z + z;
+            const bool hasReservoir = c.water.body && !c.water.reach &&
+                                      c.water.surfaceY > y0 &&
+                                      c.surface_y + 1 < y0 + Chunk::SIZE_Y;
+            if (!hasReservoir && snapshot->localTop(wx, wz) <= y0) continue;
+            const auto standing =
+                hasReservoir
+                    ? snapshot->projectStanding(terrainWorld.hydrology.get(),
+                                                wx, wz, c.surface_y, c.water)
+                    : WaterSurface{};
+            for (int y = 0; y < Chunk::SIZE_Y; ++y) {
+                auto& tile = chunk.tiles[z][y][x];
+                if (tile.isSolid() ||
+                    (tile.isLiquid() &&
+                     tile.waterOrigin == WaterOrigin::Independent))
+                    continue;
+                auto origin = WaterOrigin::Independent;
+                uint8_t fill = 0;
+                if (const auto cell = snapshot->cells.find({wx, y0 + y, wz});
+                    cell != snapshot->cells.end()) {
+                    fill = cell->second;
+                    origin = WaterOrigin::Local;
+                } else if (standing.fills(y0 + y, c.surface_y) &&
+                           !chunk.rootEdited(Chunk::cell(x, y, z))) {
+                    fill = 255;
+                    origin = WaterOrigin::Reservoir;
+                }
+                if (origin == tile.waterOrigin && fill == tile.liquidLevel)
+                    continue;
+                tile.liquid = fill ? LiquidType::Water : LiquidType::None;
+                tile.liquidLevel = fill;
+                tile.waterOrigin = origin;
+                changed = true;
+            }
+        }
+    return changed;
+}
+
+void ChunkManager::indexWater(ChunkCoord coord,
+                              const ChunkColumnInputs& columns) {
+    auto& bodies = chunks.at(coord).waterBodies;
+    const int y0 = int(coord.y) * Chunk::SIZE_Y;
+    for (const auto& c : columns.columns)
+        if (c.water.body && !c.water.reach && c.water.surfaceY > y0 &&
+            c.surface_y + 1 < y0 + Chunk::SIZE_Y &&
+            std::find(bodies.begin(), bodies.end(), c.water.body) ==
+                bodies.end())
+            bodies.push_back(c.water.body);
+    for (auto body : bodies) waterChunks[body].insert(coord);
+}
+
+void ChunkManager::reservoirChanged(const ReservoirChange& change) {
+    std::unordered_set<ChunkCoord> affected;
+    for (const auto body : change.bodies)
+        if (const auto it = waterChunks.find(body); it != waterChunks.end())
+            affected.insert(it->second.begin(), it->second.end());
+    if (const auto& p = change.local)
+        affected.insert({unsigned(p->x / Chunk::SIZE_X),
+                         unsigned(p->y / Chunk::SIZE_Y),
+                         unsigned(p->z / Chunk::SIZE_Z)});
+
+    std::unordered_set<uint64_t> columns;
+    std::unordered_set<ChunkCoord> remesh;
+    for (const auto coord : affected) {
+        const auto key = (uint64_t{coord.x} << 32) | coord.z;
+        const auto it = columnInputs.find(key);
+        if (it == columnInputs.end()) continue;
+        bool changed = false;
+        withChunkLocked(coord, [&](Chunk& chunk) {
+            changed = reconcileWater(chunk, coord, it->second.data.get());
+        });
+        if (!changed) continue;
+        columns.insert(key);
+        remesh.insert(coord);
+        for (const auto& offset :
+             std::array<std::array<int, 3>, 6>{{{-1, 0, 0},
+                                                {1, 0, 0},
+                                                {0, -1, 0},
+                                                {0, 1, 0},
+                                                {0, 0, -1},
+                                                {0, 0, 1}}}) {
+            const auto x = wrap().wrapChunk(int64_t(coord.x) + offset[0]);
+            const auto y = int64_t(coord.y) + offset[1];
+            const auto z = int64_t(coord.z) + offset[2];
+            if (x >= 0 && y >= 0 && z >= 0)
+                remesh.insert({unsigned(x), unsigned(y), unsigned(z)});
+        }
+        markLightChanged(coord);
+        waterChanged.emit(coord);
+    }
+    for (const auto coord : remesh) markDirty(coord, true);
+    for (const auto key : columns) columnWaterChanged.emit(key);
 }

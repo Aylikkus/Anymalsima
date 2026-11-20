@@ -184,6 +184,7 @@ class SunLightPropagator {
     ThreadPool& pool;
     SkyHeightMap* sky;
     Signal<uint64_t>::Connection skyConnection;
+    Signal<uint64_t>::Connection waterConnection;
     Signal<const ChunkCoord&>::Connection readyConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     std::unordered_map<ChunkCoord, State> states;

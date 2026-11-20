@@ -384,6 +384,7 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
         }
         TerrainNeighborhood data;
         std::array<int16_t, Area> levels;
+        std::array<int16_t, Area> floors;
     };
     std::unordered_map<int, SearchRegion> search;
     std::unordered_map<int, TerrainNeighborhood> exterior;
@@ -411,6 +412,7 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
         (minimum <= SeaY && reachesSea(basin.seed, seed)))
         return {};
     start.levels[index(seed)] = int16_t(minimum);
+    start.floors[index(seed)] = int16_t(minimum - 1);
     frontier[minimum].push_back(seed);
     const int period = width * Side;
     int searchLimit = basin.sillY;
@@ -459,6 +461,7 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
                 const int bottom = groundAt(it->second.data, next) + 2;
                 const int threshold = std::max(level, bottom);
                 visited = int16_t(threshold);
+                it->second.floors[index(next)] = int16_t(bottom - 1);
                 if (threshold > searchLimit) continue;
                 // One coarse region can hold both a lake and a separate
                 // piece of coast. The surveyed sea is also an open spill.
@@ -472,10 +475,27 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineLake(
             }
         }
     }
-    for (const auto& [i, cells] : search)
-        for (int j = 0; j < Area; ++j)
-            if (cells.levels[j] >= minimum && cells.levels[j] <= searchLimit)
-                result.masks[i].set(j);
+    StorageCurve::Levels area{}, initial{};
+    for (const auto& [i, cells] : search) {
+        for (int j = 0; j < Area; ++j) {
+            const int level = cells.levels[j];
+            if (level < minimum || level > searchLimit) continue;
+            result.masks[i].set(j);
+            auto& thresholds = result.thresholds[i];
+            if (thresholds.empty()) thresholds.resize(Area, -1);
+            thresholds[j] = int16_t(level);
+            const int floor = cells.floors[j];
+            ++area[level];
+            initial[level] += level - floor - 1;
+        }
+    }
+    WaterVolume wetArea = 0;
+    for (int y = 1; y <= WORLD_HEIGHT_Y; ++y) {
+        result.storage[y] = result.storage[y - 1];
+        if (y > searchLimit) continue;
+        wetArea += area[y];
+        result.storage[y] += (wetArea + initial[y]) * WaterUnitsPerBlock;
+    }
     if (!result.masks.empty()) result.lake.surfaceY = searchLimit;
     return result;
 }
@@ -547,8 +567,8 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineCoastalBasin(
     return result;
 }
 
-GeneratedHydrology::Footprint GeneratedHydrology::refineOcean(
-    int region) const {
+GeneratedHydrology::Footprint GeneratedHydrology::refineOcean(int region,
+                                                              int level) const {
     const auto c = center(region);
     const int period = width * Side;
     std::unordered_map<int, TerrainNeighborhood> neighborhoods;
@@ -557,17 +577,21 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineOcean(
     Footprint result;
     Mask& mask = result.masks[region];
     int admitted = 0;
+    const bool lowered = level < SeaY;
+    const auto* thresholds = lowered ? &seaThresholds() : nullptr;
     const auto admit = [&](Vec2i tile, int i) {
         if (!canCrossOcean(regions[i])) return;
         auto& checked = seen[i];
         const int index = tile.y % Side * Side + tile.x % Side;
         if (checked.test(index)) return;
         checked.set(index);
-        if (!regions[i].deep) {
+        if (lowered ? (*thresholds)[i] > level : !regions[i].deep) {
             auto it = neighborhoods.find(i);
             if (it == neighborhoods.end())
                 it = neighborhoods.emplace(i, terrain(i)).first;
-            if (!TerrainSampler(it->second).belowSea(tile.x, tile.y)) return;
+            if (lowered ? groundAt(it->second, tile) + 2 > level
+                        : !TerrainSampler(it->second).belowSea(tile.x, tile.y))
+                return;
         }
         wet.push_back(tile);
         if (i == region) {
@@ -579,7 +603,8 @@ GeneratedHydrology::Footprint GeneratedHydrology::refineOcean(
         for (int dx = -1; dx <= 1; ++dx) {
             const int i = regionAt(c.x + dx * Side, c.y + dz * Side);
             if (i < 0 || !regions[i].ocean) continue;
-            if (regions[i].oceanSource) admit(center(i), i);
+            if (lowered ? (*thresholds)[i] <= level : regions[i].oceanSource)
+                admit(center(i), i);
             const int row = i / width;
             if (row == 0 || row == height - 1)
                 for (int x = i % width * Side; x < (i % width + 1) * Side; ++x)
@@ -695,8 +720,9 @@ void GeneratedHydrology::retainOutletLake(uint32_t body) {
     if (outletLakes.contains(body) || outletLakeBytes >= OutletLakeBudget)
         return;
     const auto lake = footprint((uint64_t(body) << 1) | 1);
-    const size_t cost =
-        sizeof(Footprint) + 128 + lake->masks.size() * (sizeof(Mask) + 128);
+    const size_t cost = sizeof(Footprint) + 128 +
+                        lake->masks.size() * (sizeof(Mask) + 128) +
+                        lake->thresholds.size() * Area * sizeof(int16_t);
     if (outletLakeBytes + cost > OutletLakeBudget) return;
     outletLakes.emplace(body, lake);
     outletLakeBytes += cost;
@@ -738,7 +764,8 @@ GeneratedHydrology::footprint(uint64_t key) const {
         try {
             producer->set_value(std::make_shared<const Footprint>(
                 key & 1 ? refineLake(uint32_t(key >> 1))
-                        : refineOcean(int(key >> 1))));
+                        : refineOcean(int(uint32_t(key) >> 1),
+                                      key >> 32 ? int(key >> 32) : SeaY)));
         } catch (...) {
             producer->set_exception(std::current_exception());
         }
@@ -995,4 +1022,144 @@ bool GeneratedHydrology::uniformWater(int x0, int z0, int x1, int z1,
         z += depth;
     }
     return true;
+}
+
+const std::vector<int16_t>& GeneratedHydrology::seaThresholds() const {
+    std::call_once(seaThresholdsOnce, [&] {
+        // Certify a connected coarse interior without scanning every tile.
+        // Each deep region is below the maximum neighboring regional height,
+        // or the shelf's seabed ceiling. Mixed coasts are surveyed on demand.
+        std::vector<int16_t> bounds(regions.size(), SeaY);
+        std::array<std::vector<int>, SeaY> frontier;
+        oceanThreshold.assign(regions.size(), SeaY);
+        for (int i = 0; i < int(regions.size()); ++i) {
+            if (!regions[i].deep || !regions[i].oceanSource) continue;
+            int depth = 0;
+            const auto c = center(i);
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int j = regionAt(
+                        c.x + dx * Side,
+                        std::clamp(c.y + dz * Side, 0, height * Side - 1));
+                    depth = std::max(depth, ground[j].y + 2);
+                }
+            bounds[i] = int16_t(std::min(SeaY, depth));
+            if (bounds[i] == SeaY) continue;
+            if (i / width == 0 || i / width == height - 1) {
+                oceanThreshold[i] = bounds[i];
+                frontier[bounds[i]].push_back(i);
+            }
+        }
+        for (int level = 0; level < SeaY; ++level)
+            for (size_t k = 0; k < frontier[level].size(); ++k) {
+                const int i = frontier[level][k];
+                for (const int j : neighbors(i)) {
+                    if (j < 0 || bounds[j] == SeaY) continue;
+                    const int threshold = std::max<int>(bounds[j], level);
+                    if (threshold >= oceanThreshold[j]) continue;
+                    oceanThreshold[j] = int16_t(threshold);
+                    frontier[threshold].push_back(j);
+                }
+            }
+    });
+    return oceanThreshold;
+}
+
+bool GeneratedHydrology::uniformLoweredSea(int x0, int z0, int x1, int z1,
+                                           int level) const {
+    if (level <= 0) return false;
+    const auto& thresholds = seaThresholds();
+    for (int z = z0; z < z1; z += Side - WorldWrap::mod(z, Side))
+        for (int x = x0; x < x1; x += Side - WorldWrap::mod(x, Side)) {
+            const int i = regionAt(x, z);
+            if (i < 0 || thresholds[i] > level) return false;
+        }
+    return true;
+}
+
+StorageCurve GeneratedHydrology::storageCurve(uint32_t body) const {
+    if (body != Sea) {
+        if (basin(body))
+            return StorageCurve(footprint((uint64_t(body) << 1) | 1)->storage);
+        return StorageCurve({});
+    }
+
+    // Deep regions contribute their full area at the sampled regional depth.
+    // Along the shelf, sample a regular lattice only in coastal candidates.
+    // The open ocean dominates the budget. Small inland lakes use tile data.
+    constexpr int stride = Side / 4;
+    const auto& thresholds = seaThresholds();
+    StorageCurve::Levels areas{}, initial{}, storage{};
+    const auto admit = [&](int floor, int connection, WaterVolume weight) {
+        const int first = std::max(floor + 1, connection);
+        if (first > SeaY) return;
+        areas[first] += weight;
+        initial[first] += weight * (first - floor - 1);
+    };
+    for (int i = 0; i < int(regions.size()); ++i) {
+        const auto& r = regions[i];
+        if (r.deep && r.oceanSource) {
+            const int floor = std::clamp(ground[i].y + 1, 1, SeaY - 1);
+            admit(floor, thresholds[i], Area);
+        } else if (r.oceanSource) {
+            const auto local = terrain(i);
+            const auto c = center(i);
+            const int x0 = c.x - Side / 2, z0 = c.y - Side / 2;
+            int link = SeaY;
+            for (int n : neighbors(i))
+                if (n >= 0) link = std::min<int>(link, thresholds[n]);
+            // The coast samples approximate wetted area below the
+            // region's certified connection at the original sea level.
+            for (int z = stride / 2; z < Side; z += stride)
+                for (int x = stride / 2; x < Side; x += stride)
+                    admit(groundAt(local, {x0 + x, z0 + z}) + 1, link,
+                          stride * stride);
+        }
+    }
+    WaterVolume area = 0;
+    for (int y = 1; y <= WORLD_HEIGHT_Y; ++y) {
+        area += areas[y];
+        storage[y] = storage[y - 1] +
+                     (y <= SeaY ? (area + initial[y]) * WaterUnitsPerBlock : 0);
+    }
+    return StorageCurve(std::move(storage));
+}
+
+bool GeneratedHydrology::connectedAt(uint32_t body, int x, int z,
+                                     int level) const {
+    const int i = regionAt(x, z);
+    if (body == Sea) {
+        if (i < 0 || level <= 0) return false;
+        if (seaThresholds()[i] <= level) return true;
+        const auto survey = footprint(uint64_t(level) << 32 | uint64_t(i) << 1);
+        return survey->masks.at(i).test(z % Side * Side +
+                                        WorldWrap::mod(x, Side));
+    }
+    if (i < 0 || !basin(body)) return false;
+    const auto wet = footprint((uint64_t(body) << 1) | 1);
+    const auto it = wet->thresholds.find(i);
+    if (it == wet->thresholds.end()) return false;
+    const int threshold = it->second[z % Side * Side + WorldWrap::mod(x, Side)];
+    return threshold >= 0 && threshold <= level;
+}
+
+bool GeneratedHydrology::mayContainBody(uint32_t body, int x0, int z0, int x1,
+                                        int z1) const {
+    for (int z = std::max(0, z0); z < z1; z += Side - z % Side)
+        for (int x = x0; x < x1; x += Side - WorldWrap::mod(x, Side)) {
+            const int i = regionAt(x, z);
+            if (i < 0) continue;
+            const auto& r = regions[i];
+            if (body == Sea) {
+                if (r.oceanSource || canSurveyOcean(r) ||
+                    (connectCoastalBasins && r.shore != -1))
+                    return true;
+            } else if (r.shore == SharedShore) {
+                for (const int next : shoreNeighborhood(i))
+                    if (next >= 0 && regions[next].body == body) return true;
+            } else if (r.shore >= 0 && uint32_t(r.shore) + 2 == body) {
+                return true;
+            }
+        }
+    return false;
 }

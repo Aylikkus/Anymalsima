@@ -162,4 +162,14 @@ void writeStructures(const SaveSlot& slot, const TreeOverrideMap& trees,
                              structures_codec::encode(trees, voxels, extra));
 }
 
+void readReservoirs(const SaveSlot& slot, Reservoirs& reservoirs) {
+    const auto path = slot.directory / "water.dat";
+    if (std::filesystem::exists(path))
+        reservoirs.restore(FileIO::readBytes(path));
+}
+
+void writeReservoirs(const SaveSlot& slot, const Reservoirs& reservoirs) {
+    FileIO::writeBytesAtomic(slot.directory / "water.dat", reservoirs.encode());
+}
+
 }  // namespace save_catalog

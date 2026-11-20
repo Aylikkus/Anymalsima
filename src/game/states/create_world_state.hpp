@@ -38,7 +38,8 @@ class CreateWorldState : public IGameState {
     TextButton* chooseButton = nullptr;
     WorldPreview* worldPreview = nullptr;
     std::unique_ptr<UIManager> ui_manager;
-    std::unique_ptr<World> world;
+    Text* status = nullptr;
+    std::shared_ptr<World> world;
     WorldGenTask world_gen;
 
     bool generating = false;

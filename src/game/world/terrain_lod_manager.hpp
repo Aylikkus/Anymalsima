@@ -157,6 +157,10 @@ class TerrainLodManager {
     bool createGpu(Entry& entry, const TerrainLod::Patch& patch,
                    const TerrainLod::Mesh& cpu, IRenderer& renderer);
     void editChanged(uint64_t column);
+    void reservoirsChanged(const ReservoirChange& change);
+    void invalidatePatches(
+        const std::function<bool(const TerrainLod::Patch&)>& touches);
+    Signal<const ReservoirChange&>::Connection waterConnection;
     void selectDrawn();
     bool wanted(const TerrainLod::Patch& patch) const;
     bool isDrawable(const TerrainLod::Patch& patch) const;

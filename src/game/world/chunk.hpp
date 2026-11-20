@@ -21,8 +21,9 @@ struct Chunk {
     static constexpr int SIZE_Y = 16;
     static constexpr int SIZE_Z = 16;
     Tile tiles[SIZE_Z][SIZE_Y][SIZE_X];  // [z][y][x]
-    // Legacy slabs cannot distinguish unmodified terrain from same-material
-    // player replacements. Preserve that uncertainty across later saves.
+    // v1–v4 slabs keep ambiguous water and dry edits as saved.
+    bool projectsWater = false;
+    // Legacy slabs also preserve uncertainty about terrain replacements.
     bool legacyRootTerrain = false;
     bool legacyRootShape = false;
     std::shared_ptr<const RootTerrain> rootTerrain;

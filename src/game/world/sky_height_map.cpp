@@ -37,6 +37,23 @@ sky::Tile buildTile(const BuildInputs& in) {
 SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
                            const DataStorage<Block>& blocks, ThreadPool& pool)
     : chunks(chunks), edits(edits), blocks(blocks), pool(pool) {
+    if (auto* water = chunks.reservoirs())
+        waterConnection =
+            water->changed.connect([this](const ReservoirChange& change) {
+                for (const auto& [key, entry] : entries) {
+                    const int x = int(key >> 32) * Chunk::SIZE_X;
+                    const int z = int(uint32_t(key)) * Chunk::SIZE_Z;
+                    if (!change.affects(this->chunks.world().hydrology.get(), x,
+                                        z, x + Chunk::SIZE_X, z + Chunk::SIZE_Z,
+                                        this->chunks.wrap().tiles))
+                        continue;
+                    invalidate(key);
+                    if (const auto saved = overridden.find(key);
+                        saved != overridden.end() && !entry.queried)
+                        for (const auto& [index, column] : saved->second)
+                            observations[key].insert(index);
+                }
+            });
     auto table = std::make_shared<sky::OpacityTable>();
     table->fill(0);
     for (size_t id = 1; id <= blocks.items.size() && id < table->size(); ++id)
@@ -63,6 +80,8 @@ SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
 }
 
 SkyHeightMap::~SkyHeightMap() {
+    if (auto* water = chunks.reservoirs())
+        water->changed.disconnect(waterConnection);
     if (editor) editor->blockChanged.disconnect(editConnection);
     edits.changed.disconnect(editsConnection);
     chunks.columnStructuresChanged.disconnect(structuresConnection);
@@ -317,6 +336,14 @@ void SkyHeightMap::observe() {
             continue;
         }
         const auto cx = unsigned(key >> 32), cz = unsigned(key);
+        if (queue.contains({cx, 0, cz}) ||
+            std::any_of(jobs.begin(), jobs.end(), [&](const Job& job) {
+                return job.key == key &&
+                       job.generation == entry->second.generation;
+            })) {
+            ++it;
+            continue;
+        }
         bool any = false;
         for (const int index : it->second) {
             const auto& derived = *entry->second.derived;

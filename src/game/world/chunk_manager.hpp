@@ -18,6 +18,7 @@
 #include "layers_generator.hpp"
 #include "location_generator.hpp"
 #include "render/ui_context.hpp"
+#include "reservoirs.hpp"
 #include "save/region_file.hpp"
 #include "structure_overrides.hpp"
 #include "tree_wood_lod.hpp"
@@ -48,6 +49,7 @@ struct ChunkHandle {
     // Loaded from disk with solid/air different from generated terrain
     // (an earlier gameplay edit).
     bool edited = false;
+    std::vector<uint32_t> waterBodies;
     // Generated structure voxels at the revision used to prepare this chunk.
     // Tree wood is reconciled separately through TreeStamp.
     std::shared_ptr<const structure_voxels::Slab> structureBaseline;
@@ -81,6 +83,14 @@ class ChunkManager {
     // Tile light or opacity of a Ready chunk changed. Geometry may be
     // unchanged; listeners refresh light volumes around the chunk.
     Signal<const ChunkCoord&> lightChanged;
+    Signal<const ChunkCoord&> waterChanged;
+    Signal<uint64_t> columnWaterChanged;
+    const World& world() const { return terrainWorld; }
+    Reservoirs* reservoirs() const { return terrainWorld.reservoirs.get(); }
+    WaterVolume transferWater(uint32_t body, WaterVolume amount,
+                              ReservoirExchange reason);
+    WaterVolume divertWater(uint32_t body, TilePos recipient,
+                            WaterVolume amount);
     // A chunk's drawn geometry changed (new mesh uploaded, or emptied).
     Signal<const ChunkCoord&> meshUploaded;
     // The plants of a Ready chunk changed (setFlora). Chunks becoming
@@ -448,6 +458,16 @@ class ChunkManager {
     void publishGenerated(ChunkCoord coord, uint64_t identity,
                           GeneratedChunk data);
     void collect();
+
+    bool reconcileWater(Chunk& chunk, ChunkCoord coord,
+                        const ChunkColumnInputs* columns) const;
+    void reservoirChanged(const ReservoirChange& change);
+    void indexWater(ChunkCoord coord, const ChunkColumnInputs& columns);
+    std::shared_ptr<const ChunkColumnInputs> projectedColumns(
+        std::shared_ptr<const ChunkColumnInputs> columns, unsigned cx,
+        unsigned cz, const ReservoirSnapshot& snapshot) const;
+    Signal<const ReservoirChange&>::Connection reservoirConnection;
+    std::unordered_map<uint32_t, std::unordered_set<ChunkCoord>> waterChunks;
 
     struct ColumnCache {
         size_t registrations = 0;

@@ -10,6 +10,7 @@ add_library(game
     world/world_generation_task.cpp
     world/location_generator.cpp
     world/terrain_sampler.cpp
+    world/reservoirs.cpp
     world/generated_hydrology.cpp
     world/generated_rivers.cpp
     world/surface_sampler.cpp

@@ -137,6 +137,7 @@ class SkyHeightMap {
     Signal<uint64_t>::Connection editsConnection;
     Signal<uint64_t>::Connection structuresConnection;
     Signal<uint64_t>::Connection releasedConnection;
+    Signal<const ReservoirChange&>::Connection waterConnection;
     Signal<const ChunkCoord&>::Connection readyConnection;
     std::unordered_map<uint64_t, Entry> entries;
     // Requested chunk columns waiting for a (re)build, as {x, 0, z}.

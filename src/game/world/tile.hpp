@@ -9,6 +9,8 @@ enum class LiquidType : uint8_t {
     Lava = 2,
 };
 
+enum class WaterOrigin : uint8_t { Independent, Reservoir, Local };
+
 struct TileLightning {
     uint8_t sun_exposure : 4 = 0;
     uint8_t artificial_light : 4 = 0;
@@ -20,7 +22,8 @@ struct Tile {
     static constexpr uint8_t CoverDensityMask = 0x0F;
 
     uint8_t block_id = 0;  // 0 = air
-    LiquidType liquid = LiquidType::None;
+    LiquidType liquid : 6 = LiquidType::None;
+    WaterOrigin waterOrigin : 2 = WaterOrigin::Independent;
     uint8_t liquidLevel = 0;  // 0-255
     TileLightning lightLevel;
     // Ground cover (GroundCover id, 0 = none) painted on this solid tile's

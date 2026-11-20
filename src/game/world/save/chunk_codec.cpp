@@ -11,11 +11,13 @@ constexpr size_t Volume = Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
 
 // Saved tile fields, one byte each in palette order.
 uint64_t key(const Tile& tile) {
+    if (tile.waterOrigin != WaterOrigin::Independent) return tile.block_id;
     return uint64_t(tile.block_id) | uint64_t(uint8_t(tile.liquid)) << 8 |
            uint64_t(tile.liquidLevel) << 16 | uint64_t(tile.cover) << 24 |
            uint64_t(tile.coverState) << 32;
 }
 constexpr int KeyBytes = 5;
+constexpr uint16_t ProjectsWater = uint16_t(1) << 15;
 
 const Tile* flat(const Chunk& chunk) { return &chunk.tiles[0][0][0]; }
 Tile* flat(Chunk& chunk) { return &chunk.tiles[0][0][0]; }
@@ -44,7 +46,9 @@ Bytes encode(const Chunk& chunk) {
 
     BinaryWriter out;
     out.write(Version);
-    out.write(uint16_t(palette.size()));
+    auto count = uint16_t(palette.size());
+    if (chunk.projectsWater) count |= ProjectsWater;
+    out.write(count);
     for (const auto k : palette)
         for (int b = 0; b < KeyBytes; ++b)
             out.write(uint8_t((k >> 8 * b) & 0xFF));
@@ -85,7 +89,9 @@ void decode(ByteView data, Chunk& chunk) {
     const auto version = in.read<uint8_t>();
     if (version < MinVersion || version > Version)
         throw SerializationError("unsupported chunk encoding version");
-    const auto count = in.read<uint16_t>();
+    auto count = in.read<uint16_t>();
+    chunk.projectsWater = version >= 5 && (count & ProjectsWater);
+    if (chunk.projectsWater) count &= ~ProjectsWater;
     if (count == 0 || count > Volume)
         throw SerializationError("bad chunk palette size");
     std::vector<Tile> palette(count);

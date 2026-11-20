@@ -21,6 +21,9 @@ SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
             columnRevisions[column] = ++nextRevision;
             pendingDirect.insert(column);
         });
+    waterConnection = chunks.columnWaterChanged.connect([this](uint64_t key) {
+        markColumnDirty(unsigned(key >> 32), unsigned(key));
+    });
     readyConnection = chunks.becameReady.connect(
         [this](const ChunkCoord& coord) { ready(coord); });
     removedConnection = chunks.removed.connect(
@@ -31,6 +34,7 @@ SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
 }
 
 SunLightPropagator::~SunLightPropagator() {
+    chunks.columnWaterChanged.disconnect(waterConnection);
     chunks.becameReady.disconnect(readyConnection);
     chunks.removed.disconnect(removedConnection);
     if (sky) {

@@ -120,8 +120,7 @@ Tile build(const TileInputs& in) {
                 ground >= 0
                     ? std::max<uint8_t>(1, opacity[in.edit->groundBlock[s]])
                     : 0;
-            waterTop =
-                in.edit->waterY[s] >= 0 ? in.edit->waterY[s] - 1 : INT_MIN;
+            waterTop = in.edit->waterAt(i, in.water[s]).topTile();
         }
         const auto& built = edits.tiles[s];
         const int structure = in.structureTop[s];

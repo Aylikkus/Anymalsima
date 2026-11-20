@@ -3,14 +3,18 @@
 #include <set>
 
 #include "lod_scene.hpp"
+#include "serialization/file_io.hpp"
 #include "test.hpp"
 #include "test_assets.hpp"
 #include "world/chunk_mesher.hpp"
 #include "world/generated_hydrology.hpp"
 #include "world/location_generator.hpp"
+#include "world/save/chunk_codec.hpp"
 #include "world/save/save_catalog.hpp"
 #include "world/surface_sampler.hpp"
+#include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod.hpp"
+#include "world/world_editor.hpp"
 
 namespace {
 constexpr int Width = 12;
@@ -824,4 +828,296 @@ TEST(hydrology_sea_and_high_lake_share_region) {
                                  vertex.y == shore.water.surfaceY &&
                                  vertex.ny > .9f;
                       }));
+}
+
+TEST(hydrology_reservoir_reconciles_saved_and_unloaded_water) {
+    auto world = basinWorld();
+    // Extend the wrapped coast into a broad sea, with a shallow shore
+    // next to the existing inland terrain.
+    for (int z = 0; z < Height; ++z)
+        for (int x : {0, 1, Width - 2, Width - 1}) {
+            auto& r = world.regions[z * Width + x];
+            r.land = LandType::DEEP_WATER;
+            r.land_height_m = 325;
+        }
+    world.rivers.clear();
+    world.hydrology = GeneratedHydrology::build(world);
+    constexpr auto sea = GeneratedHydrology::Sea;
+    constexpr int top = WaterSurface::SeaBoundary;
+    constexpr auto layer = 4 * WaterUnitsPerBlock;
+    const auto addLedger = [&](World& w) {
+        w.reservoirs = std::make_shared<Reservoirs>(w.hydrology);
+        w.reservoirs->define(sea, StorageCurve::constantArea(4, 315, top));
+    };
+    addLedger(world);
+
+    test::Assets assets;
+    LocationGenerator generator;
+    ThreadPool pool{2};
+    ChunkMesher mesher(assets);
+    const auto root = std::filesystem::path(TEST_SCRATCH_DIR) / "live_water";
+    std::filesystem::remove_all(root);
+    const auto slot = save_catalog::create(world, {0, 2}, root);
+    const auto cx = unsigned(2), cz = unsigned(20);
+    const ChunkCoord upper{cx, unsigned((top - 1) / 16), cz};
+    const ChunkCoord lower{cx, upper.y - 1, cz};
+    const ChunkCoord west{cx - 1, lower.y, cz};
+    const ChunkCoord east{cx + 1, lower.y, cz};
+    const ChunkCoord north{cx, lower.y, cz - 1};
+    const ChunkCoord newSlab{cx + 2, lower.y, cz};
+    constexpr int x = int(cx) * 16 + 3, z = int(cz) * 16 + 5;
+    const TilePos dry{x, top - 1, z};
+    const TilePos pocket{x, 310, z};
+    const ChunkCoord cavity{cx, unsigned(pocket.y / 16), cz};
+    SurfaceSampler initial(world, assets);
+    EQUAL(initial.waterAt(x, z).surfaceY, top, "initial sea surface");
+    int shoreX = -1, shoreZ = -1;
+    for (int dz = 0; dz < 64 && shoreX < 0; ++dz)
+        for (int dx = 200; dx < 320 && shoreX < 0; ++dx)
+            if (initial.height(dx, z + dz) == top - 2 &&
+                initial.waterAt(dx, z + dz).body == sea) {
+                shoreX = dx;
+                shoreZ = z + dz;
+            }
+    CHECK(shoreX >= 0);
+
+    const auto registerSlab = [&](ChunkManager& chunks, const World& w,
+                                  ChunkCoord coord, ChunkBlob blob = {}) {
+        const auto rx = coord.x / CHUNKS_PER_REGION;
+        const auto rz = coord.z / CHUNKS_PER_REGION;
+        chunks.registerChunk(coord, {rx * 8, 0, rz * 8},
+                             &w.regions[rz * w.width + rx], std::move(blob));
+    };
+    const auto ready = [&](ChunkManager& chunks, ChunkCoord c) {
+        for (int i = 0; i < 12 && !chunks.request(c); ++i) {
+            chunks.update();
+            CHECK(pool.wait_for(std::chrono::seconds(5)));
+        }
+        CHECK(chunks.isReady(c));
+    };
+
+    RegionData disk;
+    const auto regionPath = region_file::path(slot.directory, {0, 2});
+    FileIO::ensureDirectory(regionPath.parent_path());
+    const auto saveChunks = [&](ChunkManager& chunks) {
+        disk = region_file::merge(disk, chunks.snapshotRegion({0, 2}, true));
+        FileIO::writeBytesAtomic(regionPath, region_file::encode(disk));
+    };
+    const auto detailedTop = [&](ChunkManager& chunks, ChunkCoord c, int wx,
+                                 int wz) {
+        const auto mesh = mesher.build(
+            *chunks.getChunk(c), c,
+            [&](int x, int y, int z) { return chunks.tileAt(x, y, z); });
+        CHECK(!mesh.waterTops.empty());
+        return int(c.y) * 16 + mesh.waterTops[(wz % 16) * 16 + wx % 16];
+    };
+    const auto lodTop = [&](const World& w, int level) {
+        SurfaceSampler sampler(w, assets);
+        const auto mesh = TerrainLod::build({16, 288, 2}, sampler,
+                                            std::atomic_bool{false}, 4);
+        CHECK(!mesh.water.vertices.empty());
+        for (const auto& v : mesh.water.vertices)
+            EQUAL(v.y, float(level), "coarse sea height");
+    };
+    {
+        ChunkManager chunks(generator, pool, nullptr, world, &assets);
+        for (auto c : {upper, lower, west, east, north, cavity})
+            registerSlab(chunks, world, c);
+        for (unsigned y = cavity.y + 1; y < lower.y; ++y)
+            registerSlab(chunks, world, {cx, y, cz});
+        registerSlab(chunks, world, {cx, 0, cz});
+        for (auto c : {upper, lower, west, north, cavity}) ready(chunks, c);
+        for (unsigned y = cavity.y + 1; y < lower.y; ++y)
+            ready(chunks, {cx, y, cz});
+        // A deliberate dry cell and an independent liquid in the sea band.
+        WorldEditor editor(chunks, nullptr, assets.getStorage<Block>());
+        TerrainEdits edits;
+        TerrainEditTracker tracker(chunks, edits);
+        tracker.watch(editor);
+        CHECK(editor.removeBlock(pocket) == EditStatus::Applied);
+        CHECK(editor.placeBlock(dry, 1) == EditStatus::Applied);
+        CHECK(editor.removeBlock(dry) == EditStatus::Applied);
+        chunks.withChunkLocked(upper, [&](Chunk& chunk) {
+            auto& lava = chunk.tiles[z % 16][0][(x + 1) % 16];
+            lava.liquid = LiquidType::Lava;
+            lava.liquidLevel = 63;
+            lava.waterOrigin = WaterOrigin::Independent;
+        });
+        tracker.update();
+        SurfaceSampler edited(world, assets, nullptr, edits.snapshot());
+        EQUAL(edited.waterAt(dry.x, dry.z).surfaceY, top - 1,
+              "unloaded summary preserves the dry top cell");
+        save_catalog::writeTerrainEdits(slot, *edits.snapshot());
+        EQUAL(detailedTop(chunks, upper, x + 2, z), float(top),
+              "generated detailed water");
+        saveChunks(chunks);
+        chunks.unregister(west);
+        CHECK(!chunks.isRegistered(west));
+        const auto start = world.reservoirs->volume(sea);
+        EQUAL(chunks.divertWater(sea, pocket, 200), 200, "atomic local credit");
+        EQUAL(chunks.tileAt(pocket.x, pocket.y, pocket.z)->liquidLevel, 200,
+              "local fill immediately visible");
+        EQUAL(chunks.transferWater(sea, -(layer - 201),
+                                   ReservoirExchange::Disposal),
+              -(layer - 201), "sub-layer removal");
+        CHECK(chunks.tileAt(x + 2, top - 1, z)->liquid == LiquidType::Water);
+        EQUAL(chunks.transferWater(sea, -1, ReservoirExchange::Disposal), -1,
+              "cross first layer");
+        CHECK(chunks.tileAt(x + 2, top - 1, z)->isAir());
+        CHECK(!SurfaceSampler(world, assets).waterAt(shoreX, shoreZ).wet());
+        EQUAL(initial.waterAt(shoreX, shoreZ).surfaceY, top,
+              "captured snapshot keeps its original surface");
+        EQUAL(detailedTop(chunks, lower, x + 2, z), float(top - 1),
+              "detailed water at slab boundary");
+        chunks.request(east);
+        chunks.update();  // Dispatch the slab but leave publication pending.
+        EQUAL(chunks.transferWater(sea, -layer, ReservoirExchange::Disposal),
+              -layer, "cross second layer");
+        ready(chunks, east);
+        EQUAL(detailedTop(chunks, east, x + 16, z), float(top - 2),
+              "in-flight generation publishes the current surface");
+        EQUAL(detailedTop(chunks, lower, x + 2, z), float(top - 2),
+              "ready slab reconciled");
+        EQUAL(detailedTop(chunks, north, x + 2, z - 16), float(top - 2),
+              "second ready shore column reconciled");
+        EQUAL(world.reservoirs->volume(sea), start - 2 * layer,
+              "volume ledger");
+        EQUAL(world.reservoirs->exchanged(ReservoirExchange::Disposal),
+              200 - 2 * layer, "external debit recorded once");
+        CHECK(chunks.tileAt(x + 1, top - 1, z)->liquid == LiquidType::Lava);
+        CHECK(!chunks.isRegistered(newSlab));
+        size_t readyCount = 0;
+        chunks.forEachReady([&](const ChunkCoord& c, Chunk&) {
+            CHECK(c.x >= cx - 1 && c.x <= cx + 1);
+            CHECK(c.z >= cz - 1 && c.z <= cz);
+            ++readyCount;
+        });
+        EQUAL(readyCount, size_t(5 + lower.y - cavity.y - 1),
+              "transfer does not stream any other slabs");
+        SurfaceSampler lowered(world, assets, nullptr, edits.snapshot());
+        EQUAL(lowered.waterAt(dry.x, dry.z).surfaceY, top - 2,
+              "dry-cell cap follows the lowered reservoir");
+
+        // Commit the new ledger while the region still holds its old snapshot.
+        save_catalog::writeReservoirs(slot, *world.reservoirs);
+        lodTop(world, top - 2);
+    }
+
+    auto reopened = save_catalog::readWorldMap(slot);
+    addLedger(*reopened);
+    save_catalog::readReservoirs(slot, *reopened->reservoirs);
+    disk = region_file::decode(FileIO::readBytes(regionPath));
+    ChunkManager chunks(generator, pool, nullptr, *reopened, &assets);
+    for (auto c : {upper, lower, west, east, newSlab, cavity}) {
+        const auto saved = disk.chunks.find(RegionData::localIndex(c));
+        registerSlab(chunks, *reopened, c,
+                     saved == disk.chunks.end() ? nullptr : saved->second);
+        ready(chunks, c);
+    }
+    for (auto c : {west, east, newSlab})
+        EQUAL(detailedTop(chunks, c, int(c.x) * 16, z), float(top - 2),
+              "evicted and new slabs match after restart");
+    EQUAL(chunks.tileAt(pocket.x, pocket.y, pocket.z)->liquidLevel, 200,
+          "local credit restored alongside the debit");
+    EQUAL(chunks.transferWater(sea, 2 * layer, ReservoirExchange::Input),
+          2 * layer, "refill to baseline");
+    CHECK(chunks.tileAt(dry.x, dry.y, dry.z)->isAir());
+    CHECK(chunks.tileAt(x + 1, top - 1, z)->liquid == LiquidType::Lava);
+    EQUAL(detailedTop(chunks, upper, x + 2, z), float(top),
+          "detailed top refills");
+    const TerrainEdits savedEdits(save_catalog::readTerrainEdits(slot).columns);
+    SurfaceSampler restoredQuery(*reopened, assets, nullptr,
+                                 savedEdits.snapshot());
+    EQUAL(restoredQuery.waterAt(dry.x, dry.z).surfaceY, top - 1,
+          "saved dry-cell cap survives refill");
+    EQUAL(SurfaceSampler(*reopened, assets).waterAt(shoreX, shoreZ).surfaceY,
+          top, "unloaded shore refills");
+    // Commit a region first. The older water ledger still controls reload.
+    chunks.markModified(upper);
+    chunks.markModified(lower);
+    saveChunks(chunks);
+    auto prior = save_catalog::readWorldMap(slot);
+    addLedger(*prior);
+    save_catalog::readReservoirs(slot, *prior->reservoirs);
+    ChunkManager retried(generator, pool, nullptr, *prior, &assets);
+    const auto newest = region_file::decode(FileIO::readBytes(regionPath));
+    for (auto c : {upper, lower}) {
+        registerSlab(retried, *prior, c,
+                     newest.chunks.at(RegionData::localIndex(c)));
+        ready(retried, c);
+    }
+    EQUAL(detailedTop(retried, lower, x + 2, z), float(top - 2),
+          "restart after saving the region first uses the older ledger");
+    CHECK(retried.tileAt(dry.x, dry.y, dry.z)->isAir());
+    lodTop(*reopened, top);
+}
+
+TEST(hydrology_reservoir_river_budget) {
+    auto world = riverLodScene(32);
+    // Skipped paths retain their saved IDs, leaving gaps in the reach list.
+    world.rivers.insert(world.rivers.begin(), world.rivers.size(),
+                        RiverPolyline{});
+    const auto generated =
+        GeneratedHydrology::build(world, {}, true, true, true);
+    const auto& reaches = generated->riverReaches();
+    const auto main =
+        std::find_if(reaches.begin(), reaches.end(), [](const auto& reach) {
+            return reach.end == GeneratedHydrology::RiverEnd::Sea;
+        });
+    CHECK(main != reaches.end());
+    CHECK(main->id > reaches.size());
+    const auto sea = GeneratedHydrology::Sea;
+    const auto rate = main->spring.unitsPerStep;
+    CHECK(rate > 0);
+    constexpr int top = WaterSurface::SeaBoundary;
+    const auto budgetTest = [&](int area) {
+        Reservoirs budget(generated);
+        budget.define(sea, StorageCurve::constantArea(area, top - 20, top));
+        const auto full = budget.volume(sea);
+        CHECK(budget.setReachDelivery(main->id, 0));
+        budget.advanceTo(WaterUnitsPerBlock);
+        const auto held = budget.held(main->id);
+        CHECK(held >= rate * WaterUnitsPerBlock);
+        EQUAL(budget.volume(sea), full - held,
+              "blocked deliveries stay upstream");
+        EQUAL(budget.exchanged(ReservoirExchange::River), 0,
+              "no delivery from dam");
+        EQUAL(budget.exchanged(ReservoirExchange::Evaporation), -held,
+              "background loss continues");
+
+        Reservoirs restored(generated);
+        restored.define(sea, StorageCurve::constantArea(area, top - 20, top));
+        restored.restore(budget.encode());
+        const auto lower = restored.snapshot()->level(sea, top);
+        restored.advanceTo(restored.step());
+        EQUAL(restored.held(main->id), held, "same step does not repeat input");
+        CHECK(restored.setReachDelivery(main->id, 100));
+        restored.advanceTo(WaterUnitsPerBlock + 1);
+        EQUAL(restored.held(main->id), 0, "previous arrivals spill once");
+        EQUAL(restored.volume(sea), full, "returning inflow refills sink");
+        constexpr uint32_t alternate = 9000;
+        restored.define(alternate, StorageCurve::constantArea(1, 10, 20));
+        const auto capacity = restored.volume(alternate);
+        EQUAL(restored.transfer(alternate, -capacity,
+                                ReservoirExchange::Disposal),
+              -capacity, "make room at alternate receiver");
+        CHECK(restored.setReachDelivery(main->id, 100, alternate));
+        restored.advanceTo(WaterUnitsPerBlock + 2);
+        EQUAL(restored.volume(alternate), held / WaterUnitsPerBlock,
+              "flow reaches its confirmed alternate receiver");
+        EQUAL(restored.volume(sea), full - held / WaterUnitsPerBlock,
+              "former sink still loses its background budget");
+        return lower;
+    };
+    CHECK(budgetTest(1) < budgetTest(100));
+
+    const auto lakes = basinWorld();
+    const auto lakeHydrology = GeneratedHydrology::build(lakes);
+    const auto id = lakeHydrology->candidateBody(First);
+    const auto curve = lakeHydrology->storageCurve(id);
+    const int level = lakeHydrology->lake(id).surfaceY;
+    EQUAL(curve.levelAt(curve.capacity()), level,
+          "surveyed storage fills to the spill");
+    CHECK(curve.volumeAt(level) - curve.volumeAt(level - 1) >
+          curve.volumeAt(level - 1) - curve.volumeAt(level - 2));
 }

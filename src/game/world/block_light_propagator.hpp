@@ -143,7 +143,7 @@ class BlockLightPropagator {
     ThreadPool& pool;
     LightSourceRegistry* registry;
     std::array<const LightEmission*, 256> emissions{};
-    Signal<const ChunkCoord&>::Connection readyConnection;
+    Signal<const ChunkCoord&>::Connection waterConnection, readyConnection;
     Signal<const ChunkCoord&>::Connection removedConnection;
     Signal<const LightSource&>::Connection entityConnection;
     WorldEditor* editor = nullptr;

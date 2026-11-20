@@ -127,7 +127,14 @@ double GeneratedHydrology::carve(int x, int z, double originalY) const {
 std::pair<int, WaterSurface> GeneratedHydrology::sampleRiverColumn(
     int x, int z) const {
     if (!spansAt(x, z)) return {-1, {}};
-    const auto data = terrain(regionAt(x, z));
+    return sampleColumn(x, z);
+}
+
+std::pair<int, WaterSurface> GeneratedHydrology::sampleColumn(int x,
+                                                              int z) const {
+    const int region = regionAt(x, z);
+    if (region < 0) return {-1, {}};
+    const auto data = terrain(region);
     const double original = TerrainSampler(data).surface(x, z);
     const int groundY = int(std::floor(carve(x, z, original)));
     return {groundY, waterAt(x, z, groundY)};

@@ -42,7 +42,7 @@ class GameplayState : public IGameState {
     // The camera starts from slot.meta.camera, or above slot.meta.startRegion
     // for a world that has never been played.
     GameplayState(
-        Game& game, UIContext& context, std::unique_ptr<World>&& world,
+        Game& game, UIContext& context, std::shared_ptr<World> world,
         SaveSlot slot,
         std::optional<std::vector<TreeLandmark>> landmarks = std::nullopt);
     // Saves every resident region and world.json before workers stop.
@@ -57,7 +57,7 @@ class GameplayState : public IGameState {
 
    private:
     std::unique_ptr<UIManager> ui_manager;
-    std::unique_ptr<World> world;
+    std::shared_ptr<World> world;
     SaveSlot slot;
     // Declared before chunk users so it outlives them during destruction.
     std::unique_ptr<RegionStore> regionStore;
@@ -110,6 +110,8 @@ class GameplayState : public IGameState {
     uint64_t savedStructureOverrideRevision = 0;
     bool importLegacyStructures = false;
     std::chrono::steady_clock::time_point nextStructureSave{};
+    void saveReservoirs();
+    uint64_t savedWaterRevision = 0;
     void saveStructures(bool force = false);
     TextButton* plantButton = nullptr;
     size_t plantSpecies = 0;  // index into treeSpecies().species()

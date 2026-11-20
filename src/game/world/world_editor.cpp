@@ -160,6 +160,10 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             status = EditStatus::Unchanged;
             return;
         }
+        if (block && tile.waterOrigin == WaterOrigin::Local) {
+            status = EditStatus::Blocked;
+            return;
+        }
         if (request.rootOwner && !request.previousWood)
             chunk.recordRoot(cell, request.rootOwner, tile);
         else if (!request.treeGrowth)
@@ -171,6 +175,7 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             // A block displaces any liquid in its cell.
             tile.liquid = LiquidType::None;
             tile.liquidLevel = 0;
+            tile.waterOrigin = WaterOrigin::Independent;
         }
         // Light stays until sunlight recomputes, so edits never flash dark.
         change.after = tile;

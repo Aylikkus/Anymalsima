@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "water_surface.hpp"
+#include "reservoirs.hpp"
 #include "world.hpp"
 
 struct TerrainNeighborhood;
@@ -94,12 +94,17 @@ class GeneratedHydrology {
     WaterSurface certifiedSeaAt(int x, int z) const;
     bool potentialSeaAt(int x, int z) const;
     WaterSurface previewWaterAt(int x, int z, int groundY) const;
+    StorageCurve storageCurve(uint32_t body) const;
+    bool uniformLoweredSea(int x0, int z0, int x1, int z1, int level) const;
+    bool connectedAt(uint32_t body, int x, int z, int level) const;
+    bool mayContainBody(uint32_t body, int x0, int z0, int x1, int z1) const;
     bool uniformWater(int x0, int z0, int x1, int z1, uint32_t expectedBody,
                       bool certifiedOnly = false) const;
 
     const std::vector<Reach>& riverReaches() const { return reaches; }
     std::optional<Channel> riverAt(int x, int z) const;
     double carve(int x, int z, double originalY) const;
+    std::pair<int, WaterSurface> sampleColumn(int x, int z) const;
     std::pair<int, WaterSurface> sampleRiverColumn(int x, int z) const;
     bool springRockAt(int x, int y, int z) const;
     bool usesRiverSediment() const { return riverSediment; }
@@ -148,6 +153,8 @@ class GeneratedHydrology {
         Lake lake;
         std::unordered_map<int, Mask> masks;
         bool ocean = false;
+        std::unordered_map<int, std::vector<int16_t>> thresholds;
+        StorageCurve::Levels storage{};
     };
 
     int regionAt(int x, int z) const;
@@ -186,7 +193,10 @@ class GeneratedHydrology {
     void retainOutletLake(uint32_t body);
     Footprint refineCoastalBasin(const Basin& basin) const;
     Footprint refineLake(uint32_t body) const;
-    Footprint refineOcean(int region) const;
+    Footprint refineOcean(int region, int level) const;
+    const std::vector<int16_t>& seaThresholds() const;
+    mutable std::once_flag seaThresholdsOnce;
+    mutable std::vector<int16_t> oceanThreshold;
     std::shared_ptr<const Footprint> footprint(uint64_t key) const;
 
     int width = 0, height = 0;

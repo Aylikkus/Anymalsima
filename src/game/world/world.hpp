@@ -11,6 +11,7 @@
 #include "world_wrap.hpp"
 
 class GeneratedHydrology;
+class Reservoirs;
 
 struct MeshChunk {
     std::vector<TerrainVertex> lod0;
@@ -110,6 +111,7 @@ class World {
     RiverMesh riverMesh;
     WorldGenSettings genSettings;
     std::shared_ptr<const GeneratedHydrology> hydrology;
+    std::shared_ptr<Reservoirs> reservoirs;
     void update();
     // X wraps around the world map; disabled for map-less fixtures.
     WorldWrap wrap() const {

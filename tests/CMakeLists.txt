@@ -4,6 +4,7 @@ find_package(Threads REQUIRED)
 add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/location_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/reservoirs.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_hydrology.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_rivers.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
@@ -465,7 +466,9 @@ target_include_directories(tree_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/su
 target_compile_definitions(tree_benchmark PRIVATE
     SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")
 
-foreach(case hydrology_basin_outlets_and_wrap
+foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
+             hydrology_reservoir_river_budget
+             hydrology_basin_outlets_and_wrap
              hydrology_saved_baseline_matches_new_chunk
              hydrology_lod_fallback_refines_visible_water
              hydrology_wrapped_river_profiles_and_meshes
