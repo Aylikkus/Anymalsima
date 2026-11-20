@@ -36,5 +36,6 @@ class LocationGenerator {
     void generateColumn(Chunk& chunk, int localX, int localZ, int chunkBaseY,
                         const Region& region,
                         const std::vector<RegionLayer>& layers,
-                        const SoilColumn& soil, int surfaceY) const;
+                        const SoilColumn& soil, int surfaceY,
+                        WaterSurface water) const;
 };

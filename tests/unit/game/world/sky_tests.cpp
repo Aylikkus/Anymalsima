@@ -55,6 +55,7 @@ std::shared_ptr<ColumnEdit> edit(
 sky::TileInputs flat(int surface) {
     sky::TileInputs in;
     in.surface.fill(surface);
+    in.water.fill(WaterSurface::sea(surface));
     in.structureTop.fill(INT_MIN);
     return in;
 }

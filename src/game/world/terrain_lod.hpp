@@ -8,6 +8,7 @@
 #include <span>
 #include <vector>
 
+#include "chunk_coord.hpp"
 #include "render/frustrum.hpp"
 #include "surface_sampler.hpp"
 
@@ -48,9 +49,28 @@ struct SurfaceBand {
     int x, z, minY, maxY;
     bool operator==(const SurfaceBand&) const = default;
 };
-struct Mesh {
+struct Geometry {
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
+    AABB bounds{};
+    size_t bytes() const {
+        return vertices.size() * sizeof(BlockVertex) +
+               indices.size() * sizeof(uint32_t);
+    }
+};
+struct WaterBand {
+    SurfaceBand slabs;
+    std::array<int16_t, Chunk::SIZE_X * Chunk::SIZE_Z> levels;
+    bool matches(ChunkCoord coord, std::span<const float> uploaded) const;
+};
+struct ColumnBands {
+    SurfaceBand ground;
+    std::optional<WaterBand> water;
+};
+ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler);
+
+struct Mesh : Geometry {
+    Geometry water;
     // RG: surface material layer, BA: bare rock layer, little endian.
     std::vector<uint8_t> materials;
     int mapSize = 1;
@@ -58,13 +78,14 @@ struct Mesh {
     // BA tint RGB565. coverSize texels per side over the whole patch.
     std::vector<uint8_t> covers;
     int coverSize = 1;
-    std::vector<SurfaceBand> bands;
-    AABB bounds{};
+    std::vector<ColumnBands> bands;
+    // RG: water boundary Y, little endian, zero for dry ground.
+    std::vector<uint8_t> waterLevels;
+    int waterMapSize = 1;
     float error = 0;
     size_t bytes() const {
-        return vertices.size() * sizeof(BlockVertex) +
-               indices.size() * sizeof(uint32_t) + materials.size() +
-               covers.size();
+        return Geometry::bytes() + water.bytes() + materials.size() +
+               covers.size() + waterLevels.size();
     }
 };
 using ErrorFn = std::function<float(const Patch&)>;
@@ -85,6 +106,7 @@ inline bool wrapsExactly(int periodX, float viewDistance) {
 // The four quadrants of a patch, and the patch that contains it.
 std::array<Patch, 4> children(const Patch& patch);
 Patch parent(const Patch& patch);
+bool shareEdge(const Patch& a, const Patch& b, int periodX);
 // Smooth patches hang a skirt of this depth below every inner edge; stepped
 // patches extend their boundary side walls this far below the lower column.
 float skirtDepth(const Patch& patch, float error);

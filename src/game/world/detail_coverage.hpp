@@ -55,6 +55,9 @@ class DetailCoverage {
             ++revision;
         }
     }
+    void remove(const Key& key) {
+        if (visible.erase(key)) ++revision;
+    }
     bool contains(int x, int z) const { return visible.contains({x, z}); }
     const Columns& columns() const { return visible; }
     uint64_t version() const { return revision; }

@@ -24,8 +24,10 @@ sky::Tile buildTile(const BuildInputs& in) {
     sky::TileInputs tile;
     tile.edit = in.edit;
     tile.opacity = in.opacity.get();
-    for (int i = 0; i < sky::Tile::Size; ++i)
-        tile.surface[size_t(i)] = in.terrain->columns[size_t(i)].surface_y;
+    for (size_t i = 0; i < sky::Tile::Size; ++i) {
+        tile.surface[i] = in.terrain->columns[i].surface_y;
+        tile.water[i] = in.terrain->columns[i].water;
+    }
     tile.structureTop =
         in.edit ? in.structures->skyTops(*in.edit) : in.structures->skyTops();
     return sky::build(tile);

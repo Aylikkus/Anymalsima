@@ -7,6 +7,7 @@
 #include "ground_cover_generator.hpp"
 #include "items/block.hpp"
 #include "items/ground_cover.hpp"
+#include "water_surface.hpp"
 
 namespace {
 
@@ -480,7 +481,7 @@ double floraClusterMask(const FloraSpeciesRule& r, uint32_t worldSeed, double x,
 bool floraSuits(const FloraSpeciesTable& table, const FloraSpeciesRule& r,
                 const FloraSite& e) {
     if (!e.soil || !e.region) return false;
-    if (e.surfaceY < SEA_LEVEL_Y && !r.underwater) return false;
+    if (WaterSurface::sea(e.surfaceY).wet() && !r.underwater) return false;
     if (e.slope > r.maxSlope) return false;
     if (r.coverForbidden.test(e.cover)) return false;
     if (r.coverRequired.any() &&

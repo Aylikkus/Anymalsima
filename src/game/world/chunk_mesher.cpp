@@ -4,7 +4,6 @@
 
 #include "items/block.hpp"
 #include "items/material.hpp"
-
 ChunkMesher::ChunkMesher(const IAssets& assets)
     : assets(assets), blocks(assets.getStorage<Block>()) {
     if (!assets.hasStorage<GroundCover>()) return;
@@ -62,7 +61,7 @@ const std::array<ChunkMesher::FaceDesc, 6> ChunkMesher::FACES = {{
 // UV corners are scaled to [0, width] x [0, height] so textures tile
 // naturally across merged quads.
 // ---------------------------------------------------------------------------
-void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
+void ChunkMesher::emitQuad(ChunkGeometry& mesh, float ox, float oy, float oz,
                            float dux, float duy, float duz, float dvx,
                            float dvy, float dvz, Face face, const FaceKey& key,
                            const CoverClimate& climate) const {
@@ -73,8 +72,8 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
     float uMax = std::sqrt(dux * dux + duy * duy + duz * duz);
     float vMax = std::sqrt(dvx * dvx + dvy * dvy + dvz * dvz);
 
-    // Grow the quad by SeamOverlap on every side (unit edge directions).
-    {
+    // Liquid tops use the exact tile footprint at the LOD handoff.
+    if (key.texLayer != UINT16_MAX) {
         const float e = SeamOverlap;
         const float ux = dux / uMax, uy = duy / uMax, uz = duz / uMax;
         const float vx = dvx / vMax, vy = dvy / vMax, vz = dvz / vMax;
@@ -159,7 +158,8 @@ void ChunkMesher::emitQuad(ChunkMesh& mesh, float ox, float oy, float oz,
 // ---------------------------------------------------------------------------
 ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                              const NeighbourFn& neighbour,
-                             const CoverClimate& climate) const {
+                             const CoverClimate& climate,
+                             const NeighbourFn& generatedWaterHalo) const {
     ChunkMesh mesh;
 
     // World-space origin of this chunk (tile units).
@@ -385,10 +385,17 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     y + 1 < Chunk::SIZE_Y
                         ? &chunk.tiles[z][y + 1][x]
                         : neighbour(originX + x, originY + y + 1, originZ + z);
+                if (!above && generatedWaterHalo)
+                    above = generatedWaterHalo(originX + x, originY + y + 1,
+                                               originZ + z);
                 if (!above || above->liquid != LiquidType::None ||
                     above->block_id)
                     continue;
-                emitQuad(mesh, x, y + 1, z, 0, 0, 1, 1, 0, 0, Face::PosY,
+                const float top = y + 1;
+                if (mesh.waterTops.empty())
+                    mesh.waterTops.resize(Chunk::SIZE_X * Chunk::SIZE_Z, -1);
+                mesh.waterTops[z * Chunk::SIZE_X + x] = top;
+                emitQuad(mesh.water, x, top, z, 0, 0, 1, 1, 0, 0, Face::PosY,
                          {nullptr, UINT16_MAX, NeutralTint}, climate);
             }
 

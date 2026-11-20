@@ -9,9 +9,15 @@
 #include "items/ground_cover.hpp"
 #include "render/vertex.hpp"
 
-struct ChunkMesh {
+struct ChunkGeometry {
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
+};
+
+struct ChunkMesh : ChunkGeometry {
+    ChunkGeometry water;
+    std::vector<float>
+        waterTops;  // highest exposed surface per column, chunk-local
 };
 
 // Climate at the four horizontal corners of a chunk (index x + 2 * z, in
@@ -64,7 +70,8 @@ class ChunkMesher {
     // Cover density is not per vertex; LightVolumeManager uploads it.
     ChunkMesh build(const Chunk& chunk, const ChunkCoord& coord,
                     const NeighbourFn& neighbour,
-                    const CoverClimate& climate = {}) const;
+                    const CoverClimate& climate = {},
+                    const NeighbourFn& generatedWaterHalo = {}) const;
 
     // Packs the side-fringe range for the v attribute (see build).
     static float packFringe(const ValueRange& metres);
@@ -125,7 +132,7 @@ class ChunkMesher {
     // du/dv    – two edge vectors spanning the quad (in world space)
     // face     – which of the 6 canonical face directions
     // key      – texture / tint info
-    void emitQuad(ChunkMesh& mesh, float ox, float oy, float oz, float dux,
+    void emitQuad(ChunkGeometry& mesh, float ox, float oy, float oz, float dux,
                   float duy, float duz, float dvx, float dvy, float dvz,
                   Face face, const FaceKey& key,
                   const CoverClimate& climate) const;

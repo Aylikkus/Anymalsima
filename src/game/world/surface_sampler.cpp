@@ -118,7 +118,7 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
     x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
-    result.waterY = edit->waterY[i];
+    result.water = waterAt(x, z);
     // Unchanged tiles keep generated soil and rock materials; a replaced
     // block at the original height is not shown.
     if (edit->groundY[i] != result.surfaceY) {
@@ -142,7 +142,7 @@ SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     const auto terrain = sampler.sample(x, z);
     SurfaceColumn result;
     result.surfaceY = terrain.surface_y;
-    result.waterY = result.surfaceY < SEA_LEVEL_Y ? SEA_LEVEL_Y + 1 : -1;
+    result.water = WaterSurface::sea(result.surfaceY);
     result.soil = sampler.soil(x, z, terrain);
     result.material = material(data, result, result.surfaceY);
     auto rockOnly = result;
@@ -150,6 +150,24 @@ SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     result.rockMaterial = material(data, rockOnly, result.surfaceY);
     columns[key] = result;
     return result;
+}
+
+bool SurfaceSampler::hasEdits(int x0, int z0, int x1, int z1) {
+    if (!edits || edits->empty()) return false;
+    for (int z = z0 / Chunk::SIZE_Z; z <= (z1 - 1) / Chunk::SIZE_Z; ++z)
+        for (int x = x0 / Chunk::SIZE_X; x <= (x1 - 1) / Chunk::SIZE_X; ++x)
+            if (editAt(x * Chunk::SIZE_X, z * Chunk::SIZE_Z)) return true;
+    return false;
+}
+
+WaterSurface SurfaceSampler::waterAt(int x, int z) {
+    if (const auto* edit = editAt(x, z)) {
+        const int i =
+            ColumnEdit::index(wrapX(x) % Chunk::SIZE_X,
+                              std::clamp(z, 0, depth() - 1) % Chunk::SIZE_Z);
+        return {edit->waterY[i] > edit->groundY[i] + 1 ? edit->waterY[i] : -1};
+    }
+    return WaterSurface::sea(height(x, z));
 }
 
 uint16_t SurfaceSampler::materialAt(int x, int y, int z) {

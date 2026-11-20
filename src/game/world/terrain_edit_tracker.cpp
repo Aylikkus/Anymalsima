@@ -94,11 +94,14 @@ bool TerrainEditTracker::refresh(uint64_t key) {
     for (int lz = 0; lz < Chunk::SIZE_Z; ++lz)
         for (int lx = 0; lx < Chunk::SIZE_X; ++lx) {
             const int i = ColumnEdit::index(lx, lz);
-            const int surface = inputs->columns[i].surface_y;
+            const auto& baseline = inputs->columns[i];
+            const int surface = baseline.surface_y;
             lowestSurface = std::min(lowestSurface, surface);
             int ground = -1, water = -1;
             uint8_t block = 0;
-            for (int y = std::max(surface, SEA_LEVEL_Y); y >= 0; --y) {
+            for (int y = std::max({surface, baseline.water.topTile(),
+                                   old ? old->waterY[i] - 1 : -1});
+                 y >= 0; --y) {
                 const auto* chunk =
                     chunks.getChunk({cx, unsigned(y / Chunk::SIZE_Y), cz});
                 if (!chunk) {
@@ -107,7 +110,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     if (old) {
                         ground = old->groundY[i];
                         block = old->groundBlock[i];
-                        if (water < 0) water = old->waterY[i];
+                        if (water < 0 && old->waterY[i] >= 0 && y > ground)
+                            water = std::min(y + 1, int(old->waterY[i]));
                     } else {
                         ground = y;
                         complete = false;
@@ -123,13 +127,13 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     block = root ? root->block : tile.block_id;
                     break;
                 }
-                if (water < 0 && tile.isLiquid()) water = y + 1;
+                if (water < 0 && tile.liquid == LiquidType::Water)
+                    water = y + 1;
             }
             next->groundY[i] = int16_t(ground);
             next->groundBlock[i] = block;
             next->waterY[i] = int16_t(water);
-            const int generatedWater =
-                surface < SEA_LEVEL_Y ? SEA_LEVEL_Y + 1 : -1;
+            const int generatedWater = baseline.water.surfaceY;
             generated &= ground == surface && water == generatedWater;
         }
     // Compare each loaded slab with the source snapshot it was built against.
@@ -193,19 +197,18 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {
                     const auto& tile = chunk->tiles[z][y][x];
                     const int worldY = slab * Chunk::SIZE_Y + y;
-                    const int surface =
-                        inputs->columns[ColumnEdit::index(x, z)].surface_y;
-                    if (worldY <= surface) continue;
+                    const auto& column =
+                        inputs->columns[ColumnEdit::index(x, z)];
+                    if (worldY <= column.surface_y) continue;
+                    const bool aboveWater = worldY >= column.water.surfaceY;
                     const auto cell = structure_voxels::cellIndex(x, y, z);
-                    auto expected = baseline && worldY > SEA_LEVEL_Y
-                                        ? baseline->tileAt(cell)
-                                        : 0;
+                    auto expected =
+                        baseline && aboveWater ? baseline->tileAt(cell) : 0;
                     if (grown.test(expected)) expected = 0;
                     const bool livingWood = grown.test(tile.block_id);
                     const auto actual = livingWood ? 0 : tile.block_id;
                     const bool wound =
-                        worldY > SEA_LEVEL_Y && !livingWood &&
-                        landmarkWood.test(cell) &&
+                        aboveWater && !livingWood && landmarkWood.test(cell) &&
                         (chunk->legacyRootTerrain ||
                          chunk->rootEdited(uint16_t(cell)) ||
                          (previous &&

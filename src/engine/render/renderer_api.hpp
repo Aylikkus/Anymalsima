@@ -225,6 +225,7 @@ class MeshHandle {
             renderer = other.renderer;
             mesh = std::move(other.mesh);
             valid = other.valid;
+            isDynamic = other.isDynamic;
 
             other.valid = false;
         }

@@ -271,7 +271,7 @@ bool RegionGenerator::level(const TreeSpeciesRule& r, double x, double z,
         const double a = i * 0.785398163397448;
         const auto& e = env(int64_t(std::floor(x + std::cos(a) * radius)),
                             int64_t(std::floor(z + std::sin(a) * radius)));
-        if (!e.valid || e.surfaceY < SEA_LEVEL_Y) return false;
+        if (!e.valid || WaterSurface::sea(e.surfaceY).wet()) return false;
         low = std::min(low, e.surfaceY);
         high = std::max(high, e.surfaceY);
     }
@@ -453,7 +453,7 @@ TreeSet RegionGenerator::run() {
                     anchorY = std::min(anchorY, e.surfaceY);
                 }
             }
-            if (!any || anchorY < SEA_LEVEL_Y) continue;
+            if (!any || WaterSurface::sea(anchorY).wet()) continue;
             const uint64_t key = (uint64_t(0xFF) << 56) |
                                  (uint64_t(site.x) & 0xFFFFFFF) << 28 |
                                  (uint64_t(site.z) & 0xFFFFFFF);

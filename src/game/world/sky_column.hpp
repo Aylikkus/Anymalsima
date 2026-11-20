@@ -8,6 +8,7 @@
 
 #include "chunk.hpp"
 #include "terrain_edits.hpp"
+#include "water_surface.hpp"
 
 // Sky heightmap data (docs/handoff/sky-light.md): how each tile column looks
 // from straight above. Sky light is overhead only, so a column's direct
@@ -120,9 +121,9 @@ using OpacityTable = std::array<uint8_t, 256>;
 
 // What a chunk column's sky columns are built from.
 struct TileInputs {
-    // Generated surface per column (TerrainSampler surface_y): solid up to
-    // it, sea water above it up to SEA_LEVEL_Y.
+    // Generated solid and water bounds, both sampled during generation.
     std::array<int, Tile::Size> surface{};
+    std::array<WaterSurface, Tile::Size> water{};
     // Highest structure voxel per column (trees' wood and other generated
     // structures), INT_MIN where none. Structure voxels are opaque.
     std::array<int, Tile::Size> structureTop{};

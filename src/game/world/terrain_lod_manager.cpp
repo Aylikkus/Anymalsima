@@ -7,6 +7,8 @@
 #include <ranges>
 #include <string_view>
 
+#include "light_volume_manager.hpp"
+
 namespace {
 std::array<int, 3> errorKey(const TerrainLod::Patch& p) {
     return {p.x, p.z, p.spacing};
@@ -32,6 +34,7 @@ float horizontalDistance(const TerrainLod::Patch& p, Vec3 eye,
 TerrainLodManager::Entry::~Entry() {
     if (bgfx::isValid(materialMap)) bgfx::destroy(materialMap);
     if (bgfx::isValid(coverMap)) bgfx::destroy(coverMap);
+    if (bgfx::isValid(waterMap)) bgfx::destroy(waterMap);
 }
 TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
                                      ThreadPool& pool,
@@ -47,7 +50,8 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
       edits(edits),
       inputs(std::make_shared<SurfaceInputCache>()),
       detailSampler(world, assets, inputs, edits ? edits->snapshot() : nullptr),
-      detailCoverage(quality.chunkRadius) {
+      detailCoverage(quality.chunkRadius),
+      waterCoverage(quality.chunkRadius) {
     if (edits) {
         // Structures get their own cap next to the patch budget.
         structures = std::make_unique<StructureLod>(world, assets, pool, inputs,
@@ -72,7 +76,7 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
     fogUniform.initVec4("u_world_eye", {0, 0, 0, quality.viewDistance});
     const char* debug = std::getenv("ANYMALSIMA_LOD_DEBUG_EDGES");
     debugEdges = debug && std::string_view(debug) == "1";
-    water.initVec4("u_world_water", {SEA_LEVEL_Y + 1.f, 0, 0, 0});
+    water.initVec4("u_world_water", {0, 0, 0, 0});
     patchNormals.initTexture("u_normal_array", 3,
                              assets.getMaterialNormalArray());
     joinNormals.initTexture("u_normal_array", 1,
@@ -193,7 +197,8 @@ void TerrainLodManager::choose(const Camera& camera, Vec2 viewport) {
         if (!roots.contains(p)) queue.push_back(p);
     std::stable_sort(queue.begin() + rootCount, queue.end(), near);
     for (auto& job : jobs)
-        if (!wanted(job.patch))
+        if (!wanted(job.patch) &&
+            std::find(drawn.begin(), drawn.end(), job.patch) == drawn.end())
             job.cancel->store(true, std::memory_order_relaxed);
     // Unuploaded results of an older layout only cost memory. Drawable ones
     // stay cached until the GPU budget needs their room.
@@ -245,11 +250,13 @@ bool TerrainLodManager::makeRoom(size_t bytes,
                   return std::tie(aSeen, a->second->lastDrawn) <
                          std::tie(bSeen, b->second->lastDrawn);
               });
-    for (const auto& it : candidates) {
-        if (resident + bytes <= budget()) break;
-        erase(it);
-    }
-    return resident + bytes <= budget();
+    size_t remaining = resident;
+    auto end = candidates.begin();
+    while (remaining + bytes > budget() && end != candidates.end())
+        remaining -= (*end++)->second->bytes;
+    if (remaining + bytes > budget()) return false;
+    for (auto it = candidates.begin(); it != end; ++it) erase(*it);
+    return true;
 }
 void TerrainLodManager::pressure() {
     if (errorScale == selectedScale && errorScale < 16)
@@ -294,7 +301,12 @@ void TerrainLodManager::collect() {
     }
 }
 void TerrainLodManager::request() {
-    for (const auto& p : queue) {
+    std::vector<TerrainLod::Patch> order;
+    for (const auto& p : drawn)
+        if (entries.contains(p) && entries.at(p)->needsBuild())
+            order.push_back(p);
+    order.insert(order.end(), queue.begin(), queue.end());
+    for (const auto& p : order) {
         if (jobs.size() >= maxJobs) break;
         const auto existing = entries.find(p);
         const bool rebuild =
@@ -302,6 +314,7 @@ void TerrainLodManager::request() {
         if ((existing != entries.end() && !rebuild) ||
             std::any_of(jobs.begin(), jobs.end(), [&](const auto& j) {
                 return j.patch == p &&
+                       !j.cancel->load(std::memory_order_relaxed) &&
                        (!rebuild ||
                         j.editRevision >= existing->second->staleRevision);
             }))
@@ -359,20 +372,18 @@ void TerrainLodManager::upload(IRenderer& renderer) {
         const auto bytes = cpu.bytes();
         // One oversized mesh may use a whole frame rather than never fit.
         if (uploaded && uploaded + bytes > quality.uploadBudget) continue;
-        if (!makeRoom(bytes, &p)) {
-            // A steep landscape can cost more than the initial estimates.
+        auto fresh = std::make_unique<Entry>();
+        // Allocate before evicting a fallback that this mesh would replace.
+        if (!createGpu(*fresh, p, cpu, renderer) || !makeRoom(bytes, &p)) {
             pressure();
             continue;
         }
-        if (!createGpu(entry, p, cpu, renderer)) {
-            pressure();
-            continue;
-        }
-        entry.bounds = cpu.bounds;
-        entry.bands = cpu.bands;
-        entry.bytes = bytes;
-        entry.cpu.reset();
-        entry.drawable = true;
+        fresh->bounds = cpu.bounds;
+        fresh->waterBounds = cpu.water.bounds;
+        fresh->bands = cpu.bands;
+        fresh->bytes = bytes;
+        fresh->drawable = true;
+        it->second = std::move(fresh);
         markDrawable(p, 1);
         uploaded += bytes;
         resident += bytes;
@@ -412,6 +423,21 @@ bool TerrainLodManager::createGpu(Entry& entry, const TerrainLod::Patch& p,
         entry.materialMap = BGFX_INVALID_HANDLE;
         return false;
     }
+    if (!cpu.water.vertices.empty()) {
+        entry.waterMesh.initDynamic<BlockVertex>(
+            &renderer, cpu.water.vertices.size(), cpu.water.indices.size());
+        if (!entry.waterMesh.drawable()) return false;
+        entry.waterMesh.update(
+            cpu.water.vertices.data(), cpu.water.vertices.size(),
+            cpu.water.indices.data(), cpu.water.indices.size(), true);
+    }
+    entry.waterMap = bgfx::createTexture2D(
+        cpu.waterMapSize, cpu.waterMapSize, false, 1, bgfx::TextureFormat::RG8,
+        BGFX_SAMPLER_MIN_POINT | BGFX_SAMPLER_MAG_POINT | BGFX_SAMPLER_U_CLAMP |
+            BGFX_SAMPLER_V_CLAMP,
+        bgfx::copy(cpu.waterLevels.data(), cpu.waterLevels.size()));
+    if (!bgfx::isValid(entry.waterMap)) return false;
+    entry.waterMapUniform.initTexture("u_patch_water", 8, entry.waterMap);
     entry.mapUniform.initTexture("u_surface_map", 1, entry.materialMap);
     entry.coverUniform.initTexture("u_cover_map", CoverStage, entry.coverMap);
     entry.coverInfo.initVec4("u_lod_cover", {float(cpu.coverSize), 0, 0, 0});
@@ -423,36 +449,73 @@ bool TerrainLodManager::createGpu(Entry& entry, const TerrainLod::Patch& p,
 }
 
 void TerrainLodManager::uploadReplacements(IRenderer& renderer) {
-    std::vector<TerrainLod::Patch> ready;
-    for (const auto& [p, entry] : entries)
-        if (entry->drawable && entry->replacement) ready.push_back(p);
-    for (const auto& p : ready) {
-        if (uploaded >= quality.uploadBudget) break;
-        auto it = entries.find(p);
-        if (it == entries.end()) continue;
-        const auto bytes = it->second->replacement->bytes();
-        const auto oldBytes = it->second->bytes;
-        if (bytes > oldBytes && !makeRoom(bytes - oldBytes)) {
-            pressure();
-            continue;
+    using TerrainLod::Patch;
+    std::set<Patch> visible;
+    for (const auto& p : drawn)
+        if (entries.at(p)->stale) visible.insert(p);
+    const auto publish = [&](const std::vector<Patch>& group) {
+        uint64_t revision = 0;
+        for (const auto& p : group)
+            revision = std::max(revision, entries.at(p)->staleRevision);
+        for (const auto& p : group) entries.at(p)->staleRevision = revision;
+        size_t bytes = 0, previousBytes = 0;
+        for (const auto& p : group) {
+            const auto& entry = *entries.at(p);
+            if (entry.needsBuild()) return;
+            bytes += entry.replacement->bytes();
+            previousBytes += entry.bytes;
         }
-        // makeRoom may have evicted this entry.
-        it = entries.find(p);
-        if (it == entries.end()) continue;
-        auto& old = *it->second;
-        auto fresh = std::make_unique<Entry>();
-        if (!createGpu(*fresh, p, *old.replacement, renderer)) continue;
-        fresh->bounds = old.replacement->bounds;
-        fresh->bands = old.replacement->bands;
-        fresh->bytes = bytes;
-        fresh->drawable = true;
-        fresh->lastDrawn = old.lastDrawn;
-        fresh->staleRevision = old.staleRevision;
-        fresh->stale = old.replacementRevision < old.staleRevision;
+        // A visible edge switches in one frame. Like a single oversized
+        // patch, a group may use the whole frame if it exceeds the budget.
+        if (uploaded && uploaded + bytes > quality.uploadBudget) return;
+        if (bytes > previousBytes && !makeRoom(bytes - previousBytes)) {
+            pressure();
+            return;
+        }
+        std::vector<std::unique_ptr<Entry>> ready;
+        for (const auto& p : group) {
+            const auto it = entries.find(p);
+            if (it == entries.end()) return;
+            const auto& old = *it->second;
+            const auto& cpu = *old.replacement;
+            auto fresh = std::make_unique<Entry>();
+            if (!createGpu(*fresh, p, cpu, renderer)) return;
+            fresh->bounds = cpu.bounds;
+            fresh->waterBounds = cpu.water.bounds;
+            fresh->bands = cpu.bands;
+            fresh->bytes = cpu.bytes();
+            fresh->drawable = true;
+            fresh->lastDrawn = old.lastDrawn;
+            ready.push_back(std::move(fresh));
+        }
+        // Every buffer in the group now exists. Both sides of each visible
+        // edge (including an X seam) can adopt the new snapshot together.
+        for (size_t i = 0; i < group.size(); ++i)
+            entries.at(group[i]) = std::move(ready[i]);
         uploaded += bytes;
-        resident = resident - old.bytes + bytes;
-        // Drawable either way: the per-ancestor counts are unchanged.
-        it->second = std::move(fresh);
+        resident = resident - previousBytes + bytes;
+    };
+    while (!visible.empty() && uploaded < quality.uploadBudget) {
+        std::vector<Patch> group{*visible.begin()};
+        visible.erase(visible.begin());
+        for (size_t i = 0; i < group.size(); ++i)
+            for (auto it = visible.begin(); it != visible.end();) {
+                if (TerrainLod::shareEdge(group[i], *it, periodX)) {
+                    group.push_back(*it);
+                    it = visible.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        publish(group);
+    }
+    // Cached, invisible meshes cannot block an edge in the presentation.
+    for (const auto& p : queue) {
+        if (uploaded >= quality.uploadBudget) break;
+        const auto it = entries.find(p);
+        if (it != entries.end() && it->second->drawable && it->second->stale &&
+            it->second->lastDrawn != frame)
+            publish({p});
     }
 }
 
@@ -461,19 +524,20 @@ void TerrainLodManager::editChanged(uint64_t column) {
               z0 = int(uint32_t(column)) * Chunk::SIZE_Z - 1;
     const int x1 = x0 + Chunk::SIZE_X + 2, z1 = z0 + Chunk::SIZE_Z + 2;
     const auto revision = edits->revision();
-    for (auto it = entries.begin(); it != entries.end();) {
-        const auto& p = it->first;
-        // Normals and skirts sample up to one spacing outside the patch,
-        // which may reach across the X seam.
-        const auto touchesAt = [&](int shift) {
+    const auto touches = [&](const TerrainLod::Patch& p) {
+        // Normals and skirts sample up to one spacing outside the patch.
+        const auto at = [&](int shift) {
             return p.x - p.spacing < x1 + shift &&
                    p.x + p.size() + p.spacing > x0 + shift &&
                    p.z - p.spacing < z1 && p.z + p.size() + p.spacing > z0;
         };
-        const bool touches =
-            touchesAt(0) ||
-            (periodX > 0 && (touchesAt(periodX) || touchesAt(-periodX)));
-        if (!touches) {
+        return at(0) || (periodX > 0 && (at(periodX) || at(-periodX)));
+    };
+    for (auto& job : jobs)
+        if (touches(job.patch))
+            job.cancel->store(true, std::memory_order_relaxed);
+    for (auto it = entries.begin(); it != entries.end();) {
+        if (!touches(it->first)) {
             ++it;
             continue;
         }
@@ -488,7 +552,10 @@ void TerrainLodManager::editChanged(uint64_t column) {
     }
     detailSampler.setEdits(edits->snapshot());
     if (structures) structures->edited(column);
-    surfaceBands.erase({int(column >> 32), int(uint32_t(column))});
+    const TerrainLod::DetailCoverage::Key key{int(column >> 32),
+                                              int(uint32_t(column))};
+    surfaceBands.erase(key);
+    waterCoverage.remove(key);
     joinedCoverageVersion = UINT64_MAX;
 }
 
@@ -519,10 +586,17 @@ bool TerrainLodManager::drawsChunk(const ChunkCoord& c) const {
     // while its ground is out of the detail range: the wood of a massive
     // tree seen from high above.
     const auto band = surfaceBands.find({int(c.x), int(c.z)});
-    return band != surfaceBands.end() && int(c.y) > band->second.maxY;
+    return band != surfaceBands.end() && int(c.y) > band->second.ground.maxY;
+}
+
+bool TerrainLodManager::drawsWater(const ChunkCoord& c) const {
+    const auto it = waterCoverage.columns().find({int(c.x), int(c.z)});
+    return it != waterCoverage.columns().end() && int(c.y) >= it->second.minY &&
+           int(c.y) <= it->second.maxY;
 }
 void TerrainLodManager::updateCoverage(ChunkManager& chunks,
-                                       const Camera& camera) {
+                                       const Camera& camera,
+                                       LightVolumeManager* lightVolumes) {
     const int cx = int(camera.position.x) / 16,
               cy = int(camera.position.y) / 16,
               cz = int(camera.position.z) / 16;
@@ -543,10 +617,13 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
     // summaries or the visibility of chunks after handover.
     for (const auto& p : drawn) {
         const auto it = entries.find(p);
-        if (p.spacing != 1 || it == entries.end()) continue;
-        for (const auto& band : it->second->bands)
+        if (p.spacing != 1 || it == entries.end() || it->second->stale)
+            continue;
+        for (const auto& bands : it->second->bands) {
+            const auto& band = bands.ground;
             if (distX(band.x) <= keep + 1 && std::abs(band.z - cz) <= keep + 1)
-                surfaceBands[{band.x, band.z}] = band;
+                surfaceBands[{band.x, band.z}] = bands;
+        }
     }
     int newBands = 0;
     chunks.forEachMeshed([&](const ChunkCoord& coord) {
@@ -555,18 +632,19 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
             std::abs(z - cz) > detailCoverage.enterRadius() ||
             surfaceBands.contains({x, z}) || !chunks.isMeshUploaded(coord))
             return;
-        int low = Y_CHUNKS * Chunk::SIZE_Y, high = 0;
-        for (int tz = z * 16 - 1; tz <= z * 16 + 16; ++tz)
-            for (int tx = x * 16 - 1; tx <= x * 16 + 16; ++tx) {
-                const int h = detailSampler.height(tx, tz);
-                low = std::min(low, h);
-                high = std::max(high, std::max(h, SEA_LEVEL_Y));
-            }
-        surfaceBands[{x, z}] = {x, z, low / 16, high / 16};
+        surfaceBands[{x, z}] = TerrainLod::sampleBands(x, z, detailSampler);
         ++newBands;
     });
-    std::vector<TerrainLod::SurfaceBand> candidates;
-    for (const auto& [key, band] : surfaceBands) candidates.push_back(band);
+    std::vector<TerrainLod::SurfaceBand> candidates, waterCandidates;
+    for (const auto& [key, bands] : surfaceBands) {
+        candidates.push_back(bands.ground);
+        if (bands.water) waterCandidates.push_back(bands.water->slabs);
+    }
+    const auto lit = [&](ChunkCoord coord) {
+        return !lightVolumes ||
+               (!chunks.getMesh(coord) && !chunks.getWaterMesh(coord)) ||
+               lightVolumes->prepare(coord);
+    };
     const auto current = [&](ChunkCoord coord) {
         if (!chunks.isMeshUploaded(coord)) return false;
         const int dx[6] = {-1, 1, 0, 0, 0, 0}, dy[6] = {0, 0, -1, 1, 0, 0},
@@ -580,12 +658,44 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
             if (!chunks.isReady({unsigned(x), unsigned(y), unsigned(z)}))
                 return false;
         }
-        return true;
+        return lit(coord);
     };
     detailCoverage.update(
         detailCentre, candidates, current,
-        [&](ChunkCoord coord) { return chunks.hasUploadedMesh(coord); },
+        [&](ChunkCoord coord) {
+            return chunks.hasUploadedMesh(coord) && lit(coord);
+        },
         wrap.chunks());
+
+    const auto waterDrawable = [&](ChunkCoord coord) {
+        if (!chunks.hasUploadedMesh(coord)) return false;
+        const auto it = surfaceBands.find({int(coord.x), int(coord.z)});
+        if (it == surfaceBands.end() || !it->second.water ||
+            int(coord.y) < it->second.water->slabs.minY ||
+            int(coord.y) > it->second.water->slabs.maxY)
+            return false;
+        return it->second.water->matches(coord,
+                                         chunks.uploadedWaterTops(coord)) &&
+               lit(coord);
+    };
+    const auto waterCurrent = [&](ChunkCoord coord) {
+        const int x = int(coord.x) * Chunk::SIZE_X,
+                  z = int(coord.z) * Chunk::SIZE_Z;
+        // Retain a drawable fallback even when the camera sees the water
+        // slab from above the range of the underlying terrain band.
+        for (int spacing = 1; spacing <= TerrainLod::RootSpacing;
+             spacing *= 2) {
+            const int side = TerrainLod::Cells * spacing;
+            const auto p =
+                entries.find({x / side * side, z / side * side, spacing});
+            if (p != entries.end() && p->second->lastDrawn == frame)
+                return !p->second->stale && chunks.isMeshUploaded(coord) &&
+                       waterDrawable(coord);
+        }
+        return false;
+    };
+    waterCoverage.update(detailCentre, waterCandidates, waterCurrent,
+                         waterDrawable, wrap.chunks());
     detailX = cx - DetailSize / 2;
     detailZ = cz - DetailSize / 2;
 }
@@ -599,6 +709,12 @@ void TerrainLodManager::uploadCoverage() {
                   iz = band.z - detailZ;
         if (ix >= 0 && iz >= 0 && ix < DetailSize && iz < DetailSize)
             coverage[(iz * DetailSize + ix) * 4] = 255;
+    }
+    for (const auto& [key, band] : waterCoverage.columns()) {
+        const int ix = cx + int(wrap.deltaChunk(band.x, cx)) - detailX,
+                  iz = band.z - detailZ;
+        if (ix >= 0 && iz >= 0 && ix < DetailSize && iz < DetailSize)
+            coverage[(iz * DetailSize + ix) * 4 + 1] = 255;
     }
     bgfx::updateTexture2D(detailMap, 0, 0, 0, 0, DetailSize, DetailSize,
                           bgfx::copy(coverage.data(), coverage.size()));
@@ -662,11 +778,14 @@ void TerrainLodManager::uploadJoins(IRenderer& renderer) {
 }
 void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                                ChunkManager& chunks, const Camera& camera,
-                               Vec2 viewport) {
+                               Vec2 viewport,
+                               LightVolumeManager* lightVolumes) {
     uploaded = 0;
-    updateCoverage(chunks, camera);
-    upload(renderer);
+    selectDrawn();
     uploadReplacements(renderer);
+    upload(renderer);
+    selectDrawn();
+    updateCoverage(chunks, camera, lightVolumes);
     // New or rebuilt meshes change what casts shadows.
     if (uploaded) ++drawnRevision;
     if (structures) {
@@ -681,7 +800,6 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         uploaded += bytes;
         if (bytes) ++drawnRevision;
     }
-    selectDrawn();
     uploadJoins(renderer);
     uploadCoverage();
     const auto eye = camera.eye();
@@ -690,18 +808,13 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
               z = int(std::floor(eye.z));
     underwater = false;
     if (const Tile* tile = chunks.tileAt(x, y, z)) {
-        underwater = tile->liquid == LiquidType::Water;
-    } else if (eye.y < SEA_LEVEL_Y + 1.f && y >= 0 && z >= 0 &&
-               z < detailSampler.depth() &&
-               (world.wrap().enabled() ||
-                (x >= 0 && x < detailSampler.width()))) {
-        // The orbit camera can be outside loaded chunks. Use the same
-        // surface (including edits) as distant terrain, not altitude alone.
-        const auto column = detailSampler.column(x, z);
-        underwater = y > column.surfaceY && eye.y < column.waterY;
+        underwater = WaterSurface{}.submerged(eye.y, -1, tile);
+    } else if (y >= 0 && z >= 0 && z < detailSampler.depth() &&
+               (periodX > 0 || (x >= 0 && x < detailSampler.width()))) {
+        underwater = detailSampler.waterAt(x, z).submerged(
+            eye.y, detailSampler.height(x, z));
     }
-    water.setVec4(
-        {SEA_LEVEL_Y + 1.f, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
+    water.setVec4({0, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
     float view[16], proj[16], vp[16];
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
                   {camera.position.x, camera.position.y, camera.position.z},
@@ -717,27 +830,33 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         AABB bounds = entry.bounds;
         bounds.minX += shift;
         bounds.maxX += shift;
-        if (!frustum.intersects(bounds)) continue;
+        AABB waterBounds = entry.waterBounds;
+        waterBounds.minX += shift;
+        waterBounds.maxX += shift;
+        const bool groundVisible = frustum.intersects(bounds);
+        const bool waterVisible =
+            entry.waterMesh.drawable() && frustum.intersects(waterBounds);
+        if (!groundVisible && !waterVisible) continue;
         // World-space vertices, placed relative to the eye.
         auto transform = relativeTransform(camera, shift, 0, 0);
         entry.patchUniform.setVec4({float(p.x) + shift, float(p.z),
                                     float(p.size()), float(p.spacing)});
         entry.shiftUniform.setVec4({shift, 0, 0, 0});
-        std::vector<ShaderProperty*> uniforms{&textureArray,
-                                              &entry.mapUniform,
-                                              &entry.patchUniform,
-                                              &detailUniform,
-                                              &detailOrigin,
-                                              &fogUniform,
-                                              &patchNormals,
-                                              &entry.shiftUniform,
-                                              &entry.coverUniform,
-                                              &entry.coverInfo,
-                                              &water};
+        std::vector<ShaderProperty*> uniforms{
+            &textureArray,    &entry.mapUniform,      &entry.patchUniform,
+            &detailUniform,   &detailOrigin,          &fogUniform,
+            &patchNormals,    &entry.shiftUniform,    &entry.coverUniform,
+            &entry.coverInfo, &entry.waterMapUniform, &water};
         uniforms.insert(uniforms.end(), extraUniforms.begin(),
                         extraUniforms.end());
-        target.drawVertexBuffer(entry.mesh.get(), &shader, std::move(uniforms),
-                                false, std::move(transform), DrawLayer::GAME);
+        if (groundVisible)
+            target.drawVertexBuffer(entry.mesh.get(), &shader,
+                                    std::vector(uniforms), false,
+                                    std::array(transform), DrawLayer::GAME);
+        if (waterVisible)
+            target.drawVertexBuffer(entry.waterMesh.get(), &shader,
+                                    std::move(uniforms), false,
+                                    std::move(transform), DrawLayer::GAME);
     }
     if (joinsDrawable) {
         // World-space vertices, placed relative to the eye.

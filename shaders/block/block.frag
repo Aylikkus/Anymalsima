@@ -127,7 +127,7 @@ void main()
     } else {
         // Distant joins and structure slabs: the ocean's attenuation and
         // the shade of structures above.
-        light.x = surfaceOceanSky(v_position.y)
+        light.x = surfaceWaterSky(v_position.y, -2.0 - v_cover.x)
                 * surfaceStructureSky(v_position, geometric);
     }
     vec3 far = surfaceFarLight(v_position, normal, geometric, u_light_chunk.w);

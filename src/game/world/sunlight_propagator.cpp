@@ -135,7 +135,11 @@ SunLightPropagator::snapshotColumn(uint64_t column) {
         map = sky->tile(cx, cz);
         if (!map) return std::nullopt;
     }
-    int top = std::max(SEA_LEVEL_Y, chunks.getColumnTopY(cx, cz));
+    int top = chunks.getColumnTopY(cx, cz);
+    if (!sky)
+        if (const auto terrain = chunks.generatedColumns(cx, cz))
+            for (const auto& column : terrain->columns)
+                top = std::max(top, column.water.topTile());
     DirectInput input{column, columnRevisions.at(column), 0, {}, map};
     for (const auto& coord : columnChunks.at(column)) {
         auto& state = states.at(coord);

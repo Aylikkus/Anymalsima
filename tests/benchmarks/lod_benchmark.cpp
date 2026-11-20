@@ -24,6 +24,7 @@ int main() {
         threshold *= 2;
     } while (threshold <= 64);
     size_t bytes = 0, maxBytes = 0, vertices = 0, triangles = 0;
+    size_t waterVertices = 0, waterTriangles = 0;
     const auto start = std::chrono::steady_clock::now();
     std::atomic_bool cancel{false};
     // Like TerrainLodManager: one region-input cache shared by every job.
@@ -35,6 +36,8 @@ int main() {
         maxBytes = std::max(maxBytes, mesh.bytes());
         vertices += mesh.vertices.size();
         triangles += mesh.indices.size() / 3;
+        waterVertices += mesh.water.vertices.size();
+        waterTriangles += mesh.water.indices.size() / 3;
     }
     const auto seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
@@ -45,6 +48,8 @@ int main() {
               << " actual_MiB=" << bytes / 1048576.
               << " max_upload_KiB=" << maxBytes / 1024.
               << " vertices=" << vertices << " triangles=" << triangles
+              << " water_vertices=" << waterVertices
+              << " water_triangles=" << waterTriangles
               << " build_seconds=" << seconds << '\n';
     return bytes > TerrainLod::GpuBudget || maxBytes > TerrainLod::UploadBudget
                ? 1

@@ -273,9 +273,7 @@ void LightVolumeManager::update(Vec3 focus) {
     }
 }
 
-bool LightVolumeManager::bind(const ChunkCoord& coord,
-                              std::vector<ShaderProperty*>& uniforms,
-                              std::optional<double> originX) {
+bool LightVolumeManager::prepare(const ChunkCoord& coord) {
     auto it = slots.find(coord);
     if (it == slots.end()) {
         if (!chunks.isReady(coord) || !allocate(coord)) return false;
@@ -285,6 +283,14 @@ bool LightVolumeManager::bind(const ChunkCoord& coord,
         deferredSince.erase(coord);
     }
     it->second.lastUsed = frame;
+    return true;
+}
+
+bool LightVolumeManager::bind(const ChunkCoord& coord,
+                              std::vector<ShaderProperty*>& uniforms,
+                              std::optional<double> originX) {
+    if (!prepare(coord)) return false;
+    const auto it = slots.find(coord);
     auto& page = *pages[it->second.page];
     auto& binding = page.bindings[it->second.index];
     // block.vert rebuilds world positions from the drawn transform, so the

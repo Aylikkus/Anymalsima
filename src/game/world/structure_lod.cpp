@@ -543,7 +543,7 @@ void StructureLod::request() {
                           height = (WORLD_HEIGHT_Y + s - 1) / s;
                 const auto* self = structureChunk(coord);
                 if (!self) return ChunkMesh{};
-                return mesher.build(
+                auto mesh = mesher.build(
                     *self, baseOf(coord),
                     [&](int x, int y, int z) -> const Tile* {
                         if (width > 0) x = int(WorldWrap::mod(x, width));
@@ -568,6 +568,17 @@ void StructureLod::request() {
                                    ? &solid
                                    : &air;
                     });
+                const auto base = baseOf(coord);
+                for (auto& v : mesh.vertices) {
+                    // Probe just outside the face, in the rendered X image.
+                    const int x = int(std::floor(
+                        (base.x * Chunk::SIZE_X + v.x + .01f * v.nx) * s));
+                    const int z = int(std::floor(
+                        (base.z * Chunk::SIZE_Z + v.z + .01f * v.nz) * s));
+                    const auto water = ground.waterAt(x, z);
+                    v.u = -2.f - water.surfaceY;
+                }
+                return mesh;
             },
             BS::pr::low);
         jobs.push_back({coord, revision, std::move(future)});

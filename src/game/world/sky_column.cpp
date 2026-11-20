@@ -113,7 +113,7 @@ Tile build(const TileInputs& in) {
         // Ground: the generated surface, or the edit's ground override.
         int ground = in.surface[s];
         uint8_t groundOpacity = Opaque;
-        int waterTop = in.surface[s] < SEA_LEVEL_Y ? SEA_LEVEL_Y : INT_MIN;
+        int waterTop = in.water[s].topTile();
         if (in.edit) {
             ground = in.edit->groundY[s];
             groundOpacity =

@@ -32,7 +32,7 @@ std::array<Point, 4> terrainRing(const Patch& p, SurfaceSampler& sampler,
 // ground cover); -1 elsewhere. Stored in u, which the block program reads as
 // "no cover" when negative. The terrain program reads v as the edge kind:
 // 0 ordinary face, 1 smooth skirt, 2 stepped boundary wall.
-void triangle(Mesh& mesh, Point a, Point b, Point c, float layer,
+void triangle(Geometry& mesh, Point a, Point b, Point c, float layer,
               float top = -1, float edgeKind = 0) {
     const Point u{b.x - a.x, b.y - a.y, b.z - a.z};
     const Point v{c.x - a.x, c.y - a.y, c.z - a.z};
@@ -51,7 +51,7 @@ void triangle(Mesh& mesh, Point a, Point b, Point c, float layer,
     }
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
 }
-void quad(Mesh& mesh, Point a, Point b, Point c, Point d, float layer,
+void quad(Geometry& mesh, Point a, Point b, Point c, Point d, float layer,
           float top = -1, float edgeKind = 0) {
     triangle(mesh, a, b, c, layer, top, edgeKind);
     triangle(mesh, a, c, d, layer, top, edgeKind);
@@ -67,6 +67,17 @@ std::array<Patch, 4> children(const Patch& p) {
 Patch parent(const Patch& p) {
     const int size = p.size() * 2;
     return {p.x / size * size, p.z / size * size, p.spacing * 2};
+}
+
+bool shareEdge(const Patch& a, const Patch& b, int periodX) {
+    const auto at = [&](int shift) {
+        const int bx = b.x + shift;
+        const bool xOverlap = a.x < bx + b.size() && bx < a.x + a.size();
+        const bool zOverlap = a.z < b.z + b.size() && b.z < a.z + a.size();
+        return (zOverlap && (a.x + a.size() == bx || bx + b.size() == a.x)) ||
+               (xOverlap && (a.z + a.size() == b.z || b.z + b.size() == a.z));
+    };
+    return at(0) || (periodX > 0 && (at(periodX) || at(-periodX)));
 }
 
 std::vector<Patch> select(int width, int depth, Vec3 eye, float viewportHeight,
@@ -269,21 +280,14 @@ Mesh joinDetails(std::span<const Patch> layout,
                     });
                 if (patch == layout.end() || patch->spacing == 1) continue;
                 const auto inside = sampler.column(ix, iz);
-                const float top =
-                    std::max(inside.surfaceY + 1, SEA_LEVEL_Y + 1);
-                const float y0 =
-                    std::max(meshHeight(*patch, sampler, x - shift, z),
-                             float(SEA_LEVEL_Y + 1));
-                const float y1 =
-                    std::max(meshHeight(*patch, sampler, x1 - shift, z1),
-                             float(SEA_LEVEL_Y + 1));
+                const float top = inside.surfaceY + 1;
+                const float y0 = meshHeight(*patch, sampler, x - shift, z);
+                const float y1 = meshHeight(*patch, sampler, x1 - shift, z1);
                 if (std::abs(top - y0) < .0001f && std::abs(top - y1) < .0001f)
                     continue;
                 const float sign = top >= (y0 + y1) * .5f ? 1 : -1;
-                const float layer =
-                    inside.waterY < 0
-                        ? inside.material
-                        : sampler.column(ix + dx[edge], iz + dz[edge]).material;
+                const float layer = inside.material;
+                const float water = inside.water.surfaceY;
                 const uint32_t base = uint32_t(result.vertices.size());
                 for (const auto& point : std::array<Point, 4>{{{x, top, z},
                                                                {x1, top, z1},
@@ -291,13 +295,53 @@ Mesh joinDetails(std::span<const Patch> layout,
                                                                {x, y0, z}}})
                     result.vertices.push_back(
                         {point.x, point.y, point.z, dx[edge] * sign, 0,
-                         dz[edge] * sign, 1, 0, 0, -1, 3, layer, 0xffffffff});
+                         dz[edge] * sign, 1, 0, 0, -2 - water, 3, layer,
+                         0xffffffff});
                 result.indices.insert(
                     result.indices.end(),
                     {base, base + 1, base + 2, base, base + 2, base + 3});
             }
         }
     return result;
+}
+
+ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
+    constexpr int side = Chunk::SIZE_X, slab = Chunk::SIZE_Y;
+    int lowGround = WORLD_HEIGHT_Y, highGround = 0;
+    int lowWater = WORLD_HEIGHT_Y, highWater = -1;
+    WaterBand waterBand;
+    for (int z = -1; z <= side; ++z)
+        for (int x = -1; x <= side; ++x) {
+            const int tx = cx * side + x, tz = cz * side + z;
+            const int ground = sampler.height(tx, tz);
+            lowGround = std::min(lowGround, ground);
+            highGround = std::max(highGround, ground);
+            if (x < 0 || x >= side || z < 0 || z >= side) continue;
+            const auto water = sampler.waterAt(tx, tz);
+            waterBand.levels[z * side + x] = int16_t(water.surfaceY);
+            if (water.wet()) {
+                lowWater = std::min(lowWater, water.topTile());
+                highWater = std::max(highWater, water.topTile());
+            }
+        }
+    ColumnBands result{{cx, cz, lowGround / slab, highGround / slab}, {}};
+    if (highWater >= 0) {
+        waterBand.slabs = {cx, cz, lowWater / slab, highWater / slab};
+        result.water = waterBand;
+    }
+    return result;
+}
+
+bool WaterBand::matches(ChunkCoord coord,
+                        std::span<const float> uploaded) const {
+    const int base = int(coord.y) * Chunk::SIZE_Y;
+    for (size_t i = 0; i < levels.size(); ++i) {
+        const int level = levels[i];
+        const float expected =
+            level > base && level <= base + Chunk::SIZE_Y ? level - base : -1;
+        if ((uploaded.empty() ? -1 : uploaded[i]) != expected) return false;
+    }
+    return true;
 }
 
 Mesh build(const Patch& p, SurfaceSampler& sampler,
@@ -308,6 +352,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     mesh.bounds = {float(p.x), float(Y_CHUNKS * Chunk::SIZE_Y),
                    float(p.z), float(endX),
                    0,          float(endZ)};
+    mesh.water.bounds = mesh.bounds;
     const bool stepped = p.spacing == 1;
     const auto point = [&](float x, float z) {
         return terrainPoint(p, sampler, x, z);
@@ -378,13 +423,11 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                                  y, boundary ? 2.f : 0.f);
                     }
                 }
-                // Clip each terrain triangle against the water plane. The
-                // opaque cap covers only submerged terrain, including
-                // partial coast cells.
-                if (column.waterY >= 0) {
-                    const float y = column.waterY;
-                    quad(mesh, {float(x), y, float(z)}, {float(x), y, z1},
-                         {x1, y, z1}, {x1, y, float(z)}, -2);
+                if (column.water.wet()) {
+                    const float level = column.water.surfaceY;
+                    quad(mesh.water, {float(x), level, float(z)},
+                         {float(x), level, z1}, {x1, level, z1},
+                         {x1, level, float(z)}, -2);
                 }
                 continue;
             }
@@ -400,31 +443,77 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 for (size_t i = 0; i < ring.size(); ++i)
                     triangle(mesh, center, ring[i], ring[(i + 1) % ring.size()],
                              -1);
-            constexpr float level = SEA_LEVEL_Y + 1;
-            if (std::min({center.y, ring[0].y, ring[1].y, ring[2].y,
-                          ring[3].y}) >= level)
-                continue;
-            const auto cap = [&](Point a, Point b, Point c) {
-                std::vector<Point> polygon;
-                const std::array<Point, 3> input{a, b, c};
-                for (int i = 0; i < 3; ++i) {
-                    const auto u = input[i], v = input[(i + 1) % 3];
-                    if (u.y < level) polygon.push_back({u.x, level, u.z});
-                    if ((u.y < level) != (v.y < level)) {
-                        const float t = (level - u.y) / (v.y - u.y);
-                        polygon.push_back({std::lerp(u.x, v.x, t), level,
-                                           std::lerp(u.z, v.z, t)});
+            const auto water = [&](auto&& self, int ax, int az, int bx,
+                                   int bz) -> void {
+                const int mx = (ax + bx) / 2, mz = (az + bz) / 2;
+                const auto sample = sampler.waterAt(mx, mz);
+                const bool unit = bx - ax == 1 && bz - az == 1;
+                if (!unit) {
+                    // Refine shore cells and any edited footprint. Broad areas
+                    // of deep sea and high land keep the coarse tessellation.
+                    bool uniform = !sampler.hasEdits(ax, az, bx, bz);
+                    for (int tx : {ax, mx, bx - 1})
+                        for (int tz : {az, mz, bz - 1}) {
+                            uniform &= sampler.waterAt(tx, tz).surfaceY ==
+                                       sample.surfaceY;
+                        }
+                    if (!uniform) {
+                        const int sx = std::max(ax + 1, mx);
+                        const int sz = std::max(az + 1, mz);
+                        self(self, ax, az, sx, sz);
+                        if (sx < bx) self(self, sx, az, bx, sz);
+                        if (sz < bz) self(self, ax, sz, sx, bz);
+                        if (sx < bx && sz < bz) self(self, sx, sz, bx, bz);
+                        return;
                     }
                 }
-                for (size_t i = 1; i + 1 < polygon.size(); ++i)
-                    triangle(mesh, polygon[0], polygon[i], polygon[i + 1], -2);
+                if (!sample.wet()) return;
+                const float level = sample.surfaceY;
+                const auto cap = [&](Point a, Point b, Point c) {
+                    if (std::min({a.y, b.y, c.y}) >= level ||
+                        std::max({a.x, b.x, c.x}) <= ax ||
+                        std::min({a.x, b.x, c.x}) >= bx ||
+                        std::max({a.z, b.z, c.z}) <= az ||
+                        std::min({a.z, b.z, c.z}) >= bz)
+                        return;
+                    std::array<Point, 8> polygon{a, b, c};
+                    size_t count = 3;
+                    const auto clip = [&](auto distance) {
+                        std::array<Point, 8> next;
+                        size_t n = 0;
+                        for (size_t i = 0; i < count; ++i) {
+                            const auto u = polygon[i],
+                                       v = polygon[(i + 1) % count];
+                            const float du = distance(u), dv = distance(v);
+                            if (du >= 0) next[n++] = u;
+                            if ((du < 0) != (dv < 0) && du != 0 && dv != 0) {
+                                const float t = du / (du - dv);
+                                next[n++] = {std::lerp(u.x, v.x, t),
+                                             std::lerp(u.y, v.y, t),
+                                             std::lerp(u.z, v.z, t)};
+                            }
+                        }
+                        std::copy_n(next.begin(), n, polygon.begin());
+                        count = n;
+                    };
+                    clip([&](Point v) { return level - v.y; });
+                    clip([&](Point v) { return v.x - ax; });
+                    clip([&](Point v) { return bx - v.x; });
+                    clip([&](Point v) { return v.z - az; });
+                    clip([&](Point v) { return bz - v.z; });
+                    for (size_t i = 0; i < count; ++i) polygon[i].y = level;
+                    for (size_t i = 1; i + 1 < count; ++i)
+                        triangle(mesh.water, polygon[0], polygon[i],
+                                 polygon[i + 1], -2);
+                };
+                if (flat) {
+                    cap(ring[0], ring[1], ring[2]);
+                    cap(ring[0], ring[2], ring[3]);
+                } else
+                    for (size_t i = 0; i < ring.size(); ++i)
+                        cap(center, ring[i], ring[(i + 1) % ring.size()]);
             };
-            if (flat) {
-                cap(ring[0], ring[1], ring[2]);
-                cap(ring[0], ring[2], ring[3]);
-            } else
-                for (size_t i = 0; i < ring.size(); ++i)
-                    cap(center, ring[i], ring[(i + 1) % ring.size()]);
+            water(water, x, z, int(x1), int(z1));
         }
     }
     // Smooth patches: skirts on inner edges hide cracks against neighbours of
@@ -461,14 +550,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     if (stepped) {
         for (int cz = p.z / 16; cz < (endZ + 15) / 16; ++cz)
             for (int cx = p.x / 16; cx < (endX + 15) / 16; ++cx) {
-                int low = Y_CHUNKS * Chunk::SIZE_Y, high = 0;
-                for (int z = cz * 16 - 1; z <= cz * 16 + 16; ++z)
-                    for (int x = cx * 16 - 1; x <= cx * 16 + 16; ++x) {
-                        const int h = sampler.height(x, z);
-                        low = std::min(low, h);
-                        high = std::max(high, std::max(h, SEA_LEVEL_Y));
-                    }
-                mesh.bands.push_back({cx, cz, low / 16, high / 16});
+                mesh.bands.push_back(sampleBands(cx, cz, sampler));
             }
     }
     // Ground cover: one texel per tile on stepped patches, so the hand-over
@@ -503,6 +585,21 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
             mesh.materials[i + 3] = c.rockMaterial >> 8;
         }
     }
+    mesh.waterMapSize = stepped ? p.size() : std::max(1, materialMap);
+    mesh.waterLevels.resize(size_t(mesh.waterMapSize) * mesh.waterMapSize * 2);
+    for (int z = 0; z < mesh.waterMapSize; ++z) {
+        if (cancelled.load(std::memory_order_relaxed)) return {};
+        for (int x = 0; x < mesh.waterMapSize; ++x) {
+            const int level = std::max(
+                0, sampler
+                       .waterAt(p.x + (x + .5) * p.size() / mesh.waterMapSize,
+                                p.z + (z + .5) * p.size() / mesh.waterMapSize)
+                       .surfaceY);
+            const size_t i = (size_t(z) * mesh.waterMapSize + x) * 2;
+            mesh.waterLevels[i] = level & 255;
+            mesh.waterLevels[i + 1] = level >> 8;
+        }
+    }
     // Share smooth normals and indexed vertices. Water and coplanar voxel
     // faces in particular should not consume six vertices per quad.
     for (auto& v : mesh.vertices)
@@ -529,16 +626,31 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
             return h;
         }
     };
-    std::unordered_map<Key, uint32_t, Hash> unique;
-    std::vector<BlockVertex> vertices;
-    for (auto& index : mesh.indices) {
-        const auto& v = mesh.vertices[index];
-        const auto [it, inserted] =
-            unique.emplace(std::bit_cast<Key>(v), uint32_t(vertices.size()));
-        if (inserted) vertices.push_back(v);
-        index = it->second;
+    const auto indexVertices = [](Geometry& geometry) {
+        std::unordered_map<Key, uint32_t, Hash> unique;
+        std::vector<BlockVertex> vertices;
+        for (auto& index : geometry.indices) {
+            const auto& v = geometry.vertices[index];
+            const auto [it, inserted] = unique.emplace(
+                std::bit_cast<Key>(v), uint32_t(vertices.size()));
+            if (inserted) vertices.push_back(v);
+            index = it->second;
+        }
+        geometry.vertices = std::move(vertices);
+    };
+    indexVertices(mesh);
+    indexVertices(mesh.water);
+    if (!mesh.water.vertices.empty()) {
+        auto& bounds = mesh.water.bounds;
+        bounds.minX = bounds.minZ = std::numeric_limits<float>::infinity();
+        bounds.maxX = bounds.maxZ = -std::numeric_limits<float>::infinity();
+        for (const auto& v : mesh.water.vertices) {
+            bounds.minX = std::min(bounds.minX, v.x);
+            bounds.maxX = std::max(bounds.maxX, v.x);
+            bounds.minZ = std::min(bounds.minZ, v.z);
+            bounds.maxZ = std::max(bounds.maxZ, v.z);
+        }
     }
-    mesh.vertices = std::move(vertices);
     return mesh;
 }
 }  // namespace TerrainLod

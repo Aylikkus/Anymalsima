@@ -7,6 +7,7 @@
 #include "ground_cover_generator.hpp"
 #include "height_profile.hpp"
 #include "soil_generator.hpp"
+#include "water_surface.hpp"
 #include "world.hpp"
 
 namespace TerrainTuning {
@@ -106,6 +107,7 @@ struct ColumnGenerationInput {
     SoilColumn soil;
     // Same value as TerrainSampler::sample(x, z).slope.
     double slope = 0;
+    WaterSurface water;
 };
 
 struct ChunkColumnInputs {

@@ -15,6 +15,8 @@
 #include "structure_lod.hpp"
 #include "terrain_edits.hpp"
 
+class LightVolumeManager;
+
 // Distant terrain in three tiers: voxel chunks near the camera (owned by
 // DetailCoverage), stepped spacing-1 patches inside the exact radius, and
 // smooth quadtree patches beyond it. Patches are independent cached meshes:
@@ -32,7 +34,8 @@ class TerrainLodManager {
     void update(const Camera& camera, Vec2 viewport,
                 std::span<const TileBox> casterDetail = {});
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
-                const Camera& camera, Vec2 viewport);
+                const Camera& camera, Vec2 viewport,
+                LightVolumeManager* lightVolumes = nullptr);
     ShaderProperty& waterUniform() { return water; }
     bool eyeUnderwater() const { return underwater; }
     // Uniforms appended to every distant terrain draw (lights): patches use
@@ -56,6 +59,7 @@ class TerrainLodManager {
     // terrain and structure voxels: a detailed column, or any chunk above the
     // column's surface band (distant terrain has nothing there).
     bool drawsChunk(const ChunkCoord& c) const;
+    bool drawsWater(const ChunkCoord& c) const;
     // Generated structures drawn as voxels at distance (massive trees today;
     // StructureLod::setStructures); ignored without edit tracking (no
     // structure proxies).
@@ -93,7 +97,10 @@ class TerrainLodManager {
 
    private:
     struct Entry {
-        MeshHandle mesh;
+        MeshHandle mesh, waterMesh;
+        AABB waterBounds{};
+        bgfx::TextureHandle waterMap = BGFX_INVALID_HANDLE;
+        ShaderProperty waterMapUniform;
         bgfx::TextureHandle materialMap = BGFX_INVALID_HANDLE;
         // Ground cover (TerrainLod::Mesh::covers) at stage CoverStage, and
         // u_lod_cover: x = texels per side.
@@ -106,7 +113,7 @@ class TerrainLodManager {
         // the eye when the world wraps on X.
         ShaderProperty shiftUniform;
         std::optional<TerrainLod::Mesh> cpu;
-        std::vector<TerrainLod::SurfaceBand> bands;
+        std::vector<TerrainLod::ColumnBands> bands;
         AABB bounds{};
         size_t bytes = 0;
         bool drawable = false;
@@ -155,7 +162,8 @@ class TerrainLodManager {
     void markDrawable(const TerrainLod::Patch& patch, int delta);
     // Not enough budget: select a coarser layout once per selection.
     void pressure();
-    void updateCoverage(ChunkManager& chunks, const Camera& camera);
+    void updateCoverage(ChunkManager& chunks, const Camera& camera,
+                        LightVolumeManager* lightVolumes);
     void uploadCoverage();
     void uploadJoins(IRenderer& renderer);
     size_t budget() const { return quality.gpuBudget - JoinBudget; }
@@ -175,8 +183,9 @@ class TerrainLodManager {
     // Built structures at distance; present when edits are tracked.
     std::unique_ptr<StructureLod> structures;
     ChunkCoord detailCentre{};
-    TerrainLod::DetailCoverage detailCoverage;
-    TerrainLod::DetailCoverage::Columns surfaceBands;
+    TerrainLod::DetailCoverage detailCoverage, waterCoverage;
+    std::map<TerrainLod::DetailCoverage::Key, TerrainLod::ColumnBands>
+        surfaceBands;
     std::vector<TerrainLod::Patch> joinedLayout;
     uint64_t joinedCoverageVersion = UINT64_MAX;
     static constexpr size_t JoinBudget = TerrainLod::UploadBudget;

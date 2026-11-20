@@ -13,6 +13,7 @@ SAMPLER2D(u_lod_light_map, 5);
 SAMPLER2D(u_cover_map, 6);
 // Sky light under structures (SkyOcclusionMap, LightRenderer).
 SAMPLER2D(u_sky_occlusion, 7);
+SAMPLER2D(u_patch_water, 8);
 uniform vec4 u_lod_patch;
 uniform vec4 u_lod_cover;  // x = cover texels per side
 uniform vec4 u_detail_origin;
@@ -77,7 +78,8 @@ void main()
     vec2 detailUv = (owner - u_detail_origin.xy) / u_detail_origin.z;
     if (all(greaterThanEqual(detailUv, vec2(0.0)))
         && all(lessThan(detailUv, vec2(1.0)))) {
-        if (texture2D(u_detail_map, detailUv).r > 0.5) discard;
+        vec2 coverage = texture2D(u_detail_map, detailUv).rg;
+        if ((v_layer < -1.5 ? coverage.g : coverage.r) > 0.5) discard;
     }
     if (u_world_water.z > 0.5 && v_cover.y > 0.5) {
         gl_FragColor = v_cover.y < 1.5 ? vec4(1.0, 0.0, 1.0, 1.0)
@@ -125,7 +127,10 @@ void main()
     }
     // Without a light volume, approximate the ocean's skylight attenuation.
     // Keep artificial lights independent of this estimate.
-    float sky = surfaceOceanSky(v_position.y)
+    vec2 waterUv = (owner - u_lod_patch.xy) / u_lod_patch.z;
+    vec2 encoded = floor(texture2D(u_patch_water, waterUv).rg * 255.0 + 0.5);
+    float level = v_layer < -1.5 ? v_position.y : encoded.x + 256.0 * encoded.y;
+    float sky = surfaceWaterSky(v_position.y, level)
               * surfaceStructureSky(v_position, normal);
     vec3 far = surfaceFarLight(v_position, surface, normal, 0.0)
              + surfaceLodLight(v_position);

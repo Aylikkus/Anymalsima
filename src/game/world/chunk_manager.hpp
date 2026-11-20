@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -35,7 +36,8 @@ struct ChunkHandle {
     bool dirtyPending = false;
     bool meshUrgent = false;
     uint64_t meshRevision = 0;
-    MeshHandle mesh;
+    MeshHandle mesh, waterMesh;
+    std::vector<float> waterTops;
     bool initialised = false;
     bool uploaded = false;
     uint64_t uploadedRevision = 0;
@@ -281,43 +283,66 @@ class ChunkManager {
                 it->second.meshRevision != result.revision)
                 continue;
             auto& handle = it->second;
-            if (result.mesh.vertices.empty()) {
-                // Hide a previous mesh when geometry becomes empty.
-                handle.mesh.release();
-                handle.initialised = false;
-                handle.vertices.clear();
-                handle.indices.clear();
-                handle.uploaded = true;
-                handle.uploadedRevision = result.revision;
-                meshed.erase(result.coord);
-                meshUploaded.emit(result.coord);
-                continue;
-            }
-            if (!handle.initialised) {
-                handle.mesh.initDynamic<BlockVertex>(
-                    &renderer, result.mesh.vertices.size(),
-                    result.mesh.indices.size());
-                handle.initialised = true;
-            }
-            handle.mesh.update(
-                result.mesh.vertices.data(), result.mesh.vertices.size(),
-                result.mesh.indices.data(), result.mesh.indices.size(), true);
-            if (!handle.mesh.drawable()) {
-                handle.mesh.release();
-                handle.initialised = false;
+            // Reserve both replacements before touching either drawn buffer.
+            // A failed allocation keeps the previously complete presentation.
+            MeshHandle ground, water;
+            const auto reserve = [&](const ChunkGeometry& geometry,
+                                     const MeshHandle& existing,
+                                     MeshHandle& replacement) {
+                if (geometry.vertices.empty()) return true;
+                if (existing.drawable()) {
+                    const auto& gpu = std::get<DynamicMesh>(existing.get());
+                    if (geometry.vertices.size() <= gpu.capacityVerts &&
+                        geometry.indices.size() <= gpu.capacityIndices)
+                        return true;
+                }
+                replacement.initDynamic<BlockVertex>(&renderer,
+                                                     geometry.vertices.size(),
+                                                     geometry.indices.size());
+                return replacement.drawable();
+            };
+            if (!reserve(result.mesh, handle.mesh, ground) ||
+                !reserve(result.mesh.water, handle.waterMesh, water)) {
                 retry.push_back(std::move(result));
                 continue;
             }
+            const auto upload = [](const ChunkGeometry& geometry,
+                                   MeshHandle& existing,
+                                   MeshHandle& replacement) {
+                if (geometry.vertices.empty()) {
+                    existing.release();
+                    return;
+                }
+                if (replacement.drawable()) {
+                    replacement.update(
+                        geometry.vertices.data(), geometry.vertices.size(),
+                        geometry.indices.data(), geometry.indices.size(), true);
+                    existing = std::move(replacement);
+                } else {
+                    existing.update(
+                        geometry.vertices.data(), geometry.vertices.size(),
+                        geometry.indices.data(), geometry.indices.size(), true);
+                }
+            };
+            upload(result.mesh, handle.mesh, ground);
+            upload(result.mesh.water, handle.waterMesh, water);
+            handle.initialised = !result.mesh.vertices.empty();
             handle.uploaded = true;
             handle.uploadedRevision = result.revision;
             handle.vertices = std::move(result.mesh.vertices);
             handle.indices = std::move(result.mesh.indices);
-            meshed.insert(result.coord);
+            handle.waterTops = std::move(result.mesh.waterTops);
+            if (handle.initialised || !handle.waterTops.empty())
+                meshed.insert(result.coord);
+            else
+                meshed.erase(result.coord);
             meshUploaded.emit(result.coord);
         }
         readyMeshes = std::move(retry);
     }
     MeshHandle* getMesh(const ChunkCoord& coord);
+    MeshHandle* getWaterMesh(const ChunkCoord& coord);
+    std::span<const float> uploadedWaterTops(const ChunkCoord& coord) const;
 
     bool hasGenerationWork() const {
         return !generationQueue.empty() || !generationJobs.empty() ||
@@ -447,7 +472,8 @@ class ChunkManager {
     // full sky down each column from an open top to the first solid tile.
     static void estimateSkyLight(
         Chunk& chunk, ChunkCoord coord,
-        const std::function<int(int x, int z)>& surface);
+        const std::function<std::pair<int, WaterSurface>(int x, int z)>&
+            surface);
     // Regions whose sets the column trees of a chunk in `region` need.
     std::vector<Vec2u> treeRegionsAround(Vec2u region) const;
     // True when prepareTrees would succeed now; starts no job.

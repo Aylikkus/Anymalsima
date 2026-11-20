@@ -389,7 +389,7 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     Region source = selected->region;
     source.land_height_m = terrain.surface_y;
     auto profile = selected->soil;
-    if (terrain.surface_y < SEA_LEVEL_Y ||
+    if (WaterSurface::sea(terrain.surface_y).wet() ||
         source.vegetation == VegetationType::NONE)
         profile.topsoil_block_id = 0;
     auto cover = SoilGenerator::sample(profile, source, x, z, data.periodX());
@@ -410,7 +410,8 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     // source region, so it blends across region borders with the soil.
     if (result.count > 0 && result.layers[0].topsoil &&
         result.layers[0].depth_from_surface_m == 0 &&
-        terrain.surface_y >= SEA_LEVEL_Y && selected->cover.cover_id) {
+        !WaterSurface::sea(terrain.surface_y).wet() &&
+        selected->cover.cover_id) {
         result.cover = selected->cover.cover_id;
         result.coverDensity = GroundCoverGenerator::density(
             selected->cover, x, z, terrain.slope, data.periodX());
@@ -441,7 +442,7 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
             const TerrainSample terrain{int(std::floor(center)), slope};
             out.columns[z * Chunk::SIZE_X + x] = {
                 terrain.surface_y, soil(originX + x, originZ + z, terrain),
-                slope};
+                slope, WaterSurface::sea(terrain.surface_y)};
         }
     return out;
 }

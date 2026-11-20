@@ -59,6 +59,7 @@ class LightVolumeManager {
     // available; the chunk must then be skipped this frame.
     // originX: world X the chunk is drawn at (its copy nearest the eye when
     // X wraps); defaults to the canonical chunk origin.
+    bool prepare(const ChunkCoord& coord);
     bool bind(const ChunkCoord& coord, std::vector<ShaderProperty*>& uniforms,
               std::optional<double> originX = std::nullopt);
     size_t pageCount() const { return pages.size(); }

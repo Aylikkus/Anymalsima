@@ -472,7 +472,8 @@ int main(int argc, char** argv) {
                 sections[1] = since(mark);
                 mark = SmokeClock::now();
                 RenderTarget target;
-                lod.render(target, renderer, chunks, camera, {1280, 720});
+                lod.render(target, renderer, chunks, camera, {1280, 720},
+                           forestLighting ? &volumes : nullptr);
                 sections[2] = since(mark);
                 auto& water = lod.waterUniform();
                 if (lights) {
@@ -561,9 +562,13 @@ int main(int argc, char** argv) {
                 if (handover) {
                     blockEye.setVec4({eye.x, eye.y, eye.z, 4096});
                     chunks.forEachReady([&](const ChunkCoord& coord, Chunk&) {
-                        if (!lod.drawsChunk(coord)) return;
-                        auto* mesh = chunks.getMesh(coord);
-                        if (!mesh) return;
+                        auto* ground = lod.drawsChunk(coord)
+                                           ? chunks.getMesh(coord)
+                                           : nullptr;
+                        auto* waterMesh = lod.drawsWater(coord)
+                                              ? chunks.getWaterMesh(coord)
+                                              : nullptr;
+                        if (!ground && !waterMesh) return;
                         // The copy nearest the camera (X wraps).
                         const int camCX = int(camera.position.x) / 16;
                         const double wx =
@@ -580,9 +585,16 @@ int main(int argc, char** argv) {
                             lightRenderer.appendUniforms(
                                 uniforms, LightRenderer::Program::Block);
                         }
-                        target.drawVertexBuffer(
-                            mesh->get(), &blockShader, std::move(uniforms),
-                            false, std::move(transform), DrawLayer::GAME);
+                        if (ground)
+                            target.drawVertexBuffer(
+                                ground->get(), &blockShader,
+                                std::vector(uniforms), false,
+                                std::array(transform), DrawLayer::GAME);
+                        if (waterMesh)
+                            target.drawVertexBuffer(
+                                waterMesh->get(), &blockShader,
+                                std::move(uniforms), false,
+                                std::move(transform), DrawLayer::GAME);
                         ++detailed;
                     });
                 }

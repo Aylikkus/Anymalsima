@@ -218,11 +218,12 @@ vec3 surfaceLight(vec3 normal, vec3 albedo, vec2 light, vec3 blockTint,
     vec3 lit = max(vec3_splat(sky), min(block, vec3_splat(1.0)));
     return albedo * max(lit, vec3_splat(SURFACE_MIN_LIGHT));
 }
-float surfaceOceanSky(float y)
+float surfaceWaterSky(float y, float waterHeight)
 {
     // Water opacity is 8: full sky at the surface, about 7/15 one tile
     // down and zero by two. surfaceLight applies the usual minimum light.
-    return clamp(1.0 - (u_world_water.x - y) * (8.0 / 15.0), 0.0, 1.0);
+    return waterHeight <= 0.0 ? 1.0 :
+        clamp(1.0 - (waterHeight - y) * (8.0 / 15.0), 0.0, 1.0);
 }
 
 vec3 surfaceFog(vec3 position, vec3 color)

@@ -845,7 +845,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
     lightRenderer->setSkyOcclusion(skyMap->skyOcclusion());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
-                       context.getWindowSize());
+                       context.getWindowSize(), lightVolumes.get());
     camera.underwater = terrainLod->eyeUnderwater();
     context.renderer->setCamera(camera);
     auto& water = terrainLod->waterUniform();
@@ -874,7 +874,13 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     chunkManager->forEachMeshed([&](const ChunkCoord& coord) {
         // Chunks are drawn at their copy nearest the camera, so the X seam
         // is invisible.
-        if (!terrainLod->drawsChunk(coord)) return;
+        auto* ground = terrainLod->drawsChunk(coord)
+                           ? chunkManager->getMesh(coord)
+                           : nullptr;
+        auto* waterMesh = terrainLod->drawsWater(coord)
+                              ? chunkManager->getWaterMesh(coord)
+                              : nullptr;
+        if (!ground && !waterMesh) return;
         const int64_t deltaX = wrap.deltaChunk(coord.x, camCX);
 
         // Build the AABB for this chunk in world space.
@@ -892,9 +898,6 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
 
         if (!frustum.intersects(aabb)) return;  // culled
 
-        MeshHandle* mesh = chunkManager->getMesh(coord);
-        if (!mesh) return;  // still building, skip this frame
-
         // Chunk meshes are chunk-local; place them relative to the eye.
         auto transform = relativeTransform(camera, wx, wy, wz);
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
@@ -902,8 +905,14 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         lightRenderer->appendUniforms(uniforms, LightRenderer::Program::Block);
         // Without a light volume the chunk would render unlit; skip it.
         if (!lightVolumes->bind(coord, uniforms, wx)) return;
-        target.drawVertexBuffer(mesh->get(), &blockShader, std::move(uniforms),
-                                false, std::move(transform), DrawLayer::GAME);
+        if (ground)
+            target.drawVertexBuffer(ground->get(), &blockShader,
+                                    std::vector(uniforms), false,
+                                    std::array(transform), DrawLayer::GAME);
+        if (waterMesh)
+            target.drawVertexBuffer(waterMesh->get(), &blockShader,
+                                    std::move(uniforms), false,
+                                    std::move(transform), DrawLayer::GAME);
     });
     floraRenderer->render(target, camera, frustum, *lightRenderer, now,
                           clock.days(), water);

@@ -14,8 +14,8 @@ const RegionLayer* LocationGenerator::layerAtDepth(
 void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
                                        int chunkBaseY, const Region& region,
                                        const std::vector<RegionLayer>& layers,
-                                       const SoilColumn& soil,
-                                       int surfaceY) const {
+                                       const SoilColumn& soil, int surfaceY,
+                                       WaterSurface water) const {
     for (int localY = 0; localY < Chunk::SIZE_Y; ++localY) {
         const int tileY = chunkBaseY + localY;
         Tile& tile = chunk.tiles[localZ][localY][localX];
@@ -42,10 +42,9 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
             if (depth_m == 0 && soil.cover)
                 tile.setCover(soil.cover, soil.coverDensity);
 
-        } else if (tileY <= SEA_LEVEL_Y) {
-            // surface is below sea level — fill with water
+        } else if (water.fills(tileY, surfaceY)) {
             tile.block_id = 0;
-            tile.liquid = LiquidType::Water;
+            tile.liquid = water.kind();
             tile.liquidLevel = 255;
 
         } else {
@@ -73,18 +72,21 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
                               soil, region,
                               int64_t(coord.x) * Chunk::SIZE_X + localX,
                               int64_t(coord.z) * Chunk::SIZE_Z + localZ);
-            generateColumn(
-                chunk, localX, localZ, chunkBaseY, region, layers, cover,
-                columns ? columns->columns[localZ * Chunk::SIZE_X + localX]
-                              .surface_y
-                        : region.land_height_m);
+            const auto* column =
+                columns ? &columns->columns[localZ * Chunk::SIZE_X + localX]
+                        : nullptr;
+            const int ground =
+                column ? column->surface_y : region.land_height_m;
+            generateColumn(chunk, localX, localZ, chunkBaseY, region, layers,
+                           cover, ground,
+                           column ? column->water : WaterSurface::sea(ground));
         }
 }
 
 bool LocationGenerator::isAirChunk(const ChunkCoord& coord,
                                    const ChunkColumnInputs& columns) const {
-    int top = SEA_LEVEL_Y;
+    int top = -1;
     for (const auto& column : columns.columns)
-        top = std::max(top, column.surface_y);
+        top = std::max({top, column.surface_y, column.water.topTile()});
     return int(coord.y) * Chunk::SIZE_Y > top;
 }

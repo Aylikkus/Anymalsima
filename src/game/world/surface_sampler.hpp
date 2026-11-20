@@ -18,7 +18,7 @@ struct CoverTexel {
 
 struct SurfaceColumn {
     int surfaceY = 0;
-    int waterY = -1;
+    WaterSurface water;
     SoilColumn soil;
     uint16_t material = 0;
     uint16_t rockMaterial = 0;
@@ -82,6 +82,8 @@ class SurfaceSampler {
     uint16_t materialAt(int x, int y, int z);
     // Ground height after edits.
     int height(int x, int z);
+    WaterSurface waterAt(int x, int z);
+    bool hasEdits(int x0, int z0, int x1, int z1);
     // Ground cover of the column's surface after edits (none where an edit
     // moved the ground).
     CoverTexel cover(int x, int z);

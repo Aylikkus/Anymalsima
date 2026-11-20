@@ -22,10 +22,11 @@ StructureSlab structureBaselineFor(std::optional<structure_voxels::Slab> slab,
             for (int x = 0; x < Side; ++x) {
                 const auto i = cellIndex(x, y, z);
                 if (!slab->bits.test(i)) continue;
-                const int ceiling =
-                    terrain ? std::max(SEA_LEVEL_Y,
-                                       terrain->columns[z * Side + x].surface_y)
-                            : SEA_LEVEL_Y;
+                const auto* column =
+                    terrain ? &terrain->columns[z * Side + x] : nullptr;
+                const int ceiling = column ? std::max(column->water.topTile(),
+                                                      column->surface_y)
+                                           : WaterSurface::sea(-1).topTile();
                 if (int(coord.y) * Side + y <= ceiling ||
                     grown.test(slab->blockAt(i)))
                     slab->bits.reset(i);
@@ -799,6 +800,11 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
         if (auto* chunk = getChunk(neighbor))
             neighbors[neighbor] = std::make_shared<Chunk>(*chunk);
     }
+    const auto column = columnInputs.find((uint64_t{coord.x} << 32) | coord.z);
+    const auto terrain =
+        column == columnInputs.end() ? nullptr : column->second.data;
+    const auto structures =
+        column == columnInputs.end() ? nullptr : column->second.structures;
     CoverClimate climate;
     if (!terrainWorld.regions.empty())
         for (int corner = 0; corner < 4; ++corner) {
@@ -812,8 +818,14 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
     const auto priority = handle.meshUrgent ? BS::pr::high : BS::pr::normal;
     auto future = pool.submit_task(
         [coord, data, neighbors = std::move(neighbors), builder = *mesher,
-         identity, revision, wrapX, depth = terrainWorld.height * 128,
-         climate]() {
+         identity, revision, wrapX, depth = terrainWorld.height * 128, climate,
+         terrain, structures]() {
+            const unsigned aboveY = coord.y + 1;
+            const std::optional<structure_voxels::Slab> above =
+                !neighbors.contains({coord.x, aboveY, coord.z}) && structures &&
+                        aboveY < Y_CHUNKS && structures->mayContain(aboveY)
+                    ? structures->rasterize(aboveY)
+                    : std::nullopt;
             auto mesh = builder.build(
                 *data, coord,
                 [&](int x, int y, int z) -> const Tile* {
@@ -834,7 +846,24 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                                                    [y % Chunk::SIZE_Y]
                                                    [x % Chunk::SIZE_X];
                 },
-                climate);
+                climate,
+                [&](int x, int y, int z) -> const Tile* {
+                    if (!terrain) return nullptr;
+                    static const Tile solid{.block_id = 1, .lightLevel = {}};
+                    static const Tile water{.liquid = LiquidType::Water,
+                                            .liquidLevel = 255,
+                                            .lightLevel = {}};
+                    static const Tile air{};
+                    const int lx = x % Chunk::SIZE_X, lz = z % Chunk::SIZE_Z;
+                    const auto& column =
+                        terrain->columns[lz * Chunk::SIZE_X + lx];
+                    if (y <= column.surface_y) return &solid;
+                    if (above &&
+                        above->tileAt(structure_voxels::cellIndex(lx, 0, lz)))
+                        return &solid;
+                    return column.water.fills(y, column.surface_y) ? &water
+                                                                   : &air;
+                });
             return FinishedMesh{coord, std::move(mesh), identity, revision};
         },
         priority);
@@ -917,7 +946,7 @@ void ChunkManager::collect() {
             if (auto it = chunks.find(job.coord);
                 it != chunks.end() && it->second.identity == job.identity) {
                 it->second.meshState =
-                    it->second.initialised ? MeshState::Built : MeshState::None;
+                    it->second.uploaded ? MeshState::Built : MeshState::None;
                 markDirty(job.coord);
             }
             throw;
@@ -937,18 +966,20 @@ void ChunkManager::collect() {
 
 void ChunkManager::estimateSkyLight(
     Chunk& chunk, ChunkCoord coord,
-    const std::function<int(int x, int z)>& surface) {
+    const std::function<std::pair<int, WaterSurface>(int x, int z)>& surface) {
     const int base = int(coord.y) * Chunk::SIZE_Y;
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
         for (int x = 0; x < Chunk::SIZE_X; ++x) {
             // Open sky above the chunk: its top is above the column's
             // surface. Water seen from the top keeps the sweep's falloff
             // (opacity 8: 15, 7, then dark).
-            if (base + Chunk::SIZE_Y - 1 <= surface(x, z)) continue;
-            int value = 15;
+            const auto [ground, water] = surface(x, z);
+            const int top = base + Chunk::SIZE_Y - 1;
+            if (top <= ground) continue;
             const Tile& first = chunk.tiles[z][Chunk::SIZE_Y - 1][x];
-            if (first.isLiquid() && base + Chunk::SIZE_Y < SEA_LEVEL_Y - 1)
-                value = 0;
+            const int above =
+                first.isLiquid() ? std::max(0, water.topTile() - top) : 0;
+            int value = std::max(0, 15 - 8 * above);
             for (int y = Chunk::SIZE_Y - 1; y >= 0 && value > 0; --y) {
                 Tile& tile = chunk.tiles[z][y][x];
                 if (tile.isSolid()) break;
@@ -980,8 +1011,9 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
             column != columnInputs.end() ? column->second.data.get() : nullptr;
         const int top = getColumnTopY(coord.x, coord.z);
         estimateSkyLight(*data.data, coord, [&](int x, int z) {
-            return inputs ? inputs->columns[z * Chunk::SIZE_X + x].surface_y
-                          : top;
+            if (!inputs) return std::pair{top, WaterSurface::sea(top)};
+            const auto& sample = inputs->columns[z * Chunk::SIZE_X + x];
+            return std::pair{sample.surface_y, sample.water};
         });
     }
     {
@@ -1187,10 +1219,10 @@ void ChunkManager::dispatchGeneration() {
                                 for (int y = 0; y < Chunk::SIZE_Y && !edited;
                                      ++y)
                                     for (int x = 0; x < Chunk::SIZE_X; ++x) {
-                                        const int surface =
-                                            columns
-                                                ->columns[z * Chunk::SIZE_X + x]
-                                                .surface_y;
+                                        const auto& column =
+                                            columns->columns[z * Chunk::SIZE_X +
+                                                             x];
+                                        const int surface = column.surface_y;
                                         const int worldY =
                                             int(coord.y) * Chunk::SIZE_Y + y;
                                         const Tile& tile =
@@ -1208,9 +1240,15 @@ void ChunkManager::dispatchGeneration() {
                                                       structure_voxels::
                                                           cellIndex(x, y, z))
                                                 : 0;
-                                        if (worldY <= surface
-                                                ? actual == 0
-                                                : actual != expected) {
+                                        const auto liquid =
+                                            !expected && column.water.fills(
+                                                             worldY, surface)
+                                                ? LiquidType::Water
+                                                : LiquidType::None;
+                                        if ((worldY <= surface
+                                                 ? actual == 0
+                                                 : actual != expected) ||
+                                            tile.liquid != liquid) {
                                             edited = true;
                                             break;
                                         }
@@ -1527,6 +1565,20 @@ void ChunkManager::update(WorldEditor* editor) {
     dispatchTreeJobs();
     updateStructureBaselines(editor);
     dispatchMeshes();
+}
+
+MeshHandle* ChunkManager::getWaterMesh(const ChunkCoord& coord) {
+    const auto it = chunks.find(coord);
+    return it != chunks.end() && !it->second.waterTops.empty()
+               ? &it->second.waterMesh
+               : nullptr;
+}
+
+std::span<const float> ChunkManager::uploadedWaterTops(
+    const ChunkCoord& coord) const {
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || !it->second.uploaded) return {};
+    return it->second.waterTops;
 }
 
 MeshHandle* ChunkManager::getMesh(const ChunkCoord& coord) {

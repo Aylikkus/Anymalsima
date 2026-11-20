@@ -83,6 +83,10 @@ TEST(lod_surface_matches_chunks) {
                         for (int y = 0; y < 16; ++y) {
                             const auto& t = chunk.tiles[z][y][x];
                             const int wy = cy * 16 + y;
+                            const bool wet = c.water.fills(wy, c.surfaceY);
+                            CHECK((t.liquid == LiquidType::Water) == wet);
+                            if (wet)
+                                EQUAL(int(t.liquidLevel), 255, "full cell");
                             if (wy <= c.surfaceY)
                                 EQUAL(sampler.materialAt(cx * 16 + x, wy,
                                                          cz * 16 + z),
@@ -100,6 +104,29 @@ TEST(lod_surface_matches_chunks) {
                     }
             }
         }
+    // A boundary-height surface occupies the slab below the boundary.
+    // Air classification and the unloaded query use the same interval.
+    ChunkColumnInputs raised;
+    for (auto& c : raised.columns) {
+        c.surface_y = 380;
+        c.water = {400};
+    }
+    CHECK(!generator.isAirChunk({0, 24, 0}, raised));
+    CHECK(generator.isAirChunk({0, 25, 0}, raised));
+    Chunk water{};
+    const auto& region = world.regions.front();
+    generator.generateChunk(water, {0, 24, 0}, {0, 0, 0}, region,
+                            geology.get(region), {}, &raised);
+    const auto& cell = water.tiles[0][15][0];
+    CHECK(cell.liquid == LiquidType::Water);
+    for (float eye : {399.99f, 400.f, 400.01f}) {
+        const Tile air{};
+        const bool loaded =
+            WaterSurface{}.submerged(eye, -1, eye < 400.f ? &cell : &air);
+        const bool unloaded = raised.columns.front().water.submerged(eye, 380);
+        CHECK(loaded == unloaded);
+        CHECK(loaded == (eye < 400.f));
+    }
 }
 TEST(lod_geology_order_independent) {
     test::Assets assets;
@@ -145,7 +172,8 @@ TEST(lod_stepped_surface_and_bands) {
                     break;
                 }
             CHECK(found);
-            const auto& band = mesh.bands[(z - 256) / 16 * 2 + (x - 256) / 16];
+            const auto& band =
+                mesh.bands[(z - 256) / 16 * 2 + (x - 256) / 16].ground;
             CHECK(band.minY <= (height - 1) / 16);
             CHECK(band.maxY >= (height - 1) / 16);
         }
@@ -238,17 +266,56 @@ TEST(lod_water_and_bounds) {
     bool water = false, floor = false;
     for (const auto& v : mesh.vertices) {
         CHECK(v.x >= 0 && v.x <= 256 && v.z >= 0 && v.z <= 256);
-        if (v.layer == -2) {
-            water = true;
-            CHECK(v.y == SEA_LEVEL_Y + 1);
-            CHECK(v.ny > 0);
-        }
+        CHECK(v.layer != -2);
         if (v.y == 0) floor = true;
+    }
+    for (const auto& v : mesh.water.vertices) {
+        water = true;
+        CHECK(v.layer == -2);
+        CHECK(v.y == SEA_LEVEL_Y + 1);
+        CHECK(v.ny > 0);
     }
     CHECK(water);
     CHECK(floor);
     CHECK(mesh.bytes() < TerrainLod::UploadBudget);
-    EQUAL(sampler.column(20, 20).waterY, SEA_LEVEL_Y + 1, "ocean");
+    EQUAL(sampler.column(20, 20).water.surfaceY, SEA_LEVEL_Y + 1, "ocean");
+    CHECK(mesh.water.bounds.minY == SEA_LEVEL_Y + 1);
+    CHECK(mesh.water.bounds.maxY == SEA_LEVEL_Y + 1);
+
+    // A dry strip below sea level and a rising bank straddle a chunk
+    // boundary. Coarse water must honor both the footprint and its terrain.
+    auto edits = std::make_shared<EditMap>();
+    for (int cx : {0, 1}) {
+        auto edit = std::make_shared<ColumnEdit>();
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x) {
+                const int tx = cx * 16 + x;
+                const int i = ColumnEdit::index(x, z);
+                edit->groundY[i] = tx >= 22 ? 402 : 350;
+                edit->waterY[i] = (tx >= 14 && tx < 18) || tx >= 22 ? -1 : 385;
+                edit->groundBlock[i] = 1;
+            }
+        (*edits)[editKey(cx, 0)] = edit;
+    }
+    sampler.setEdits(edits);
+    for (int spacing : {1, 2, 4, 8, 16, 64}) {
+        const TerrainLod::Patch shore{0, 0, spacing};
+        const auto shoreMesh = TerrainLod::build(shore, sampler, running, 4);
+        CHECK(!shoreMesh.water.vertices.empty());
+        for (size_t i = 0; i < shoreMesh.water.indices.size(); i += 3) {
+            const auto& a =
+                shoreMesh.water.vertices[shoreMesh.water.indices[i]];
+            const auto& b =
+                shoreMesh.water.vertices[shoreMesh.water.indices[i + 1]];
+            const auto& c =
+                shoreMesh.water.vertices[shoreMesh.water.indices[i + 2]];
+            const float x = (a.x + b.x + c.x) / 3.f,
+                        z = (a.z + b.z + c.z) / 3.f;
+            EQUAL(a.y, float(sampler.waterAt(int(x), int(z)).surfaceY),
+                  "water triangle lies in the sampled footprint");
+            CHECK(TerrainLod::meshHeight(shore, sampler, x, z) <= a.y + .001f);
+        }
+    }
     std::atomic_bool cancel{true};
     CHECK(TerrainLod::build(patch, sampler, cancel).vertices.empty());
 }
@@ -353,12 +420,39 @@ TEST(lod_loaded_water_mesh) {
     Tile air{};
     const auto mesh =
         mesher.build(chunk, {0, 0, 0}, [&](int, int, int) { return &air; });
-    EQUAL(mesh.indices.size(), size_t(6), "one water surface");
-    for (const auto& v : mesh.vertices) {
+    EQUAL(mesh.water.indices.size(), size_t(6), "one water surface");
+    for (const auto& v : mesh.water.vertices) {
         CHECK(v.layer == -2);
         CHECK(v.y == 4);
         CHECK(v.ny == 1);
     }
+
+    chunk.tiles[2][3][1] = {};
+    chunk.tiles[2][15][1] = {
+        .liquid = LiquidType::Water, .liquidLevel = 255, .lightLevel = {}};
+    const auto unknown = [](int, int, int) -> const Tile* { return nullptr; };
+    CHECK(mesher.build(chunk, {0, 24, 0}, unknown).water.indices.empty());
+    const auto boundary =
+        mesher.build(chunk, {0, 24, 0}, unknown, {}, [&](int x, int y, int z) {
+            EQUAL(x, 1, "halo x");
+            EQUAL(y, 400, "halo y is in the slab above");
+            EQUAL(z, 2, "halo z");
+            return &air;
+        });
+    EQUAL(boundary.water.indices.size(), size_t(6), "water top from halo");
+    for (const auto& v : boundary.water.vertices) {
+        EQUAL(v.y, 16.f, "boundary height");
+        CHECK(v.x >= 1.f && v.x <= 2.f && v.z >= 2.f && v.z <= 3.f);
+    }
+    const Tile solid{.block_id = 1, .lightLevel = {}};
+    const auto occluded = mesher.build(
+        chunk, {0, 24, 0}, [&](int, int, int) { return &solid; }, {},
+        [&](int, int, int) { return &air; });
+    CHECK(occluded.water.indices.empty());
+    const Tile partial{
+        .liquid = LiquidType::Water, .liquidLevel = 64, .lightLevel = {}};
+    CHECK(WaterSurface{}.submerged(399.2f, -1, &partial));
+    CHECK(!WaterSurface{}.submerged(399.3f, -1, &partial));
 }
 
 TEST(lod_detail_survives_refresh) {
@@ -429,6 +523,71 @@ TEST(lod_detail_low_handoff_wraps) {
     // Beyond the retained ring across the wrapping seam.
     coverage.update({3, 28, 7}, bands, ready, ready, 64);
     CHECK(!coverage.contains(63, 7));
+
+    // The water slab can be ready with the ocean floor outside the draw band.
+    // Pending uploads, light failure, and eviction leave the proxy visible.
+    test::Assets assets;
+    auto world = worldForLod(8, 1, 350);
+    SurfaceSampler sampler(world, assets);
+    const auto bandsAtSeam = TerrainLod::sampleBands(63, 7, sampler);
+    CHECK(bandsAtSeam.water);
+    const std::array waterBands{bandsAtSeam.water->slabs};
+    const ChunkCoord slab{63, unsigned(waterBands[0].minY), 7};
+    std::vector<float> tops(256, float(SEA_LEVEL_Y + 1 - slab.y * 16));
+    TerrainLod::DetailCoverage water(4), ground(4);
+    bool current = false, mesh = false, light = false, matchingProxy = true;
+    auto drawable = [&](ChunkCoord c) {
+        return mesh && light && bandsAtSeam.water->matches(c, tops);
+    };
+    const auto frame = [&](unsigned x, bool detail) {
+        const ChunkCoord camera{x, slab.y, 7};
+        ground.update(
+            camera, std::span(&bandsAtSeam.ground, 1),
+            [](ChunkCoord) { return false; }, drawable, 64);
+        water.update(
+            camera, waterBands,
+            [&](ChunkCoord c) {
+                return current && matchingProxy && drawable(c);
+            },
+            drawable, 64);
+        CHECK(!ground.contains(63, 7));
+        const bool detailed = water.contains(63, 7);
+        const bool proxy = !detailed;
+        EQUAL(int(proxy) + int(detailed && drawable(slab)), 1,
+              "one drawable owner");
+        CHECK(detailed == detail);
+    };
+    frame(1, false);
+    mesh = current = true;
+    frame(1, false);
+    light = true;
+    matchingProxy = false;
+    frame(1, false);
+    matchingProxy = true;
+    frame(1, true);
+    current = false;
+    frame(2, true);
+    tops[0] += 1.f;
+    frame(2, false);
+    tops[0] -= 1.f;
+    current = true;
+    frame(1, true);
+    mesh = false;
+    frame(1, false);
+    CHECK(TerrainLod::shareEdge({992, 96, 1}, {0, 96, 1}, 1024));
+    CHECK(!TerrainLod::shareEdge({992, 96, 1}, {0, 96, 1}, 0));
+    const auto west =
+        TerrainLod::build({960, 64, 2}, sampler, running, 4, true);
+    const auto east = TerrainLod::build({0, 64, 2}, sampler, running, 4, true);
+    const auto edgeHeights = [](const auto& mesh, float x) {
+        std::map<float, float> result;
+        for (const auto& v : mesh.water.vertices)
+            if (v.x == x) result[v.z] = v.y;
+        return result;
+    };
+    const auto westEdge = edgeHeights(west, 1024.f);
+    CHECK(!westEdge.empty());
+    CHECK(westEdge == edgeHeights(east, 0.f));
 }
 
 TEST(lod_mesh_height_matches_triangles) {
@@ -480,12 +639,8 @@ TEST(lod_detail_coarse_joins) {
         const auto& d = mesh.vertices[i + 3];
         // No internal wall between adjacent detailed columns.
         CHECK(!(a.x == 288 && b.x == 288));
-        CHECK(close(d.y,
-                    std::max(TerrainLod::meshHeight(patch, sampler, d.x, d.z),
-                             float(SEA_LEVEL_Y + 1))));
-        CHECK(close(c.y,
-                    std::max(TerrainLod::meshHeight(patch, sampler, c.x, c.z),
-                             float(SEA_LEVEL_Y + 1))));
+        CHECK(close(d.y, TerrainLod::meshHeight(patch, sampler, d.x, d.z)));
+        CHECK(close(c.y, TerrainLod::meshHeight(patch, sampler, c.x, c.z)));
         CHECK(a.y == b.y);
     }
 }
