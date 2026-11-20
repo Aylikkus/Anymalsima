@@ -66,7 +66,7 @@ vec3 surfaceNormal(vec3 position, vec3 normal, float layer)
 //   [2] xyz = world forward, w = cos(outer angle), or -2 without a cone
 //   [3] x = cos(inner angle), y = 1 when the voxel near field covers the
 //       first SURFACE_NEAR_RANGE blocks (the term fades in over that band),
-//       z = shadow slot in the atlas, or -1 without a shadow map
+//       z = ready shadow slot in the atlas, w = open faces of the emitter
 #define SURFACE_MAX_FAR_LIGHTS 32
 #define SURFACE_NEAR_RANGE 15.0
 uniform vec4 u_lights[128];
@@ -145,14 +145,11 @@ float surfaceStructureSky(vec3 position, vec3 normal)
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// skyGate: how much sky the point sees. Lights without a shadow map use it
-// so caves stay dark; shadowed lights are occluded exactly instead.
 // nearField: 1 where the voxel light volume covers the first
 // SURFACE_NEAR_RANGE blocks (detailed chunks), so the far term fades in
 // beyond it; 0 on surfaces without voxel light (distant terrain, joins,
 // structures), which take the far term all the way to the light.
-vec3 surfaceFarLight(vec3 position, vec3 normal, vec3 geometric, float skyGate,
-                     float nearField)
+vec3 surfaceFarLight(vec3 position, vec3 normal, vec3 geometric, float nearField)
 {
     vec3 sum = vec3_splat(0.0);
     int count = int(u_light_info.x + 0.5);
@@ -173,11 +170,17 @@ vec3 surfaceFarLight(vec3 position, vec3 normal, vec3 geometric, float skyGate,
             strength *= smoothstep(SURFACE_NEAR_RANGE - 4.0,
                                    SURFACE_NEAR_RANGE, d);
         if (strength <= 0.0) continue;
-        if (extra.z > -0.5)
-            strength *= shadowVisibility(extra.z, -toLight, geometric,
-                                         placement.w);
-        else
-            strength *= skyGate;
+        // A lamp at the center of its tile reaches the first face along the
+        // original ray before any shadow-map bias. A solid tile across that
+        // face blocks the ray even if its mesh is missing from the atlas.
+        vec3 offset = abs(toLight);
+        if (extra.w < 63.0 && max(offset.x, max(offset.y, offset.z)) > 0.5) {
+            float face;
+            vec2 ndc;
+            shadowFace(-toLight, face, ndc);
+            if ((int(extra.w) & (1 << int(face))) == 0) continue;
+        }
+        strength *= shadowVisibility(extra.z, -toLight, geometric, placement.w);
         float facing = SURFACE_AMBIENT
                      + SURFACE_DIFFUSE * max(dot(normal, l), 0.0);
         sum += color.rgb * (strength * facing);

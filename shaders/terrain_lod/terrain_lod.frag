@@ -127,7 +127,7 @@ void main()
     // Keep artificial lights independent of this estimate.
     float sky = surfaceOceanSky(v_position.y)
               * surfaceStructureSky(v_position, normal);
-    vec3 far = surfaceFarLight(v_position, surface, normal, 1.0, 0.0)
+    vec3 far = surfaceFarLight(v_position, surface, normal, 0.0)
              + surfaceLodLight(v_position);
     color = surfaceLight(surface, color, vec2(sky, 0.0), vec3_splat(1.0),
                          normal, 0.0, far);

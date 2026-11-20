@@ -130,12 +130,17 @@ void LightRenderer::renderShadows(RenderTarget& target,
 
 void LightRenderer::fillLightUniforms() {
     std::array<float, MaxLights * 16> data{};
-    activeLights = std::min<int>(MaxLights, int(visible.size()));
-    for (int i = 0; i < activeLights; ++i) {
+    activeLights = 0;
+    const size_t count = std::min(visible.size(), size_t(MaxLights));
+    for (size_t i = 0; i < count; ++i) {
         const auto& view = visible[i];
+        const int slot = shadowMaps->slot(view.id);
+        // Sky exposure at the receiver cannot tell whether a wall separates
+        // it from the light. Wait for shadow coverage before lighting it.
+        if (slot < 0) continue;
         const auto& e = view.source->emission;
         const auto& d = view.source->direction;
-        float* v = &data[i * 16];
+        float* v = &data[activeLights++ * 16];
         v[0] = float(view.position[0]);
         v[1] = float(view.position[1]);
         v[2] = float(view.position[2]);
@@ -158,7 +163,8 @@ void LightRenderer::fillLightUniforms() {
         // Every far light also has a flood-filled near field (tiles and
         // entity lights alike), so the per-pixel term hands over from it.
         v[13] = 1;
-        v[14] = float(shadowMaps->slot(view.id));
+        v[14] = float(slot);
+        v[15] = float(view.source->openFaces);
     }
     lights.setVec4Array(data.data(), MaxLights * 4);
     info.setVec4({float(activeLights), skyDarkness, 0, 0});

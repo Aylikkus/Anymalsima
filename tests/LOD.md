@@ -161,8 +161,10 @@ lights 150 tiles ahead and dims the sky (block light, far light, distant glow,
 glare); views them from 350 tiles away and high above; then, back home, builds
 a hollow stone box and puts an 8 km entity light inside, in an opaque block
 like a lamp. With its shadow map the capture must match the box without the
-light (`boxed_light_changed_pixels` at most 200), and the same light with the
-walls removed must change at least 150000 pixels (the control; a light
+light (`boxed_light_changed_pixels` at most 200). The test repeats the comparison
+with every shadow slot occupied (`over_budget_light_changed_pixels` at most
+200). The same light with the walls removed must change at least 150000
+pixels (the control; a light
 shadowed by its own block changes about 59000). `SINGLE_LAMP=1` places one
 test lamp instead of six, so it is always within the shadow budget;
 `LAMP_HEIGHT=n` raises it n tiles; `LAMP_BOX=1` walls it in on five faces

@@ -130,10 +130,7 @@ void main()
         light.x = surfaceOceanSky(v_position.y)
                 * surfaceStructureSky(v_position, geometric);
     }
-    // As on terrain LODs, don't use estimated ocean skylight to gate lamps.
-    float skyGate = u_light_chunk.w > 0.5 ? light.x : 1.0;
-    vec3 far = surfaceFarLight(v_position, normal, geometric, skyGate,
-                               u_light_chunk.w);
+    vec3 far = surfaceFarLight(v_position, normal, geometric, u_light_chunk.w);
     // Without a volume (distant joins and structures) small lights come
     // from the coarse distant glow map.
     if (u_light_chunk.w < 0.5) far += surfaceLodLight(v_position);

@@ -1,8 +1,8 @@
 # Handoff: scaling far lights to many lighthouses
 
-Status: **analysis only, nothing implemented.** Pick this up when worlds
-start holding many far-reaching lights (generated settlements with
-lighthouses, megastructures).
+The shadow requirement below is implemented. Revisit the remaining work when
+worlds start holding many far-reaching lights, such as generated settlements
+with lighthouses.
 
 ## Target scenario
 
@@ -20,14 +20,13 @@ Far light = `LightEmission::isFar()` (radius > 15). Each frame:
    (`camera.viewDistance`: 4096 / 6144 / 8192 for Low / Medium / High), and
    ranks them by `max(0, distance - radius)`: lights whose radius covers the
    camera first, then by how close their light comes to it.
-2. `LightRenderer::fillLightUniforms` sends the first
-   `LightRenderer::MaxLights` (**32**) to `u_lights`; they are evaluated per
-   pixel on voxel and distant terrain (`surfaceFarLight` in
-   `shaders/world_surface.sh`). Further lights are dropped.
-3. `LightShadows::assign` gives cube shadow maps to the first
+2. `LightShadows::assign` gives cube shadow maps to the first
    `Budgets[quality].lights` (**4 / 8 / 16**) of that ranking; a light keeps
-   its slot while it ranks within 1.5 x the budget (`Keep`). Lights without a
-   slot use the unshadowed far term, gated only by sky exposure.
+   its slot while it ranks within 1.5 x the budget (`Keep`).
+3. `LightRenderer::fillLightUniforms` sends only lights with ready maps to
+   `u_lights`. Voxel terrain, distant terrain and foliage evaluate those
+   lights per pixel. Lights waiting for a map or outside the budget still
+   contribute to the voxel near field (up to 15 tiles).
 4. Glare (`LightRenderer::drawGlare`) is separate: every unsealed light
    within the view distance, nearest first, up to `MaxGlares` (4096), one
    instanced draw.
@@ -44,29 +43,19 @@ Far light = `LightEmission::isFar()` (radius > 15). Each frame:
 
 ## Problems to expect
 
-1. **Distant unshadowed lighthouses leak.** A lighthouse 3–5 km away that is
-   outside the shadow budget lights everything with open sky inside its
-   radius, including the far sides of hills. With an 8 km view, many
-   lighthouses can be in range while only 16 are shadowed, so leaky lit
-   patches will show on distant terrain. This is the most visible issue.
-2. **More than 32 in view distance: the farthest are dropped** from per-pixel
-   light. Their distant lit patches vanish (their glare stays), and as the
-   ranking changes while moving, patches can pop in and out. Unlikely with
-   ~100 spread over a large map, possible in dense regions on High.
-3. **The per-frame scan touches every registered light,** including small
+1. **Only lights with shadow slots illuminate distant surfaces.** With an
+   8 km view, many lighthouses can be in range while only 16 are shadowed.
+   Distant lit patches can pop in and out as the ranking changes.
+2. **The per-frame scan touches every registered light,** including small
    torches (`registry.forEach` in `visibleFarLights`). Fine for hundreds or
    a few thousand; with tens of thousands of torches it becomes measurable
    frame time.
 
 ## Proposed changes (in order of value)
 
-1. **Fade or approximate distant unshadowed lights instead of leaking.**
-   For lights without a shadow slot beyond some distance, drop the per-pixel
-   far term and rely on the glare dot plus a coarse glow, like small lights
-   (`LodLightMap`). Better: occlude with the terrain heightmap (march the
-   light-to-receiver segment against ground heights in the shader, or bake a
-   per-light horizon map on the CPU when its region loads) so mountains still
-   block them. This removes leaks without more shadow maps.
+1. **Approximate shadows for lights outside the atlas budget.** A terrain
+   heightmap test or a per-light horizon map could let exposed lighthouses
+   light nearby terrain while keeping hills in shadow.
 2. **Rank by visible contribution.** Skip lights whose sphere is outside the
    view frustum, and weight the rest by how much on-screen area they light
    (e.g. projected sphere size times attenuation at its nearest visible

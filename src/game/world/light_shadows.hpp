@@ -20,8 +20,8 @@
 // Shadows are cached: a face is rendered again only when a light is
 // assigned, moves or turns, when a chunk mesh inside its radius changes, or
 // (throttled) when distant terrain selection changes. A per-frame face
-// budget spreads the cost. Lights without a slot keep the unshadowed,
-// sky-gated far term.
+// budget spreads the cost. Only lights with ready slots illuminate surfaces
+// beyond the voxel near field.
 class LightShadows {
    public:
     struct Budget {

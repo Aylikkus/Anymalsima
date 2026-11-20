@@ -159,9 +159,11 @@ int main(int argc, char** argv) {
         LightVolumeManager volumes(chunks, assets.getStorage<Block>(),
                                    &blockLight, &sunlight);
         // SMOKE_QUALITY=0..2 picks the light (shadow) budget preset.
-        const int lightQuality = std::getenv("SMOKE_QUALITY")
-                                     ? std::atoi(std::getenv("SMOKE_QUALITY"))
-                                     : 0;
+        const int lightQuality =
+            std::clamp(std::getenv("SMOKE_QUALITY")
+                           ? std::atoi(std::getenv("SMOKE_QUALITY"))
+                           : 0,
+                       0, int(std::size(LightShadows::Budgets)) - 1);
         LightRenderer lightRenderer(renderer, lightQuality);
         // Plants, in the lights scenario (the only one binding light
         // volumes, like the game).
@@ -189,6 +191,7 @@ int main(int argc, char** argv) {
         TilePos boxLamp{};
         std::vector<uint8_t> boxBaseline, lastPixels;
         LightSourceRegistry::Id beaconId = 0;
+        std::vector<LightSourceRegistry::Id> shadowBudgetLights;
         // As in GameplayState: voxel geometry changes re-render shadows.
         auto chunkChanged = [&](const ChunkCoord& c) {
             const std::array<double, 3> min{c.x * 16.0, c.y * 16.0, c.z * 16.0};
@@ -1405,7 +1408,7 @@ int main(int argc, char** argv) {
                                   << " registry=" << registry.size() << '\n';
                         if (lightRenderer.glareCount() == 0) result = 1;
                     }
-                    if (phase == 4 || phase == 6) boxBaseline = lastPixels;
+                    if (phase == 4 || phase == 7) boxBaseline = lastPixels;
                     if (phase == 5) {
                         // An 8 km light walled in by a hollow box: shadows
                         // keep everything outside exactly as dark as without
@@ -1419,7 +1422,18 @@ int main(int argc, char** argv) {
                         if (changed > 200 || lightRenderer.shadowedCount() == 0)
                             result = 1;
                     }
-                    if (phase == 7) {
+                    if (phase == 6) {
+                        const size_t changed = changedPixels();
+                        const int slot = lightRenderer.shadows().slot(beaconId);
+                        std::cout
+                            << "over_budget_light_changed_pixels=" << changed
+                            << " slot=" << slot << '\n';
+                        if (changed > 200 || slot >= 0 ||
+                            lightRenderer.shadowedCount() !=
+                                int(shadowBudgetLights.size()))
+                            result = 1;
+                    }
+                    if (phase == 8) {
                         // Control: without its walls the same light must
                         // visibly light the scene.
                         const size_t changed = changedPixels();
@@ -1548,9 +1562,27 @@ int main(int argc, char** argv) {
                     } else if (phase == 5) {
                         addBeacon();
                     } else if (phase == 6) {
+                        // Fill every shadow slot with effectively dark
+                        // lights closer to the eye than the boxed beacon.
+                        registry.remove(beaconId);
+                        const Vec3 eye = camera.eye();
+                        const int budget =
+                            LightShadows::Budgets[lightQuality].lights;
+                        for (int i = 0; i < budget; ++i) {
+                            LightSource filler;
+                            filler.owner = LightSource::Owner::Entity;
+                            filler.emission.radius = 8000;
+                            filler.emission.intensity = 1e-6f;
+                            filler.position = {eye.x, eye.y, eye.z};
+                            shadowBudgetLights.push_back(registry.add(filler));
+                        }
+                        addBeacon();
+                    } else if (phase == 7) {
                         // Remove the light, the walls and the roof (keep the
                         // floor) and capture the open scene without it.
                         registry.remove(beaconId);
+                        for (const auto id : shadowBudgetLights)
+                            registry.remove(id);
                         std::vector<EditRequest> open;
                         for (int dy = 1; dy < 5; ++dy)
                             for (int dz = -2; dz <= 2; ++dz)
@@ -1561,7 +1593,7 @@ int main(int argc, char** argv) {
                                          EditMode::Replace,
                                          0});
                         expectApplied(editor.apply(open));
-                    } else if (phase == 7) {
+                    } else if (phase == 8) {
                         addBeacon();
                     }
                 }
@@ -1640,6 +1672,7 @@ int main(int argc, char** argv) {
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
+            if (lights && (phase < 8 || settled < 10)) result = 1;
             if (travel && (phase < 2 || settled < 10)) result = 1;
             if (structure &&
                 (phase < 2 || edits.size() == 0 || lod.structureCount() == 0))
