@@ -20,8 +20,9 @@ struct WorldMeta : ISerializable {
     // surface topsoil tile. 7: plants (FLOR). 8: trees (living wood).
     // 9: surface ceiling blended across region borders (no beach steps).
     // 10: prototype roots. 11: branching roots. 12: bark and inner wood.
-    // 13: uphill root contact.
-    static constexpr int GeneratorVersion = 13;
+    // 13: uphill root contact. 14: generated standing basins.
+    static constexpr int HydrologyVersion = 14;
+    static constexpr int GeneratorVersion = HydrologyVersion;
     // Oldest generator version whose surface heights match the current one.
     // Bump it whenever surface heights change (not for material changes).
     static constexpr int SurfaceVersion = 9;

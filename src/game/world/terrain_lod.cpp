@@ -349,11 +349,15 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
     Mesh mesh;
     const int endX = std::min(p.x + p.size(), sampler.width());
     const int endZ = std::min(p.z + p.size(), sampler.depth());
+    mesh.provisionalWater = sampler.hasUnrefinedWater(p.x, p.z, endX, endZ);
     mesh.bounds = {float(p.x), float(Y_CHUNKS * Chunk::SIZE_Y),
                    float(p.z), float(endX),
                    0,          float(endZ)};
     mesh.water.bounds = mesh.bounds;
     const bool stepped = p.spacing == 1;
+    // Refine the shoreline at up to eight subdivisions per terrain cell.
+    // Stepped and nearby patches can still represent each individual tile.
+    const int waterSpacing = std::max(1, p.spacing / 8);
     const auto point = [&](float x, float z) {
         return terrainPoint(p, sampler, x, z);
     };
@@ -447,17 +451,10 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                                    int bz) -> void {
                 const int mx = (ax + bx) / 2, mz = (az + bz) / 2;
                 const auto sample = sampler.waterAt(mx, mz);
-                const bool unit = bx - ax == 1 && bz - az == 1;
-                if (!unit) {
+                if (bx - ax > waterSpacing || bz - az > waterSpacing) {
                     // Refine shore cells and any edited footprint. Broad areas
                     // of deep sea and high land keep the coarse tessellation.
-                    bool uniform = !sampler.hasEdits(ax, az, bx, bz);
-                    for (int tx : {ax, mx, bx - 1})
-                        for (int tz : {az, mz, bz - 1}) {
-                            uniform &= sampler.waterAt(tx, tz).surfaceY ==
-                                       sample.surfaceY;
-                        }
-                    if (!uniform) {
+                    if (!sampler.uniformWater(ax, az, bx, bz, sample)) {
                         const int sx = std::max(ax + 1, mx);
                         const int sz = std::max(az + 1, mz);
                         self(self, ax, az, sx, sz);

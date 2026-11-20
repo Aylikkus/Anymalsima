@@ -137,6 +137,9 @@ struct TreeLandmark {
     double spacing = 0;
 };
 // Landmarks of the whole map: a pure function of the world and the seed.
+inline uint32_t treeGenerationSeed(const World& world) {
+    return world.genSettings.feature_seed ^ 0x7ee5u;
+}
 std::vector<TreeLandmark> placeTreeLandmarks(const TreeSpeciesTable& table,
                                              const World& world, uint32_t seed);
 

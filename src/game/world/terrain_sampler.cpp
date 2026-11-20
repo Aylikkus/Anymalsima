@@ -2,6 +2,8 @@
 
 #include <limits>
 
+#include "generated_hydrology.hpp"
+
 namespace {
 double smooth(double value) {
     value = std::clamp(value, 0.0, 1.0);
@@ -62,6 +64,7 @@ TerrainNeighborhood TerrainNeighborhood::capture(const World& world,
     result.height = world.height;
     result.height_seed = world.genSettings.height_seed;
     result.feature_seed = world.genSettings.feature_seed;
+    result.hydrology = world.hydrology;
     for (int dz = -2; dz <= 2; ++dz) {
         for (int dx = -2; dx <= 2; ++dx) {
             // X wraps around the world; Z clamps to its edge rows.
@@ -288,6 +291,17 @@ double TerrainSampler::surface(double x, double z) const {
     return std::clamp(shore, 0.0, ceiling);
 }
 
+bool TerrainSampler::belowSea(int x, int z) const {
+    const int rx = x / TerrainTuning::RegionX;
+    const int rz = z / TerrainTuning::RegionZ;
+    const double coast = coastDistance(rx, rz, x, z);
+    // The land branch and the ceiling both stay above the water fill.
+    // The seabed branch stays below it. Only the blend needs full relief.
+    if (coast <= -TerrainTuning::BlendWidth) return true;
+    if (coast >= TerrainTuning::BlendWidth) return false;
+    return surface(x, z) < SEA_LEVEL_Y;
+}
+
 TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
     const double center = surface(x, z);
     // Compare against the center as well: central differences alone can hide
@@ -299,8 +313,20 @@ TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
     return {int(std::floor(center)), slope};
 }
 
+WaterSurface TerrainSampler::water(int64_t x, int64_t z, int groundY) const {
+    if (!data.hydrology) return WaterSurface::sea(groundY);
+    return data.hydrology->waterAt(int(WorldWrap::mod(x, data.periodX())),
+                                   int(z), groundY);
+}
+
 SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
                                 const TerrainSample& terrain) const {
+    return soil(x, z, terrain, water(x, z, terrain.surface_y));
+}
+
+SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
+                                const TerrainSample& terrain,
+                                WaterSurface surfaceWater) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     const int rx = int(x / sx), rz = int(z / sz);
     const double lx = double(x) - rx * sx, lz = double(z) - rz * sz;
@@ -321,6 +347,7 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
         double weight;
     };
     std::array<Choice, 4> choices{};
+    const bool submerged = surfaceWater.wet();
     double total = 0;
     int count = 0;
     for (int iz = 0; iz < 2; ++iz)
@@ -337,11 +364,11 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
             // underwater rule still follows the actual shoreline.
             Region source = candidate.region;
             source.land_height_m = terrain.surface_y;
-            const bool eligible =
-                std::any_of(candidate.soil_rules.begin(),
-                            candidate.soil_rules.end(), [&](const auto& rule) {
-                                return SoilGenerator::allowed(rule, source);
-                            });
+            const bool eligible = std::any_of(
+                candidate.soil_rules.begin(), candidate.soil_rules.end(),
+                [&](const auto& rule) {
+                    return SoilGenerator::allowed(rule, source, submerged);
+                });
             if (!eligible) continue;
             choices[count++] = {&candidate, weight};
             total += weight;
@@ -389,8 +416,7 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     Region source = selected->region;
     source.land_height_m = terrain.surface_y;
     auto profile = selected->soil;
-    if (WaterSurface::sea(terrain.surface_y).wet() ||
-        source.vegetation == VegetationType::NONE)
+    if (submerged || source.vegetation == VegetationType::NONE)
         profile.topsoil_block_id = 0;
     auto cover = SoilGenerator::sample(profile, source, x, z, data.periodX());
     const double retention =
@@ -409,8 +435,7 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
     // Cover grows on the top topsoil tile of dry land. It follows the soil's
     // source region, so it blends across region borders with the soil.
     if (result.count > 0 && result.layers[0].topsoil &&
-        result.layers[0].depth_from_surface_m == 0 &&
-        !WaterSurface::sea(terrain.surface_y).wet() &&
+        result.layers[0].depth_from_surface_m == 0 && !submerged &&
         selected->cover.cover_id) {
         result.cover = selected->cover.cover_id;
         result.coverDensity = GroundCoverGenerator::density(
@@ -440,9 +465,12 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
                 slope =
                     std::max(slope, std::abs(heights[index + offset] - center));
             const TerrainSample terrain{int(std::floor(center)), slope};
+            const auto surfaceWater =
+                water(originX + x, originZ + z, terrain.surface_y);
             out.columns[z * Chunk::SIZE_X + x] = {
-                terrain.surface_y, soil(originX + x, originZ + z, terrain),
-                slope, WaterSurface::sea(terrain.surface_y)};
+                terrain.surface_y,
+                soil(originX + x, originZ + z, terrain, surfaceWater), slope,
+                surfaceWater};
         }
     return out;
 }

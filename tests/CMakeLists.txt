@@ -4,6 +4,7 @@ find_package(Threads REQUIRED)
 add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/location_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/generated_hydrology.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
@@ -61,6 +62,7 @@ target_link_libraries(world_logic_cpu PUBLIC
 add_executable(world_logic_tests
     support/test_main.cpp
     unit/game/world/generation_tests.cpp
+    unit/game/world/hydrology_tests.cpp
     unit/game/world/soil_tests.cpp
     unit/game/world/terrain_tests.cpp
     unit/game/world/lod_tests.cpp
@@ -461,3 +463,15 @@ target_link_libraries(tree_benchmark PRIVATE world_logic_cpu)
 target_include_directories(tree_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_compile_definitions(tree_benchmark PRIVATE
     SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")
+
+foreach(case hydrology_basin_outlets_and_wrap
+             hydrology_saved_baseline_matches_new_chunk
+             hydrology_lod_fallback_refines_visible_water)
+    add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
+    set_tests_properties(game.world.${case} PROPERTIES
+        LABELS "unit;gameplay;world;water" TIMEOUT 30)
+    if(ANYMALSIMA_TEST_SANITIZERS)
+        set_tests_properties(game.world.${case} PROPERTIES
+            ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endif()
+endforeach()

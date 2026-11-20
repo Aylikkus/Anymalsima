@@ -7,7 +7,6 @@
 #include "ground_cover_generator.hpp"
 #include "items/block.hpp"
 #include "items/ground_cover.hpp"
-#include "water_surface.hpp"
 
 namespace {
 
@@ -158,6 +157,7 @@ namespace {
 struct Env {
     bool valid = false;
     int surfaceY = 0;
+    bool submerged = false;
     double slope = 0;
     uint8_t cover = 0, coverDensity = 0;
     uint8_t soil = 0;
@@ -228,11 +228,13 @@ const Env& Generator::env(int64_t x, int64_t z) {
             lz < Chunk::SIZE_Z) {
             const auto& c = in.columns->columns[lz * Chunk::SIZE_X + lx];
             e.surfaceY = c.surface_y;
+            e.submerged = c.water.wet();
             e.slope = c.slope;
             soil = c.soil;
         } else {
             const auto t = sampler.sample(cx, z);
             e.surfaceY = t.surface_y;
+            e.submerged = sampler.water(cx, z, t.surface_y).wet();
             e.slope = t.slope;
             soil = sampler.soil(cx, z, t);
         }
@@ -255,7 +257,7 @@ bool Generator::suits(const FloraSpeciesRule& r, const Env& e) const {
     if (!e.valid) return false;
     return floraSuits(rules, r,
                       {e.surfaceY, e.slope, e.cover, e.coverDensity, e.soil,
-                       e.topsoil, e.region});
+                       e.topsoil, e.region, e.submerged});
 }
 
 bool Generator::suits(const Candidate& c) {
@@ -481,7 +483,7 @@ double floraClusterMask(const FloraSpeciesRule& r, uint32_t worldSeed, double x,
 bool floraSuits(const FloraSpeciesTable& table, const FloraSpeciesRule& r,
                 const FloraSite& e) {
     if (!e.soil || !e.region) return false;
-    if (WaterSurface::sea(e.surfaceY).wet() && !r.underwater) return false;
+    if (e.submerged && !r.underwater) return false;
     if (e.slope > r.maxSlope) return false;
     if (r.coverForbidden.test(e.cover)) return false;
     if (r.coverRequired.any() &&
@@ -501,7 +503,7 @@ bool floraSuits(const FloraSpeciesTable& table, const FloraSpeciesRule& r,
     Region region = *e.region;
     region.land_height_m = e.surfaceY;
     return std::any_of(r.climate.begin(), r.climate.end(), [&](auto& rule) {
-        return SoilGenerator::allowed(rule, region);
+        return SoilGenerator::allowed(rule, region, e.submerged);
     });
 }
 

@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "core/geometry.hpp"
+#include "generated_hydrology.hpp"
 #include "generation/perlin_noise.hpp"
 #include "height_profile.hpp"
 #include "layers_generator.hpp"
@@ -14,17 +15,22 @@ World WorldGenerator::generate(const WorldGenSettings &settings,
     World &world = tempWorld;
 
     generateHeight(settings, shouldCancel);
-    assignLakes(world);
     generateHumidity(settings, shouldCancel);
     generateTemperature(settings, shouldCancel);
     generateRivers(settings, shouldCancel);
     generateFeatures(settings, assets, shouldCancel);
 
+    if (shouldCancel()) return {};
+    world.genSettings = settings;
+    world.hydrology = GeneratedHydrology::build(world, shouldCancel);
+    if (!world.hydrology) return {};
+    for (int i = 0; i < int(world.regions.size()); ++i) {
+        if (world.hydrology->candidateBody(i) > GeneratedHydrology::Sea)
+            world.regions[i].addFeature(FeatureMask::LAKE);
+    }
     buildRegionMeshes(shouldCancel);
 
-    world.genSettings = settings;
-
-    return world;
+    return std::move(world);
 }
 
 void WorldGenerator::generateHeight(const WorldGenSettings &settings,
@@ -101,72 +107,6 @@ void WorldGenerator::generateHeight(const WorldGenSettings &settings,
     }
 
     computeDistanceToWater(world, waterQ);
-}
-
-void WorldGenerator::assignLakes(World &world) {
-    int w = world.width;
-    int h = world.height;
-
-    std::vector<uint8_t> visited(w * h, 0);
-
-    auto isWater = [&](const Region &r) {
-        return r.land == LandType::WATER || r.land == LandType::DEEP_WATER ||
-               r.land == LandType::SHORE;
-    };
-
-    auto wrapX = [w](int x) {
-        x %= w;
-        if (x < 0) x += w;
-        return x;
-    };
-
-    const int dx[8] = {1, -1, 0, 0, 1, 1, -1, -1};
-    const int dy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
-
-    const int LAKE_MAX = 100;
-
-    for (int i = 0; i < w * h; ++i) {
-        if (visited[i] || !isWater(world.regions[i])) continue;
-
-        std::queue<int> q;
-        std::vector<int> body;
-
-        q.push(i);
-        visited[i] = 1;
-
-        bool touchesEdge = false;
-
-        while (!q.empty()) {
-            int cur = q.front();
-            q.pop();
-
-            body.push_back(cur);
-
-            int cx = cur % w;
-            int cy = cur / w;
-
-            if (cy == 0 || cy == h - 1) touchesEdge = true;
-
-            for (int d = 0; d < 8; ++d) {
-                int nx = wrapX(cx + dx[d]);
-                int ny = cy + dy[d];
-
-                if (ny < 0 || ny >= h) continue;
-
-                int ni = ny * w + nx;
-
-                if (visited[ni] || !isWater(world.regions[ni])) continue;
-
-                visited[ni] = 1;
-                q.push(ni);
-            }
-        }
-
-        if (!touchesEdge && body.size() <= LAKE_MAX) {
-            for (int idx : body)
-                world.regions[idx].addFeature(FeatureMask::LAKE);
-        }
-    }
 }
 
 void WorldGenerator::computeDistanceToWater(World &world,
@@ -1274,21 +1214,6 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
     world.regionMeshes.clear();
     world.regionMeshes.resize(static_cast<int>(LayerType::COUNT));
 
-    auto isLayer = [&](LayerType layer, const Region &r) -> bool {
-        switch (layer) {
-            case LayerType::WATER:
-                return r.height < 0.55f;
-            case LayerType::LAND:
-                return r.land == LandType::PLAINS ||
-                       r.land == LandType::HILLS ||
-                       r.land == LandType::MOUNTAINS ||
-                       r.land == LandType::PEAK;
-            case LayerType::COUNT:
-                return false;
-        }
-        return false;
-    };
-
     // ─────────────────────────────────────────────
     // Marching Squares lookup table
     // Each cell corner: TL=8, TR=4, BR=2, BL=1
@@ -1405,7 +1330,8 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
         auto sample = [&](int x, int y) -> uint8_t {
             x = (x % w + w) % w;          // wrap X
             y = std::clamp(y, 0, h - 1);  // no Y wrap
-            return isLayer(layer, world.regions[y * w + x]) ? 1 : 0;
+            const bool water = world.hydrology->candidateBody(y * w + x) != 0;
+            return layer == LayerType::WATER ? water : !water;
         };
 
         for (int gy = 0; gy < gh; ++gy) {
@@ -1472,40 +1398,25 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
             else
                 buf = &chunk.lod7;
 
-            for (int i = 0; i < 3; ++i) {
-                int ix, iy;
-                float height;
-
-                if (i == 0) {
-                    ix = int(a.x);
-                    iy = int(a.y);
-                    height = sampleHeight(a);
-                } else if (i == 1) {
-                    ix = int(b.x);
-                    iy = int(b.y);
-                    height = sampleHeight(b);
-                } else {
-                    ix = int(c.x);
-                    iy = int(c.y);
-                    height = sampleHeight(c);
-                }
-
-                // Wrap X for region lookup, clamp Y (no vertical wrap)
-                int sx = ((ix % w) + w) % w;        // wrap, not clamp
-                int sy = std::clamp(iy, 0, h - 1);  // Y still clamped
+            for (const auto p : {a, b, c}) {
+                const int sx = int(WorldWrap::mod(int(std::floor(p.x)), w));
+                const int sy = std::clamp(int(std::floor(p.y)), 0, h - 1);
+                const float height = sampleHeight(p);
 
                 const Region &r = world.regions[sy * w + sx];
                 auto f = encodeFeatures(r);
 
                 TerrainVertex v;
-                v.x = ix;  // ← original position, NOT clamped/wrapped
-                v.y = iy;
+                v.x = p.x;
+                v.y = p.y;
                 v.z = 0.0f;
 
                 v.biome = f.biome / 255.0f;
                 v.moisture = f.moisture / 255.0f;
                 v.temperature = f.temperature / 255.0f;
-                v.height = height;
+                // The preview shader uses 0.5 to select its water palette.
+                v.height = layer == LayerType::WATER ? std::min(height, .499f)
+                                                     : std::max(height, .5f);
 
                 buf->push_back(v);
             }
@@ -1542,8 +1453,8 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
 
                 int config = (tl << 3) | (tr << 2) | (br << 1) | bl;
 
-                float ox = static_cast<float>(gx);
-                float oy = static_cast<float>(gy);
+                float ox = static_cast<float>(gx - 1);
+                float oy = static_cast<float>(gy - 1);
 
                 if (config == 15) {
                     Vec2 a{ox, oy};
@@ -1586,6 +1497,15 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
                     {ox, oy + 0.5f},        // left
                 };
 
+                if (layer == LayerType::WATER &&
+                    (config == 5 || config == 10)) {
+                    for (int i = 0; i < 4; ++i)
+                        if (corners[i].inside)
+                            emitTri(corners[i].pos, mids[i], mids[(i + 3) % 4],
+                                    0);
+                    continue;
+                }
+
                 for (int ci = 0; ci < 4; ++ci) {
                     int ni = (ci + 1) % 4;
                     if (corners[ci].inside) cellPoly.push_back(corners[ci].pos);
@@ -1624,8 +1544,7 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
                             if (wy >= h) continue;
 
                             ++total;
-                            if (isLayer(layer, world.regions[wy * w + wx]))
-                                ++count;
+                            if (sample(wx, wy)) ++count;
                         }
                     }
                     dgrid[(dy + 1) * dgw + (dx + 1)] =
@@ -1694,6 +1613,15 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
                     };
 
                     std::vector<Vec2> cellPoly;
+                    if (layer == LayerType::WATER &&
+                        (config == 5 || config == 10)) {
+                        for (int i = 0; i < 4; ++i)
+                            if (corners[i].inside)
+                                emitTri(corners[i].pos, mids[i],
+                                        mids[(i + 3) % 4], lodLevel);
+                        continue;
+                    }
+
                     cellPoly.reserve(6);
                     for (int ci = 0; ci < 4; ++ci) {
                         int ni = (ci + 1) % 4;

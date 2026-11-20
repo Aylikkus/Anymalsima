@@ -60,17 +60,20 @@ class SurfaceInputCache {
 // lighting, live voxel access or GPU calls. Owner must outlive the sampler.
 class SurfaceSampler {
    public:
+    enum class WaterDetail { Exact, CertifiedSea };
     // edits: gameplay changes to show instead of generated terrain (ground
     // height, top block, water). Structures above the generated surface are
     // not part of the height field; see structureTop().
     SurfaceSampler(const World& world, IAssets& assets,
                    std::shared_ptr<SurfaceInputCache> shared = nullptr,
-                   std::shared_ptr<const EditMap> edits = nullptr)
+                   std::shared_ptr<const EditMap> edits = nullptr,
+                   WaterDetail waterDetail = WaterDetail::Exact)
         : world(world),
           assets(assets),
           layers(world.genSettings, &assets),
           shared(std::move(shared)),
-          edits(std::move(edits)) {
+          edits(std::move(edits)),
+          waterDetail(waterDetail) {
         if (world.width <= 0 || world.height <= 0 ||
             world.regions.size() != size_t(world.width) * world.height)
             throw std::invalid_argument("Invalid surface sampling world");
@@ -83,7 +86,9 @@ class SurfaceSampler {
     // Ground height after edits.
     int height(int x, int z);
     WaterSurface waterAt(int x, int z);
-    bool hasEdits(int x0, int z0, int x1, int z1);
+    bool submerged(int x, int z, float y);
+    bool hasUnrefinedWater(int x0, int z0, int x1, int z1) const;
+    bool uniformWater(int x0, int z0, int x1, int z1, WaterSurface sample);
     // Ground cover of the column's surface after edits (none where an edit
     // moved the ground).
     CoverTexel cover(int x, int z);
@@ -91,22 +96,28 @@ class SurfaceSampler {
     int structureTop(int x, int z);
     // Replaces the edits and drops the derived caches.
     void setEdits(std::shared_ptr<const EditMap> value);
+    bool provisionalWater() const {
+        return world.hydrology && waterDetail == WaterDetail::CertifiedSea;
+    }
     int width() const { return world.width * TerrainTuning::RegionX; }
     int depth() const { return world.height * TerrainTuning::RegionZ; }
     // X wraps around the world; Z clamps (see the clamps in the .cpp).
     int wrapX(int x) const { return int(WorldWrap::mod(x, width())); }
 
    private:
+    bool hasEdits(int x0, int z0, int x1, int z1);
     using RegionInput = SurfaceRegionInput;
     const RegionInput& input(int x, int z);
     // Edit of the chunk column containing the wrapped/clamped tile, or null.
     const ColumnEdit* editAt(int x, int z);
+    WaterSurface generatedWater(int x, int z, int groundY) const;
     SurfaceColumn generatedColumn(int x, int z);
     const World& world;
     IAssets& assets;
     LayersGenerator layers;
     std::shared_ptr<SurfaceInputCache> shared;
     std::shared_ptr<const EditMap> edits;
+    WaterDetail waterDetail;
     uint64_t lastEditKey = UINT64_MAX;
     const ColumnEdit* lastEdit = nullptr;
     std::unordered_map<uint64_t, std::shared_ptr<const RegionInput>> regions;

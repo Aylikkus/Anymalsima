@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "generated_hydrology.hpp"
 #include "ground_cover_generator.hpp"
 #include "items/rock.hpp"
 #include "items/soil.hpp"
@@ -120,7 +121,8 @@ std::vector<TreeLandmark> placeTreeLandmarks(const TreeSpeciesTable& table,
             for (int rx = 0; rx < world.width; ++rx) {
                 const Region& region =
                     world.regions[size_t(rz) * world.width + rx];
-                if (region.land_height_m < SEA_LEVEL_Y) continue;
+                if (!world.hydrology && region.land_height_m < SEA_LEVEL_Y)
+                    continue;
                 if (!r.site.vegetation.empty() &&
                     std::find(r.site.vegetation.begin(),
                               r.site.vegetation.end(),
@@ -150,6 +152,9 @@ std::vector<TreeLandmark> placeTreeLandmarks(const TreeSpeciesTable& table,
                     int64_t(rz) * RegionTiles +
                     int64_t(margin + SoilGenerator::unit(rx, rz, s ^ 0x34u) *
                                          (RegionTiles - 2 * margin));
+                if (world.hydrology &&
+                    world.hydrology->waterAt(site.x, site.z).wet())
+                    continue;
                 site.hash = hash32(SoilGenerator::unit(rx, rz, s ^ 0x35u));
                 site.spacing = r.species.spacing_m.sample(
                     SoilGenerator::unit(rx, rz, s ^ 0x36u));
@@ -235,6 +240,7 @@ const RegionGenerator::Env& RegionGenerator::env(int64_t x, int64_t z) {
             const auto t = sampler.sample(cx, z);
             const auto soil = sampler.soil(cx, z, t);
             e.surfaceY = t.surface_y;
+            e.site.submerged = sampler.water(cx, z, t.surface_y).wet();
             e.slope = t.slope;
             e.site.surfaceY = t.surface_y;
             e.site.slope = t.slope;
@@ -271,7 +277,7 @@ bool RegionGenerator::level(const TreeSpeciesRule& r, double x, double z,
         const double a = i * 0.785398163397448;
         const auto& e = env(int64_t(std::floor(x + std::cos(a) * radius)),
                             int64_t(std::floor(z + std::sin(a) * radius)));
-        if (!e.valid || WaterSurface::sea(e.surfaceY).wet()) return false;
+        if (!e.valid || e.site.submerged) return false;
         low = std::min(low, e.surfaceY);
         high = std::max(high, e.surfaceY);
     }
@@ -438,6 +444,7 @@ TreeSet RegionGenerator::run() {
             const double base = r->species.size.trunk_radius_m.max *
                                 (1 + r->species.form_params.root_flare);
             bool any = false;
+            bool submerged = false;
             int anchorY = INT_MAX;
             for (int ring = 0; ring <= 4; ++ring) {
                 const double radius = base * ring / 4;
@@ -450,10 +457,11 @@ TreeSet RegionGenerator::run() {
                                                std::sin(a) * radius)));
                     if (!e.valid) continue;
                     any = true;
+                    submerged |= e.site.submerged;
                     anchorY = std::min(anchorY, e.surfaceY);
                 }
             }
-            if (!any || WaterSurface::sea(anchorY).wet()) continue;
+            if (!any || submerged) continue;
             const uint64_t key = (uint64_t(0xFF) << 56) |
                                  (uint64_t(site.x) & 0xFFFFFFF) << 28 |
                                  (uint64_t(site.z) & 0xFFFFFFF);

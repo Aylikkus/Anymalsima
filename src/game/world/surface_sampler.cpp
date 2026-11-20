@@ -1,5 +1,6 @@
 #include "surface_sampler.hpp"
 
+#include "generated_hydrology.hpp"
 #include "ground_cover_climate.hpp"
 #include "items/ground_cover.hpp"
 
@@ -142,8 +143,8 @@ SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     const auto terrain = sampler.sample(x, z);
     SurfaceColumn result;
     result.surfaceY = terrain.surface_y;
-    result.water = WaterSurface::sea(result.surfaceY);
-    result.soil = sampler.soil(x, z, terrain);
+    result.water = generatedWater(x, z, result.surfaceY);
+    result.soil = sampler.soil(x, z, terrain, result.water);
     result.material = material(data, result, result.surfaceY);
     auto rockOnly = result;
     rockOnly.soil = {};
@@ -160,6 +161,33 @@ bool SurfaceSampler::hasEdits(int x0, int z0, int x1, int z1) {
     return false;
 }
 
+bool SurfaceSampler::hasUnrefinedWater(int x0, int z0, int x1, int z1) const {
+    return provisionalWater() &&
+           world.hydrology->needsRefinement(x0, z0, x1, z1);
+}
+
+bool SurfaceSampler::submerged(int x, int z, float y) {
+    if (!editAt(x, z)) {
+        const int ceiling = world.hydrology
+                                ? world.hydrology->waterCeilingAt(x, z)
+                                : WaterSurface::SeaBoundary;
+        if (y >= ceiling) return false;
+    }
+    return waterAt(x, z).submerged(y, height(x, z));
+}
+
+bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
+                                  WaterSurface sample) {
+    if (hasEdits(x0, z0, x1, z1)) return false;
+    if (world.hydrology)
+        return world.hydrology->uniformWater(x0, z0, x1, z1, sample.body,
+                                             provisionalWater());
+    for (int x : {x0, (x0 + x1) / 2, x1 - 1})
+        for (int z : {z0, (z0 + z1) / 2, z1 - 1})
+            if (waterAt(x, z).surfaceY != sample.surfaceY) return false;
+    return true;
+}
+
 WaterSurface SurfaceSampler::waterAt(int x, int z) {
     if (const auto* edit = editAt(x, z)) {
         const int i =
@@ -167,7 +195,14 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
                               std::clamp(z, 0, depth() - 1) % Chunk::SIZE_Z);
         return {edit->waterY[i] > edit->groundY[i] + 1 ? edit->waterY[i] : -1};
     }
-    return WaterSurface::sea(height(x, z));
+    const int ground = world.hydrology ? -1 : height(x, z);
+    return generatedWater(x, std::clamp(z, 0, depth() - 1), ground);
+}
+
+WaterSurface SurfaceSampler::generatedWater(int x, int z, int groundY) const {
+    if (!world.hydrology) return WaterSurface::sea(groundY);
+    if (provisionalWater()) return world.hydrology->certifiedSeaAt(x, z);
+    return world.hydrology->waterAt(x, z, groundY);
 }
 
 uint16_t SurfaceSampler::materialAt(int x, int y, int z) {

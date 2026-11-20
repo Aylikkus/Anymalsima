@@ -11,7 +11,8 @@
 #include "widgets/world_preview.hpp"
 #include "world/save/save_catalog.hpp"
 
-CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
+CreateWorldState::CreateWorldState(Game &game, UIContext &context)
+    : context(context) {
     ui_manager = std::make_unique<UIManager>(context);
 
     auto root = std::make_unique<Panel>();
@@ -34,7 +35,8 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
     return_btn->setText(_("RETURN"));
     return_btn->setFontRole(FontRole::Bold);
     return_btn->setGridPlacement({1, 14, 3, 1});
-    return_btn->onClick.connect([&game, &context]() {
+    return_btn->onClick.connect([&game, &context, this]() {
+        if (entering.valid()) return;
         game.changeState<CreateOrLoadState>(game, context);
     });
 
@@ -45,7 +47,8 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
     generate_btn->setText(_("GENERATE"));
     generate_btn->setFontRole(FontRole::Bold);
     generate_btn->setGridPlacement({5, 14, 3, 1});
-    generate_btn->onClick.connect([&game, &context, this]() {
+    generate_btn->onClick.connect([&context, this]() {
+        if (entering.valid()) return;
         generating = true;
         std::random_device rd;
         std::mt19937_64 gen((uint64_t(rd()) << 32) ^ rd());
@@ -61,6 +64,7 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
     auto choose_btn = ui_manager->createWidget(
         std::make_unique<TextButton>(context, "ui.black.9slice", "mouse_click"),
         settings_panel);
+    chooseButton = choose_btn;
     choose_btn->setTextAlignment(TextAlign::Center, VerticalAlign::Middle);
     choose_btn->setText(_("CHOOSE"));
     choose_btn->setFontRole(FontRole::Bold);
@@ -77,6 +81,7 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
 
     auto preview = ui_manager->createWidget(
         std::make_unique<WorldPreview>(context), root.get());
+    worldPreview = preview;
     preview->setAnchor({0, 0, 1, 1});
     preview->setBackgroundColor({0, 0, 0, 0});
 
@@ -145,19 +150,29 @@ CreateWorldState::CreateWorldState(Game &game, UIContext &context) {
     });
 
     world_gen.onFinished.connect([preview, this]() {
+        generating = false;
         world = world_gen.takeResult();
         preview->setWorld(world.get());
     });
 
-    choose_btn->onClick.connect([&game, &context, this, preview]() {
+    choose_btn->onClick.connect([this, preview]() {
+        if (generating || entering.valid()) return;
         auto r = preview->getSelectedRegion();
         if (!r || !world) return;
         try {
-            auto slot = save_catalog::create(*world, r.value()->coord);
-            game.changeState<GameplayState>(game, context, std::move(world),
-                                            std::move(slot));
+            entering =
+                std::async(std::launch::async, [source = world.get(),
+                                                assets = this->context.assets,
+                                                start = r.value()->coord]() {
+                    const TreeSpeciesTable species(*assets);
+                    auto landmarks = placeTreeLandmarks(
+                        species, *source, treeGenerationSeed(*source));
+                    auto slot = save_catalog::create(*source, start);
+                    return PreparedWorld{std::move(slot), std::move(landmarks)};
+                });
+            chooseButton->setText(_("Loading..."));
         } catch (const std::exception &e) {
-            std::cerr << "Creating world save failed: " << e.what() << '\n';
+            std::cerr << "Creating world failed: " << e.what() << '\n';
         }
     });
 
@@ -171,6 +186,19 @@ void CreateWorldState::handleInput(Game &game, const InputEvent &e,
 
 void CreateWorldState::update(Game &game, float dt) {
     if (generating) world_gen.update();
+    using namespace std::chrono_literals;
+    if (!entering.valid() || entering.wait_for(0s) != std::future_status::ready)
+        return;
+    try {
+        auto ready = entering.get();
+        worldPreview->setWorld(nullptr);
+        game.changeState<GameplayState>(game, context, std::move(world),
+                                        std::move(ready.slot),
+                                        std::move(ready.landmarks));
+    } catch (const std::exception &e) {
+        chooseButton->setText(_("CHOOSE"));
+        std::cerr << "Creating world failed: " << e.what() << '\n';
+    }
 }
 
 void CreateWorldState::render(RenderTarget &target, UIContext &context) {

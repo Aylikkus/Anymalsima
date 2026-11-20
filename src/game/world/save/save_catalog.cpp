@@ -5,6 +5,7 @@
 
 #include "serialization/file_io.hpp"
 #include "trees_codec.hpp"
+#include "world/generated_hydrology.hpp"
 #include "world_map_codec.hpp"
 
 namespace save_catalog {
@@ -90,7 +91,10 @@ void writeWorldMap(const SaveSlot& slot, const World& world) {
 
 std::unique_ptr<World> readWorldMap(const SaveSlot& slot) {
     const auto bytes = FileIO::readBytes(slot.directory / MapFile);
-    return std::make_unique<World>(world_map_codec::decode(bytes));
+    auto world = std::make_unique<World>(world_map_codec::decode(bytes));
+    if (slot.meta.generatorVersion >= WorldMeta::HydrologyVersion)
+        world->hydrology = GeneratedHydrology::build(*world);
+    return world;
 }
 
 terrain_edits_codec::File readTerrainEdits(const SaveSlot& slot) {

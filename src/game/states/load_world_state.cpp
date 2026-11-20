@@ -109,8 +109,13 @@ void LoadWorldState::select(size_t index) {
 void LoadWorldState::startLoading() {
     if (loading.valid() || !selected) return;
     status->setText(_("Loading..."));
-    loading = std::async(std::launch::async, [slot = slots[*selected]]() {
-        return save_catalog::readWorldMap(slot);
+    loading = std::async(std::launch::async, [slot = slots[*selected],
+                                              assets = context.assets]() {
+        auto world = save_catalog::readWorldMap(slot);
+        const TreeSpeciesTable species(*assets);
+        auto landmarks =
+            placeTreeLandmarks(species, *world, treeGenerationSeed(*world));
+        return LoadedWorld{std::move(world), std::move(landmarks)};
     });
 }
 
@@ -124,9 +129,10 @@ void LoadWorldState::update(Game& game, float dt) {
     if (!loading.valid() || loading.wait_for(0s) != std::future_status::ready)
         return;
     try {
-        auto world = loading.get();
-        game.changeState<GameplayState>(game, context, std::move(world),
-                                        slots[*selected]);
+        auto ready = loading.get();
+        game.changeState<GameplayState>(game, context, std::move(ready.world),
+                                        slots[*selected],
+                                        std::move(ready.landmarks));
     } catch (const std::exception& e) {
         std::cerr << "Loading world failed: " << e.what() << '\n';
         status->setText(_("This world could not be loaded"));

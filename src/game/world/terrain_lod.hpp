@@ -71,6 +71,7 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler);
 
 struct Mesh : Geometry {
     Geometry water;
+    bool provisionalWater = false;
     // RG: surface material layer, BA: bare rock layer, little endian.
     std::vector<uint8_t> materials;
     int mapSize = 1;

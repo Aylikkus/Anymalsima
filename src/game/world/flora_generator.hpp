@@ -134,6 +134,7 @@ struct FloraSite {
     uint8_t soil = 0;  // Soil id, 0 = none (rock)
     bool topsoil = false;
     const Region* region = nullptr;  // climate
+    bool submerged = false;
 };
 // Whether a species grows on a site: soil, ground cover, slope, water and
 // climate rules. Shared by generation and spreading.

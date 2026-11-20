@@ -11,7 +11,8 @@
 // How many chunks out from the camera chunk to request and draw.
 
 GameplayState::GameplayState(Game& game, UIContext& context,
-                             std::unique_ptr<World>&& world, SaveSlot saveSlot)
+                             std::unique_ptr<World>&& world, SaveSlot saveSlot,
+                             std::optional<std::vector<TreeLandmark>> landmarks)
     : slot(std::move(saveSlot)) {
     // name, stage, texture_handle
     u_texture_array.initTexture("u_texture_array", 0,
@@ -166,7 +167,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     mesher = std::make_unique<ChunkMesher>(*context.assets);
     chunkManager = std::make_unique<ChunkManager>(
         *generator, context.threadPool, mesher.get(), *this->world.get(),
-        context.assets);
+        context.assets, std::move(landmarks));
     // World-wide sources must be installed before any chunk is requested.
     try {
         auto file = save_catalog::readStructures(slot);
@@ -233,7 +234,9 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     treeSim = std::make_unique<TreeSimulation>(*chunkManager, *editor);
     updatePlantLabel();
     // Comparing saved chunks with generated terrain is only meaningful when
-    // the save's generator produced the same surface heights.
+    // the save's generator produced the same surface heights. readWorldMap
+    // selects the saved generation's water baseline for both the tracker
+    // and new chunks at the explored frontier.
     const bool sameGenerator =
         slot.meta.generatorVersion >= WorldMeta::SurfaceVersion;
     if (!sameGenerator)

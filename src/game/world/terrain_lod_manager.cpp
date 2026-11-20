@@ -282,9 +282,15 @@ void TerrainLodManager::collect() {
             if (const auto it = entries.find(job.patch); it != entries.end()) {
                 // Rebuilt after an edit: replaces the drawn mesh on upload.
                 auto& entry = *it->second;
-                if (entry.drawable && entry.stale &&
+                const bool upgrade =
+                    job.refiningWater && entry.provisionalWater;
+                if (entry.drawable && (entry.stale || upgrade) &&
+                    job.editRevision >= entry.staleRevision &&
                     (!entry.replacement ||
-                     entry.replacementRevision < job.editRevision)) {
+                     entry.replacementRevision < job.editRevision ||
+                     !mesh.provisionalWater)) {
+                    if (!entry.stale) entry.staleRevision = job.editRevision;
+                    entry.stale = true;
                     entry.replacement = std::move(mesh);
                     entry.replacementRevision = job.editRevision;
                 }
@@ -301,6 +307,24 @@ void TerrainLodManager::collect() {
     }
 }
 void TerrainLodManager::request() {
+    const auto submit = [&](const TerrainLod::Patch& p, bool provisional,
+                            bool refiningWater) {
+        auto cancel = std::make_shared<std::atomic_bool>(false);
+        auto future = pool.submit_task(
+            [source = &world, definitions = &assets, shared = inputs, cancel, p,
+             map = quality.materialMap, wrapX = periodX > 0, provisional,
+             changes = edits ? edits->snapshot() : nullptr] {
+                const auto water =
+                    provisional ? SurfaceSampler::WaterDetail::CertifiedSea
+                                : SurfaceSampler::WaterDetail::Exact;
+                SurfaceSampler sampler(*source, *definitions, shared, changes,
+                                       water);
+                return TerrainLod::build(p, sampler, *cancel, map, wrapX);
+            },
+            refiningWater ? BS::pr::low : BS::pr::normal);
+        jobs.push_back({p, edits ? edits->revision() : 0, refiningWater,
+                        std::move(cancel), std::move(future)});
+    };
     std::vector<TerrainLod::Patch> order;
     for (const auto& p : drawn)
         if (entries.contains(p) && entries.at(p)->needsBuild())
@@ -326,19 +350,27 @@ void TerrainLodManager::request() {
             pressure();
             continue;
         }
-        auto cancel = std::make_shared<std::atomic_bool>(false);
-        auto future = pool.submit_task(
-            [source = &world, definitions = &assets, shared = inputs, cancel, p,
-             map = quality.materialMap, wrapX = periodX > 0,
-             changes = edits ? edits->snapshot() : nullptr] {
-                SurfaceSampler sampler(*source, *definitions, shared, changes);
-                return TerrainLod::build(p, sampler, *cancel, map, wrapX);
-            },
-            // Roots are the fallback for everything else in view; edited
-            // terrain should update promptly.
-            roots.contains(p) || rebuild ? BS::pr::normal : BS::pr::low);
-        jobs.push_back({p, edits ? edits->revision() : 0, std::move(cancel),
-                        std::move(future)});
+        const bool provisional =
+            p.spacing == TerrainLod::RootSpacing &&
+            (!rebuild || existing->second->provisionalWater);
+        submit(p, provisional, false);
+    }
+
+    // A cold coastal root may survey hundreds of regions. Give it a
+    // drawable fallback first and leave the other slots available to the
+    // smaller patches that will replace that fallback.
+    if (jobs.size() >= maxJobs ||
+        std::any_of(jobs.begin(), jobs.end(),
+                    [](const auto& job) { return job.refiningWater; }))
+        return;
+    for (const auto& p : queue) {
+        const auto it = entries.find(p);
+        if (it == entries.end() || !it->second->drawable ||
+            !it->second->provisionalWater || it->second->stale ||
+            std::find(drawn.begin(), drawn.end(), p) == drawn.end())
+            continue;
+        submit(p, false, true);
+        break;
     }
 }
 void TerrainLodManager::update(const Camera& camera, Vec2 viewport,
@@ -383,6 +415,7 @@ void TerrainLodManager::upload(IRenderer& renderer) {
         fresh->bands = cpu.bands;
         fresh->bytes = bytes;
         fresh->drawable = true;
+        fresh->provisionalWater = cpu.provisionalWater;
         it->second = std::move(fresh);
         markDrawable(p, 1);
         uploaded += bytes;
@@ -485,6 +518,7 @@ void TerrainLodManager::uploadReplacements(IRenderer& renderer) {
             fresh->bands = cpu.bands;
             fresh->bytes = cpu.bytes();
             fresh->drawable = true;
+            fresh->provisionalWater = cpu.provisionalWater;
             fresh->lastDrawn = old.lastDrawn;
             ready.push_back(std::move(fresh));
         }
@@ -811,8 +845,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         underwater = WaterSurface{}.submerged(eye.y, -1, tile);
     } else if (y >= 0 && z >= 0 && z < detailSampler.depth() &&
                (periodX > 0 || (x >= 0 && x < detailSampler.width()))) {
-        underwater = detailSampler.waterAt(x, z).submerged(
-            eye.y, detailSampler.height(x, z));
+        underwater = detailSampler.submerged(x, z, eye.y);
     }
     water.setVec4({0, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
     float view[16], proj[16], vp[16];

@@ -117,6 +117,7 @@ class TerrainLodManager {
         AABB bounds{};
         size_t bytes = 0;
         bool drawable = false;
+        bool provisionalWater = false;
         // Frame in which the patch was last selected for drawing.
         uint64_t lastDrawn = 0;
         // Terrain edits changed under a drawable patch: it stays drawn until
@@ -136,6 +137,7 @@ class TerrainLodManager {
     struct Job {
         TerrainLod::Patch patch;
         uint64_t editRevision = 0;
+        bool refiningWater = false;
         std::shared_ptr<std::atomic_bool> cancel;
         std::future<TerrainLod::Mesh> future;
     };

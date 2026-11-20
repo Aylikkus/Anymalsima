@@ -359,6 +359,9 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
     if (*direct < 10) return false;
     FloraSite site;
     site.surfaceY = anchorY;
+    // The open-air test above covers new worlds. Preserve the historical
+    // elevation filter for spreading in saves with legacy generation.
+    site.submerged = !world.hydrology && WaterSurface::sea(anchorY).wet();
     const auto [soil, topsoil] =
         chunks.floraSpecies().soilOfBlock(ground->block_id);
     site.soil = soil;

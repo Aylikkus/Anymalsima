@@ -41,8 +41,10 @@ class GameplayState : public IGameState {
    public:
     // The camera starts from slot.meta.camera, or above slot.meta.startRegion
     // for a world that has never been played.
-    GameplayState(Game& game, UIContext& context,
-                  std::unique_ptr<World>&& world, SaveSlot slot);
+    GameplayState(
+        Game& game, UIContext& context, std::unique_ptr<World>&& world,
+        SaveSlot slot,
+        std::optional<std::vector<TreeLandmark>> landmarks = std::nullopt);
     // Saves every resident region and world.json before workers stop.
     ~GameplayState() override;
 

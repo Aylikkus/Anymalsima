@@ -36,11 +36,16 @@ struct SoilColumn {
 class SoilGenerator {
    public:
     static bool allowed(const SoilPlacement& p, const Region& r) {
+        return allowed(p, r, r.land_height_m < SEA_LEVEL_Y);
+    }
+
+    static bool allowed(const SoilPlacement& p, const Region& r,
+                        bool submerged) {
         const auto contains = [](const auto& values, auto value) {
             return values.empty() || std::find(values.begin(), values.end(),
                                                value) != values.end();
         };
-        if (!p.allow_underwater && r.land_height_m < SEA_LEVEL_Y) return false;
+        if (!p.allow_underwater && submerged) return false;
         if (!contains(p.allowed_land, r.land) ||
             !contains(p.allowed_biomes, r.biome))
             return false;

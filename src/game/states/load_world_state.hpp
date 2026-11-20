@@ -12,6 +12,7 @@
 #include "widgets/scroll_container.hpp"
 #include "widgets/text.hpp"
 #include "world/save/save_catalog.hpp"
+#include "world/tree_generator.hpp"
 
 // Lists worlds in saves/ and continues the selected one. The world map is
 // decoded on a background thread; update() switches to gameplay when done.
@@ -35,5 +36,9 @@ class LoadWorldState : public IGameState {
     std::vector<TextButton*> rows;
     std::optional<size_t> selected;
     Text* status = nullptr;
-    std::future<std::unique_ptr<World>> loading;
+    struct LoadedWorld {
+        std::unique_ptr<World> world;
+        std::vector<TreeLandmark> landmarks;
+    };
+    std::future<LoadedWorld> loading;
 };

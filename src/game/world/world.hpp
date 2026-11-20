@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include "core/assets_api.hpp"
@@ -8,6 +9,8 @@
 #include "region.hpp"
 #include "render/vertex.hpp"
 #include "world_wrap.hpp"
+
+class GeneratedHydrology;
 
 struct MeshChunk {
     std::vector<TerrainVertex> lod0;
@@ -106,6 +109,7 @@ class World {
     std::vector<RiverPolyline> rivers;
     RiverMesh riverMesh;
     WorldGenSettings genSettings;
+    std::shared_ptr<const GeneratedHydrology> hydrology;
     void update();
     // X wraps around the world map; disabled for map-less fixtures.
     WorldWrap wrap() const {

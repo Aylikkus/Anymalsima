@@ -15,11 +15,11 @@ a river, see water pool and spill, or expose a spring and create a new river.
 
 | Area | Current behavior and consequence |
 | --- | --- |
-| World map | `WorldGenerator::assignLakes` labels small inland components of water and shore regions. It uses eight-way adjacency with X wrap and a size cutoff, without calculating spill heights or lake levels. `generateRivers` builds preview polylines in region coordinates. The path samples carry flow strength, and the preview derives width from it. The paths provide candidate channels. Their routing and the preview's coastal branches and widths need validation before voxel terrain uses them. |
-| Chunk generation | `TerrainSampler` supplies the ground, soils, and column inputs for `LocationGenerator`. The latter fills from above the ground through tile Y=384 inclusive. The nominal rendered sea surface is Y=385. Low inland terrain can receive the same fill, so a map lake may already show water at sea level. There is no independent lake level, channel carving, or water-body membership. |
-| Detailed rendering | `ChunkMesher` emits opaque horizontal water tops at tile Y+1 when the tile above is known and empty. It ignores `liquidLevel` and emits no waterfall faces. The detailed draw also depends on a usable light volume. |
-| Distant rendering | `TerrainLod` spacing 1 uses `SurfaceSampler::column().waterY`, including a legacy edit summary. Smooth patches clip terrain against the fixed sea plane. Detail-to-coarse joins and surface-band calculations also assume sea level. Camera submersion checks the loaded tile or a sea-gated fallback. Shaders use a single ocean plane for water depth lighting. |
-| Save and edits | `RIVR` already saves polylines in the world map. The chunk codec saves liquid type and a byte level, without source provenance. `TerrainEditTracker` currently derives water tops and its baseline from legacy assumptions, and `WorldEditor` can clear liquid when placing a block. `SkyHeightMap` and voxel light also need a shared water input. |
+| World map | A regional priority flood records candidate basins, catchments and outlet elevations. The preview displays the candidates. River polylines supply candidate routes and sampled bed elevations. |
+| Chunk generation | `TerrainSampler` supplies ground, soils and a generated water surface to `LocationGenerator`. The sea surface is Y=385. Inland lakes have their own spill-capped levels and face-connected footprints. Earlier generator versions retain the original sea fill. |
+| Detailed rendering | `ChunkMesher` emits opaque horizontal water tops at tile Y+1 when the tile above is known and empty. The detailed draw also depends on a usable light volume. Fractional tops and waterfall faces are planned for later steps. |
+| Distant rendering | Stepped and smooth patches use the same water query, including terrain edit summaries. Smooth patches clip water to sampled wet coverage and the patch triangles. Water bounds and slab readiness drive the proxy handoff. Camera submersion uses a loaded tile when available and the shared surface otherwise. |
+| Save and edits | `RIVR` stores the candidate polylines. The saved generator version selects the terrain-edit baseline and water generation rules. The chunk codec stores liquid type and level. Source provenance is planned with live reservoir levels. |
 
 The create-world UI currently generates 512 × 300 regions. A region is
 128 × 128 horizontal tiles and a voxel chunk is 16³. At the proposed
@@ -148,6 +148,33 @@ elevations, a low sill, a diagonal-only touch, a dry bowl below sea level,
 and a coast across X wrap. Assert stable IDs, expected spill heights and
 dry cells, and matching lake surface in an unloaded sampler and a newly
 generated chunk. Include a lake whose top is above the old air-chunk cutoff.
+
+Generator version 14 derives the standing-water baseline from the saved
+region heights, terrain features, seeds, and river paths in `world_map.dat`.
+Earlier saves continue to use the original sea fill for new chunks and edit
+comparisons. Lake IDs come from the canonical seed region. The map preview
+shows regional candidates, including elevated basins. The tile sampler gates
+water on face-connected paths over the generated ground.
+
+The sea pass certifies region-center paths to open Z edges and checks mixed
+shorelines within a three-by-three region window. Lake refinement searches
+reachable tiles up to the regional spill height. A verified lower exit
+lowers that cap. A search that reaches its 24-region budget keeps the lower
+levels it fully checked. Shared shore regions are partitioned by proximity to
+the candidate basins, and wet masks are held in a bounded shared cache.
+Distant roots first draw terrain and certified open sea. The manager later
+refines any root still on screen in a single background slot while smaller
+patches load. Smooth meshes use up to eight water subdivisions per terrain
+cell, and stepped meshes keep tile-wide shorelines.
+The same footprints feed new slabs, terrain-edit comparisons, sky estimates,
+vegetation and terrain LOD. River beds record the sampled elevation along
+the saved paths and their receiving catchments. Channel shaping and river
+surfaces begin in Step 3.
+
+CTest covers the regional and sampled sills, a dry sub-sea bowl, the
+wrapped coast, a diagonal-only contact, and agreement between an unloaded
+query, a newly generated water-only slab and both terrain LOD mesh paths
+after save and reload.
 
 ## 3. Carve rivers and render flow at every distance
 

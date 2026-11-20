@@ -3,6 +3,7 @@
 #include <climits>
 #include <iostream>
 
+#include "generated_hydrology.hpp"
 #include "ground_cover_climate.hpp"
 #include "save/chunk_codec.hpp"
 #include "save/flora_codec.hpp"
@@ -116,9 +117,10 @@ std::vector<TileBox> changedStructureBoxes(
 }
 }  // namespace
 
-ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
-                           const ChunkMesher* mesher, const World& world,
-                           IAssets* assets)
+ChunkManager::ChunkManager(
+    const LocationGenerator& gen, ThreadPool& pool, const ChunkMesher* mesher,
+    const World& world, IAssets* assets,
+    std::optional<std::vector<TreeLandmark>> preparedLandmarks)
     : terrainWorld(world),
       generator(gen),
       pool(pool),
@@ -131,8 +133,10 @@ ChunkManager::ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
     floraSeed_ = world.genSettings.feature_seed ^ 0x5f10a7u;
     treeTable = assets ? std::make_shared<const TreeSpeciesTable>(*assets)
                        : std::make_shared<const TreeSpeciesTable>();
-    treeSeed = world.genSettings.feature_seed ^ 0x7ee5u;
-    landmarks = placeTreeLandmarks(*treeTable, world, treeSeed);
+    treeSeed = treeGenerationSeed(world);
+    landmarks = preparedLandmarks
+                    ? std::move(*preparedLandmarks)
+                    : placeTreeLandmarks(*treeTable, world, treeSeed);
     for (const auto& site : landmarks)
         landmarkRegions.insert({unsigned(site.x / TerrainTuning::RegionX),
                                 unsigned(site.z / TerrainTuning::RegionZ)});
@@ -198,6 +202,10 @@ void ChunkManager::registerChunk(const ChunkCoord& coord,
                             .land_height_m));
             }
     }
+    if (terrainWorld.hydrology)
+        ceiling = std::max(ceiling, terrainWorld.hydrology->ceiling(
+                                        region->coord.y * terrainWorld.width +
+                                        region->coord.x));
     columnTopY.try_emplace(column, ceiling);
     ++columnInputs[column].registrations;
     ++regionRegistrations[region->coord];

@@ -7,11 +7,15 @@
 
 void WorldPreview::setWorld(const World* w) {
     world = w;
+    hoveredRegion = nullptr;
+    selectedRegion = nullptr;
+    dragging = false;
     offsetX = 0;
     offsetY = 0;
     zoom = 1.0f;
     wrapOffset();
     cacheDirty = true;
+    if (!world) return;
 
     u_min_temp_c.setFloat(world->min_temp_c);
     u_max_temp_c.setFloat(world->max_temp_c);

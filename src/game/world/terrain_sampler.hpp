@@ -84,6 +84,7 @@ struct TerrainNeighborhood {
     int height = 0;
     uint32_t height_seed = 0;
     uint32_t feature_seed = 0;
+    std::shared_ptr<const GeneratedHydrology> hydrology;
 
     static TerrainNeighborhood capture(const World& world, Vec2u center,
                                        const IAssets& assets);
@@ -118,8 +119,12 @@ class TerrainSampler {
    public:
     explicit TerrainSampler(const TerrainNeighborhood& data) : data(data) {}
     double surface(double x, double z) const;
+    bool belowSea(int x, int z) const;
     TerrainSample sample(int64_t x, int64_t z) const;
+    WaterSurface water(int64_t x, int64_t z, int groundY) const;
     SoilColumn soil(int64_t x, int64_t z, const TerrainSample& terrain) const;
+    SoilColumn soil(int64_t x, int64_t z, const TerrainSample& terrain,
+                    WaterSurface water) const;
     ChunkColumnInputs columns(unsigned chunkX, unsigned chunkZ) const;
 
    private:

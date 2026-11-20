@@ -70,8 +70,9 @@ struct FinishedMesh {
 class ChunkManager {
    public:
     ChunkManager(const LocationGenerator& gen, ThreadPool& pool,
-                 const ChunkMesher* mesher, const World& world,
-                 IAssets* assets);
+                 const ChunkMesher* mesher, const World& world, IAssets* assets,
+                 std::optional<std::vector<TreeLandmark>> preparedLandmarks =
+                     std::nullopt);
     ~ChunkManager();
 
     Signal<const ChunkCoord&> becameReady;

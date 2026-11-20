@@ -38,8 +38,7 @@ void WorldGenTask::start(const WorldGenSettings& settings, IAssets* assets)
 WorldGenTask::~WorldGenTask()
 {
     cancel = true;
-    if (worker.joinable())
-        worker.detach();
+    if (worker.joinable()) worker.join();
 }
 
 bool WorldGenTask::isFinished() const

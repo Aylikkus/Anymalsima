@@ -28,7 +28,6 @@ class WorldGenerator {
                              std::function<bool()> shouldCancel);
     void generateFeatures(const WorldGenSettings& settings, IAssets* assets,
                           std::function<bool()> shouldCancel);
-    void assignLakes(World& world);
     void computeDistanceToWater(World& world, std::queue<int>& waterQ);
 
     void buildRegionMeshes(std::function<bool()> shouldCancel);

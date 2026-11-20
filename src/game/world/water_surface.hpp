@@ -1,15 +1,17 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 
 #include "consts.hpp"
 #include "tile.hpp"
 
-// Integer boundary above the last occupied tile. Generated water keeps the
-// legacy sea fill for this generation version, including inland low ground.
+// Integer boundary above the last occupied tile. Body IDs identify generated
+// water and are absent for legacy water and local edit summaries.
 struct WaterSurface {
     static constexpr int SeaBoundary = SEA_LEVEL_Y + 1;
     int surfaceY = -1;
+    uint32_t body = 0;
 
     static constexpr WaterSurface sea(int groundY) {
         return {groundY < SEA_LEVEL_Y ? SeaBoundary : -1};
