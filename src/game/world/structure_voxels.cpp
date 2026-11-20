@@ -265,11 +265,23 @@ TileBox boxOf(const Planned& p) {
     return slabBox(levelOf(p.key), p.sx, p.sy, p.sz);
 }
 
+bool intersectsWrapped(const TileBox& box, const TileBox& other,
+                       const WorldWrap& wrap) {
+    if (box.empty() || other.empty()) return false;
+    const int boxX = box.x0 + box.sizeX() / 2;
+    const int otherX = other.x0 + other.sizeX() / 2;
+    const int shift = int(wrap.deltaTile(otherX, boxX)) + boxX - otherX;
+    auto image = other;
+    image.x0 += shift;
+    image.x1 += shift;
+    return !image.intersect(box).empty();
+}
+
 std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
                           double eyeZ, const WorldWrap& wrap,
                           const std::unordered_set<ChunkCoord>& previous,
-                          const Occupancy* occupancy,
-                          const TileBox& fullDetail) {
+                          const Occupancy* occupancy, const TileBox& fullDetail,
+                          std::span<const TileBox> casterDetail) {
     std::vector<Planned> out;
     if (bounds.empty()) return out;
     // Distance from the eye to the part of a cell the structure fills.
@@ -308,17 +320,14 @@ std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
             const float margin =
                 previous.empty() ? 0.f : (coarse ? -Margin : Margin);
             finer = d < limit + margin;
-            if (!finer && !fullDetail.empty()) {
-                // Match the X images of the slab and handover box.
+            if (!finer) {
                 const auto box = slabBox(level, sx, sy, sz);
-                const int detailX = fullDetail.x0 + fullDetail.sizeX() / 2;
-                const int slabX = box.x0 + box.sizeX() / 2;
-                const int shift =
-                    int(wrap.deltaTile(detailX, slabX)) + slabX - detailX;
-                auto detail = fullDetail;
-                detail.x0 += shift;
-                detail.x1 += shift;
-                finer = !detail.intersect(box).empty();
+                finer =
+                    intersectsWrapped(box, fullDetail, wrap) ||
+                    std::any_of(casterDetail.begin(), casterDetail.end(),
+                                [&](const TileBox& detail) {
+                                    return intersectsWrapped(box, detail, wrap);
+                                });
             }
         }
         if (!finer) {

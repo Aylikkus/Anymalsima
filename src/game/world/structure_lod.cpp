@@ -106,7 +106,7 @@ void StructureLod::planStructures(Vec3 eye, const TileBox& fullDetail) {
         const auto& source = *structure.wanted;
         auto planned = structure_voxels::plan(
             source.bounds, eye.x, eye.y, eye.z, world.wrap(), structure.covered,
-            structure.occupancy.get(), fullDetail);
+            structure.occupancy.get(), fullDetail, shadowDetail);
         structure.distance = planned.empty() ? 0 : planned.front().distance;
         const bool same =
             structure.built && structure.built->revision == source.revision;
@@ -306,7 +306,14 @@ void StructureLod::edited(uint64_t column) {
 }
 
 void StructureLod::update(Vec3 eye, const TileBox& fullDetail,
-                          std::shared_ptr<const EditMap> edits) {
+                          std::shared_ptr<const EditMap> edits,
+                          std::span<const TileBox> casterDetail) {
+    if (!std::ranges::equal(shadowDetail, casterDetail)) {
+        shadowDetail.assign(casterDetail.begin(), casterDetail.end());
+        for (auto& [key, structure] : structures)
+            structure.plannedWanted.reset();
+        replan = true;
+    }
     snapshot = std::move(edits);
     collectStructures();
     planStructures(eye, fullDetail);
@@ -417,9 +424,18 @@ bool StructureLod::coveredByChunks(const ChunkCoord& c) const {
     const int64_t dx = world.wrap().enabled()
                            ? world.wrap().deltaChunk(c.x, drawnCentre.x)
                            : int64_t(c.x) - int64_t(drawnCentre.x);
-    return std::abs(dx) <= inner &&
-           std::abs(int(c.y) - int(drawnCentre.y)) <= inner &&
-           std::abs(int(c.z) - int(drawnCentre.z)) <= inner && chunkDrawn(c);
+    if (std::abs(dx) > inner ||
+        std::abs(int(c.y) - int(drawnCentre.y)) > inner ||
+        std::abs(int(c.z) - int(drawnCentre.z)) > inner || !chunkDrawn(c))
+        return false;
+    // Have an exact proxy ready before the loaded chunk stops casting.
+    const TileBox box =
+        structure_voxels::boxOf({c, int(c.x), int(c.y), int(c.z), 0});
+    return std::none_of(shadowDetail.begin(), shadowDetail.end(),
+                        [&](const TileBox& detail) {
+                            return structure_voxels::intersectsWrapped(
+                                box, detail, world.wrap());
+                        });
 }
 
 void StructureLod::collect() {

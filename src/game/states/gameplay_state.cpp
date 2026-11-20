@@ -702,7 +702,8 @@ void GameplayState::update(Game& game, float dt) {
     landmarks.insert(landmarks.end(), generatedLandmarks.begin(),
                      generatedLandmarks.end());
     terrainLod->setStructures(std::move(landmarks));
-    terrainLod->update(camera, uiContext->getWindowSize());
+    terrainLod->update(camera, uiContext->getWindowSize(),
+                       lightRenderer->shadows().casterDetail());
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
     blockLight->setFocus(camera.position);

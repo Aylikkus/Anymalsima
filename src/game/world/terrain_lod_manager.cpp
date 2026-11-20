@@ -328,7 +328,8 @@ void TerrainLodManager::request() {
                         std::move(future)});
     }
 }
-void TerrainLodManager::update(const Camera& camera, Vec2 viewport) {
+void TerrainLodManager::update(const Camera& camera, Vec2 viewport,
+                               std::span<const TileBox> casterDetail) {
     collect();
     choose(camera, viewport);
     request();
@@ -343,7 +344,8 @@ void TerrainLodManager::update(const Camera& camera, Vec2 viewport) {
             (x - radius) * Chunk::SIZE_X,     (y - radius) * Chunk::SIZE_Y,
             (z - radius) * Chunk::SIZE_Z,     (x + radius + 1) * Chunk::SIZE_X,
             (y + radius + 1) * Chunk::SIZE_Y, (z + radius + 1) * Chunk::SIZE_Z};
-        structures->update(camera.eye(), detail, edits->snapshot());
+        structures->update(camera.eye(), detail, edits->snapshot(),
+                           casterDetail);
     }
 }
 void TerrainLodManager::upload(IRenderer& renderer) {

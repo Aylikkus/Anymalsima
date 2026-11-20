@@ -1,5 +1,5 @@
-$input a_position
-$output v_rel
+$input a_position, a_normal
+$output v_rel, v_caster
 
 #include <bgfx_shader.sh>
 
@@ -9,5 +9,8 @@ $output v_rel
 void main()
 {
     v_rel = mul(u_model[0], vec4(a_position, 1.0)).xyz;
+    // Only coarse structure casters are scaled (StructureLod::scale).
+    float cellSize = mul(u_model[0], vec4(1.0, 0.0, 0.0, 0.0)).x;
+    v_caster = vec4(a_normal, cellSize);
     gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
 }

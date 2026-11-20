@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -224,13 +225,18 @@ struct Planned {
 // Tiles of a planned slab (unwrapped X).
 TileBox boxOf(const Planned& planned);
 
+// Test boxes in their nearest X images.
+bool intersectsWrapped(const TileBox& box, const TileBox& other,
+                       const WorldWrap& wrap);
+
 // occupancy: only these slabs are planned (null: every slab of bounds).
-// Slabs intersecting fullDetail stay at level 0 for chunk handover.
+// Slabs intersecting fullDetail or casterDetail stay at level 0.
 std::vector<Planned> plan(const TileBox& bounds, double eyeX, double eyeY,
                           double eyeZ, const WorldWrap& wrap,
                           const std::unordered_set<ChunkCoord>& previous,
                           const Occupancy* occupancy = nullptr,
-                          const TileBox& fullDetail = {});
+                          const TileBox& fullDetail = {},
+                          std::span<const TileBox> casterDetail = {});
 
 // Canonical key of unwrapped slab coordinates (std::nullopt: outside a
 // world that does not wrap).

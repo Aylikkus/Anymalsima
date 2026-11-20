@@ -1,4 +1,4 @@
-$input v_rel
+$input v_rel, v_caster
 
 #include <bgfx_shader.sh>
 
@@ -20,8 +20,22 @@ void main()
     // (1/512), so the lamp's faces reach 0.5 + 1/512; anything beyond stays,
     // so neighbor faces that start at the lamp's edges are kept whole (a
     // wider margin let light leak along those edges in thin sheets).
-    vec3 a = abs(v_rel);
-    if (max(a.x, max(a.y, a.z)) < 0.5 + 1.0 / 512.0 + 0.0002) discard;
+    float cellSize = v_caster.w;
+    float seam = cellSize / 512.0 + 0.0002;
+    if (cellSize > 1.5) {
+        // A coarse branch can grow into the cell occupied by an exposed
+        // lamp. Work relative to that cell's centre so the bounds follow
+        // the voxel grid even when the lamp is off-centre.
+        vec3 centre = 0.5 * cellSize - mod(u_shadow_light.xyz, cellSize);
+        vec3 a = abs(v_rel - centre);
+        // A face of the containing cell points away from the lamp.
+        // An adjacent cell's face on the same plane points toward it.
+        if (dot(v_rel, v_caster.xyz) > 0.0 &&
+            max(a.x, max(a.y, a.z)) < 0.5 * cellSize + seam) discard;
+    } else {
+        vec3 a = abs(v_rel);
+        if (max(a.x, max(a.y, a.z)) < 0.5 + seam) discard;
+    }
     if (u_shadow_caster.y > 0.5) {
         // Simplified terrain can rise above a light standing on the real
         // ground and wall it in; near the light only real (voxel and

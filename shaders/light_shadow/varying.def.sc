@@ -6,3 +6,4 @@ float a_texcoord1 : TEXCOORD1;
 vec4 a_color0 : COLOR0;
 
 vec3 v_rel : TEXCOORD0;
+vec4 v_caster : TEXCOORD1;

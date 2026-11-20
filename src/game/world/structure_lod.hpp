@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <span>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,7 +51,8 @@ class StructureLod {
     // A column's edit changed: it and its 4 side columns need new meshes.
     void edited(uint64_t column);
     void update(Vec3 eye, const TileBox& fullDetail,
-                std::shared_ptr<const EditMap> snapshot);
+                std::shared_ptr<const EditMap> snapshot,
+                std::span<const TileBox> casterDetail = {});
     // The generated structures in view (main thread; sources with an
     // unchanged key and revision are kept).
     void setStructures(std::vector<structure_voxels::SourcePtr> sources);
@@ -414,6 +416,7 @@ class StructureLod {
     std::shared_ptr<const VoxelSlabs> voxelsChosenFor;
     std::array<int, 3> plannedCell{INT32_MIN, 0, 0};
     TileBox plannedDetail;
+    std::vector<TileBox> shadowDetail;
     bool replan = true;  // a source changed or a build finished
     std::array<int, 3> chosenCell{INT32_MIN, 0, 0};
     // Wanted slabs, nearest first.

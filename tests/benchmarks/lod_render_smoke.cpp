@@ -460,7 +460,8 @@ int main(int argc, char** argv) {
                 if (lights)
                     lightRenderer.update(registry, camera, world.wrap(), now);
                 lod.setStructures(trees.landmarkVoxels(0));
-                lod.update(camera, {1280, 720});
+                lod.update(camera, {1280, 720},
+                           lightRenderer.shadows().casterDetail());
                 if (occlusion) {
                     skyMap.updateOcclusion(
                         camera.eye(),

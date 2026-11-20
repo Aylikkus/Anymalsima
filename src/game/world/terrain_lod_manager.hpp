@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 
 #include "chunk_manager.hpp"
 #include "detail_coverage.hpp"
@@ -28,7 +29,8 @@ class TerrainLodManager {
         const TerrainLod::Quality& quality = TerrainLod::Qualities[0],
         TerrainEdits* edits = nullptr);
     ~TerrainLodManager();
-    void update(const Camera& camera, Vec2 viewport);
+    void update(const Camera& camera, Vec2 viewport,
+                std::span<const TileBox> casterDetail = {});
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
                 const Camera& camera, Vec2 viewport);
     ShaderProperty& waterUniform() { return water; }

@@ -11,6 +11,7 @@
 #include "render/frustrum.hpp"
 #include "render/render_target.hpp"
 #include "render/renderer_api.hpp"
+#include "tile_box.hpp"
 
 // Cube shadow maps of the most important far lights (LightEmission::isFar),
 // so walls, boxes and mountains stop their light. Main thread only.
@@ -63,6 +64,8 @@ class LightShadows {
     void assign(const std::vector<FarLightView>& ranked);
     // Atlas slot of a light whose six faces are all rendered, or -1.
     int slot(LightSourceRegistry::Id id) const;
+    // Exact structure casters near the shadowed lights, aligned to chunks.
+    std::vector<TileBox> casterDetail() const;
     // Geometry changed inside the box [min, max] (world, canonical X):
     // re-render the faces of lights that can see it.
     void geometryChanged(const std::array<double, 3>& min,

@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include "chunk.hpp"
 #include "render/render_views.hpp"
 #include "world_wrap.hpp"
 
@@ -130,6 +131,24 @@ int LightShadows::slot(LightSourceRegistry::Id id) const {
         if (slots[i]->used && slots[i]->ready && slots[i]->id == id)
             return int(i);
     return -1;
+}
+
+std::vector<TileBox> LightShadows::casterDetail() const {
+    std::vector<TileBox> boxes;
+    boxes.reserve(slots.size());
+    for (const auto& slot : slots) {
+        if (!slot->used) continue;
+        const auto& p = slot->canonical;
+        const int x = int(std::floor(p[0] / Chunk::SIZE_X)) * Chunk::SIZE_X;
+        const int y = int(std::floor(p[1] / Chunk::SIZE_Y)) * Chunk::SIZE_Y;
+        const int z = int(std::floor(p[2] / Chunk::SIZE_Z)) * Chunk::SIZE_Z;
+        // Keep the emitter's slab and one ring around it, where even thin
+        // branches can cast long shadows onto the ground.
+        boxes.push_back({x - Chunk::SIZE_X, y - Chunk::SIZE_Y,
+                         z - Chunk::SIZE_Z, x + 2 * Chunk::SIZE_X,
+                         y + 2 * Chunk::SIZE_Y, z + 2 * Chunk::SIZE_Z});
+    }
+    return boxes;
 }
 
 void LightShadows::geometryChanged(const std::array<double, 3>& min,

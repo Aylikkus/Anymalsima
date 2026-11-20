@@ -131,6 +131,34 @@ TEST(structure_voxels_plan_chunk_handover) {
     CHECK(coarse > 0);
 }
 
+TEST(structure_voxels_plan_far_light_casters) {
+    const WorldWrap wrap{4096};
+    const TileBox branch{-64, 512, 0, 128, 528, 16};
+    // The lamp sits across the seam from the branch's unwrapped origin.
+    const std::array lampDetail{TileBox{4064, 496, -16, 4112, 544, 32}};
+    const TileBox lightAtBranch{-32, 496, -16, 16, 544, 32};
+    const auto near = plan(branch, 4080, 520, 8, wrap, {});
+    const auto far =
+        plan(branch, 1024, 520, 8, wrap, keys(near), nullptr, {}, lampDetail);
+    expectExactCover(branch, far);
+    size_t retained = 0, coarse = 0;
+    for (const auto& slab : far) {
+        if (!boxOf(slab).intersect(lightAtBranch).empty()) {
+            EQUAL(levelOf(slab.key), 0, "branch by the far lamp stays exact");
+            ++retained;
+        } else if (levelOf(slab.key) == MaxLevel) {
+            ++coarse;
+        }
+    }
+    CHECK(retained > 0);
+    CHECK(coarse > 0);
+
+    // Freeing the shadow slot lets the same slabs coarsen again.
+    const auto withoutLamp = plan(branch, 1024, 520, 8, wrap, keys(far));
+    for (const auto& slab : withoutLamp)
+        EQUAL(levelOf(slab.key), MaxLevel, "far branch with no shadow slot");
+}
+
 TEST(structure_voxels_slab_merge) {
     // Two structures overlapping in one slab: the first keeps its cells,
     // the second fills the rest with its own block.

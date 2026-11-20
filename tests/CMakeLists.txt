@@ -298,6 +298,7 @@ endforeach()
 # Distant structure voxels (docs/handoff/structures.md).
 foreach(case structure_voxels_plan_levels structure_voxels_plan_hysteresis
              structure_voxels_plan_wraps structure_voxels_plan_chunk_handover
+             structure_voxels_plan_far_light_casters
              structure_voxels_slab_merge structure_stamp_only_fills_air
              structure_footprint_tops structure_footprint_incremental
              sky_occlusion_matches_sunlight sky_occlusion_by_height
