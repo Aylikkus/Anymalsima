@@ -65,6 +65,18 @@ add_library(game
     world/layers_generator.hpp
 )
 
+# These CPU samplers run millions of times while deriving a default world.
+# Keep Debug diagnostics elsewhere, but compile this hot, deterministic
+# generation path with optimization so loading a saved map does not stall.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        world/terrain_sampler.cpp
+        world/generated_hydrology.cpp
+        world/generated_rivers.cpp
+        PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>"
+    )
+endif()
+
 target_include_directories(game
     PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

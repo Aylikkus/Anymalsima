@@ -58,14 +58,9 @@ struct Geometry {
                indices.size() * sizeof(uint32_t);
     }
 };
-struct WaterBand {
-    SurfaceBand slabs;
-    std::array<int16_t, Chunk::SIZE_X * Chunk::SIZE_Z> levels;
-    bool matches(ChunkCoord coord, std::span<const float> uploaded) const;
-};
 struct ColumnBands {
     SurfaceBand ground;
-    std::optional<WaterBand> water;
+    std::optional<SurfaceBand> water;
 };
 ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler);
 

@@ -17,14 +17,17 @@ vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing)
     vec3 color = vec3(0.055, 0.24, 0.32);
     if (!flowing) return color;
     float t = u_world_water.x;
-    vec2 phase = position.xz / 8.0 - t * flow * 0.5;
-    float riffle = sin(6.2831853 * phase.x) + sin(6.2831853 * phase.y);
+    vec2 advected = position.xz - t * flow * 3.25;
+    vec2 phase = 6.2831853 * advected / vec2(8.0, 4.0);
+    float riffle = sin(phase.x + 0.65 * sin(phase.y))
+                 + sin(phase.y - 0.8 * sin(phase.x));
     if (abs(normal.y) < 0.5) {
         float stripe = dot(position.xz, vec2(-normal.z, normal.x)) / 4.0;
         riffle = sin(6.2831853 * (-position.y / 4.0 - t + stripe))
                + sin(6.2831853 * (-position.y / 8.0 - t * 0.5 - stripe));
     }
-    return color * (1.0 + 0.10 * riffle);
+    float crest = smoothstep(0.8, 1.85, riffle);
+    return color * (1.0 + 0.18 * riffle) + crest * vec3(0.065, 0.095, 0.10);
 }
 
 

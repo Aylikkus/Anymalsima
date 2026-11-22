@@ -7,6 +7,7 @@
 #include "ground_cover_climate.hpp"
 #include "save/chunk_codec.hpp"
 #include "save/flora_codec.hpp"
+#include "terrain_edits.hpp"
 #include "world_editor.hpp"
 
 namespace {
@@ -413,8 +414,7 @@ bool ChunkManager::isMeshUploaded(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready &&
            it->second.uploaded &&
-           it->second.uploadedRevision == it->second.meshRevision &&
-           !it->second.dirtyPending;
+           it->second.uploadedRevision >= it->second.meshTopologyRevision;
 }
 Chunk* ChunkManager::getChunk(const ChunkCoord& coord) {
     auto it = chunks.find(coord);
@@ -450,15 +450,32 @@ const RootVoxel* ChunkManager::rootAt(int x, int y, int z) {
                        x % Chunk::SIZE_X, y % Chunk::SIZE_Y, z % Chunk::SIZE_Z))
                  : nullptr;
 }
+namespace {
+TilePos waterEditPosition(ChunkCoord coord, uint16_t cell) {
+    return {
+        int(coord.x) * Chunk::SIZE_X + cell % Chunk::SIZE_X,
+        int(coord.y) * Chunk::SIZE_Y + (cell / Chunk::SIZE_X) % Chunk::SIZE_Y,
+        int(coord.z) * Chunk::SIZE_Z + cell / (Chunk::SIZE_X * Chunk::SIZE_Y)};
+}
+}  // namespace
+
 void ChunkManager::unregister(const ChunkCoord& coord) {
     const auto found = chunks.find(coord);
     const bool existed = found != chunks.end();
     if (existed) {
+        if (const auto& chunk = found->second.data; chunk && chunk->rootTerrain)
+            for (auto cell : chunk->rootTerrain->edited)
+                waterEdits.erase(waterEditPosition(coord, cell));
         const auto rc = found->second.regionCoord;
         for (const auto body : found->second.waterBodies) {
             auto it = waterChunks.find(body);
             it->second.erase(coord);
             if (it->second.empty()) waterChunks.erase(it);
+        }
+        for (const auto reach : found->second.waterReaches) {
+            auto it = waterReachChunks.find(reach);
+            it->second.erase(coord);
+            if (it->second.empty()) waterReachChunks.erase(it);
         }
         chunks.erase(found);
         meshed.erase(coord);
@@ -484,13 +501,15 @@ void ChunkManager::unregister(const ChunkCoord& coord) {
     // into a replacement chunk, and unloading never waits for a worker.
     if (existed) removed.emit(coord);
 }
-void ChunkManager::markDirty(const ChunkCoord& coord, bool urgent) {
+void ChunkManager::markDirty(const ChunkCoord& coord, bool urgent,
+                             bool waterOnly) {
     auto it = chunks.find(coord);
     if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
     auto& handle = it->second;
     handle.dirtyPending = true;
     handle.meshUrgent |= urgent;
     ++handle.meshRevision;
+    if (!waterOnly) handle.meshTopologyRevision = handle.meshRevision;
     if (mesher) meshQueue.insert(coord);
 }
 void ChunkManager::markModified(const ChunkCoord& coord) {
@@ -1015,7 +1034,7 @@ void ChunkManager::collect() {
             continue;
         auto& handle = it->second;
         handle.meshState = MeshState::Built;
-        if (handle.meshRevision != result.revision) {
+        if (!handle.canPublishMesh(result.revision)) {
             meshQueue.insert(result.coord);
             continue;
         }
@@ -1071,7 +1090,7 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {
                     const auto baseline =
                         inputs->columns[z * Chunk::SIZE_X + x].water;
-                    if (!baseline.body || baseline.reach) continue;
+                    if (!baseline.body && !baseline.reach) continue;
                     for (auto& row : data.data->tiles[z])
                         if (row[x].liquid == LiquidType::Water)
                             row[x].waterOrigin = WaterOrigin::Reservoir;
@@ -1105,6 +1124,24 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
         it->second.trees = data.trees;
     }
     pending.erase(coord);
+    if (const auto* chunk = getChunk(coord);
+        reservoirs() && chunk && chunk->rootTerrain)
+        for (auto cell : chunk->rootTerrain->edited) {
+            const auto p = waterEditPosition(coord, cell);
+            const auto* baseline = waterColumnAt(p);
+            if (baseline && (baseline->water.reach || baseline->water.body) &&
+                baseline->water.fills(p.y, baseline->surface_y)) {
+                if (const auto* tile = tileAt(p.x, p.y, p.z);
+                    tile && tile->isSolid())
+                    waterTopologyEdits.insert(p);
+                if (baseline->water.reach) continue;
+            }
+            if (reservoirs()->hasBreach(p)) continue;
+            if (waterIntakeCandidate(p)) {
+                waterEdits.insert(p);
+                waterTopologyEdits.insert(p);
+            }
+        }
     markDirty(coord);
     becameReady.emit(coord);
     if (data.baselineChanged) structureRebased.emit(coord);
@@ -1656,13 +1693,6 @@ MeshHandle* ChunkManager::getWaterMesh(const ChunkCoord& coord) {
                : nullptr;
 }
 
-std::span<const float> ChunkManager::uploadedWaterTops(
-    const ChunkCoord& coord) const {
-    const auto it = chunks.find(coord);
-    if (it == chunks.end() || !it->second.uploaded) return {};
-    return it->second.waterTops;
-}
-
 MeshHandle* ChunkManager::getMesh(const ChunkCoord& coord) {
     auto it = chunks.find(coord);
     // Keep the current uploaded mesh visible while its replacement is built.
@@ -1918,10 +1948,614 @@ WaterVolume ChunkManager::divertWater(uint32_t body, TilePos p,
     return terrainWorld.reservoirs->divert(body, p, amount);
 }
 
+float ChunkManager::aquiferAt(int x, int y, int z) {
+    x = int(wrap().wrapTile(x));
+    if (x < 0 || y < 0 || z < 0) return 0;
+    const auto coord =
+        ChunkCoord{unsigned(x / Chunk::SIZE_X), unsigned(y / Chunk::SIZE_Y),
+                   unsigned(z / Chunk::SIZE_Z)};
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || !it->second.data) return 0;
+    const auto layers = regionLayers.find(it->second.regionCoord);
+    if (layers == regionLayers.end()) return 0;
+    const auto& tile =
+        it->second.data
+            ->tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y][x % Chunk::SIZE_X];
+    if (!tile.isSolid()) return 0;
+    const auto& region =
+        terrainWorld.regions[it->second.regionCoord.y * terrainWorld.width +
+                             it->second.regionCoord.x];
+    const int depth = region.land_height_m - y;
+    if (depth < 0) return 0;
+    for (const auto& layer : layers->second)
+        if (layer.type == RegionLayerType::Rock &&
+            layer.block_id == tile.block_id) {
+            const int top = layer.depth_from_surface_m;
+            const int bottom = top + layer.thickness_m;
+            if (depth >= top && depth < bottom) return layer.aquifer_saturation;
+            break;
+        }
+    return 0;
+}
+
+Reservoirs::CellAccess ChunkManager::waterAccess(TilePos p) {
+    using Access = Reservoirs::CellAccess;
+    if (p.x < 0 || p.y < 0 || p.y >= WORLD_HEIGHT_Y || p.z < 0 ||
+        (terrainWorld.height && p.z >= int(terrainWorld.height) * 128))
+        return Access::Blocked;
+    const ChunkCoord coord{unsigned(p.x / Chunk::SIZE_X),
+                           unsigned(p.y / Chunk::SIZE_Y),
+                           unsigned(p.z / Chunk::SIZE_Z)};
+    const auto* chunk = getChunk(coord);
+    if (!chunk) return Access::Unknown;
+    const auto& tile = chunk->tiles[p.z % Chunk::SIZE_Z][p.y % Chunk::SIZE_Y]
+                                   [p.x % Chunk::SIZE_X];
+    if (tile.isSolid() ||
+        (tile.isLiquid() && tile.waterOrigin != WaterOrigin::Local))
+        return Access::Blocked;
+    return Access::Open;
+}
+
+std::optional<Reservoirs::Sink> ChunkManager::waterSinkAt(TilePos p) {
+    p.x = int(wrap().wrapTile(p.x));
+    if (p.x < 0 || p.y < 0 || p.z < 0 || !reservoirs()) return {};
+    const auto* tile = tileAt(p.x, p.y, p.z);
+    if (!tile || tile->isSolid() || tile->liquid != LiquidType::Water ||
+        tile->waterOrigin == WaterOrigin::Local)
+        return {};
+    const auto* baseline = waterColumnAt(p);
+    if (!baseline) return {};
+    const auto snapshot = reservoirs()->snapshot();
+    const auto* hydrology = terrainWorld.hydrology.get();
+    auto surface = snapshot->projectStanding(
+        hydrology, p.x, p.z, baseline->surface_y, baseline->water);
+    int floor = baseline->surface_y;
+    const auto pool = snapshot->projectLocal(p.x, p.z, floor, {}, &floor);
+    if (pool.fills(p.y, floor))
+        surface = pool;
+    else if (!surface.fills(p.y, baseline->surface_y))
+        return {};
+    return Reservoirs::Sink{surface.reach ? 0 : surface.body, surface.reach,
+                            surface.surfaceY};
+}
+
+void ChunkManager::surveyChannel(Reservoirs& water, TilePos mouth) {
+    const auto canonical = [&](TilePos p) {
+        p.x = int(wrap().wrapTile(p.x));
+        return p;
+    };
+    const auto faces = [](TilePos p) {
+        return std::array<TilePos, 6>{{{p.x, p.y + 1, p.z},
+                                       {p.x, p.y - 1, p.z},
+                                       {p.x - 1, p.y, p.z},
+                                       {p.x + 1, p.y, p.z},
+                                       {p.x, p.y, p.z - 1},
+                                       {p.x, p.y, p.z + 1}}};
+    };
+    const auto local = [&](TilePos p) {
+        const auto* tile = tileAt(p.x, p.y, p.z);
+        return tile && !tile->isSolid() && tile->liquid == LiquidType::Water &&
+               tile->waterOrigin == WaterOrigin::Local;
+    };
+    // The source: a standing body beside or above the mouth.
+    std::optional<Reservoirs::Sink> source;
+    TilePos intake = mouth;
+    for (auto q : faces(mouth)) {
+        if (q.y < mouth.y) continue;
+        if (const auto s = waterSinkAt(canonical(q)); s && s->body && !s->reach)
+            if (!source || s->surfaceY > source->surfaceY) {
+                source = s;
+                intake = canonical(q);
+            }
+    }
+    // A mouth above the lowered surface no longer feeds; keep its record.
+    using Access = Reservoirs::CellAccess;
+    if (!source || waterAccess(mouth) != Access::Open) return;
+    // Trace gravity through loaded cells. A fast-forwarded downspout may
+    // have no stored water between its lip and the pool at the bottom.
+    std::queue<TilePos> pending;
+    std::unordered_map<TilePos, TilePos> parent{{mouth, mouth}};
+    pending.push(mouth);
+    constexpr size_t Budget = 8192;
+    bool unknown = false;
+    while (!pending.empty()) {
+        const auto p = pending.front();
+        pending.pop();
+        const TilePos below{p.x, p.y - 1, p.z};
+        const bool supported =
+            waterAccess(below) == Access::Blocked || local(below);
+        for (auto q : faces(p)) {
+            q = canonical(q);
+            if (q.y < 0 || q.z < 0 || q.y > p.y || (q.y == p.y && !supported) ||
+                parent.contains(q))
+                continue;
+            const auto* tile = tileAt(q.x, q.y, q.z);
+            if (!tile) {
+                unknown = true;
+                continue;
+            }
+            if (const auto target = waterSinkAt(q);
+                target && (target->reach || target->body != source->body) &&
+                target->surfaceY < source->surfaceY) {
+                // Flow continues while the source stands above the mouth,
+                // the path sill and the receiver.
+                std::vector<TilePos> path{q};
+                for (auto at = p; at != mouth; at = parent.at(at))
+                    path.push_back(at);
+                path.push_back(mouth);
+                path.push_back(intake);
+                water.setChannelMouth(source->body, *target, mouth,
+                                      std::max(mouth.y, target->surfaceY),
+                                      std::move(path));
+                return;
+            }
+            if (waterAccess(q) != Access::Open) continue;
+            if (parent.size() >= Budget) {
+                unknown = true;
+                continue;
+            }
+            parent.emplace(q, p);
+            pending.push(q);
+        }
+    }
+    // Fully surveyed without a receiver: the channel is closed or pooled.
+    if (!unknown) water.clearChannelMouth(mouth);
+}
+
+void ChunkManager::surveyChannels(Reservoirs& water, size_t mouths) {
+    if (waterEdits.empty()) return;
+    auto it = channelCursor ? waterEdits.upper_bound(*channelCursor)
+                            : waterEdits.begin();
+    for (size_t i = 0; i < std::min(mouths, waterEdits.size()); ++i) {
+        if (it == waterEdits.end()) it = waterEdits.begin();
+        const auto p = *it++;
+        channelCursor = p;
+        surveyChannel(water, p);
+    }
+}
+
+const ColumnGenerationInput* ChunkManager::waterColumnAt(TilePos p) const {
+    if (p.x < 0 || p.z < 0) return nullptr;
+    const auto key =
+        (uint64_t(p.x / Chunk::SIZE_X) << 32) | unsigned(p.z / Chunk::SIZE_Z);
+    const auto it = columnInputs.find(key);
+    if (it == columnInputs.end() || !it->second.data) return nullptr;
+    return &it->second.data->columns[(p.z % Chunk::SIZE_Z) * Chunk::SIZE_X +
+                                     p.x % Chunk::SIZE_X];
+}
+
+bool ChunkManager::waterIntakeCandidate(TilePos p) {
+    if (waterAccess(p) != Reservoirs::CellAccess::Open) return false;
+    const auto* hydrology = terrainWorld.hydrology.get();
+    if (!hydrology) return false;
+    for (auto q : {TilePos{p.x, p.y + 1, p.z}, TilePos{p.x - 1, p.y, p.z},
+                   TilePos{p.x + 1, p.y, p.z}, TilePos{p.x, p.y, p.z - 1},
+                   TilePos{p.x, p.y, p.z + 1}}) {
+        q.x = int(wrap().wrapTile(q.x));
+        if (!hydrology->containsColumn(q.x, q.z)) continue;
+        if (const auto* source = waterColumnAt(q)) {
+            if (source->water.fills(q.y, source->surface_y)) return true;
+        } else if (q.y < hydrology->waterCeilingAt(q.x, q.z)) {
+            const auto [ground, water] = hydrology->sampleColumn(q.x, q.z);
+            if (water.fills(q.y, ground)) return true;
+        }
+    }
+    return false;
+}
+
+void ChunkManager::waterBlockEdited(TilePos p) {
+    if (!reservoirs()) return;
+    waterTopologyEdits.insert(p);
+    const auto* chunk =
+        getChunk({unsigned(p.x / Chunk::SIZE_X), unsigned(p.y / Chunk::SIZE_Y),
+                  unsigned(p.z / Chunk::SIZE_Z)});
+    if (chunk && waterIntakeCandidate(p) &&
+        chunk->rootEdited(Chunk::cell(p.x % Chunk::SIZE_X, p.y % Chunk::SIZE_Y,
+                                      p.z % Chunk::SIZE_Z)))
+        waterEdits.insert(p);
+    else if (waterEdits.erase(p))
+        reservoirs()->clearChannelMouth(p);
+}
+
+void ChunkManager::commitWaterEdits() {
+    if (auto* water = reservoirs()) updateWaterTopology(*water);
+}
+
+void ChunkManager::detectLakeSplit(Reservoirs& water, TilePos outlet) {
+    const auto& hydro = *terrainWorld.hydrology;
+    constexpr size_t MaxPocketCells = 1024;
+    const auto wrapX = wrap();
+    const auto canonical = [&](TilePos p) {
+        p.x = int(wrapX.wrapTile(p.x));
+        return p;
+    };
+    for (auto seed : {TilePos{outlet.x, outlet.y + 1, outlet.z},
+                      TilePos{outlet.x - 1, outlet.y, outlet.z},
+                      TilePos{outlet.x + 1, outlet.y, outlet.z},
+                      TilePos{outlet.x, outlet.y, outlet.z - 1},
+                      TilePos{outlet.x, outlet.y, outlet.z + 1}}) {
+        seed = canonical(seed);
+        const auto* baseline = waterColumnAt(seed);
+        if (!baseline || !baseline->water.body || baseline->water.reach)
+            continue;
+        const uint32_t parent = baseline->water.body;
+        const auto snapshot = water.snapshot();
+        const auto surface = snapshot->projectStanding(
+            &hydro, seed.x, seed.z, baseline->surface_y, baseline->water);
+        if (!surface.fills(seed.y, baseline->surface_y)) continue;
+        const auto* first = tileAt(seed.x, seed.y, seed.z);
+        if (!first || first->waterOrigin != WaterOrigin::Reservoir ||
+            first->liquid != LiquidType::Water)
+            continue;
+        const int head = surface.surfaceY;
+        const auto fill = snapshot->surfaceFills.find(parent);
+        struct Column {
+            int floor = WORLD_HEIGHT_Y;
+            int cells = 0;
+        };
+        std::map<std::pair<int, int>, Column> columns;
+        std::vector<TilePos> work{seed};
+        std::unordered_set<TilePos> seen{seed};
+        WaterVolume trapped = 0;
+        bool wall = false, verified = true;
+        for (size_t i = 0; verified && i < work.size(); ++i) {
+            const auto p = work[i];
+            const auto* tile = tileAt(p.x, p.y, p.z);
+            if (!tile || tile->waterOrigin != WaterOrigin::Reservoir ||
+                tile->liquid != LiquidType::Water) {
+                verified = false;
+                break;
+            }
+            auto& column = columns[{p.x, p.z}];
+            column.floor = std::min(column.floor, p.y);
+            ++column.cells;
+            // The shoreline render bias does not remove stored water.
+            trapped += p.y == head - 1 && fill != snapshot->surfaceFills.end()
+                           ? fill->second
+                           : WaterUnitsPerBlock;
+            for (auto q :
+                 {TilePos{p.x, p.y + 1, p.z}, TilePos{p.x, p.y - 1, p.z},
+                  TilePos{p.x - 1, p.y, p.z}, TilePos{p.x + 1, p.y, p.z},
+                  TilePos{p.x, p.y, p.z - 1}, TilePos{p.x, p.y, p.z + 1}}) {
+                q = canonical(q);
+                if (q == outlet || q.y >= head || q.y < 0 ||
+                    !hydro.containsColumn(q.x, q.z) || !seen.insert(q).second)
+                    continue;
+                const auto* other = tileAt(q.x, q.y, q.z);
+                const auto* base = waterColumnAt(q);
+                if (!other || !base) {
+                    verified = false;
+                    break;
+                }
+                if (other->isSolid()) {
+                    wall |= base->water.body == parent &&
+                            base->water.fills(q.y, base->surface_y);
+                    continue;
+                }
+                if (waterEdits.contains(q) &&
+                    !base->water.fills(q.y, base->surface_y))
+                    continue;  // another cut of this outlet bank
+                if (work.size() >= MaxPocketCells ||
+                    !snapshot
+                         ->projectStanding(&hydro, q.x, q.z, base->surface_y,
+                                           base->water)
+                         .fills(q.y, base->surface_y) ||
+                    base->water.body != parent) {
+                    verified = false;
+                    break;
+                }
+                work.push_back(q);
+            }
+        }
+        if (!verified || !wall) continue;
+        Reservoirs::BreachSurvey survey{head, {}};
+        for (const auto& [pos, column] : columns) {
+            if (column.cells != head - column.floor) {
+                verified = false;  // no overhang/cavity in this shortcut
+                break;
+            }
+            survey.columns.push_back(
+                {{pos.first, pos.second}, column.floor, column.floor});
+        }
+        if (verified &&
+            water.detachLake(parent, seed, std::move(survey), trapped))
+            return;
+    }
+}
+
+void ChunkManager::updateWaterTopology(Reservoirs& water) {
+    if (!terrainWorld.hydrology || !soilAssets || waterTopologyEdits.empty())
+        return;
+    const auto& hydro = *terrainWorld.hydrology;
+    const auto edits =
+        waterTerrainEdits ? waterTerrainEdits->snapshot() : nullptr;
+    const int depth = int(terrainWorld.height) * WorldWrap::RegionSize;
+    std::unordered_map<Vec2u, TerrainNeighborhood> neighborhoods;
+    std::unordered_map<const Bytes*, std::unique_ptr<Chunk>> structures;
+    const auto floor = [&](Vec2i v, int head) {
+        if (edits) {
+            const auto it = edits->find(editKey(v.x / 16, v.y / 16));
+            if (it != edits->end()) {
+                const int x = v.x % 16, z = v.y % 16;
+                const auto& edit = *it->second;
+                int y = edit.groundY[ColumnEdit::index(x, z)] + 1;
+                // Terrain summaries keep buildings separate from ground
+                // height. A wall based on the surface is a hydraulic sill.
+                for (; y < head && y <= edit.structureTopY(); ++y) {
+                    const auto* blob = edit.slab(uint16_t(y / Chunk::SIZE_Y));
+                    if (!blob || !*blob) break;
+                    auto& decoded = structures[blob->get()];
+                    if (!decoded) {
+                        decoded = std::make_unique<Chunk>();
+                        chunk_codec::decode(**blob, *decoded);
+                    }
+                    if (!decoded->tiles[z][y % Chunk::SIZE_Y][x].isSolid())
+                        break;
+                }
+                return y;
+            }
+        }
+        const Vec2u region{unsigned(v.x / WorldWrap::RegionSize),
+                           unsigned(v.y / WorldWrap::RegionSize)};
+        auto it = neighborhoods.find(region);
+        if (it == neighborhoods.end())
+            it = neighborhoods
+                     .emplace(region, TerrainNeighborhood::capture(
+                                          terrainWorld, region, *soilAssets))
+                     .first;
+        return int(std::floor(TerrainSampler(it->second).surface(v.x, v.y))) +
+               1;
+    };
+    for (const auto p : waterTopologyEdits) {
+        const auto* cell = tileAt(p.x, p.y, p.z);
+        if (!cell) continue;
+        bool springMouth = false;
+        if (hydro.springRockAt(p.x, p.y - 1, p.z))
+            for (const auto& reach : hydro.riverReaches()) {
+                const auto& spring = reach.spring;
+                if (reach.lakeSource || spring.tile != Vec2i{p.x, p.z} ||
+                    p.y != spring.rockY + 1)
+                    continue;
+                water.setSpringOpen(reach.id, !cell->isSolid());
+                springMouth = true;
+            }
+        const auto* baseline = waterColumnAt(p);
+        const bool inRiver = baseline && baseline->water.reach &&
+                             baseline->water.fills(p.y, baseline->surface_y);
+        if (cell->isSolid()) {
+            water.blockChannelCell(p);
+            water.closeBreach(p);
+            if (inRiver) {
+                const auto reach = baseline->water.reach;
+                if (!springMouth && !water.damAt(reach))
+                    if (auto dam = riverDamAt(p))
+                        water.openDam(reach, p, std::move(dam->second));
+                waterEdits.erase(p);
+            }
+            continue;
+        }
+        if (inRiver) {
+            const auto reach = baseline->water.reach;
+            if (const auto wall = water.damAt(reach)) {
+                const auto* section = waterColumnAt(*wall);
+                const auto sample =
+                    section ? section->water
+                            : hydro.sampleRiverColumn(wall->x, wall->z).second;
+                const bool flowsX =
+                    std::abs(sample.flow.x) >= std::abs(sample.flow.y);
+                if ((flowsX && p.x == wall->x &&
+                     std::abs(p.z - wall->z) <= 48) ||
+                    (!flowsX && p.z == wall->z &&
+                     std::abs(WorldWrap::delta(p.x, wall->x, wrap().tiles)) <=
+                         48))
+                    water.closeBreach(*wall);
+            }
+            // Restoring the generated cross-section is not a new diversion.
+            waterEdits.erase(p);
+            ReservoirChange change;
+            change.local = p;
+            reservoirChanged(change);
+            continue;
+        }
+        if (water.hasBreach(p)) {
+            waterEdits.erase(p);
+            continue;
+        }
+        if (!baseline) continue;
+        if (p.y != baseline->surface_y || baseline->water.reach) continue;
+        if (const auto* above = tileAt(p.x, p.y + 1, p.z);
+            above && above->isSolid())
+            continue;
+        for (auto q :
+             {TilePos{p.x - 1, p.y, p.z}, TilePos{p.x + 1, p.y, p.z},
+              TilePos{p.x, p.y, p.z - 1}, TilePos{p.x, p.y, p.z + 1}}) {
+            q.x = int(wrap().wrapTile(q.x));
+            if (q.z < 0 || q.z >= depth) continue;
+            const auto source = hydro.sampleRiverColumn(q.x, q.z);
+            if (!source.second.reach || !source.second.fills(p.y, source.first))
+                continue;
+            const auto* neighbor = tileAt(q.x, p.y, q.z);
+            if (neighbor && neighbor->isSolid()) continue;
+            const int head = source.second.surfaceY;
+            const auto survey = Reservoirs::surveyBreach(
+                {p.x, p.z}, head, wrap().tiles,
+                [&](Vec2i v) -> std::optional<int> {
+                    if (v.y < 0 || v.y >= depth) return {};
+                    if (v == Vec2i{p.x, p.z}) return p.y;
+                    const auto water = hydro.waterAt(v.x, v.y);
+                    if (water.reach == source.second.reach) return head;
+                    if (water.wet()) return {};
+                    return floor(v, head);
+                });
+            if (survey && water.openBreach(source.second.reach, p, *survey)) {
+                waterEdits.erase(p);
+                break;
+            }
+        }
+    }
+    waterTopologyEdits.clear();
+    size_t tested = 0;
+    for (const auto p : waterEdits) {
+        if (tested++ == 64) break;
+        detectLakeSplit(water, p);
+    }
+}
+
+std::optional<std::pair<uint32_t, Reservoirs::BreachSurvey>>
+ChunkManager::riverDamAt(TilePos p) {
+    const auto* column = waterColumnAt(p);
+    if (!column || !column->water.reach ||
+        !column->water.fills(p.y, column->surface_y))
+        return {};
+    const auto water = column->water;
+    const auto flow = water.flow;
+    if (flow.x == 0 && flow.y == 0) return {};
+    const int dx =
+        std::abs(flow.x) >= std::abs(flow.y) ? (flow.x > 0 ? 1 : -1) : 0;
+    const int dz = dx == 0 ? (flow.y > 0 ? 1 : -1) : 0;
+    const auto at = [&](int across, int along, int y) {
+        return TilePos{int(wrap().wrapTile(p.x + along * dx + across * dz)), y,
+                       p.z + along * dz - across * dx};
+    };
+    // Certify the complete wet cross-section before persisting a dam. Its
+    // small upstream footprint counts only water added above the old river.
+    std::vector<Reservoirs::BasinColumn> upstream;
+    int crest = WORLD_HEIGHT_Y;
+    for (int side : {-1, 1}) {
+        bool bank = false;
+        for (int i = side < 0 ? 0 : 1; i <= 48; ++i) {
+            auto q = at(i * side, 0, p.y);
+            const auto* sample = waterColumnAt(q);
+            const auto* tile = tileAt(q.x, q.y, q.z);
+            if (!sample || !tile) return {};
+            if (sample->water.reach != water.reach) {
+                bank = !sample->water.wet() && tile->isSolid();
+                if (bank) crest = std::min(crest, sample->surface_y + 1);
+                break;
+            }
+            for (int y = sample->surface_y + 1; y < sample->water.surfaceY;
+                 ++y) {
+                const auto* wetCell = tileAt(q.x, y, q.z);
+                if (!wetCell || !wetCell->isSolid()) return {};
+            }
+            int wallTop = sample->water.surfaceY;
+            while (wallTop < WORLD_HEIGHT_Y) {
+                const auto* block = tileAt(q.x, wallTop, q.z);
+                if (!block || !block->isSolid()) break;
+                ++wallTop;
+            }
+            crest = std::min(crest, wallTop);
+            const auto before = at(i * side, -1, p.y);
+            const auto* prev = waterColumnAt(before);
+            if (prev && prev->water.reach == water.reach)
+                upstream.push_back({{before.x, before.z},
+                                    prev->water.surfaceY,
+                                    prev->water.surfaceY});
+        }
+        if (!bank) return {};
+    }
+    // Include one layer over the sill to represent head driving overflow.
+    const int head = std::min(WORLD_HEIGHT_Y, crest + 1);
+    std::erase_if(upstream, [&](const auto& c) { return c.floor >= head; });
+    if (upstream.empty()) return {};
+    return std::pair{water.reach,
+                     Reservoirs::BreachSurvey{head, std::move(upstream)}};
+}
+
+void ChunkManager::advanceWater(
+    uint64_t targetStep, std::chrono::steady_clock::duration workBudget) {
+    auto* water = reservoirs();
+    if (!water) return;
+    updateWaterTopology(*water);
+    if (targetStep <= water->step()) return;
+    surveyChannels(*water, 4);
+    if (waterEdits.empty() && !water->needsFixedSteps()) {
+        // Without a local exchange or spill, keep the existing coarse
+        // graph's bulk budget. Unedited worlds need no cell time steps.
+        water->advanceTo(targetStep);
+        return;
+    }
+    if (targetStep - water->step() > MaxWaterStepsPerUpdate) {
+        tickWater(*water, targetStep);
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < MaxWaterStepsPerUpdate && water->step() < targetStep;
+         ++i) {
+        tickWater(*water, water->step() + 1);
+        if (std::chrono::steady_clock::now() - start >= workBudget) break;
+    }
+}
+
+void ChunkManager::tickWater(Reservoirs& water, uint64_t step) {
+    const auto elapsed = step - water.step();
+    std::vector<Reservoirs::RiverIntake> intakes;
+    auto it = waterEditCursor ? waterEdits.upper_bound(*waterEditCursor)
+                              : waterEdits.begin();
+    const size_t EditBudget = elapsed > 1 ? 8 : 64;
+    for (size_t i = 0; i < std::min(EditBudget, waterEdits.size()); ++i) {
+        if (it == waterEdits.end()) it = waterEdits.begin();
+        const auto p = *it++;
+        waterEditCursor = p;
+        if (water.hasBreach(p)) continue;
+        using Access = Reservoirs::CellAccess;
+        const auto access = waterAccess(p);
+        if (access != Access::Open) continue;
+        if (const auto* baseline = waterColumnAt(p);
+            baseline && baseline->water.reach &&
+            baseline->water.fills(p.y, baseline->surface_y))
+            continue;
+        // A wet face above or beside a cut is evidence of a connection;
+        // a wet cell below cannot push water up into a dry block.
+        for (auto q : {TilePos{p.x, p.y + 1, p.z}, TilePos{p.x - 1, p.y, p.z},
+                       TilePos{p.x + 1, p.y, p.z}, TilePos{p.x, p.y, p.z - 1},
+                       TilePos{p.x, p.y, p.z + 1}}) {
+            q.x = int(wrap().wrapTile(q.x));
+            const auto* source = tileAt(q.x, q.y, q.z);
+            if (!source || source->liquid != LiquidType::Water ||
+                source->isSolid() || source->waterOrigin == WaterOrigin::Local)
+                continue;
+            const auto* baseline = waterColumnAt(q);
+            if (!baseline || !baseline->water.fills(q.y, baseline->surface_y))
+                continue;
+            if (baseline->water.reach)
+                intakes.push_back({baseline->water.reach, p});
+            else {
+                // Older saved slabs preserve their original water as
+                // independent. It can feed a new cut only where the current
+                // reservoir still certifies this generated wet cell.
+                const auto projected = water.snapshot()->project(
+                    terrainWorld.hydrology.get(), q.x, q.z, baseline->surface_y,
+                    baseline->water);
+                if (!projected.body ||
+                    !projected.fills(q.y, baseline->surface_y))
+                    continue;
+                water.drainCut(
+                    projected.body, p, elapsed,
+                    [&](TilePos cell) { return waterAccess(cell); },
+                    wrap().tiles);
+            }
+            break;
+        }
+    }
+    water.advanceTo(
+        step, intakes, [&](TilePos p) { return waterAccess(p); }, wrap().tiles);
+    water.reconcile();
+    flowWater(512);
+}
+
+size_t ChunkManager::flowWater(size_t cellBudget) {
+    if (!reservoirs()) return 0;
+    return reservoirs()->flow(
+        cellBudget, [&](TilePos p) { return waterAccess(p); }, wrap().tiles,
+        [&](TilePos p) { return waterSinkAt(p); });
+}
+
 std::shared_ptr<const ChunkColumnInputs> ChunkManager::projectedColumns(
     std::shared_ptr<const ChunkColumnInputs> columns, unsigned cx, unsigned cz,
     const ReservoirSnapshot& snapshot) const {
-    if (!columns || (snapshot.levels.empty() && snapshot.cells.empty()))
+    if (!columns || (snapshot.levels.empty() && snapshot.cells.empty() &&
+                     snapshot.riverStages.empty() && snapshot.pools.empty()))
         return columns;
     auto result = std::make_shared<ChunkColumnInputs>(*columns);
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
@@ -1935,8 +2569,9 @@ std::shared_ptr<const ChunkColumnInputs> ChunkManager::projectedColumns(
 }
 
 bool ChunkManager::reconcileWater(Chunk& chunk, ChunkCoord coord,
-                                  const ChunkColumnInputs* columns) const {
-    if (!chunk.projectsWater || !columns || !reservoirs()) return false;
+                                  const ChunkColumnInputs* columns,
+                                  bool refreshLocal) const {
+    if (!columns || !reservoirs()) return false;
     const auto snapshot = reservoirs()->snapshot();
     bool changed = false;
     const int y0 = int(coord.y) * Chunk::SIZE_Y;
@@ -1945,10 +2580,17 @@ bool ChunkManager::reconcileWater(Chunk& chunk, ChunkCoord coord,
             const auto& c = columns->columns[z * Chunk::SIZE_X + x];
             const int wx = int(coord.x) * Chunk::SIZE_X + x;
             const int wz = int(coord.z) * Chunk::SIZE_Z + z;
-            const bool hasReservoir = c.water.body && !c.water.reach &&
-                                      c.water.surfaceY > y0 &&
-                                      c.surface_y + 1 < y0 + Chunk::SIZE_Y;
-            if (!hasReservoir && snapshot->localTop(wx, wz) <= y0) continue;
+            const bool hasReservoir =
+                chunk.projectsWater && (c.water.body || c.water.reach) &&
+                c.water.surfaceY > y0 && c.surface_y + 1 < y0 + Chunk::SIZE_Y;
+            int poolGround = c.surface_y;
+            const auto pool = snapshot->pools.empty() || !chunk.projectsWater
+                                  ? WaterSurface{}
+                                  : snapshot->projectLocal(wx, wz, c.surface_y,
+                                                           {}, &poolGround);
+            if (!hasReservoir && !refreshLocal &&
+                snapshot->localTop(wx, wz) <= y0 && pool.surfaceY <= y0)
+                continue;
             const auto standing =
                 hasReservoir
                     ? snapshot->projectStanding(terrainWorld.hydrology.get(),
@@ -1956,9 +2598,16 @@ bool ChunkManager::reconcileWater(Chunk& chunk, ChunkCoord coord,
                     : WaterSurface{};
             for (int y = 0; y < Chunk::SIZE_Y; ++y) {
                 auto& tile = chunk.tiles[z][y][x];
+                const bool oldProjectedRiver =
+                    hasReservoir && c.water.reach &&
+                    c.water.fills(y0 + y, c.surface_y) &&
+                    tile.liquid == LiquidType::Water &&
+                    tile.liquidLevel == 255 &&
+                    !chunk.rootEdited(Chunk::cell(x, y, z));
                 if (tile.isSolid() ||
                     (tile.isLiquid() &&
-                     tile.waterOrigin == WaterOrigin::Independent))
+                     tile.waterOrigin == WaterOrigin::Independent &&
+                     !oldProjectedRiver))
                     continue;
                 auto origin = WaterOrigin::Independent;
                 uint8_t fill = 0;
@@ -1966,10 +2615,13 @@ bool ChunkManager::reconcileWater(Chunk& chunk, ChunkCoord coord,
                     cell != snapshot->cells.end()) {
                     fill = cell->second;
                     origin = WaterOrigin::Local;
-                } else if (standing.fills(y0 + y, c.surface_y) &&
-                           !chunk.rootEdited(Chunk::cell(x, y, z))) {
-                    fill = 255;
-                    origin = WaterOrigin::Reservoir;
+                } else {
+                    if (c.water.reach ||
+                        !chunk.rootEdited(Chunk::cell(x, y, z)))
+                        fill = standing.fillAt(y0 + y, c.surface_y);
+                    if (pool.body)
+                        fill = std::max(fill, pool.fillAt(y0 + y, poolGround));
+                    if (fill) origin = WaterOrigin::Reservoir;
                 }
                 if (origin == tile.waterOrigin && fill == tile.liquidLevel)
                     continue;
@@ -1993,6 +2645,15 @@ void ChunkManager::indexWater(ChunkCoord coord,
                 bodies.end())
             bodies.push_back(c.water.body);
     for (auto body : bodies) waterChunks[body].insert(coord);
+    auto& reaches = chunks.at(coord).waterReaches;
+    for (const auto& c : columns.columns)
+        if (c.water.reach && c.water.surfaceY > y0 &&
+            c.surface_y + 1 < y0 + Chunk::SIZE_Y &&
+            std::find(reaches.begin(), reaches.end(), c.water.reach) ==
+                reaches.end()) {
+            reaches.push_back(c.water.reach);
+            waterReachChunks[c.water.reach].insert(coord);
+        }
 }
 
 void ChunkManager::reservoirChanged(const ReservoirChange& change) {
@@ -2000,10 +2661,30 @@ void ChunkManager::reservoirChanged(const ReservoirChange& change) {
     for (const auto body : change.bodies)
         if (const auto it = waterChunks.find(body); it != waterChunks.end())
             affected.insert(it->second.begin(), it->second.end());
+    for (const auto reach : change.reaches)
+        if (const auto it = waterReachChunks.find(reach);
+            it != waterReachChunks.end())
+            affected.insert(it->second.begin(), it->second.end());
+    std::unordered_set<uint64_t> poolColumns;
+    if (change.pools)
+        for (const auto body : change.bodies)
+            if (const auto it = change.pools->find(body);
+                it != change.pools->end())
+                for (const auto p : it->second)
+                    poolColumns.insert((uint64_t(p.x / Chunk::SIZE_X) << 32) |
+                                       unsigned(p.y / Chunk::SIZE_Z));
+    for (const auto key : poolColumns)
+        if (columnInputs.contains(key))
+            for (unsigned y = 0; y < Y_CHUNKS; ++y)
+                affected.insert({unsigned(key >> 32), y, unsigned(key)});
     if (const auto& p = change.local)
         affected.insert({unsigned(p->x / Chunk::SIZE_X),
                          unsigned(p->y / Chunk::SIZE_Y),
                          unsigned(p->z / Chunk::SIZE_Z)});
+    for (const auto& p : change.locals)
+        affected.insert({unsigned(p.x / Chunk::SIZE_X),
+                         unsigned(p.y / Chunk::SIZE_Y),
+                         unsigned(p.z / Chunk::SIZE_Z)});
 
     std::unordered_set<uint64_t> columns;
     std::unordered_set<ChunkCoord> remesh;
@@ -2013,7 +2694,9 @@ void ChunkManager::reservoirChanged(const ReservoirChange& change) {
         if (it == columnInputs.end()) continue;
         bool changed = false;
         withChunkLocked(coord, [&](Chunk& chunk) {
-            changed = reconcileWater(chunk, coord, it->second.data.get());
+            changed = reconcileWater(chunk, coord, it->second.data.get(),
+                                     change.local || !change.locals.empty() ||
+                                         poolColumns.contains(key));
         });
         if (!changed) continue;
         columns.insert(key);
@@ -2034,6 +2717,6 @@ void ChunkManager::reservoirChanged(const ReservoirChange& change) {
         markLightChanged(coord);
         waterChanged.emit(coord);
     }
-    for (const auto coord : remesh) markDirty(coord, true);
+    for (const auto coord : remesh) markDirty(coord, true, true);
     for (const auto key : columns) columnWaterChanged.emit(key);
 }

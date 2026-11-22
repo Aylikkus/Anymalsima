@@ -35,4 +35,7 @@ class WorldGenerator {
 
     FeatureEncoded encodeFeatures(const Region& r);
     World tempWorld;
+    // Refined lake tiles per region; the preview draws these, not the
+    // coarse basin candidates.
+    std::vector<uint16_t> lakeCoverage;
 };

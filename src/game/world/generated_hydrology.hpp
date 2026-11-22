@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <vector>
 
@@ -84,6 +85,12 @@ class GeneratedHydrology {
         bool oceanAcrossBasins = false);
 
     uint32_t candidateBody(int region) const;
+    // Wet tiles per region from the refined lake footprints, the same masks
+    // that chunks and terrain LOD use. Candidate basins often refine to a
+    // smaller lake or none at all, so the map preview should not draw them.
+    // Surveys every basin on a few threads; empty when cancelled.
+    std::vector<uint16_t> refinedLakeCoverage(
+        const std::function<bool()>& cancelled = {}) const;
     uint32_t catchment(int region) const;
     const Basin* basin(uint32_t id) const;
     Lake lake(uint32_t id) const;
@@ -102,13 +109,18 @@ class GeneratedHydrology {
                       bool certifiedOnly = false) const;
 
     const std::vector<Reach>& riverReaches() const { return reaches; }
+    int periodX() const { return width * Side; }
+    bool containsColumn(int x, int z) const {
+        return x >= 0 && x < periodX() && z >= 0 && z < height * Side;
+    }
     std::optional<Channel> riverAt(int x, int z) const;
     double carve(int x, int z, double originalY) const;
     std::pair<int, WaterSurface> sampleColumn(int x, int z) const;
     std::pair<int, WaterSurface> sampleRiverColumn(int x, int z) const;
     bool springRockAt(int x, int y, int z) const;
     bool usesRiverSediment() const { return riverSediment; }
-    bool hasChannel(int x0, int z0, int x1, int z1) const;
+    bool hasChannel(int x0, int z0, int x1, int z1,
+                    std::span<const uint32_t> reachFilter = {}) const;
     int channelFloorLevel(int x, int z, int radius) const;
 
     const std::vector<std::vector<RiverBed>>& riverBeds() const { return beds; }
@@ -209,6 +221,17 @@ class GeneratedHydrology {
     std::vector<RegionWater> regions;
     std::unordered_map<uint32_t, Basin> basins;
     std::vector<std::vector<RiverBed>> beds;
+
+    // During reach derivation, retain just surveyed shore masks. A full
+    // footprint also carries storage curves that river probes never read.
+    struct ReachLakeMask {
+        int surfaceY = -1;
+        bool ocean = false;
+        std::unordered_map<int, Mask> masks;
+    };
+    mutable std::unordered_map<uint32_t, ReachLakeMask> reachLakeMasks;
+    mutable size_t reachLakeMaskBytes = 0;
+    static constexpr size_t ReachLakeMaskBudget = 32u << 20;
 
     // Outlet lakes are surveyed at world creation. Retain their exact masks
     // within a fixed budget so a distant river and its receiver can arrive

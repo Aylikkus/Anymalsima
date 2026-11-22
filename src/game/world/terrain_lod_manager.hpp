@@ -145,6 +145,11 @@ class TerrainLodManager {
         std::shared_ptr<std::atomic_bool> cancel;
         std::future<TerrainLod::Mesh> future;
     };
+    struct BandJob {
+        ChunkCoord chunk;
+        bool stale = false;
+        std::future<TerrainLod::ColumnBands> future;
+    };
     void choose(const Camera& camera, Vec2 viewport);
     void collect();
     void request();
@@ -194,6 +199,7 @@ class TerrainLodManager {
     Signal<uint64_t>::Connection editConnection;
     std::shared_ptr<SurfaceInputCache> inputs;
     SurfaceSampler detailSampler;
+    std::shared_ptr<const ReservoirSnapshot> waterSnapshot;
     // Built structures at distance; present when edits are tracked.
     std::unique_ptr<StructureLod> structures;
     ChunkCoord detailCentre{};
@@ -223,6 +229,7 @@ class TerrainLodManager {
     std::map<std::array<int, 3>, Estimate> estimates;
     bool errorsChanged = false, selectionDirty = true;
     std::vector<Job> jobs;
+    std::vector<BandJob> bandJobs;
     size_t maxJobs = 2;
     std::array<int, 4> lastFocus{-1, -1, -1, -1};
     float errorScale = 1, selectedScale = 0;

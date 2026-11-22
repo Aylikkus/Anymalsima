@@ -73,6 +73,11 @@ std::optional<GeneratedHydrology::Channel> GeneratedHydrology::riverAt(
                          level - depth - 1,
                          p.distance,
                          radius};
+        if (naturalProfiles) {
+            const float grade = std::lerp(span.level0, span.level1, t) - level;
+            const float fill = .72f + .35f * grade - .26f * across * across;
+            result->water.topFill = uint8_t(std::round(255 * fill));
+        }
     }
     return result;
 }
@@ -147,7 +152,9 @@ bool GeneratedHydrology::springRockAt(int x, int y, int z) const {
     return it != springRock.end() && it->second == y;
 }
 
-bool GeneratedHydrology::hasChannel(int x0, int z0, int x1, int z1) const {
+bool GeneratedHydrology::hasChannel(
+    int x0, int z0, int x1, int z1,
+    std::span<const uint32_t> reachFilter) const {
     if (riverIndex.empty() || x0 >= x1 || z0 >= z1) return false;
     const double cx = (double(x0) + x1 - 1) * .5;
     const double cz = (double(z0) + z1 - 1) * .5;
@@ -164,6 +171,11 @@ bool GeneratedHydrology::hasChannel(int x0, int z0, int x1, int z1) const {
                         if (const auto* candidates = spansAt(x, z))
                             for (uint32_t i : *candidates) {
                                 const auto& s = spans[i];
+                                if (!reachFilter.empty() &&
+                                    std::find(reachFilter.begin(),
+                                              reachFilter.end(),
+                                              s.reach) == reachFilter.end())
+                                    continue;
                                 if (project(cx, cz, s.from, s.to, width * Side)
                                         .distance <=
                                     std::max(s.radius0, s.radius1) + BankWidth +

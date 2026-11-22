@@ -448,11 +448,10 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     if (other && other->block_id) continue;
                     const bool drop = water.wet() && wy < water.surfaceY &&
                                       wy >= water.dropBottom(lower, bank);
-                    const bool changed =
-                        fluid && (!water.fills(wy, ground) || height < 1 ||
-                                  (other && lower.fills(wy, bank) &&
-                                   other->liquid == LiquidType::None));
-                    if (!drop && !(changed && other && fluid)) continue;
+                    // Any air beside a water cell exposes a face: a lower
+                    // lake, a drained neighbor or a dug pocket. Liquid
+                    // neighbors only need the part above their own fill.
+                    if (!drop && !(fluid && other)) continue;
                     const float bottom = other && other->isLiquid()
                                              ? WaterSurface::cellHeight(*other)
                                              : 0;

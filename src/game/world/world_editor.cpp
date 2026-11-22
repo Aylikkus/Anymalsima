@@ -252,5 +252,8 @@ void WorldEditor::commit(Pending& pending) {
     if (sunlight)
         for (const auto column : pending.columns)
             sunlight->markColumnDirty(unsigned(column >> 32), unsigned(column));
-    for (const auto& change : pending.changes) blockChanged.emit(change);
+    for (const auto& change : pending.changes) {
+        chunks.waterBlockEdited(change.pos);
+        blockChanged.emit(change);
+    }
 }

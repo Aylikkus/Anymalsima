@@ -59,7 +59,7 @@ target_include_directories(world_logic_cpu SYSTEM PUBLIC
     "$<TARGET_PROPERTY:bgfx,INTERFACE_INCLUDE_DIRECTORIES>"
 )
 target_link_libraries(world_logic_cpu PUBLIC
-    BS_thread_pool nlohmann_json i18n Threads::Threads libzstd_static
+    BS_thread_pool nlohmann_json i18n Threads::Threads libzstd_static bx
 )
 add_executable(world_logic_tests
     support/test_main.cpp
@@ -414,6 +414,7 @@ foreach(case lod_surface_matches_chunks lod_geology_order_independent
              lod_stepped_boundary_walls lod_water_and_bounds
              lod_selection_coverage_balance lod_cover_fallback lod_edits_lower_ground
              lod_loaded_water_mesh lod_detail_survives_refresh
+             lod_local_water_keeps_drawable_detail_during_remesh
              lod_detail_hysteresis lod_detail_low_handoff_wraps
              lod_mesh_height_matches_triangles
              lod_detail_coarse_joins)
@@ -467,6 +468,25 @@ target_compile_definitions(tree_benchmark PRIVATE
     SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")
 
 foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
+             hydrology_local_flow_conserves_and_freezes_unknown_boundary
+             hydrology_local_flow_falls_across_slab_and_wrap
+             hydrology_local_flow_prefers_nearest_drop
+             hydrology_editor_connects_generated_water
+             hydrology_editor_water_crosses_ready_boundary
+             hydrology_broken_bank_fills_unloaded_valley
+             hydrology_editor_seals_spring_and_restores_river
+             hydrology_editor_dam_backs_up_river
+             hydrology_editor_reopens_saved_cut
+             hydrology_time_speed_consumes_the_same_water_steps
+             hydrology_water_time_budget_and_coarse_fast_forward
+             hydrology_split_lake_drains_channel_at_7200
+             hydrology_channel_fast_forward_and_plug
+             hydrology_editor_certifies_dry_downspout
+             hydrology_river_fractional_top_matches_detail
+             hydrology_dam_pool_spills_at_crest
+             hydrology_portal_drains_pocket_and_refills
+             hydrology_outlet_keys_to_rock_site
+             hydrology_runtime_state_round_trips
              hydrology_reservoir_river_budget
              hydrology_basin_outlets_and_wrap
              hydrology_saved_baseline_matches_new_chunk

@@ -45,7 +45,8 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
         } else if (water.fills(tileY, surfaceY)) {
             tile.block_id = 0;
             tile.liquid = water.kind();
-            tile.liquidLevel = 255;
+            water.softenShore(surfaceY);
+            tile.liquidLevel = water.fillAt(tileY, surfaceY);
 
         } else {
             tile.block_id = 0;

@@ -17,14 +17,28 @@ struct WaterSurface {
     uint32_t reach = 0;
     Vec2 flow{0, 0};
     bool edited = false;
+    uint8_t topFill = 255;
+
+    constexpr float height() const {
+        return wet() ? topTile() + topFill / 255.f : float(surfaceY);
+    }
+    constexpr uint8_t fillAt(int y, int groundY) const {
+        return fills(y, groundY) ? (y == topTile() ? topFill : 255) : 0;
+    }
+    constexpr void softenShore(int groundY) {
+        // Partial coverage of the first wet tile at a standing shoreline.
+        if (body && !reach && depth(groundY) == 1)
+            topFill = std::min<uint8_t>(topFill, 224);
+    }
 
     // A vertical face is owned by the higher column. The lower water or
     // neighboring solid terrain covers the portion beneath this boundary.
+    // A natural shore returns surfaceY (no face); two standing bodies at
+    // different levels, a drained neighbor or a river step need one.
     constexpr int dropBottom(WaterSurface neighbor, int neighborGround) const {
-        if (!wet() ||
-            !(edited || (neighbor.wet() && (reach || neighbor.reach))))
-            return surfaceY;
-        return std::max(neighbor.surfaceY, neighborGround + 1);
+        if (!wet()) return surfaceY;
+        return std::min(surfaceY,
+                        std::max(neighbor.surfaceY, neighborGround + 1));
     }
 
     constexpr int depth(int groundY) const {
@@ -51,6 +65,6 @@ struct WaterSurface {
         if (cell)
             return !cell->isSolid() && cell->liquid == LiquidType::Water &&
                    y - std::floor(y) < cellHeight(*cell);
-        return y >= groundY + 1 && y < surfaceY;
+        return y >= groundY + 1 && y < height();
     }
 };

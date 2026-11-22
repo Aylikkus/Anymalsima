@@ -25,8 +25,14 @@ World WorldGenerator::generate(const WorldGenSettings &settings,
     world.hydrology = GeneratedHydrology::build(world, shouldCancel, true, true,
                                                 true, true, true, true, true);
     if (!world.hydrology) return {};
+    lakeCoverage = world.hydrology->refinedLakeCoverage(shouldCancel);
+    if (lakeCoverage.empty()) return {};
+    // Candidate basins often refine to a smaller lake or none at all. Label
+    // the regions holding a meaningful part of an actual lake.
+    constexpr int RegionArea = WorldWrap::RegionSize * WorldWrap::RegionSize;
     for (int i = 0; i < int(world.regions.size()); ++i) {
-        if (world.hydrology->candidateBody(i) > GeneratedHydrology::Sea)
+        if (lakeCoverage[i] >= RegionArea / 8 &&
+            world.hydrology->candidateBody(i) != GeneratedHydrology::Sea)
             world.regions[i].addFeature(FeatureMask::LAKE);
     }
     buildRegionMeshes(shouldCancel);
@@ -1331,7 +1337,14 @@ void WorldGenerator::buildRegionMeshes(std::function<bool()> shouldCancel) {
         auto sample = [&](int x, int y) -> uint8_t {
             x = (x % w + w) % w;          // wrap X
             y = std::clamp(y, 0, h - 1);  // no Y wrap
-            const bool water = world.hydrology->candidateBody(y * w + x) != 0;
+            // The sea keeps its regional outline. Lakes follow the refined
+            // footprint, so a candidate that never fills stays dry.
+            const int i = y * w + x;
+            constexpr int Half =
+                WorldWrap::RegionSize * WorldWrap::RegionSize / 2;
+            const bool water =
+                world.hydrology->candidateBody(i) == GeneratedHydrology::Sea ||
+                (size_t(i) < lakeCoverage.size() && lakeCoverage[i] >= Half);
             return layer == LayerType::WATER ? water : !water;
         };
 

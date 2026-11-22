@@ -140,11 +140,12 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 }
                 const auto cell = Chunk::cell(lx, y % Chunk::SIZE_Y, lz);
                 const bool inReservoir =
-                    chunk->projectsWater && baseline.water.body &&
-                    !baseline.water.reach && baseline.water.fills(y, surface);
+                    chunk->projectsWater &&
+                    (baseline.water.body || baseline.water.reach) &&
+                    baseline.water.fills(y, surface);
                 projected |= inReservoir;
                 if (reservoirTop < 0 && inReservoir && !tile.isSolid() &&
-                    !chunk->rootEdited(cell) &&
+                    (baseline.water.reach || !chunk->rootEdited(cell)) &&
                     (!tile.isLiquid() ||
                      tile.waterOrigin == WaterOrigin::Reservoir))
                     reservoirTop = y + 1;

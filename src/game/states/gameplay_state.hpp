@@ -85,6 +85,8 @@ class GameplayState : public IGameState {
     SectionContainer skyExtra;
     std::future<void> skyWrite;
     Signal<const ChunkCoord&>::Connection skyReadyConnection;
+    // Terrain edits exposing or sealing aquifer rock register and close
+    // runtime spring outlets (see docs/handoff/water.md, step 5).
     void saveSky(bool wait);
     std::unique_ptr<SunLightPropagator> sunLight;
     std::unique_ptr<WorldEditor> editor;

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "render/render_views.hpp"
 #include "render/vertex.hpp"
@@ -76,12 +77,12 @@ void LightRenderer::setSkyOcclusion(
         occlusionOrigin.setVec4({0, 0, 0, 0});
         return;
     }
-    const auto& texels = occlusion->texels();
+    // The half-float image is built with the map on the pool; uploading
+    // stays a copy.
+    const auto& halves = occlusion->texelHalves();
     const bgfx::Memory* memory =
-        bgfx::alloc(uint32_t(texels.size() * sizeof(uint16_t)));
-    auto* half = reinterpret_cast<uint16_t*>(memory->data);
-    for (size_t i = 0; i < texels.size(); ++i)
-        half[i] = bx::halfFromFloat(texels[i]);
+        bgfx::alloc(uint32_t(halves.size() * sizeof(uint16_t)));
+    std::memcpy(memory->data, halves.data(), halves.size() * sizeof(uint16_t));
     bgfx::updateTexture2D(occlusionTexture, 0, 0, 0, 0, SkyOcclusionMap::Size,
                           SkyOcclusionMap::Size, memory);
     occlusionOrigin.setVec4({float(occlusion->originX()),
@@ -215,6 +216,7 @@ void LightRenderer::drawGlare(RenderTarget& target, const Camera& camera,
                          });
         candidates.resize(MaxGlares);
     }
+    if (candidates.empty()) return;
     const uint32_t count = bgfx::getAvailInstanceDataBuffer(
         uint32_t(candidates.size()), InstanceStride);
     if (count == 0) return;

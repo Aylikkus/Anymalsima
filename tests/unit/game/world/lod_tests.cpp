@@ -6,6 +6,7 @@
 
 #include "test.hpp"
 #include "test_assets.hpp"
+#include "world/chunk_manager.hpp"
 #include "world/chunk_mesher.hpp"
 #include "world/detail_coverage.hpp"
 #include "world/location_generator.hpp"
@@ -311,6 +312,19 @@ TEST(lod_water_and_bounds) {
                 shoreMesh.water.vertices[shoreMesh.water.indices[i + 2]];
             const float x = (a.x + b.x + c.x) / 3.f,
                         z = (a.z + b.z + c.z) / 3.f;
+            if (a.ny == 0) {
+                const int wetX = int(x - .25f * a.nx);
+                const int wetZ = int(z - .25f * a.nz);
+                const int dryX = int(x + .25f * a.nx);
+                const int dryZ = int(z + .25f * a.nz);
+                EQUAL(std::max({a.y, b.y, c.y}),
+                      sampler.waterAt(wetX, wetZ).height(),
+                      "wall starts at the higher water surface");
+                EQUAL(std::min({a.y, b.y, c.y}),
+                      float(sampler.height(dryX, dryZ) + 1),
+                      "wall closes the exposed drop to dry ground");
+                continue;
+            }
             EQUAL(a.y, float(sampler.waterAt(int(x), int(z)).surfaceY),
                   "water triangle lies in the sampled footprint");
             CHECK(TerrainLod::meshHeight(shore, sampler, x, z) <= a.y + .001f);
@@ -436,9 +450,9 @@ TEST(lod_loaded_water_mesh) {
         CHECK(v.ny == 1);
     }
 
-    chunk.tiles[2][3][1] = {};
-    chunk.tiles[2][15][1] = {
-        .liquid = LiquidType::Water, .liquidLevel = 255, .lightLevel = {}};
+    chunk.tiles[2][3][1] = Tile{};
+    chunk.tiles[2][15][1] =
+        Tile{.liquid = LiquidType::Water, .liquidLevel = 255, .lightLevel = {}};
     const auto unknown = [](int, int, int) -> const Tile* { return nullptr; };
     CHECK(mesher.build(chunk, {0, 24, 0}, unknown).water.indices.empty());
     const auto boundary =
@@ -462,6 +476,22 @@ TEST(lod_loaded_water_mesh) {
         .liquid = LiquidType::Water, .liquidLevel = 64, .lightLevel = {}};
     CHECK(WaterSurface{}.submerged(399.2f, -1, &partial));
     CHECK(!WaterSurface{}.submerged(399.3f, -1, &partial));
+    // Inside a generated lake the higher cell owns the exposed strip, even
+    // when it is full and both columns have the same integer surface level.
+    Chunk lake{};
+    lake.tiles[2][3][1] = Tile{.liquid = LiquidType::Water, .liquidLevel = 255};
+    lake.tiles[2][3][2] = Tile{.liquid = LiquidType::Water, .liquidLevel = 220};
+    const auto stepped = mesher.build(
+        lake, {}, [&](int, int, int) { return &air; }, {}, {},
+        [](int, int) { return std::pair{2, WaterSurface{4, 1}}; });
+    std::vector<float> edge;
+    for (const auto& v : stepped.water.vertices)
+        if (v.nx == 1 && v.x == 2) edge.push_back(v.y);
+    EQUAL(edge.size(), 4u, "one face between the two levels");
+    EQUAL(*std::min_element(edge.begin(), edge.end()), 3 + 220 / 255.f,
+          "strip starts at the lower water level");
+    EQUAL(*std::max_element(edge.begin(), edge.end()), 4.f,
+          "strip ends at the upper water level");
 }
 
 TEST(lod_detail_survives_refresh) {
@@ -540,14 +570,11 @@ TEST(lod_detail_low_handoff_wraps) {
     SurfaceSampler sampler(world, assets);
     const auto bandsAtSeam = TerrainLod::sampleBands(63, 7, sampler);
     CHECK(bandsAtSeam.water);
-    const std::array waterBands{bandsAtSeam.water->slabs};
+    const std::array waterBands{*bandsAtSeam.water};
     const ChunkCoord slab{63, unsigned(waterBands[0].minY), 7};
-    std::vector<float> tops(256, float(SEA_LEVEL_Y + 1 - slab.y * 16));
     TerrainLod::DetailCoverage water(4), ground(4);
-    bool current = false, mesh = false, light = false, matchingProxy = true;
-    auto drawable = [&](ChunkCoord c) {
-        return mesh && light && bandsAtSeam.water->matches(c, tops);
-    };
+    bool current = false, mesh = false, light = false;
+    auto drawable = [&](ChunkCoord) { return mesh && light; };
     const auto frame = [&](unsigned x, bool detail) {
         const ChunkCoord camera{x, slab.y, 7};
         ground.update(
@@ -555,10 +582,7 @@ TEST(lod_detail_low_handoff_wraps) {
             [](ChunkCoord) { return false; }, drawable, 64);
         water.update(
             camera, waterBands,
-            [&](ChunkCoord c) {
-                return current && matchingProxy && drawable(c);
-            },
-            drawable, 64);
+            [&](ChunkCoord c) { return current && drawable(c); }, drawable, 64);
         CHECK(!ground.contains(63, 7));
         const bool detailed = water.contains(63, 7);
         const bool proxy = !detailed;
@@ -570,15 +594,12 @@ TEST(lod_detail_low_handoff_wraps) {
     mesh = current = true;
     frame(1, false);
     light = true;
-    matchingProxy = false;
-    frame(1, false);
-    matchingProxy = true;
     frame(1, true);
     current = false;
     frame(2, true);
-    tops[0] += 1.f;
+    light = false;
     frame(2, false);
-    tops[0] -= 1.f;
+    light = true;
     current = true;
     frame(1, true);
     mesh = false;
@@ -597,6 +618,70 @@ TEST(lod_detail_low_handoff_wraps) {
     const auto westEdge = edgeHeights(west, 1024.f);
     CHECK(!westEdge.empty());
     CHECK(westEdge == edgeHeights(east, 0.f));
+}
+
+TEST(lod_local_water_keeps_drawable_detail_during_remesh) {
+    constexpr ChunkCoord River{7, 25, 7}, Canal{7, 24, 7};
+    test::Assets assets;
+    Chunk chunk{};
+    auto& local = chunk.tiles[2][3][1];
+    local.liquid = LiquidType::Water;
+    local.liquidLevel = 64;
+    local.waterOrigin = WaterOrigin::Local;
+    const Tile air{};
+    const auto columns = [](int, int) {
+        return std::pair{int(Canal.y) * 16 + 2,
+                         WaterSurface{int(Canal.y) * 16 + 4}};
+    };
+    ChunkMesher mesher(assets);
+    const auto build = [&] {
+        return mesher.build(
+            chunk, Canal, [&](int, int, int) { return &air; }, {}, {}, columns);
+    };
+    const auto partial = build();
+    EQUAL(partial.waterTops[2 * 16 + 1], 3.f + 64.f / 255.f,
+          "voxel surface keeps its fractional height");
+    local.liquidLevel = 255;
+    const auto full = build();
+    CHECK(std::any_of(full.water.vertices.begin(), full.water.vertices.end(),
+                      [](const auto& v) { return v.ny == 0; }));
+
+    TerrainLod::DetailCoverage coverage(4);
+    auto drawable = [](ChunkCoord) { return true; };
+    const std::array riverBands{TerrainLod::SurfaceBand{7, 7, 25, 25}};
+    coverage.update(River, riverBands, drawable, drawable, 0, true);
+    TerrainLod::DetailCoverage::Columns bands{{{7, 7}, riverBands[0]}};
+    TerrainLod::DetailCoverage::includeSlab(bands, Canal);
+    const std::array withCanal{bands.begin()->second};
+    coverage.update(
+        River, withCanal, [&](ChunkCoord c) { return c == River; }, drawable, 0,
+        true);
+    EQUAL(coverage.columns().at({7, 7}).minY, 25,
+          "keep river detail while canal upload is pending");
+    coverage.update(River, {}, drawable, drawable, 0, true);
+    CHECK(coverage.contains(7, 7));
+    coverage.update(River, withCanal, drawable, drawable, 0, true);
+    EQUAL(coverage.columns().at({7, 7}).minY, 24,
+          "the fractional canal acquires detail below the proxy band");
+
+    bands.clear();
+    TerrainLod::DetailCoverage::includeSlab(bands, Canal);
+    TerrainLod::DetailCoverage noProxy(4);
+    const std::array localOnly{bands.begin()->second};
+    noProxy.update(River, localOnly, drawable, drawable, 0, true);
+    CHECK(noProxy.contains(7, 7));
+
+    ChunkHandle handle;
+    handle.meshTopologyRevision = 3;
+    handle.meshRevision = 7;
+    CHECK(handle.canPublishMesh(6));
+    CHECK(!handle.canPublishMesh(2));
+    handle.uploaded = true;
+    handle.uploadedRevision = 6;
+    CHECK(!handle.canPublishMesh(6));
+    CHECK(handle.canPublishMesh(7));
+    handle.meshTopologyRevision = handle.meshRevision = 8;
+    CHECK(!handle.canPublishMesh(7));
 }
 
 TEST(lod_mesh_height_matches_triangles) {

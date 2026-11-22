@@ -1,12 +1,15 @@
 #include "generated_hydrology.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
 #include <bitset>
 #include <chrono>
 #include <climits>
 #include <deque>
 #include <queue>
 #include <stdexcept>
+#include <thread>
 
 #include "terrain_sampler.hpp"
 
@@ -58,6 +61,9 @@ std::shared_ptr<const GeneratedHydrology> GeneratedHydrology::build(
         (carveRivers &&
          !result->buildReaches(cancelled, naturalRivers, connectLakeOutlets)))
         return {};
+    result->reachLakeMasks.clear();
+    result->reachLakeMasks.rehash(0);
+    result->reachLakeMaskBytes = 0;
     return result;
 }
 
@@ -777,6 +783,42 @@ uint32_t GeneratedHydrology::candidateBody(int region) const {
     return regions[region].body;
 }
 
+std::vector<uint16_t> GeneratedHydrology::refinedLakeCoverage(
+    const std::function<bool()>& cancelled) const {
+    std::vector<uint32_t> ids;
+    ids.reserve(basins.size());
+    for (const auto& [id, basin] : basins) ids.push_back(id);
+    std::sort(ids.begin(), ids.end());
+    std::vector<std::atomic<uint32_t>> counts(regions.size());
+    std::atomic<size_t> next = 0;
+    std::atomic_bool stop = false;
+    const auto work = [&] {
+        for (size_t k; !stop && (k = next++) < ids.size();) {
+            if (stopped(cancelled)) {
+                stop = true;
+                break;
+            }
+            const auto lake = footprint((uint64_t(ids[k]) << 1) | 1);
+            for (const auto& [region, mask] : lake->masks) {
+                uint32_t wet = 0;
+                for (const auto word : mask.bits) wet += std::popcount(word);
+                counts[region] += wet;
+            }
+        }
+    };
+    const unsigned threads =
+        std::clamp(std::thread::hardware_concurrency(), 1u, 8u);
+    std::vector<std::thread> pool;
+    for (unsigned i = 1; i < threads; ++i) pool.emplace_back(work);
+    work();
+    for (auto& thread : pool) thread.join();
+    if (stop) return {};
+    std::vector<uint16_t> result(regions.size());
+    for (size_t i = 0; i < counts.size(); ++i)
+        result[i] = uint16_t(std::min<uint32_t>(counts[i], Area));
+    return result;
+}
+
 uint32_t GeneratedHydrology::catchment(int region) const {
     return regions[region].catchment;
 }
@@ -917,10 +959,31 @@ WaterSurface GeneratedHydrology::standingWaterAt(int x, int z, int groundY,
         if (groundY + 1 >= basin.sillY &&
             !(basin.coastal && groundY < SEA_LEVEL_Y))
             return {};
-        const auto wet = footprint((uint64_t(id) << 1) | 1);
-        if (const auto it = wet->masks.find(i);
-            it != wet->masks.end() && it->second.test(index))
-            return {wet->lake.surfaceY, wet->ocean ? Sea : id};
+        const ReachLakeMask* compact = nullptr;
+        std::shared_ptr<const Footprint> wet;
+        if (probeOutlet) {
+            const auto cached = reachLakeMasks.find(id);
+            if (cached != reachLakeMasks.end()) compact = &cached->second;
+        }
+        if (!compact) {
+            wet = footprint((uint64_t(id) << 1) | 1);
+            if (probeOutlet) {
+                const size_t bytes = sizeof(ReachLakeMask) +
+                                     wet->masks.size() * (sizeof(Mask) + 64);
+                if (bytes <= ReachLakeMaskBudget - reachLakeMaskBytes) {
+                    auto [it, inserted] = reachLakeMasks.try_emplace(
+                        id, ReachLakeMask{wet->lake.surfaceY, wet->ocean,
+                                          wet->masks});
+                    if (inserted) reachLakeMaskBytes += bytes;
+                    compact = &it->second;
+                }
+            }
+        }
+        const auto& masks = compact ? compact->masks : wet->masks;
+        if (const auto it = masks.find(i);
+            it != masks.end() && it->second.test(index))
+            return {compact ? compact->surfaceY : wet->lake.surfaceY,
+                    (compact ? compact->ocean : wet->ocean) ? Sea : id};
     }
     return {};
 }

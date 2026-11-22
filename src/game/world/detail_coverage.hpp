@@ -22,10 +22,21 @@ class DetailCoverage {
     using Key = std::pair<int, int>;
     using Columns = std::map<Key, SurfaceBand>;
 
+    static void includeSlab(Columns& columns, ChunkCoord coord) {
+        const Key key{int(coord.x), int(coord.z)};
+        const int y = int(coord.y);
+        auto& band =
+            columns.try_emplace(key, SurfaceBand{key.first, key.second, y, y})
+                .first->second;
+        band.minY = std::min(band.minY, y);
+        band.maxY = std::max(band.maxY, y);
+    }
+
     // periodChunks > 0: X wraps with this many chunk columns.
     template <typename Current, typename Drawable>
     void update(ChunkCoord focus, std::span<const SurfaceBand> candidates,
-                Current&& current, Drawable&& drawable, int periodChunks = 0) {
+                Current&& current, Drawable&& drawable, int periodChunks = 0,
+                bool refreshBands = false) {
         auto next = visible;
         const auto inRange = [&](const SurfaceBand& band, int radius) {
             return std::abs(WorldWrap::delta(band.x, int(focus.x),
@@ -46,10 +57,15 @@ class DetailCoverage {
                 it = next.erase(it);
             else
                 ++it;
-        for (const auto& band : candidates)
-            if (!next.contains({band.x, band.z}) &&
-                inRange(band, enterRadius()) && ready(band, current))
-                next[{band.x, band.z}] = band;
+        for (const auto& band : candidates) {
+            const Key key{band.x, band.z};
+            const auto old = next.find(key);
+            if (old != next.end() && (!refreshBands || old->second == band))
+                continue;
+            if (inRange(band, old == next.end() ? enterRadius() : keep) &&
+                ready(band, current))
+                next[key] = band;
+        }
         if (next != visible) {
             visible = std::move(next);
             ++revision;

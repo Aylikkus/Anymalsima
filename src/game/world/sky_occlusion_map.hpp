@@ -43,6 +43,11 @@ class SkyOcclusionMap {
     using Raster = std::function<void(int, int, std::vector<float>&)>;
     void build(double eyeX, double eyeZ, const Raster& raster);
 
+    // Row-major half-float copy of texels() for GPU upload, built by
+    // build() on the pool: the 4M-element conversion is far too slow for
+    // the main thread (see LightRenderer::setSkyOcclusion).
+    const std::vector<uint16_t>& texelHalves() const { return halves; }
+
     bool valid() const { return built; }
     double originX() const { return minX; }
     double originZ() const { return minZ; }
@@ -70,6 +75,7 @@ class SkyOcclusionMap {
         return std::floor(v / Snap) * Snap + Snap / 2.0;
     }
     std::vector<float> data;
+    std::vector<uint16_t> halves;
     double minX = 0, minZ = 0;
     double centreX = 0, centreZ = 0;
     bool built = false;

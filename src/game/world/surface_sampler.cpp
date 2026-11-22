@@ -181,6 +181,8 @@ int SurfaceSampler::channelFloorLevel(int x, int z, int radius) const {
 }
 
 bool SurfaceSampler::hasChannel(int x0, int z0, int x1, int z1) const {
+    if (reservoirs && reservoirs->poolIntersects(x0, z0, x1, z1, width()))
+        return true;
     return world.hydrology && world.hydrology->hasChannel(x0, z0, x1, z1);
 }
 
@@ -190,7 +192,8 @@ bool SurfaceSampler::hasUnrefinedWater(int x0, int z0, int x1, int z1) const {
 }
 
 bool SurfaceSampler::submerged(int x, int z, float y) {
-    if (!editAt(x, z) && (!reservoirs || reservoirs->cells.empty())) {
+    if (!editAt(x, z) && (!reservoirs || (reservoirs->cells.empty() &&
+                                          reservoirs->pools.empty()))) {
         const int ceiling = world.hydrology
                                 ? world.hydrology->waterCeilingAt(x, z)
                                 : WaterSurface::SeaBoundary;
@@ -226,7 +229,7 @@ bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
                                              provisionalWater());
     for (int x : {x0, (x0 + x1) / 2, x1 - 1})
         for (int z : {z0, (z0 + z1) / 2, z1 - 1})
-            if (waterAt(x, z).surfaceY != sample.surfaceY) return false;
+            if (waterAt(x, z).height() != sample.height()) return false;
     return true;
 }
 
@@ -241,21 +244,32 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
                              (waterDetail == WaterDetail::Preview &&
                               world.hydrology->potentialSeaAt(x, z));
     auto result = generatedWater(x, z, needsHeight ? height(x, z) : -1);
-    if (reservoirs && (reservoirs->levels.contains(result.body) ||
-                       reservoirs->localTop(x, z) >= 0)) {
+    if (reservoirs &&
+        (reservoirs->levels.contains(result.body) ||
+         reservoirs->riverStages.contains(result.reach) ||
+         reservoirs->poolIntersects(x, z, x + 1, z + 1, width()))) {
         const int ground = height(x, z);
         // A provisional coastal sample does not prove membership as the
         // ocean recedes. Resolve the actual baseline before applying a level.
         if (provisionalWater() && world.hydrology &&
             reservoirs->levels.contains(result.body))
             result = world.hydrology->waterAt(x, z, ground);
-        result =
-            reservoirs->project(world.hydrology.get(), x, z, ground, result);
+        result = reservoirs->projectStanding(world.hydrology.get(), x, z,
+                                             ground, result);
     }
     if (const auto* edit = editAt(x, z)) {
         const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
         result = edit->waterAt(i, result);
     }
+    // Edits can cap the generated reservoir, not the exact water projected
+    // by the live ledger into the newly dug opening.
+    if (reservoirs &&
+        (reservoirs->poolIntersects(x, z, x + 1, z + 1, width()) ||
+         reservoirs->localTop(x, z) >= 0))
+        result = reservoirs->projectLocal(x, z, height(x, z), result);
+    if (result.body && !result.reach && !result.edited &&
+        waterDetail == WaterDetail::Exact)
+        result.softenShore(height(x, z));
     if (waterSamples.size() >= 65536) waterSamples.clear();
     waterSamples.emplace(key, result);
     return result;

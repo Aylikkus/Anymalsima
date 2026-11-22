@@ -51,6 +51,7 @@ TerrainLodManager::TerrainLodManager(const World& world, IAssets& assets,
       edits(edits),
       inputs(std::make_shared<SurfaceInputCache>()),
       detailSampler(world, assets, inputs, edits ? edits->snapshot() : nullptr),
+      waterSnapshot(world.reservoirs ? world.reservoirs->snapshot() : nullptr),
       detailCoverage(quality.chunkRadius),
       waterCoverage(quality.chunkRadius),
       rangeLimit(quality.viewDistance),
@@ -117,6 +118,13 @@ TerrainLodManager::~TerrainLodManager() {
             job.future.get();
         } catch (const std::exception& e) {
             std::cerr << "LOD shutdown: " << e.what() << '\n';
+        }
+    }
+    for (auto& job : bandJobs) {
+        try {
+            job.future.get();
+        } catch (const std::exception& e) {
+            std::cerr << "LOD band shutdown: " << e.what() << '\n';
         }
     }
     if (bgfx::isValid(detailMap)) bgfx::destroy(detailMap);
@@ -765,8 +773,19 @@ void TerrainLodManager::editChanged(uint64_t column) {
     if (structures) structures->edited(column);
     const TerrainLod::DetailCoverage::Key key{int(column >> 32),
                                               int(uint32_t(column))};
-    surfaceBands.erase(key);
-    waterCoverage.remove(key);
+    const WorldWrap wrap{periodX};
+    for (auto& job : bandJobs)
+        if (std::abs(wrap.deltaChunk(job.chunk.x, key.first)) <= 1 &&
+            std::abs(int(job.chunk.z) - key.second) <= 1)
+            job.stale = true;
+    for (int dz = -1; dz <= 1; ++dz)
+        for (int dx = -1; dx <= 1; ++dx) {
+            const TerrainLod::DetailCoverage::Key nearby{
+                int(wrap.wrapChunk(key.first + dx)), key.second + dz};
+            if (nearby.first < 0 || nearby.second < 0) continue;
+            surfaceBands.erase(nearby);
+            waterCoverage.remove(nearby);
+        }
     joinedCoverageVersion = UINT64_MAX;
 }
 
@@ -795,22 +814,39 @@ void TerrainLodManager::invalidatePatches(
 }
 
 void TerrainLodManager::reservoirsChanged(const ReservoirChange& change) {
-    detailSampler.setReservoirs(world.reservoirs->snapshot());
+    auto next = world.reservoirs->snapshot();
+    ReservoirChange projected;
+    projected.bodies = change.bodies;
+    projected.pools = change.pools;
+    const auto record = [&](TilePos p) {
+        if (next->localTop(p.x, p.z) != waterSnapshot->localTop(p.x, p.z))
+            projected.locals.push_back({p.x, 0, p.z});
+    };
+    if (change.local) record(*change.local);
+    for (const auto p : change.locals) record(p);
+    waterSnapshot = std::move(next);
+    if (projected.bodies.empty() && projected.locals.empty()) return;
+    std::sort(projected.locals.begin(), projected.locals.end(), TilePosLess{});
+    projected.locals.erase(
+        std::unique(projected.locals.begin(), projected.locals.end()),
+        projected.locals.end());
+    // The proxy only stores an integer top. Fractional changes must not
+    // discard its patch jobs or evict water already drawn at voxel detail.
+    detailSampler.setReservoirs(waterSnapshot);
     invalidatePatches([&](const TerrainLod::Patch& p) {
-        return change.affects(world.hydrology.get(), p.x - p.spacing,
-                              p.z - p.spacing, p.x + p.size() + p.spacing,
-                              p.z + p.size() + p.spacing, periodX);
+        return projected.affects(world.hydrology.get(), p.x - p.spacing,
+                                 p.z - p.spacing, p.x + p.size() + p.spacing,
+                                 p.z + p.size() + p.spacing, periodX);
     });
     for (auto it = surfaceBands.begin(); it != surfaceBands.end();) {
         const auto key = it->first;
         const int x = key.first * Chunk::SIZE_X, z = key.second * Chunk::SIZE_Z;
-        if (!change.affects(world.hydrology.get(), x - 1, z - 1,
-                            x + Chunk::SIZE_X + 1, z + Chunk::SIZE_Z + 1,
-                            periodX)) {
+        if (!projected.affects(world.hydrology.get(), x - 1, z - 1,
+                               x + Chunk::SIZE_X + 1, z + Chunk::SIZE_Z + 1,
+                               periodX)) {
             ++it;
             continue;
         }
-        waterCoverage.remove(key);
         it = surfaceBands.erase(it);
     }
 }
@@ -853,6 +889,23 @@ bool TerrainLodManager::drawsWater(const ChunkCoord& c) const {
 void TerrainLodManager::updateCoverage(ChunkManager& chunks,
                                        const Camera& camera,
                                        LightVolumeManager* lightVolumes) {
+    using namespace std::chrono_literals;
+    for (size_t i = 0; i < bandJobs.size();) {
+        if (bandJobs[i].future.wait_for(0s) != std::future_status::ready) {
+            ++i;
+            continue;
+        }
+        auto job = std::move(bandJobs[i]);
+        bandJobs.erase(bandJobs.begin() + i);
+        try {
+            auto bands = job.future.get();
+            if (!job.stale && chunks.isMeshUploaded(job.chunk))
+                surfaceBands[{int(job.chunk.x), int(job.chunk.z)}] =
+                    std::move(bands);
+        } catch (const std::exception& e) {
+            std::cerr << "LOD band generation failed: " << e.what() << '\n';
+        }
+    }
     const int cx = int(camera.position.x) / 16,
               cy = int(camera.position.y) / 16,
               cz = int(camera.position.z) / 16;
@@ -884,18 +937,46 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
     int newBands = 0;
     chunks.forEachMeshed([&](const ChunkCoord& coord) {
         const int x = int(coord.x), z = int(coord.z);
-        if (newBands >= 4 || distX(x) > detailCoverage.enterRadius() ||
+        if (newBands >= 4 || bandJobs.size() >= 4 ||
+            distX(x) > detailCoverage.enterRadius() ||
             std::abs(z - cz) > detailCoverage.enterRadius() ||
             surfaceBands.contains({x, z}) || !chunks.isMeshUploaded(coord))
             return;
-        surfaceBands[{x, z}] = TerrainLod::sampleBands(x, z, detailSampler);
+        if (std::any_of(bandJobs.begin(), bandJobs.end(),
+                        [&](const BandJob& j) {
+                            return j.chunk.x == coord.x && j.chunk.z == coord.z;
+                        }))
+            return;
+        auto changes = edits ? edits->snapshot() : nullptr;
+        auto water = world.reservoirs ? world.reservoirs->snapshot() : nullptr;
+        auto future = pool.submit_task(
+            [source = &world, definitions = &assets, shared = inputs, changes,
+             water, x, z] {
+                SurfaceSampler sampler(*source, *definitions, shared, changes,
+                                       SurfaceSampler::WaterDetail::Exact,
+                                       water);
+                return TerrainLod::sampleBands(x, z, sampler);
+            },
+            BS::pr::normal);
+        bandJobs.push_back({coord, false, std::move(future)});
         ++newBands;
     });
     std::vector<TerrainLod::SurfaceBand> candidates, waterCandidates;
+    TerrainLod::DetailCoverage::Columns waterBands;
     for (const auto& [key, bands] : surfaceBands) {
         candidates.push_back(bands.ground);
-        if (bands.water) waterCandidates.push_back(bands.water->slabs);
+        if (bands.water) waterBands.emplace(key, *bands.water);
     }
+    // A canal can contain water below the proxy's surface band, or where the
+    // proxy has no water at all. Cover both ranges before hiding the proxy.
+    chunks.forEachMeshed([&](ChunkCoord c) {
+        const auto key = TerrainLod::DetailCoverage::Key{int(c.x), int(c.z)};
+        if (std::abs(int(c.y) - cy) > keep || !surfaceBands.contains(key) ||
+            !chunks.getWaterMesh(c))
+            return;
+        TerrainLod::DetailCoverage::includeSlab(waterBands, c);
+    });
+    for (const auto& [key, band] : waterBands) waterCandidates.push_back(band);
     const auto lit = [&](ChunkCoord coord) {
         return !lightVolumes ||
                (!chunks.getMesh(coord) && !chunks.getWaterMesh(coord)) ||
@@ -924,34 +1005,15 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         wrap.chunks());
 
     const auto waterDrawable = [&](ChunkCoord coord) {
-        if (!chunks.hasUploadedMesh(coord)) return false;
-        const auto it = surfaceBands.find({int(coord.x), int(coord.z)});
-        if (it == surfaceBands.end() || !it->second.water ||
-            int(coord.y) < it->second.water->slabs.minY ||
-            int(coord.y) > it->second.water->slabs.maxY)
-            return false;
-        return it->second.water->matches(coord,
-                                         chunks.uploadedWaterTops(coord)) &&
-               lit(coord);
+        return chunks.hasUploadedMesh(coord) && lit(coord);
     };
     const auto waterCurrent = [&](ChunkCoord coord) {
-        const int x = int(coord.x) * Chunk::SIZE_X,
-                  z = int(coord.z) * Chunk::SIZE_Z;
-        // Retain a drawable fallback even when the camera sees the water
-        // slab from above the range of the underlying terrain band.
-        for (int spacing = 1; spacing <= TerrainLod::RootSpacing;
-             spacing *= 2) {
-            const int side = TerrainLod::Cells * spacing;
-            const auto p =
-                entries.find({x / side * side, z / side * side, spacing});
-            if (p != entries.end() && p->second->lastDrawn == frame)
-                return !p->second->stale && chunks.isMeshUploaded(coord) &&
-                       waterDrawable(coord);
-        }
-        return false;
+        // The loaded mesh is authoritative, including fractional surfaces
+        // and known dry or covered voxels. The proxy is only a fallback.
+        return chunks.isMeshUploaded(coord) && waterDrawable(coord);
     };
     waterCoverage.update(detailCentre, waterCandidates, waterCurrent,
-                         waterDrawable, wrap.chunks());
+                         waterDrawable, wrap.chunks(), true);
     detailX = cx - DetailSize / 2;
     detailZ = cz - DetailSize / 2;
 }

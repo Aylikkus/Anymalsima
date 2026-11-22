@@ -471,6 +471,9 @@ int main(int argc, char** argv) {
                 };
                 // chunks, lod update, lod render+upload, trees, frame, flush
                 std::array<double, 6> sections{};
+                double requestMs = 0, chunkUpdateMs = 0, skyMapMs = 0,
+                       sunUpdateMs = 0, blockUpdateMs = 0, uploadMs = 0,
+                       volumesMs = 0;
                 auto mark = SmokeClock::now();
                 if (approaching && approach.state == 1) {
                     const double dx = approach.targetX - camera.position.x;
@@ -523,6 +526,7 @@ int main(int argc, char** argv) {
                         {unsigned(cx) / 8, unsigned(cz) / 8});
                     locations.update();  // gradual unloading
                     chunks.setFocus(camera.position);
+                    const auto requestStart = SmokeClock::now();
                     sunlight.setFocus(camera.position);
                     blockLight.setFocus(camera.position);
                     const int reach = terrainSettings.chunkRadius;
@@ -532,13 +536,39 @@ int main(int argc, char** argv) {
                                 chunks.request(
                                     {unsigned(world.wrap().wrapChunk(x)),
                                      unsigned(y), unsigned(z)});
+                    const auto requestEnd = SmokeClock::now();
                     chunks.update();
+                    const auto chunkUpdateEnd = SmokeClock::now();
                     skyMap.setFocus(camera.position);
                     skyMap.update();
+                    const auto skyMapEnd = SmokeClock::now();
                     sunlight.update();
+                    const auto sunEnd = SmokeClock::now();
                     blockLight.update();
+                    const auto blockEnd = SmokeClock::now();
                     chunks.uploadReadyMeshes(renderer);
+                    const auto uploadEnd = SmokeClock::now();
                     if (useVolumes) volumes.update(camera.position);
+                    const auto volumesEnd = SmokeClock::now();
+                    requestMs = since(requestStart);
+                    chunkUpdateMs = std::chrono::duration<double, std::milli>(
+                                        chunkUpdateEnd - requestEnd)
+                                        .count();
+                    skyMapMs = std::chrono::duration<double, std::milli>(
+                                   skyMapEnd - chunkUpdateEnd)
+                                   .count();
+                    sunUpdateMs = std::chrono::duration<double, std::milli>(
+                                      sunEnd - skyMapEnd)
+                                      .count();
+                    blockUpdateMs = std::chrono::duration<double, std::milli>(
+                                        blockEnd - sunEnd)
+                                        .count();
+                    uploadMs = std::chrono::duration<double, std::milli>(
+                                   uploadEnd - blockEnd)
+                                   .count();
+                    volumesMs = std::chrono::duration<double, std::milli>(
+                                    volumesEnd - uploadEnd)
+                                    .count();
                 }
                 sections[0] = since(mark);
                 mark = SmokeClock::now();
@@ -547,16 +577,41 @@ int main(int argc, char** argv) {
                                        .count();
                 if (lights)
                     lightRenderer.update(registry, camera, world.wrap(), now);
+                const auto lodStageStart = SmokeClock::now();
                 lod.setStructures(trees.landmarkVoxels(0));
+                const double landmarkMs = since(lodStageStart);
+                const auto updateStart = SmokeClock::now();
                 lod.update(camera, {1280, 720},
                            lightRenderer.shadows().casterDetail());
+                const double lodUpdateMs = since(updateStart);
+                const auto occlusionStart = SmokeClock::now();
+                std::vector<structure_voxels::SourcePtr> occlusionSources;
+                const auto lmStart = SmokeClock::now();
                 if (occlusion) {
-                    skyMap.updateOcclusion(
-                        camera.eye(),
-                        trees.landmarkVoxels(chunks.woodDay(), false), world,
-                        assets);
+                    occlusionSources =
+                        trees.landmarkVoxels(chunks.woodDay(), false);
+                }
+                const auto lmEnd = SmokeClock::now();
+                if (occlusion) {
+                    skyMap.updateOcclusion(camera.eye(),
+                                           std::move(occlusionSources), world,
+                                           assets);
+                }
+                const auto skyUpdateEnd = SmokeClock::now();
+                if (occlusion) {
                     lightRenderer.setSkyOcclusion(skyMap.skyOcclusion());
                 }
+                const auto skySetEnd = SmokeClock::now();
+                const double lmMs = since(lmEnd);
+                const double skyUpdateMs =
+                    std::chrono::duration<double, std::milli>(skyUpdateEnd -
+                                                              lmEnd)
+                        .count();
+                const double skySetMs =
+                    std::chrono::duration<double, std::milli>(skySetEnd -
+                                                              skyUpdateEnd)
+                        .count();
+                const double landmarkCopyMs = since(occlusionStart);
                 sections[1] = since(mark);
                 mark = SmokeClock::now();
                 RenderTarget target;
@@ -1007,6 +1062,28 @@ int main(int argc, char** argv) {
                 sections[5] = since(mark);
                 sections[4] = since(frameStart);
                 if (savedScene) {
+                    if (sections[4] > 33 || frame % 60 == 0) {
+                        std::cout << "slow_frame=" << frame
+                                  << " cpu_ms=" << sections[4]
+                                  << " req_ms=" << requestMs
+                                  << " chunkupd_ms=" << chunkUpdateMs
+                                  << " sky_ms=" << skyMapMs
+                                  << " sun_ms=" << sunUpdateMs
+                                  << " block_ms=" << blockUpdateMs
+                                  << " upload_ms=" << uploadMs
+                                  << " vol_ms=" << volumesMs
+                                  << " chunks_ms=" << sections[0]
+                                  << " lod_ms=" << sections[1]
+                                  << " landmark_ms=" << landmarkMs
+                                  << " lod_update_ms=" << lodUpdateMs
+                                  << " lm_copy_ms=" << landmarkCopyMs
+                                  << " lm_ms=" << lmMs
+                                  << " skyset_ms=" << skySetMs
+                                  << " lod_render_ms=" << sections[2]
+                                  << " trees_ms=" << sections[3]
+                                  << " flush_ms=" << sections[5]
+                                  << " backlog=" << lod.backlog() << '\n';
+                    }
                     if (savedWalk && frame >= WalkEnd) {
                         if (lod.terrainBacklog() && !lod.jobCount() &&
                             !lod.uploadedBytes())

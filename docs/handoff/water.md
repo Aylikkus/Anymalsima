@@ -15,9 +15,9 @@ a river, see water pool and spill, or expose a spring and create a new river.
 
 | Area | Current behavior and consequence |
 | --- | --- |
-| World map | A regional priority flood records candidate basins, catchments and outlet elevations. The preview displays the candidates. River polylines supply candidate routes and sampled bed elevations. |
+| World map | A regional priority flood records candidate basins, catchments and outlet elevations. The preview uses refined lake coverage. River polylines supply candidate routes and sampled bed elevations. |
 | Chunk generation | `TerrainSampler` supplies ground, soils and a generated water surface to `LocationGenerator`. The sea surface is Y=385. Inland lakes have their own spill-capped levels and face-connected footprints. Earlier generator versions retain the original sea fill. |
-| Detailed rendering | `ChunkMesher` emits opaque horizontal water tops at tile Y+1 when the tile above is known and empty. The detailed draw also depends on a usable light volume. Fractional tops and waterfall faces are planned for later steps. |
+| Detailed rendering | Water tops follow voxel fill when the tile above is known and empty. The higher neighbor draws the exposed strip between unequal levels. River drops can extend over the rock below the lip. |
 | Distant rendering | Stepped and smooth patches use the same water query, including terrain edit summaries. Smooth patches clip water to sampled wet coverage and the patch triangles. Water bounds and slab readiness drive the proxy handoff. Camera submersion uses a loaded tile when available and the shared surface otherwise. |
 | Save and edits | `RIVR` stores the candidate polylines. The saved generator version selects the terrain-edit baseline. `water.dat` stores runtime volumes, river holds and local credits. Chunk v5 reprojects water owned by that ledger when a slab loads. |
 
@@ -88,8 +88,8 @@ separated so terrain and structure shadow casters stay correct.
 
 Reuse `DetailCoverage` hysteresis and the current/drawable distinction, with
 water ownership tracked independently where necessary. Suppress the proxy
-only over the footprint covered by drawable detail at the matching water
-revision. Water above a terrain surface band or visible from a high camera
+only over the footprint covered by drawable detail. Water above a terrain
+surface band or visible from a high camera
 still needs a proxy until its detailed slab is drawable. On unload restore
 the current proxy before dropping its detailed replacement. Keep the last
 complete presentation while new meshes upload. For changing levels, publish
@@ -153,7 +153,9 @@ Generator version 14 derives the standing-water baseline from the saved
 region heights, terrain features, seeds, and river paths in `world_map.dat`.
 Earlier saves continue to use the original sea fill for new chunks and edit
 comparisons. Lake IDs come from the canonical seed region. The map preview
-shows regional candidates, including elevated basins. The tile sampler gates
+colors regions at least half covered by refined lake tiles; one-eighth
+coverage is enough for the LAKE label. This gives a regional outline
+rather than a tile-by-tile shoreline. The tile sampler gates
 water on face-connected paths over the generated ground.
 
 The sea pass certifies region-center paths to open Z edges and checks mixed
@@ -386,8 +388,11 @@ playthrough is needed.
 Standing bodies use 255 integer units per block. An owner-thread transfer
 returns the accepted signed amount and records its source or sink. A
 transfer to a confirmed isolated cell commits the reservoir debit and the
-cell credit in the same ledger. Visible standing levels follow whole storage
-bands. Withdrawals within a band accumulate until the next level threshold.
+cell credit in the same ledger. The visible top is rounded in sixteenths
+of a block; full cells below it do not change. One-block shallows have a
+small visual shoreline offset. Natural rivers render fractional tops
+according to grade and cross-channel depth, with downstream-moving
+riffles in both detail and terrain LOD.
 Refills stop at the generated waterline, which is the surveyed spill level
 for lakes.
 
@@ -419,6 +424,94 @@ projected column. A chunk published after a worker finishes uses the latest
 ledger, and changes invalidate intersecting LOD and lighting work.
 
 ## 5. Add local finite-volume flow and edited connections
+
+Locally credited cells fall first. On a flat, they look up to three tiles
+for the closest reachable drop and favor its first face; without a drop
+they level across faces. This bounded solver requires verified empty or
+locally owned cells. Unknown cave boundaries still freeze. Placing a
+block into locally owned water is rejected, preserving its volume.
+
+Digging below or beside sea or lake water debits that body to fill the
+opening. A short, verified lake compartment beside an open cut takes
+ownership of the water already inside it. The survey checks wet voxel
+faces to the bed and waterline instead of assuming a wall on the surface
+seals the lake. The detached footprint does not refill from the old
+lake's projection, even when dry or reloaded. The cut stops draining
+when its source falls to the outlet sill or when it has no confirmed
+room downstream. Unknown or larger enclosures are not certified, and
+automatic rejoining of detached compartments is not implemented.
+
+A loaded downhill path from a lake cut to a lower body or river can
+become a persistent channel. Each mouth delivers up to one block of water
+per game second, debited from the source. A raised outlet leaves the
+water below its sill in place. Plugging a cell on the certified path
+invalidates it, including after a reload. Uncertified paths still use
+local flow. River cuts spend the reach's delivery, which can renew from
+an open spring.
+
+A river cut can still feed local cells, but a surface breach
+into a verified valley enters the reach budget directly. The survey
+finds a downhill landing, then bounds the connected basin at the inlet
+waterline. It uses generated heights and saved terrain edits, including
+grounded walls, without requesting chunks. An unknown frontier, another
+water body, or an exhausted survey budget falls back to local flow.
+While the new lake is filling, the breach takes about half of the reach's
+incoming flow and the original channel becomes shallower downstream.
+A full terminal valley stops taking net flow, and plugging the breach
+leaves the collected water in place.
+
+A short dam is certified after the loaded cross-section confirms solid
+blocks from bank to bank. Its saved certificate stays active if the wall
+unloads. While the upstream pool fills, the old receiver loses delivery
+and the projected downstream reach drops. After the pool reaches the
+crest band, surplus resumes toward the original receiver. Removing a
+submerged part of the wall releases the stored head. Alternate spill
+destinations and rebuilding the crest of an existing dam are not covered.
+
+Plugging or reopening the mouth of a generated spring cuts or restores
+its graph input; it no longer creates a second local spring. Replacing
+and removing a block in the original river footprint restores its
+projection without creating a new intake.
+
+Certified routes fast-forward from elapsed delivery and available storage.
+For local cuts, an update with more than 256 seconds pending searches a
+bounded downhill or horizontal path, fills confirmed receiving cells first
+at the lowest levels, and advances directly to the clock. It does not
+claim capacity in unknown voxels or replay every second. Small advances
+still step local cells under a 3 ms budget. The bulk path is an
+approximation, not a replay of the flow front or a solver for underground
+pressure and unverified offscreen channels.
+
+Detailed water uses the uploaded voxel mesh, not an exact match against the
+proxy's integer top. The handoff waits for lit uploads across both the
+proxy and detailed water slabs, and keeps the last drawable detail during
+water-only remeshes. A completed mesh can replace an older one while
+another fluid step is pending; solid edits still reject outdated
+geometry. Fractional storage and river stage changes invalidate the proxy;
+locally simulated cells still use a coarser invalidation.
+
+`RSVR` v5 adds channel paths, sill heights, receivers and pending arrivals.
+Ledger versions 1 through 4 remain readable. v4 persists detached lake compartments, their footprints and
+their original lake IDs. v3 stores certified surface breaches, dam pool
+footprints, and sealed generated springs. v1–v3 remain readable; v2 stores confirmed
+portals, runtime aquifer outlet records and explicit spill routes.
+`Reservoirs::reconcile` runs each fixed step before `flow`: open outlets
+credit their exposed face cell, and portals exchange volume between a local
+cell and its body in both directions, debiting and crediting the same
+ledger. `definePool` registers a runtime standing body (a dammed reach's
+upstream pool or an enclosed pocket) with a certified footprint and an
+empty store; `ReservoirSnapshot::project` covers exactly the footprint's
+columns with the pool's level, so chunks and LOD meshes see the pool grow
+without a hydrology survey. `setSpillRoute` models a dam crest: the reach's
+held delivery fills the upstream pool up to the crest height and the
+surplus crosses into the receiver at a bounded rate. Headless fixtures
+cover a bank breach forming a lake beyond loaded chunks, conservation
+against the original receiving body, spring sealing and reopening, dams
+across unload and reload, and bulk versus one-second delivery. Edited
+connectivity beyond confirmed portals
+(bounded 3D searches, split and merge deferral, saved portal summaries) and
+the full spring-to-sea fixture remain to be implemented before this step
+meets its acceptance criteria.
 
 Use an active-cell budget at a fixed simulation step. Start with downward
 transfer and leveling between faces, then add limited pressure only when
@@ -529,6 +622,23 @@ Run the existing LOD suite with `ctest --test-dir build -L lod
 shoreline rebuilds and the active-cell budget. Record sampled columns,
 mesh size, uploads and queue latency at each LOD preset. This lets a small
 test world exercise the expensive transitions directly.
+
+Frame profiling against a saved world (`lod_render_smoke`, `saved`
+scenario, November 2026) found no measurable cost from the step-5 local
+flow: `Reservoirs::flow` with a 512-cell budget, `advanceTo` (about
+1.5 ms for 234 holds) and the batched reconciliation were invisible next
+to two pre-existing main-thread costs. The dominant one was
+`LightRenderer::setSkyOcclusion` converting the 1024x1024x4-float sky
+occlusion image to half floats on the main thread every rebuild (about
+500 ms per frame in Debug, one run of frames every 250 ms rebuild gate).
+`SkyOcclusionMap::build` now produces the half-float image on the pool
+beside the float data, and the renderer only copies it; the `lights`
+scenario crashed in the glare draw before the empty-candidates guard in
+`LightRenderer::drawGlare` and runs through with it. On the saved world
+this moved the median frame from about 34 ms to about 7 ms and the p95
+from about 535 ms to about 13 ms. The remaining recurring cost is the
+chunk pipeline (`ChunkManager::request` plus `update`): up to about
+15 ms per frame while the terrain queue drains, below 2 ms once settled.
 
 Liquids currently have hardcoded IDs for water and lava in `LiquidType`.
 Only water has the generated and meshed surface path described here.

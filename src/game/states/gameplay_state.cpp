@@ -2,11 +2,13 @@
 
 #include <bx/math.h>
 
+#include <algorithm>
 #include <iostream>
 
 #include "gettext_wrapper.hpp"
 #include "main_menu_state.hpp"
 #include "render/frustrum.hpp"
+#include "world/generated_hydrology.hpp"
 
 // How many chunks out from the camera chunk to request and draw.
 
@@ -252,6 +254,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     editTracker = std::make_unique<TerrainEditTracker>(*chunkManager, *edits,
                                                        sameGenerator);
     editTracker->watch(*editor);
+    chunkManager->setWaterTerrainEdits(edits.get());
     locationMgr = std::make_unique<LocationManager>(*chunkManager, *this->world,
                                                     regionStore.get());
 
@@ -313,6 +316,7 @@ GameplayState::~GameplayState() {
     try {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();
+        chunkManager->commitWaterEdits();
         saveStructures(true);
         saveReservoirs();
         locationMgr->saveAll(true);
@@ -700,6 +704,7 @@ void GameplayState::useTool(int mouseX, int mouseY) {
 void GameplayState::update(Game& game, float dt) {
     // Before any region can unload this frame.
     editTracker->update();
+    chunkManager->commitWaterEdits();
     // X wraps around the world (stored canonically in [0, W)); Z is bounded.
     camera.position.x = float(world->wrap().wrapX(camera.position.x));
     if (camera.position.x >= float(world->wrap().tiles))
@@ -746,8 +751,7 @@ void GameplayState::update(Game& game, float dt) {
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
-    if (world->reservoirs)
-        world->reservoirs->advanceTo(uint64_t(clock.days() * 86400));
+    chunkManager->advanceWater(uint64_t(clock.days() * 86400));
     floraSim->update(clock.days());
     treeSim->update(clock.days());
     saveStructures();

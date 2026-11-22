@@ -24,6 +24,7 @@
 #include "tree_wood_lod.hpp"
 
 class WorldEditor;
+class TerrainEdits;
 
 enum class ChunkState { Unloaded, Queued, Ready };
 enum class MeshState { None, Queued, Built };
@@ -37,8 +38,10 @@ struct ChunkHandle {
     bool dirtyPending = false;
     bool meshUrgent = false;
     uint64_t meshRevision = 0;
+    // Terrain/neighbor changes invalidate snapshots. Water-only changes can
+    // leave a slightly older mesh drawable until its successor is ready.
+    uint64_t meshTopologyRevision = 0;
     MeshHandle mesh, waterMesh;
-    std::vector<float> waterTops;
     bool hasWaterGeometry = false;
     bool initialised = false;
     bool uploaded = false;
@@ -50,6 +53,7 @@ struct ChunkHandle {
     // (an earlier gameplay edit).
     bool edited = false;
     std::vector<uint32_t> waterBodies;
+    std::vector<uint32_t> waterReaches;
     // Generated structure voxels at the revision used to prepare this chunk.
     // Tree wood is reconciled separately through TreeStamp.
     std::shared_ptr<const structure_voxels::Slab> structureBaseline;
@@ -59,6 +63,11 @@ struct ChunkHandle {
     TreeStamp trees;
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
+
+    bool canPublishMesh(uint64_t revision) const {
+        return revision >= meshTopologyRevision &&
+               (!uploaded || revision > uploadedRevision);
+    }
 };
 
 struct FinishedMesh {
@@ -91,6 +100,28 @@ class ChunkManager {
                               ReservoirExchange reason);
     WaterVolume divertWater(uint32_t body, TilePos recipient,
                             WaterVolume amount);
+    size_t flowWater(size_t cellBudget);
+    // Recheck edited faces against live tiles before moving any water.
+    void waterBlockEdited(TilePos pos);
+    void commitWaterEdits();
+    void setWaterTerrainEdits(const TerrainEdits* edits) {
+        waterTerrainEdits = edits;
+    }
+    // Allows cheap steps to keep up with x720 at 60 FPS. The time budget
+    // takes precedence when steps are expensive.
+    static constexpr size_t MaxWaterStepsPerUpdate = 256;
+    // Advance toward the clock's game seconds, leaving unprocessed seconds
+    // on the ledger for later frames. Check the time budget between steps.
+    void advanceWater(uint64_t targetStep,
+                      std::chrono::steady_clock::duration workBudget =
+                          std::chrono::milliseconds(3));
+    // The aquifer saturation of the rock stratum at this tile, or 0 when the
+    // tile is air, water, soil, or above the surface. Springs register an
+    // outlet where an edit exposes such rock to open air.
+    float aquiferAt(int x, int y, int z);
+    // Emitted when an edit exposes or seals an aquifer-bearing rock face:
+    // (tile, exposed). TerrainEditState routes these to Reservoirs outlets.
+    Signal<std::pair<TilePos, bool>> aquiferExposed;
     // A chunk's drawn geometry changed (new mesh uploaded, or emptied).
     Signal<const ChunkCoord&> meshUploaded;
     // The plants of a Ready chunk changed (setFlora). Chunks becoming
@@ -127,6 +158,7 @@ class ChunkManager {
     // unregistered column or a world without a map (fixtures).
     std::shared_ptr<const ChunkColumnInputs> generatedColumns(unsigned chunkX,
                                                               unsigned chunkZ);
+    // Uploaded for the current solid topology; water may have stepped again.
     bool isMeshUploaded(const ChunkCoord& coord) const;
     // An older uploaded revision remains drawable while its replacement is
     // queued (for example, after sunlight changes).
@@ -137,7 +169,8 @@ class ChunkManager {
     // Main-thread view of the substrate under a living root.
     const RootVoxel* rootAt(int x, int y, int z);
     void unregister(const ChunkCoord& coord);
-    void markDirty(const ChunkCoord& coord, bool urgent = false);
+    void markDirty(const ChunkCoord& coord, bool urgent = false,
+                   bool waterOnly = false);
     void markAllDirty();
     // Announces new light values without remeshing.
     void markLightChanged(const ChunkCoord& coord);
@@ -292,7 +325,7 @@ class ChunkManager {
         for (auto& result : readyMeshes) {
             auto it = chunks.find(result.coord);
             if (it == chunks.end() || it->second.identity != result.identity ||
-                it->second.meshRevision != result.revision)
+                !it->second.canPublishMesh(result.revision))
                 continue;
             auto& handle = it->second;
             // Reserve both replacements before touching either drawn buffer.
@@ -343,7 +376,6 @@ class ChunkManager {
             handle.uploadedRevision = result.revision;
             handle.vertices = std::move(result.mesh.vertices);
             handle.indices = std::move(result.mesh.indices);
-            handle.waterTops = std::move(result.mesh.waterTops);
             handle.hasWaterGeometry = !result.mesh.water.indices.empty();
             if (handle.initialised || handle.hasWaterGeometry)
                 meshed.insert(result.coord);
@@ -355,7 +387,6 @@ class ChunkManager {
     }
     MeshHandle* getMesh(const ChunkCoord& coord);
     MeshHandle* getWaterMesh(const ChunkCoord& coord);
-    std::span<const float> uploadedWaterTops(const ChunkCoord& coord) const;
 
     bool hasGenerationWork() const {
         return !generationQueue.empty() || !generationJobs.empty() ||
@@ -460,7 +491,22 @@ class ChunkManager {
     void collect();
 
     bool reconcileWater(Chunk& chunk, ChunkCoord coord,
-                        const ChunkColumnInputs* columns) const;
+                        const ChunkColumnInputs* columns,
+                        bool refreshLocal = false) const;
+    Reservoirs::CellAccess waterAccess(TilePos pos);
+    // The standing body or reach owning a loaded reservoir water cell.
+    std::optional<Reservoirs::Sink> waterSinkAt(TilePos pos);
+    // Certifies dug channels whose local water links a standing body to a
+    // lower receiver; bounded per call.
+    void surveyChannels(Reservoirs& water, size_t mouths);
+    void surveyChannel(Reservoirs& water, TilePos mouth);
+    const ColumnGenerationInput* waterColumnAt(TilePos pos) const;
+    bool waterIntakeCandidate(TilePos pos);
+    void updateWaterTopology(Reservoirs& water);
+    void detectLakeSplit(Reservoirs& water, TilePos outlet);
+    std::optional<std::pair<uint32_t, Reservoirs::BreachSurvey>> riverDamAt(
+        TilePos pos);
+    void tickWater(Reservoirs& water, uint64_t step);
     void reservoirChanged(const ReservoirChange& change);
     void indexWater(ChunkCoord coord, const ChunkColumnInputs& columns);
     std::shared_ptr<const ChunkColumnInputs> projectedColumns(
@@ -468,6 +514,13 @@ class ChunkManager {
         unsigned cz, const ReservoirSnapshot& snapshot) const;
     Signal<const ReservoirChange&>::Connection reservoirConnection;
     std::unordered_map<uint32_t, std::unordered_set<ChunkCoord>> waterChunks;
+    std::unordered_map<uint32_t, std::unordered_set<ChunkCoord>>
+        waterReachChunks;
+    std::set<TilePos, TilePosLess> waterEdits;
+    std::set<TilePos, TilePosLess> waterTopologyEdits;
+    const TerrainEdits* waterTerrainEdits = nullptr;
+    std::optional<TilePos> waterEditCursor;
+    std::optional<TilePos> channelCursor;
 
     struct ColumnCache {
         size_t registrations = 0;

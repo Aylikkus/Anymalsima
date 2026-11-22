@@ -294,7 +294,10 @@ WaterSurface ColumnEdit::waterAt(int index, WaterSurface water) const {
         if (fixed == water.surfaceY && fixed > groundY[index] + 1) return water;
         water = {fixed, 0, water.reach, water.flow, true};
     } else if (cap) {
-        water.surfaceY = std::min(water.surfaceY, cap);
+        if (water.surfaceY > cap) {
+            water.surfaceY = cap;
+            water.topFill = 255;
+        }
         if (fixed > water.surfaceY) water = {fixed, 0, 0, {}, true};
     }
     return water.surfaceY > groundY[index] + 1 ? water : WaterSurface{};

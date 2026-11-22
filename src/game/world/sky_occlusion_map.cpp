@@ -1,5 +1,7 @@
 #include "sky_occlusion_map.hpp"
 
+#include <bx/math.h>
+
 #include <algorithm>
 
 float SkyOcclusionMap::skyAtDistance(int k) {
@@ -28,7 +30,11 @@ void SkyOcclusionMap::build(double eyeX, double eyeZ, const Raster& raster) {
             bz0 = std::min(bz0, tz);
             bz1 = std::max(bz1, tz);
         }
-    if (bx1 < 0) return;
+    if (bx1 < 0) {
+        // No occluders in view: keep the upload image sized like data().
+        halves.assign(data.size(), bx::halfFromFloat(Open));
+        return;
+    }
     // Threshold k: the lowest top within k texels (4-neighbour), by k
     // passes of a cross-shaped min filter, around the occupied rectangle.
     constexpr int Reach = Thresholds - 1;
@@ -57,6 +63,9 @@ void SkyOcclusionMap::build(double eyeX, double eyeZ, const Raster& raster) {
                 data[i * Thresholds + k] = top[i];
             }
     }
+    halves.resize(data.size());
+    for (size_t i = 0; i < data.size(); ++i)
+        halves[i] = bx::halfFromFloat(data[i]);
 }
 
 std::array<float, SkyOcclusionMap::Thresholds> SkyOcclusionMap::at(

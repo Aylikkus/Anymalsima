@@ -74,25 +74,22 @@ void waterTile(Geometry& mesh, SurfaceSampler& sampler, int x, int z,
                WaterSurface water, bool wrapX, bool top = true) {
     if (!water.wet()) return;
     const float a = x, b = x + 1, c = z, d = z + 1;
-    const float y = water.surfaceY;
+    const float y = water.height();
     if (top)
         quad(mesh, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
              water.reach ? -3 : -2, water.reach ? water.flow.x : -1,
              water.flow.y);
-    if (!water.reach && !water.edited &&
-        !sampler.hasChannel(x - 1, z - 1, x + 2, z + 2))
-        return;
+    // Sides wherever the neighbor stands lower: river steps, edits and two
+    // standing bodies at different levels. A natural shore is higher ground.
     for (const auto& [dx, dz] :
          std::array<Vec2i, 4>{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}}) {
         if (z + dz < 0 || z + dz >= sampler.depth() ||
             (!wrapX && (x + dx < 0 || x + dx >= sampler.width())))
             continue;
         const auto other = sampler.waterAt(x + dx, z + dz);
-        if (other.surfaceY >= water.surfaceY ||
-            (!water.edited && !(other.wet() && (water.reach || other.reach))))
-            continue;
+        if (other.height() >= water.height()) continue;
         const float bottom =
-            water.dropBottom(other, sampler.height(x + dx, z + dz));
+            std::max(other.height(), float(sampler.height(x + dx, z + dz) + 1));
         if (bottom >= y) continue;
         const Vec2 flow = water.reach ? water.flow : Vec2(float(dx), float(dz));
         const float sx = a + (dx > 0 || dz > 0);
@@ -116,7 +113,7 @@ void channelWater(Geometry& out, SurfaceSampler& sampler, int x, int z, int x1,
             waterTile(out, sampler, xx, zz, sample, wrapX, false);
         }
     const auto same = [](WaterSurface a, WaterSurface b) {
-        return a.surfaceY == b.surfaceY && a.reach == b.reach &&
+        return a.height() == b.height() && a.reach == b.reach &&
                a.flow == b.flow;
     };
     for (int zz = z; zz < z1; ++zz)
@@ -130,7 +127,7 @@ void channelWater(Geometry& out, SurfaceSampler& sampler, int x, int z, int x1,
                 while (probe < endX && same(water, at(probe, endZ))) ++probe;
                 if (probe != endX) break;
             }
-            const float a = xx, b = endX, c = zz, d = endZ, y = water.surfaceY;
+            const float a = xx, b = endX, c = zz, d = endZ, y = water.height();
             quad(out, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
                  water.reach ? -3 : -2, water.reach ? water.flow.x : -1,
                  water.flow.y);
@@ -435,7 +432,7 @@ Mesh joinDetails(std::span<const Patch> layout,
                     continue;
                 const float sign = top >= (y0 + y1) * .5f ? 1 : -1;
                 const float layer = inside.material;
-                const float water = inside.water.surfaceY;
+                const float water = inside.water.height();
                 const uint32_t base = uint32_t(result.vertices.size());
                 for (const auto& point : std::array<Point, 4>{{{x, top, z},
                                                                {x1, top, z1},
@@ -457,7 +454,6 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
     constexpr int side = Chunk::SIZE_X, slab = Chunk::SIZE_Y;
     int lowGround = WORLD_HEIGHT_Y, highGround = 0;
     int lowWater = WORLD_HEIGHT_Y, highWater = -1;
-    WaterBand waterBand;
     for (int z = -1; z <= side; ++z)
         for (int x = -1; x <= side; ++x) {
             const int tx = cx * side + x, tz = cz * side + z;
@@ -466,40 +462,26 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
             highGround = std::max(highGround, ground);
             if (x < 0 || x >= side || z < 0 || z >= side) continue;
             const auto water = sampler.waterAt(tx, tz);
-            waterBand.levels[z * side + x] = int16_t(water.surfaceY);
             if (water.wet()) {
                 lowWater = std::min(lowWater, water.topTile());
-                if (water.reach || water.edited ||
-                    sampler.hasChannel(tx - 1, tz - 1, tx + 2, tz + 2))
-                    for (const auto& [dx, dz] : std::array<Vec2i, 4>{
-                             {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}})
-                        if (tz + dz >= 0 && tz + dz < sampler.depth())
-                            lowWater =
-                                std::min(lowWater,
-                                         water.dropBottom(
-                                             sampler.waterAt(tx + dx, tz + dz),
-                                             sampler.height(tx + dx, tz + dz)));
+                // Side faces reach down to a lower neighbor. Sample ground
+                // only where the neighboring water stands lower.
+                for (const auto& [dx, dz] :
+                     std::array<Vec2i, 4>{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}}) {
+                    if (tz + dz < 0 || tz + dz >= sampler.depth()) continue;
+                    const auto other = sampler.waterAt(tx + dx, tz + dz);
+                    if (other.surfaceY >= water.surfaceY) continue;
+                    lowWater = std::min(
+                        lowWater, water.dropBottom(other, sampler.height(
+                                                              tx + dx, tz + dz)));
+                }
                 highWater = std::max(highWater, water.topTile());
             }
         }
     ColumnBands result{{cx, cz, lowGround / slab, highGround / slab}, {}};
-    if (highWater >= 0) {
-        waterBand.slabs = {cx, cz, lowWater / slab, highWater / slab};
-        result.water = waterBand;
-    }
+    if (highWater >= 0)
+        result.water = SurfaceBand{cx, cz, lowWater / slab, highWater / slab};
     return result;
-}
-
-bool WaterBand::matches(ChunkCoord coord,
-                        std::span<const float> uploaded) const {
-    const int base = int(coord.y) * Chunk::SIZE_Y;
-    for (size_t i = 0; i < levels.size(); ++i) {
-        const int level = levels[i];
-        const float expected =
-            level > base && level <= base + Chunk::SIZE_Y ? level - base : -1;
-        if ((uploaded.empty() ? -1 : uploaded[i]) != expected) return false;
-    }
-    return true;
 }
 
 Mesh build(const Patch& p, SurfaceSampler& sampler,
@@ -657,7 +639,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 }
             }
             if (!sample.wet()) return;
-            const float level = sample.surfaceY;
+            const float level = sample.height();
             const auto cap = [&](Point a, Point b, Point c) {
                 if (std::min({a.y, b.y, c.y}) >= level ||
                     std::max({a.x, b.x, c.x}) <= ax ||
