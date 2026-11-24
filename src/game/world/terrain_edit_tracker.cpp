@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bitset>
 
+#include "generated_hydrology.hpp"
 #include "save/chunk_codec.hpp"
 
 namespace {
@@ -145,7 +146,9 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     baseline.water.fills(y, surface);
                 projected |= inReservoir;
                 if (reservoirTop < 0 && inReservoir && !tile.isSolid() &&
-                    (baseline.water.reach || !chunk->rootEdited(cell)) &&
+                    (baseline.water.reach ||
+                     baseline.water.body > GeneratedHydrology::Sea ||
+                     !chunk->rootEdited(cell)) &&
                     (!tile.isLiquid() ||
                      tile.waterOrigin == WaterOrigin::Reservoir))
                     reservoirTop = y + 1;

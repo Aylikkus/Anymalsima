@@ -450,6 +450,32 @@ TEST(lod_loaded_water_mesh) {
         CHECK(v.ny == 1);
     }
 
+    // Two finite cells with different fills meet at one continuous edge.
+    for (int x : {1, 2}) {
+        auto& cell = chunk.tiles[2][3][x];
+        cell.liquid = LiquidType::Water;
+        cell.waterOrigin = WaterOrigin::Local;
+        cell.liquidLevel = x == 1 ? 20 : 80;
+    }
+    const auto film = mesher.build(
+        chunk, {}, [&](int, int, int) { return &air; }, {}, {},
+        [&](int x, int z) -> std::pair<int, WaterSurface> {
+            if (z == 2 && (x == 1 || x == 2))
+                return {2,
+                        {4, 0, 0, {}, true, chunk.tiles[2][3][x].liquidLevel}};
+            return {2, {}};
+        });
+    static_assert(Vec2{}.x == 0 && Vec2{}.y == 0);
+    int shared = 0;
+    for (const auto& v : film.water.vertices) {
+        if (v.ny == 1) CHECK(v.layer == -2);
+        if (v.x != 2 || v.ny != 1) continue;
+        CHECK(std::abs(v.y - (3 + 50.f / 255)) < .00001f);
+        ++shared;
+    }
+    EQUAL(shared, 4, "both tops use the same two corner heights");
+    for (const auto& v : film.water.vertices) CHECK(v.x != 2 || v.nx == 0);
+    chunk.tiles[2][3][2] = {};
     chunk.tiles[2][3][1] = Tile{};
     chunk.tiles[2][15][1] =
         Tile{.liquid = LiquidType::Water, .liquidLevel = 255, .lightLevel = {}};

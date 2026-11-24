@@ -67,6 +67,44 @@ WaterSurface water(const GeneratedHydrology& hydrology, int region) {
     const auto p = center(region);
     return hydrology.waterAt(p.x, p.y);
 }
+
+class WaterEditFixture {
+   public:
+    explicit WaterEditFixture(World& world)
+        : world(world),
+          chunks(generator, pool, nullptr, world, &assets),
+          editor(chunks, nullptr, assets.getStorage<Block>()) {}
+
+    void load(TilePos p, ChunkBlob blob = {}) {
+        const ChunkCoord c{unsigned(p.x / 16), unsigned(p.y / 16),
+                           unsigned(p.z / 16)};
+        if (!chunks.isRegistered(c)) {
+            const auto rx = c.x / CHUNKS_PER_REGION;
+            const auto rz = c.z / CHUNKS_PER_REGION;
+            chunks.registerChunk(c, {rx * 8, 0, rz * 8},
+                                 &world.regions[rz * world.width + rx],
+                                 std::move(blob));
+        }
+        for (int i = 0; i < 12 && !chunks.request(c); ++i) {
+            chunks.update();
+            CHECK(pool.wait_for(std::chrono::seconds(5)));
+        }
+        CHECK(chunks.isReady(c));
+    }
+
+    const Tile& tile(TilePos p) {
+        const auto* result = chunks.tileAt(p.x, p.y, p.z);
+        CHECK(result);
+        return *result;
+    }
+
+    World& world;
+    test::Assets assets;
+    LocationGenerator generator;
+    ThreadPool pool{2};
+    ChunkManager chunks;
+    WorldEditor editor;
+};
 }  // namespace
 
 TEST(hydrology_basin_outlets_and_wrap) {
@@ -137,6 +175,28 @@ TEST(hydrology_channel_fast_forward_and_plug) {
     EQUAL(water.volume(receiver), capacity, "bulk drainage conserves water");
 }
 
+TEST(hydrology_surface_runoff_reaches_the_sill) {
+    Reservoirs water(nullptr), restored(nullptr);
+    constexpr uint32_t lake = 42;
+    const auto shape = StorageCurve::constantArea(10000, 400, 420);
+    for (auto* ledger : {&water, &restored}) ledger->define(lake, shape);
+    const TilePos mouth{16, 408, 16}, plug{17, 408, 16}, out{32, 402, 16};
+    CHECK(water.setChannelMouth(lake, {0, 0, out.y}, mouth, mouth.y,
+                                {out, plug, mouth}));
+    water.advanceTo(120);
+    CHECK(water.volume(lake) < shape.capacity());
+    restored.restore(water.encode());
+    water.advanceTo(86400);
+    EQUAL(water.volume(lake), shape.volumeAt(mouth.y),
+          "dry surface outlet reaches the sill in a game day");
+    EQUAL(water.volume(lake) - water.exchanged(ReservoirExchange::Disposal),
+          shape.capacity(), "runoff is explicitly accounted for");
+    const auto before = restored.volume(lake);
+    restored.blockChannelCell(plug);
+    restored.advanceTo(86400);
+    EQUAL(restored.volume(lake), before, "plugging a saved route stops runoff");
+}
+
 TEST(hydrology_saved_baseline_matches_new_chunk) {
     test::Assets assets;
     auto world = basinWorld();
@@ -195,7 +255,7 @@ TEST(hydrology_saved_baseline_matches_new_chunk) {
         const auto lod = TerrainLod::build(patch, unloaded, cancelled, 4);
         CHECK(!lod.water.vertices.empty());
         for (const auto& v : lod.water.vertices)
-            EQUAL(v.y, float(h), "water mesh height");
+            EQUAL(v.y, sample.water.height(), "water mesh height");
     }
 
     // The same saved inputs opened as v13 keep the old generated water and
@@ -250,7 +310,7 @@ TEST(hydrology_lod_fallback_refines_visible_water) {
         EQUAL(first.vertices[i].y, refined.vertices[i].y,
               "ground stays drawable");
     for (const auto& v : refined.water.vertices)
-        EQUAL(v.y, 430.f, "refined lake height");
+        EQUAL(v.y, exact.waterAt(p.x, p.y).height(), "refined lake height");
 
     // The fast depth predicate must agree with the full terrain surface
     // where a warped beach crosses the canonical wrap seam.
@@ -471,8 +531,10 @@ TEST(hydrology_natural_reach_profiles_and_coastal_preview) {
     CHECK(curved);
     CHECK(main.end == GeneratedHydrology::RiverEnd::Sea);
     const auto mouth = main.outlet;
+    EQUAL(exact.waterAt(mouth.x, mouth.y).body, GeneratedHydrology::Sea,
+          "the ocean survey certifies the river mouth");
     EQUAL(fallback.waterAt(mouth.x, mouth.y).surfaceY,
-          WaterSurface::SeaBoundary, "ocean at the mouth in the first patch");
+          WaterSurface::SeaBoundary, "fallback uses the certified river mouth");
     const auto patch =
         TerrainLod::Patch{mouth.x / 128 * 128, mouth.y / 128 * 128, 4};
     const std::atomic_bool cancel{false};
@@ -483,9 +545,10 @@ TEST(hydrology_natural_reach_profiles_and_coastal_preview) {
     for (size_t i = 0; i < all.vertices.size(); ++i)
         EQUAL(preview.vertices[i].y, all.vertices[i].y, "stable terrain Y");
     CHECK(std::any_of(preview.water.vertices.begin(),
-                      preview.water.vertices.end(), [](const BlockVertex& v) {
+                      preview.water.vertices.end(), [&](const BlockVertex& v) {
                           return v.ny > .9f && v.layer == -2 &&
-                                 v.y == WaterSurface::SeaBoundary;
+                                 v.y ==
+                                     exact.waterAt(mouth.x, mouth.y).height();
                       }));
 }
 
@@ -664,10 +727,12 @@ TEST(hydrology_river_continues_from_lake) {
     const auto lake = hydro.lake(body);
     CHECK(lake.surfaceY > WaterSurface::SeaBoundary);
     const auto& reaches = hydro.riverReaches();
-    CHECK(std::any_of(reaches.begin(), reaches.end(), [&](const auto& reach) {
-        return reach.end == GeneratedHydrology::RiverEnd::Lake &&
-               reach.receiver == body && reach.spring.unitsPerStep > 0;
-    }));
+    const auto inlet =
+        std::find_if(reaches.begin(), reaches.end(), [&](const auto& reach) {
+            return reach.end == GeneratedHydrology::RiverEnd::Lake &&
+                   reach.receiver == body && reach.spring.unitsPerStep > 0;
+        });
+    CHECK(inlet != reaches.end());
     CHECK(std::none_of(legacy->hydrology->riverReaches().begin(),
                        legacy->hydrology->riverReaches().end(),
                        [](const auto& reach) { return reach.lakeSource; }));
@@ -740,6 +805,133 @@ TEST(hydrology_river_continues_from_lake) {
     const auto& tile =
         chunk.tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y][x % Chunk::SIZE_X];
     CHECK(tile.liquid == LiquidType::Water);
+
+    // Close the lake outlet at its first river cross-section, before it has
+    // a long enough upstream reach to act as the survey's supply port.
+    for (int setback : {0, 1, 3}) {
+        const bool lakeSide = setback != 0;
+        world->reservoirs = std::make_shared<Reservoirs>(world->hydrology);
+        WaterEditFixture wall(*world);
+        std::vector<EditRequest> blocks;
+        for (int dz = -16; dz <= 16; ++dz)
+            for (int dx = -16; dx <= 16; ++dx) {
+                const Vec2i p{x + dx, z + dz};
+                const auto river = sampler.waterAt(p.x, p.y);
+                if (lakeSide ? river.body != body : river.reach != outlet->id)
+                    continue;
+                // Also enclose the mouth three cells back into the lake.
+                // No wall voxel in that case touches a river voxel.
+                const int radius = std::max(1, setback);
+                int distance = radius + 1;
+                for (int oz = -radius; oz <= radius; ++oz)
+                    for (int ox = -radius; ox <= radius; ++ox) {
+                        const int d = std::abs(ox) + std::abs(oz);
+                        if (d >= distance) continue;
+                        const auto adjacent =
+                            sampler.waterAt(p.x + ox, p.y + oz);
+                        if (lakeSide ? adjacent.reach == outlet->id
+                                     : adjacent.body == body)
+                            distance = d;
+                    }
+                if (distance != radius) continue;
+                for (int h = sampler.height(p.x, p.y) + 1; h < river.surfaceY;
+                     ++h) {
+                    const TilePos tile{p.x, h, p.y};
+                    wall.load(tile);
+                    blocks.push_back({tile, EditMode::Place, 1});
+                }
+            }
+        CHECK(!blocks.empty());
+        for (auto result : wall.editor.apply(blocks))
+            CHECK(result == EditStatus::Applied);
+        wall.chunks.commitWaterEdits();
+        CHECK(world->reservoirs->damAt(outlet->id).has_value());
+    }
+
+    // Generated outlet cells belong to the reach even when it runs dry.
+    world->reservoirs = std::make_shared<Reservoirs>(world->hydrology);
+    {
+        WaterEditFixture shore(*world);
+        shore.load({source.x, y, source.y});
+        shore.load({x, y, z});
+        const auto initialLake = world->reservoirs->volume(body);
+        CHECK(world->reservoirs->setReachDelivery(outlet->id, 0));
+        CHECK(!shore.tile({x, y, z}).isLiquid());
+        shore.chunks.advanceWater(1);
+        CHECK(world->reservoirs->snapshot()->cells.empty());
+        EQUAL(world->reservoirs->volume(body), initialLake,
+              "no duplicate shoreline drain");
+        const TilePos plug{
+            source.x, sampler.waterAt(source.x, source.y).topTile(), source.y};
+        shore.load(plug);
+        CHECK(shore.editor.placeBlock(plug, 1) == EditStatus::Applied);
+        CHECK(shore.editor.removeBlock(plug) == EditStatus::Applied);
+        shore.chunks.advanceWater(2);
+        CHECK(shore.tile(plug).waterOrigin == WaterOrigin::Reservoir);
+        CHECK(world->reservoirs->snapshot()->cells.empty());
+    }
+    world->reservoirs = std::make_shared<Reservoirs>(world->hydrology);
+    auto& water = *world->reservoirs;
+    WaterEditFixture f(*world);
+    f.load({x, y, z});
+    // A stored runoff route from inside this generated outlet duplicates
+    // the reach. Keep the existing lake volume when discarding that route.
+    CHECK(
+        water.setChannelMouth(body, {0, 0, y - 1}, {x, y, z}, y, {{x, y, z}}));
+    Reservoirs reopened(world->hydrology);
+    reopened.restore(water.encode());
+    EQUAL(reopened.channelCount(), 0u, "obsolete outlet runoff removed");
+    CHECK(water.clearChannelMouth({x, y, z}));
+    const auto full = sampler.waterAt(x, z);
+    water.transfer(body, -1, ReservoirExchange::Disposal);
+    sampler.setReservoirs(water.snapshot());
+    EQUAL(sampler.waterAt(x, z).height(), full.height(),
+          "one unit of drawdown preserves the channel");
+    water.transfer(body, 1, ReservoirExchange::Input);
+    const auto capacity = water.volume(body);
+    CHECK(capacity > 0);
+    CHECK(water.setSpringOpen(inlet->id, false));
+    const auto dryAt = uint64_t(capacity) + 86400;
+    water.advanceTo(dryAt);
+    EQUAL(water.volume(body), 0,
+          "the blocked inlet no longer supplies the lake");
+    sampler.setReservoirs(water.snapshot());
+    CHECK(!sampler.waterAt(x, z).wet());
+    CHECK(f.tile({x, y, z}).liquid == LiquidType::None);
+    const auto mouth = inlet->outlet;
+    CHECK(!sampler.waterAt(mouth.x, mouth.y).wet());
+    const auto path = hydro.lakeInflowAt(mouth.x, mouth.y);
+    CHECK(path);
+    std::optional<TilePos> shelf;
+    for (int dz = -16; dz <= 16 && !shelf; ++dz)
+        for (int dx = -16; dx <= 16 && !shelf; ++dx) {
+            if (!dx && !dz) continue;
+            const int tx = mouth.x + dx, tz = mouth.y + dz;
+            if (hydro.lakeInflowAt(tx, tz) == path)
+                shelf = TilePos{tx, sampler.height(tx, tz) + 1, tz};
+        }
+    CHECK(shelf);
+    f.load(*shelf);
+    CHECK(f.tile(*shelf).liquid == LiquidType::None);
+    CHECK(water.setSpringOpen(inlet->id, true));
+    water.advanceTo(dryAt + 10000);
+    sampler.setReservoirs(water.snapshot());
+    CHECK(!sampler.waterAt(x, z).wet());
+    const auto stream = sampler.waterAt(mouth.x, mouth.y);
+    EQUAL(stream.reach, inlet->id, "shallow inflow crosses the exposed shelf");
+    CHECK(stream.topFill < 255);
+    const auto shelfStream = sampler.waterAt(shelf->x, shelf->z);
+    EQUAL(shelfStream.reach, inlet->id, "inflow continues past the mouth");
+    CHECK(f.tile(*shelf).liquid == LiquidType::Water);
+    EQUAL(f.tile(*shelf).liquidLevel, shelfStream.topFill,
+          "the thin inlet stream also appears in the loaded voxels");
+    water.advanceTo(dryAt + 22000);
+    CHECK(water.volume(body) > 0 && water.volume(body) < capacity);
+    water.advanceTo(dryAt + uint64_t(capacity) + 86400);
+    sampler.setReservoirs(water.snapshot());
+    EQUAL(water.volume(body), capacity, "the inlet fills the lake again");
+    EQUAL(sampler.waterAt(x, z).reach, outlet->id,
+          "a full lake feeds its outlet");
 }
 
 TEST(hydrology_coastal_basin_fills_at_sea_level) {
@@ -771,6 +963,14 @@ TEST(hydrology_coastal_basin_fills_at_sea_level) {
     CHECK(!legacy->waterAt(x, z, 370).wet());
 
     test::Assets assets;
+    SurfaceSampler pending(world, assets, nullptr, nullptr,
+                           SurfaceSampler::WaterDetail::Preview);
+    CHECK(pending.height(x, z) < SEA_LEVEL_Y);
+    CHECK(!pending.waterAt(x, z).wet());
+    const auto pendingPatch =
+        TerrainLod::build({x, z, 1}, pending, std::atomic_bool{false}, 8, true);
+    CHECK(pendingPatch.provisionalWater);
+    CHECK(pendingPatch.water.vertices.empty());
     SurfaceSampler sampler(world, assets);
     const auto col = sampler.column(x, z);
     EQUAL(col.water.body, GeneratedHydrology::Sea, "coastal basin joins sea");
@@ -799,6 +999,50 @@ TEST(hydrology_coastal_basin_fills_at_sea_level) {
                                       &columns);
     CHECK(chunk.tiles[z % Chunk::SIZE_Z][y % Chunk::SIZE_Y][x % Chunk::SIZE_X]
               .liquid == LiquidType::Water);
+}
+
+TEST(hydrology_ocean_crosses_the_coarse_shore_halo) {
+    World world{};
+    world.width = 4;
+    world.height = 8;
+    world.genSettings = WorldGenSettings::fromSeed(2);
+    world.genSettings.width = world.width;
+    world.genSettings.height = world.height;
+    for (int z = 0; z < world.height; ++z)
+        for (int x = 0; x < world.width; ++x) {
+            const bool low = z <= 4 || z == 6;
+            auto& region = world.regions.emplace_back();
+            region = test::regionAt(low ? SEA_LEVEL_Y - 12 : SEA_LEVEL_Y + 24);
+            region.coord = {unsigned(x), unsigned(z)};
+            // Only the first rows are coarse ocean. The valley continues
+            // below sea level far past their neighboring region.
+            region.land = z <= 1 ? LandType::WATER : LandType::PLAINS;
+        }
+    world.hydrology = GeneratedHydrology::build(world, {}, false, false, false,
+                                                false, false, true, true);
+    const auto& hydro = *world.hydrology;
+    test::Assets assets;
+    SurfaceSampler sampler(world, assets);
+    const int sea = WaterSurface::SeaBoundary;
+    for (int z : {3 * Side - 1, 3 * Side, 3 * Side + Side / 2, 4 * Side}) {
+        for (int x : {-1, 0, Side - 1, Side}) {
+            const auto sample = sampler.column(x, z);
+            EQUAL(sample.surfaceY < SEA_LEVEL_Y, true,
+                  "fixture has a low valley at " + std::to_string(x) + "," +
+                      std::to_string(z));
+            EQUAL(sample.water.body, GeneratedHydrology::Sea,
+                  "connected below-sea terrain fills across region borders");
+            EQUAL(sample.water.surfaceY, sea, "coast shares one waterline");
+            CHECK(hydro.connectedAt(GeneratedHydrology::Sea, x, z, sea - 1));
+        }
+    }
+    CHECK(hydro.uniformWater(-1, 3 * Side - 1, 2, 3 * Side + 1,
+                             GeneratedHydrology::Sea));
+    constexpr int enclosedZ = 6 * Side + Side / 2;
+    const auto enclosed = sampler.column(Side, enclosedZ);
+    CHECK(enclosed.surfaceY < SEA_LEVEL_Y);
+    CHECK(enclosed.water.body != GeneratedHydrology::Sea);
+    CHECK(!hydro.connectedAt(GeneratedHydrology::Sea, Side, enclosedZ, sea));
 }
 
 TEST(hydrology_sea_and_high_lake_share_region) {
@@ -855,7 +1099,7 @@ TEST(hydrology_sea_and_high_lake_share_region) {
     CHECK(std::any_of(mesh.water.vertices.begin(), mesh.water.vertices.end(),
                       [&](const BlockVertex& vertex) {
                           return vertex.x == x && vertex.z == z &&
-                                 vertex.y == shore.water.surfaceY &&
+                                 vertex.y == shore.water.height() &&
                                  vertex.ny > .9f;
                       }));
 }
@@ -910,8 +1154,9 @@ TEST(hydrology_reservoir_reconciles_saved_and_unloaded_water) {
                 shoreZ = z + dz;
             }
     CHECK(shoreX >= 0);
-    CHECK(initial.waterAt(shoreX, shoreZ).topFill < 255);
-    EQUAL(initial.waterAt(x, z).topFill, 255,
+    EQUAL(initial.waterAt(shoreX, shoreZ).topFill, WaterSurface::RestingFill,
+          "the shallows meet the same waterline as the deep sea");
+    EQUAL(initial.waterAt(x, z).topFill, WaterSurface::RestingFill,
           "the deep sea retains a level surface away from the shoreline");
 
     const auto registerSlab = [&](ChunkManager& chunks, const World& w,
@@ -950,7 +1195,9 @@ TEST(hydrology_reservoir_reconciles_saved_and_unloaded_water) {
                                             std::atomic_bool{false}, 4);
         CHECK(!mesh.water.vertices.empty());
         for (const auto& v : mesh.water.vertices)
-            EQUAL(v.y, float(level), "coarse sea height");
+            EQUAL(v.y,
+                  level == top ? initial.waterAt(x, z).height() : float(level),
+                  "coarse sea height");
     };
     {
         ChunkManager chunks(generator, pool, nullptr, world, &assets);
@@ -981,8 +1228,8 @@ TEST(hydrology_reservoir_reconciles_saved_and_unloaded_water) {
         EQUAL(edited.waterAt(dry.x, dry.z).surfaceY, top - 1,
               "unloaded summary preserves the dry top cell");
         save_catalog::writeTerrainEdits(slot, *edits.snapshot());
-        EQUAL(detailedTop(chunks, upper, x + 2, z), float(top),
-              "generated detailed water");
+        EQUAL(detailedTop(chunks, upper, x + 2, z),
+              initial.waterAt(x, z).height(), "generated detailed water");
         saveChunks(chunks);
         chunks.unregister(west);
         CHECK(!chunks.isRegistered(west));
@@ -1060,7 +1307,7 @@ TEST(hydrology_reservoir_reconciles_saved_and_unloaded_water) {
           2 * layer, "refill to baseline");
     CHECK(chunks.tileAt(dry.x, dry.y, dry.z)->isAir());
     CHECK(chunks.tileAt(x + 1, top - 1, z)->liquid == LiquidType::Lava);
-    EQUAL(detailedTop(chunks, upper, x + 2, z), float(top),
+    EQUAL(detailedTop(chunks, upper, x + 2, z), initial.waterAt(x, z).height(),
           "detailed top refills");
     const TerrainEdits savedEdits(save_catalog::readTerrainEdits(slot).columns);
     SurfaceSampler restoredQuery(*reopened, assets, nullptr,
@@ -1319,7 +1566,12 @@ TEST(hydrology_local_flow_conserves_and_freezes_unknown_boundary) {
             return Reservoirs::CellAccess::Open;
         return Reservoirs::CellAccess::Blocked;
     };
+    const auto before = water.snapshot();
     water.flow(1, access);
+    EQUAL(before->cells.at(source), 255,
+          "a mesh worker keeps its captured fill");
+    CHECK(!before->cells.intersects(16, 0, 17, 1));
+    CHECK(water.snapshot()->cells.intersects(16, 0, 17, 1));
     auto state = water.snapshot();
     EQUAL(int(state->cells.at(source)), 223, "sideways transfer is capped");
     EQUAL(int(state->cells.at(TilePos{16, 11, 0})), 32,
@@ -1342,6 +1594,156 @@ TEST(hydrology_local_flow_conserves_and_freezes_unknown_boundary) {
     reloaded.flow(2, blocked);
     EQUAL(int(reloaded.snapshot()->cells.at(source)), 223,
           "unknown boundaries hold their volume");
+}
+
+TEST(hydrology_still_local_pool_wakes_on_excavation) {
+    Reservoirs water(nullptr);
+    TilePos source{12, 10, 12}, dest{12, 9, 12};
+    bool dug = false;
+    const auto terrain = [&](TilePos p) {
+        return p == source || (dug && p == dest)
+                   ? Reservoirs::CellAccess::Open
+                   : Reservoirs::CellAccess::Blocked;
+    };
+    water.creditLocal(source, 100, ReservoirExchange::Input);
+    water.flow(1, terrain);
+    EQUAL(water.flow(512, terrain), 0u, "resting pool consumes no visits");
+    dug = true;
+    water.wakeLocalBox(dest, source, 32);
+    water.flow(1, terrain, 32);
+    EQUAL(water.snapshot()->cells.at(dest), 100,
+          "excavation wakes resting water");
+}
+
+TEST(hydrology_draining_lake_mesh_heights) {
+    auto world = basinWorld();
+    auto hydro = GeneratedHydrology::build(world, {}, false);
+    const auto lake = hydro->candidateBody(First);
+    world.hydrology = hydro;
+    world.reservoirs = std::make_shared<Reservoirs>(hydro);
+    WaterEditFixture f(world);
+    SurfaceSampler sampler(world, f.assets);
+    const auto site = center(First);
+    const auto original = sampler.waterAt(site.x, site.y);
+    const ChunkCoord coord{unsigned(site.x / 16),
+                           unsigned(original.topTile() / 16),
+                           unsigned(site.y / 16)};
+    f.load({site.x, original.topTile(), site.y});
+    f.load({site.x, original.topTile() + 1, site.y});
+    const auto detail = ChunkMesher(f.assets).build(
+        *f.chunks.getChunk(coord), coord,
+        [&](int x, int y, int z) { return f.chunks.tileAt(x, y, z); }, {}, {},
+        [&](int x, int z) { return hydro->sampleColumn(x, z); });
+    const auto lod = TerrainLod::build({site.x, site.y, 1}, sampler,
+                                       std::atomic_bool{false}, 4);
+    CHECK(!detail.water.vertices.empty() && !lod.water.vertices.empty());
+    const auto curve = hydro->storageCurve(lake);
+    const auto band = curve.capacity() - curve.volumeAt(original.topTile());
+    world.reservoirs->transfer(lake, -band / 2, ReservoirExchange::Disposal);
+    sampler.setReservoirs(world.reservoirs->snapshot());
+    const auto current = sampler.waterAt(site.x, site.y);
+    CHECK(current.height() < original.height());
+    for (auto mesh : {detail.lakeSurface, lod.lakeSurface}) {
+        EQUAL(mesh.body, lake, "lake mesh owner");
+        EQUAL(mesh.height + mesh.offset(current), current.height(),
+              "pending upload follows current waterline");
+    }
+}
+
+TEST(hydrology_lake_seep_and_coastal_pool) {
+    auto world = basinWorld();
+    auto hydro = GeneratedHydrology::build(world, {}, false);
+    Reservoirs water(hydro);
+    const auto lake = hydro->candidateBody(First);
+    water.transfer(lake, -1000, ReservoirExchange::Disposal);
+    const auto drained = water.volume(lake);
+    water.advanceTo(10);
+    EQUAL(water.volume(lake), drained + 320,
+          "basin receives bounded groundwater");
+    const TilePos gate{2, 380, 3};
+    Reservoirs::BreachSurvey bowl{385, {{{2, 3}, 375, 375}}};
+    CHECK(water.connectValley(
+        GeneratedHydrology::Sea, gate, {1, 380, 3}, bowl,
+        {{2, 375, 3}, {2, 376, 3}, {2, 377, 3}, {2, 378, 3}, {2, 379, 3}}));
+    const auto pool = water.snapshot()->pools.begin()->first;
+    const auto ocean = water.volume(GeneratedHydrology::Sea);
+    water.advanceTo(13);
+    const auto sheet =
+        water.snapshot()->streams.at(ReservoirSnapshot::columnKey(2, 3));
+    EQUAL(sheet.bottom, 375, "fall reaches its landing");
+    EQUAL(sheet.top, 380, "fall starts at the lip");
+    EQUAL(water.volume(pool), 3 * WaterUnitsPerBlock,
+          "three seconds of incoming seawater");
+    EQUAL(water.volume(GeneratedHydrology::Sea), ocean - water.volume(pool),
+          "ocean funds pool");
+    Reservoirs restored(hydro);
+    restored.restore(water.encode());
+    restored.blockChannelCell(gate);
+    restored.advanceTo(12000);
+    CHECK(restored.snapshot()->streams.empty());
+    EQUAL(restored.volume(pool), water.volume(pool),
+          "plug traps pool after reload");
+}
+
+TEST(hydrology_valley_spills_to_river_until_plugged) {
+    auto world = riverLodScene(32);
+    auto hydro = GeneratedHydrology::build(world, {}, true, false, true);
+    const auto reach = hydro->riverReaches().front().id;
+    Reservoirs water(hydro), restored(hydro);
+    constexpr uint32_t source = 42;
+    for (auto* ledger : {&water, &restored})
+        ledger->define(source, StorageCurve::constantArea(20, 380, 390));
+    const TilePos gate{5, 383, 5}, crest{7, 382, 5};
+    Reservoirs::BreachSurvey bowl{382, {{{6, 5}, 380, 380}}};
+    CHECK(water.connectValley(
+        source, gate, {4, 383, 5}, bowl, {{6, 380, 5}},
+        {{0, reach, 375}, {{8, 374, 5}, crest, {6, 380, 5}}}));
+    const auto pool = water.snapshot()->pools.begin()->first;
+    const auto initial = water.volume(source);
+    Reservoirs baseline(hydro);
+    for (auto* ledger : {&baseline, &water}) {
+        CHECK(ledger->setReachDelivery(reach, 0));
+        ledger->advanceTo(5);
+    }
+    EQUAL(water.held(reach) - baseline.held(reach), 3 * WaterUnitsPerBlock,
+          "river receives exactly the surplus");
+    EQUAL(water.volume(pool), 2 * WaterUnitsPerBlock, "pond fills to its rim");
+    EQUAL(initial - water.volume(source), 5 * WaterUnitsPerBlock,
+          "surplus continues through the pond");
+    CHECK(
+        water.snapshot()->streams.contains(ReservoirSnapshot::columnKey(7, 5)));
+    restored.restore(water.encode());
+    restored.advanceTo(6);
+    EQUAL(initial - restored.volume(source), 6 * WaterUnitsPerBlock,
+          "overflow survives reload");
+    restored.blockChannelCell(crest);
+    restored.advanceTo(120);
+    EQUAL(initial - restored.volume(source), 6 * WaterUnitsPerBlock,
+          "a plugged outlet stops transfer into the full pond");
+    CHECK(restored.snapshot()->streams.empty());
+}
+
+TEST(hydrology_exposed_film_dries_after_supply_stops) {
+    Reservoirs water(nullptr);
+    const TilePos p{4, 10, 4};
+    auto access = [&](TilePos q) {
+        return q.x == p.x && q.z == p.z && q.y >= p.y
+                   ? Reservoirs::CellAccess::Open
+                   : Reservoirs::CellAccess::Blocked;
+    };
+    water.creditLocal(p, 8, ReservoirExchange::Input);
+    water.flow(1, access);
+    water.advanceTo(290);
+    water.creditLocal(p, 2, ReservoirExchange::Input);
+    water.flow(1, access);
+    water.advanceTo(301);
+    water.flow(1, access);
+    EQUAL(water.snapshot()->cells.at(p), 10, "freshly fed film remains");
+    water.advanceTo(590);
+    water.flow(1, access);
+    CHECK(water.snapshot()->cells.empty());
+    EQUAL(water.exchanged(ReservoirExchange::Evaporation), -10,
+          "film loss recorded once");
 }
 
 TEST(hydrology_local_flow_falls_across_slab_and_wrap) {
@@ -1387,45 +1789,22 @@ TEST(hydrology_local_flow_prefers_nearest_drop) {
           "preferring a drop preserves volume");
 }
 
-namespace {
-class WaterEditFixture {
-   public:
-    explicit WaterEditFixture(World& world)
-        : world(world),
-          chunks(generator, pool, nullptr, world, &assets),
-          editor(chunks, nullptr, assets.getStorage<Block>()) {}
-
-    void load(TilePos p, ChunkBlob blob = {}) {
-        const ChunkCoord c{unsigned(p.x / 16), unsigned(p.y / 16),
-                           unsigned(p.z / 16)};
-        if (!chunks.isRegistered(c)) {
-            const auto rx = c.x / CHUNKS_PER_REGION;
-            const auto rz = c.z / CHUNKS_PER_REGION;
-            chunks.registerChunk(c, {rx * 8, 0, rz * 8},
-                                 &world.regions[rz * world.width + rx],
-                                 std::move(blob));
-        }
-        for (int i = 0; i < 12 && !chunks.request(c); ++i) {
-            chunks.update();
-            CHECK(pool.wait_for(std::chrono::seconds(5)));
-        }
-        CHECK(chunks.isReady(c));
-    }
-
-    const Tile& tile(TilePos p) {
-        const auto* result = chunks.tileAt(p.x, p.y, p.z);
-        CHECK(result);
-        return *result;
-    }
-
-    World& world;
-    test::Assets assets;
-    LocationGenerator generator;
-    ThreadPool pool{2};
-    ChunkManager chunks;
-    WorldEditor editor;
-};
-}  // namespace
+TEST(hydrology_local_flow_settles_saved_suspended_water) {
+    Reservoirs water(nullptr), restored(nullptr);
+    const TilePos suspended{8, 48, 8}, landing{8, 12, 8};
+    EQUAL(water.creditLocal(suspended, 1, ReservoirExchange::Input), 1,
+          "even the smallest old water credit must fall");
+    restored.restore(water.encode());
+    using Access = Reservoirs::CellAccess;
+    const auto shaft = [](TilePos p) {
+        return p.x == 8 && p.z == 8 && p.y >= 12 && p.y <= 48 ? Access::Open
+                                                              : Access::Blocked;
+    };
+    restored.flow(1, shaft);
+    CHECK(!restored.snapshot()->cells.contains(suspended));
+    EQUAL(restored.snapshot()->cells.at(landing), 1,
+          "the credit settles across multiple slabs in one sweep");
+}
 
 TEST(hydrology_editor_certifies_dry_downspout) {
     auto world = riverLodScene(32);
@@ -1490,9 +1869,12 @@ TEST(hydrology_editor_connects_generated_water) {
             EQUAL(after->cells.at(cut), WaterUnitsPerBlock,
                   "standing water feeds the opening from above");
             EQUAL(world.reservoirs->volume(baseline.body),
-                  before - WaterUnitsPerBlock, "the body pays for the fill");
+                  before - WaterUnitsPerBlock + (kind == 1 ? 32 : 0),
+                  "the body pays for the fill and its spring supplies "
+                  "groundwater");
         }
-        CHECK(!world.reservoirs->exchanged(ReservoirExchange::Input));
+        EQUAL(world.reservoirs->exchanged(ReservoirExchange::Input),
+              kind == 1 ? 32 : 0, "only the lake seep adds water");
     }
 }
 
@@ -1505,6 +1887,12 @@ TEST(hydrology_editor_water_crosses_ready_boundary) {
     // chunk seam. Without the source slab, the opening must stay dry.
     const TilePos cut{0, SEA_LEVEL_Y, center(WrappedCoast).y};
     const TilePos west{int(world.wrap().tiles) - 1, cut.y, cut.z};
+    constexpr int Area = 1024;
+    world.reservoirs->define(
+        GeneratedHydrology::Sea,
+        StorageCurve::constantArea(Area, cut.y - 8, cut.y + 1));
+    world.reservoirs->transfer(GeneratedHydrology::Sea, -16 * Area,
+                               ReservoirExchange::Disposal);
     f.load(cut);
     CHECK(f.tile(cut).liquid == LiquidType::Water);
     for (auto p : {TilePos{1, cut.y, cut.z}, TilePos{0, cut.y, cut.z - 1},
@@ -1519,27 +1907,33 @@ TEST(hydrology_editor_water_crosses_ready_boundary) {
     f.load(west);
     CHECK(f.tile(west).liquid == LiquidType::Water);
     f.chunks.advanceWater(2);
-    EQUAL(f.tile(cut).liquidLevel, 255, "wet face activates across X wrap");
+    constexpr int head = 240 * WaterSurface::RestingFill / 255;
+    EQUAL(f.tile(west).liquidLevel, head, "sea is at a fractional level");
+    EQUAL(f.tile(cut).liquidLevel, f.tile(west).liquidLevel,
+          "the opening matches the source across X wrap");
     const ChunkCoord c{0, unsigned(cut.y / 16), unsigned(cut.z / 16)};
     const auto mesh = ChunkMesher(f.assets).build(
         *f.chunks.getChunk(c), c,
         [&](int x, int y, int z) { return f.chunks.tileAt(x, y, z); });
     CHECK(!mesh.waterTops.empty());
-    EQUAL(mesh.waterTops[(cut.z % 16) * 16], float(cut.y % 16 + 1),
-          "detailed mesh shows water in the cut");
+    EQUAL(mesh.waterTops[(cut.z % 16) * 16], float(cut.y % 16) + head / 255.f,
+          "detailed mesh shows the fractional head in the cut");
 
-    // Drain a separately credited full cell down into a sealed hole. A
-    // vacated local column/slab must not retain a stale water tile.
+    // Drain a separately credited full cell through the air above the sea.
+    // The vacated slab must not retain any stale water.
     const TilePos air{cut.x + 4, (cut.y / 16 + 1) * 16, cut.z};
     const TilePos below{air.x, air.y - 1, air.z};
     f.load(air);
     f.load(below);
+    const auto before = world.reservoirs->volume(GeneratedHydrology::Sea);
     EQUAL(world.reservoirs->creditLocal(air, 255, ReservoirExchange::Input),
           255, "credit air above the sea");
     CHECK(f.tile(air).isLiquid());
     f.chunks.flowWater(512);
     CHECK(f.tile(air).isAir());
-    CHECK(f.tile(below).isLiquid());
+    CHECK(f.tile(below).isAir());
+    EQUAL(world.reservoirs->volume(GeneratedHydrology::Sea) - before, 255,
+          "water falls across the slab and joins the sea");
 }
 
 TEST(hydrology_editor_dam_backs_up_river) {
@@ -1607,6 +2001,10 @@ TEST(hydrology_editor_dam_backs_up_river) {
     Reservoirs restored(world.hydrology);
     restored.restore(world.reservoirs->encode());
     CHECK(restored.damAt(main.id));
+    const auto loadedMask =
+        restored.snapshot()->riverStages.at(main.id).damUpstream;
+    CHECK(loadedMask &&
+          *loadedMask == *pond->riverStages.at(main.id).damUpstream);
     f.chunks.advanceWater(86400, std::chrono::seconds::zero());
     EQUAL(world.reservoirs->step(), 86400u, "unloaded dam still advances");
     sampler.setReservoirs(world.reservoirs->snapshot());
@@ -1620,6 +2018,171 @@ TEST(hydrology_editor_dam_backs_up_river) {
     EQUAL(world.reservoirs->volume(pool), 0,
           "opening a wall drains previously stored head");
     CHECK(!world.reservoirs->exchanged(ReservoirExchange::Input));
+}
+
+TEST(hydrology_editor_staggered_dam_seals_deep_channel) {
+    auto world = riverLodScene(32);
+    world.hydrology = GeneratedHydrology::build(world, {}, true, false, true);
+    world.reservoirs = std::make_shared<Reservoirs>(world.hydrology);
+    WaterEditFixture f(world);
+    SurfaceSampler sampler(world, f.assets);
+    const auto& reach = world.hydrology->riverReaches().front();
+    const int x = reach.spring.tile.x - 24, z = reach.spring.tile.y;
+    const auto center = sampler.column(x, z + 1);
+    CHECK(center.water.reach == reach.id &&
+          center.water.depth(center.surfaceY) > 1);
+    const auto before = sampler.column(x + 1, z + 1);
+    const auto after = sampler.column(x - 1, z + 1);
+    const TilePos leak{
+        x, std::max({before.surfaceY, center.surfaceY, after.surfaceY}) + 1,
+        z + 1};
+    CHECK(before.water.fills(leak.y, before.surfaceY));
+    CHECK(after.water.fills(leak.y, after.surfaceY));
+    CHECK(leak.y < center.water.topTile());
+    for (int dz = -12; dz <= 12; ++dz) {
+        // Overlap each step at the turn. This wall is face-connected, but
+        // no straight cross-section in X is fully blocked.
+        const auto offset = [](int row) { return (row + 12) / 3 - 4; };
+        for (int dx = offset(dz - 1); dx <= offset(dz); ++dx) {
+            const auto c = sampler.column(x + dx, z + dz);
+            if (c.water.reach != reach.id) continue;
+            for (int y = c.surfaceY + 1; y < c.water.surfaceY; ++y) {
+                const TilePos p{x + dx, y, z + dz};
+                f.load(p);
+                if (p != leak)
+                    CHECK(f.editor.placeBlock(p, 1) == EditStatus::Applied);
+            }
+        }
+    }
+    f.chunks.commitWaterEdits();
+    CHECK(!world.reservoirs->damAt(reach.id));
+    CHECK(f.editor.placeBlock(leak, 1) == EditStatus::Applied);
+    f.chunks.advanceWater(1);
+    CHECK(world.reservoirs->damAt(reach.id));
+    CHECK(f.editor.removeBlock(leak) == EditStatus::Applied);
+    f.chunks.commitWaterEdits();
+    CHECK(!world.reservoirs->damAt(reach.id));
+}
+
+TEST(hydrology_editor_dam_across_diagonal_reach) {
+    auto world = riverLodScene(32);
+    world.rivers.resize(1);
+    world.rivers.front().path[1].first.y = 2;
+    world.hydrology = GeneratedHydrology::build(world, {}, true, false, true);
+    world.reservoirs = std::make_shared<Reservoirs>(world.hydrology);
+    WaterEditFixture f(world);
+    SurfaceSampler sampler(world, f.assets);
+    const auto& reach = world.hydrology->riverReaches().front();
+    const int x = reach.spring.tile.x - 24, z = reach.spring.tile.y - 24;
+    const auto center = sampler.waterAt(x, z);
+    CHECK(center.reach == reach.id && center.flow.x < -.5f &&
+          center.flow.y < -.5f);
+
+    for (int dz = -12; dz <= 12; ++dz)
+        for (int dx : {-dz, -dz + 1}) {
+            const auto c = sampler.column(x + dx, z + dz);
+            if (c.water.reach != reach.id) continue;
+            for (int y = c.surfaceY + 1; y < c.water.surfaceY; ++y) {
+                const TilePos p{x + dx, y, z + dz};
+                f.load(p);
+                CHECK(f.editor.placeBlock(p, 1) == EditStatus::Applied);
+            }
+        }
+    f.chunks.advanceWater(1);
+    CHECK(world.reservoirs->damAt(reach.id));
+    sampler.setReservoirs(world.reservoirs->snapshot());
+    CHECK(sampler.waterAt(x + 3, z + 3).wet());
+    CHECK(!sampler.waterAt(x - 3, z - 3).wet());
+}
+
+TEST(hydrology_headwater_dam_responds_to_crest_and_floor_edits) {
+    auto world = riverLodScene(32);
+    world.hydrology = GeneratedHydrology::build(world, {}, true, false, true);
+    world.reservoirs = std::make_shared<Reservoirs>(world.hydrology);
+    auto& water = *world.reservoirs;
+    WaterEditFixture f(world);
+    SurfaceSampler sampler(world, f.assets);
+    const auto& reach = world.hydrology->riverReaches().front();
+    const int x = reach.spring.tile.x - 2, z = reach.spring.tile.y;
+    const auto center = sampler.column(x, z);
+    CHECK(center.water.reach == reach.id);
+    const auto after = sampler.column(x - 12, z);
+    CHECK(after.water.reach == reach.id);
+    f.load({x - 12, after.water.topTile(), z});
+    const TilePos gate{x, center.surfaceY + 1, z};
+    std::vector<TilePos> caps;
+    for (int dz = -10; dz <= 10; ++dz) {
+        const auto c = sampler.column(x, z + dz);
+        if (c.water.reach != reach.id) continue;
+        const TilePos cap{x, c.water.surfaceY, z + dz};
+        f.load(cap);
+        caps.push_back(cap);
+        for (int y = c.surfaceY + 1; y < c.water.surfaceY; ++y) {
+            const TilePos p{x, y, z + dz};
+            f.load(p);
+            if (p != gate)
+                CHECK(f.editor.placeBlock(p, 1) == EditStatus::Applied);
+        }
+    }
+    f.chunks.advanceWater(1);
+    CHECK(!water.damAt(reach.id));
+    CHECK(f.editor.placeBlock(gate, 1) == EditStatus::Applied);
+    f.chunks.advanceWater(2);
+    CHECK(water.damAt(reach.id));
+    CHECK(f.tile({x - 12, after.water.topTile(), z}).liquid ==
+          LiquidType::None);
+
+    f.chunks.advanceWater(86400);
+    const auto pool = water.snapshot()->pools.begin()->first;
+    const auto stored = water.volume(pool);
+    CHECK(stored > 0);
+    const auto spill = std::find_if(caps.begin(), caps.end(), [&](TilePos p) {
+        return f.tile(p).liquid == LiquidType::Water;
+    });
+    CHECK(spill != caps.end());
+    CHECK(f.tile({x - 12, after.water.topTile(), z}).liquid ==
+          LiquidType::Water);
+    for (auto cap : caps)
+        CHECK(f.editor.placeBlock(cap, 1) == EditStatus::Applied);
+    f.chunks.commitWaterEdits();
+    CHECK(water.damAt(reach.id));
+    EQUAL(water.volume(pool), stored,
+          "raising the crest preserves stored water");
+    CHECK(f.tile({x - 12, after.water.topTile(), z}).liquid ==
+          LiquidType::None);
+    CHECK(f.editor.removeBlock(*spill) == EditStatus::Applied);
+    f.chunks.advanceWater(2 * 86400);
+    CHECK(water.damAt(reach.id));
+    CHECK(f.tile(*spill).liquid == LiquidType::Water);
+    CHECK(f.tile({x - 12, after.water.topTile(), z}).liquid ==
+          LiquidType::Water);
+
+    const int floor = std::min(
+        {sampler.height(x + 1, z), center.surfaceY, sampler.height(x - 1, z)});
+    for (int dx : {1, 0, -1})
+        for (int y = sampler.height(x + dx, z); y >= floor; --y) {
+            const TilePos p{x + dx, y, z};
+            f.load(p);
+            CHECK(f.editor.removeBlock(p) == EditStatus::Applied);
+        }
+    f.chunks.commitWaterEdits();
+    CHECK(!water.damAt(reach.id));
+    CHECK(f.tile(*spill).liquid == LiquidType::None);
+    CHECK(f.tile({x - 12, after.water.topTile(), z}).liquid ==
+          LiquidType::Water);
+    for (int y = floor; y <= center.surfaceY; ++y)
+        CHECK(f.editor.placeBlock({x, y, z}, 1) == EditStatus::Applied);
+    f.chunks.commitWaterEdits();
+    CHECK(water.damAt(reach.id));
+    const TilePos spring{reach.spring.tile.x, reach.spring.rockY + 1,
+                         reach.spring.tile.y};
+    f.load(spring);
+    CHECK(f.editor.placeBlock(spring, 1) == EditStatus::Applied);
+    f.chunks.commitWaterEdits();
+    CHECK(water.damAt(reach.id));
+    CHECK(f.editor.removeBlock(spring) == EditStatus::Applied);
+    f.chunks.commitWaterEdits();
+    CHECK(water.damAt(reach.id));
 }
 
 TEST(hydrology_broken_bank_fills_unloaded_valley) {
@@ -1761,27 +2324,161 @@ TEST(hydrology_editor_seals_spring_and_restores_river) {
     CHECK(f.editor.placeBlock(mouth, 1) == EditStatus::Applied);
     f.chunks.advanceWater(1);
     s.setReservoirs(world.reservoirs->snapshot());
-    CHECK(!s.waterAt(downstream.x, downstream.z).wet());
+    EQUAL(s.waterAt(downstream.x, downstream.z).height(), original.height(),
+          "plugging the spring leaves the water already in the bed");
+    f.chunks.advanceWater(7200);
+    s.setReservoirs(world.reservoirs->snapshot());
+    const auto draining = s.waterAt(downstream.x, downstream.z);
+    CHECK(draining.wet() && draining.height() < original.height());
+    std::vector<TilePos> surround;
+    const int wallX = mouth.x - 2;
+    for (int dz = -12; dz <= 12; ++dz) {
+        const auto column = s.column(wallX, mouth.z + dz);
+        const auto natural =
+            world.hydrology->waterAt(wallX, mouth.z + dz, column.surfaceY);
+        if (natural.reach != reach.id) continue;
+        for (int y = column.surfaceY + 1; y < natural.surfaceY; ++y) {
+            const TilePos p{wallX, y, mouth.z + dz};
+            f.load(p);
+            CHECK(f.editor.placeBlock(p, 1) == EditStatus::Applied);
+            surround.push_back(p);
+        }
+    }
+    CHECK(!surround.empty());
+    f.chunks.commitWaterEdits();
+    CHECK(!world.reservoirs->damAt(reach.id));
+    s.setReservoirs(world.reservoirs->snapshot());
+    EQUAL(s.waterAt(downstream.x, downstream.z).height(), draining.height(),
+          "building around a sealed source must not skip the recession");
     Reservoirs restored(world.hydrology);
     restored.restore(world.reservoirs->encode());
-    CHECK(restored.snapshot()->riverStages.at(reach.id).percent == 0);
+    EQUAL(restored.snapshot()->riverStages.at(reach.id).recessionAge,
+          world.reservoirs->snapshot()->riverStages.at(reach.id).recessionAge,
+          "save and reload preserve the in-progress drawdown");
+    f.chunks.advanceWater(86400);
+    s.setReservoirs(world.reservoirs->snapshot());
+    CHECK(!s.waterAt(downstream.x, downstream.z).wet());
+    for (const auto p : surround)
+        CHECK(f.editor.removeBlock(p) == EditStatus::Applied);
     CHECK(f.editor.removeBlock(mouth) == EditStatus::Applied);
-    f.chunks.advanceWater(2);
+    f.chunks.advanceWater(86401);
+    s.setReservoirs(world.reservoirs->snapshot());
+    CHECK(!s.waterAt(downstream.x, downstream.z).wet());
+    f.chunks.advanceWater(86400 + 7200);
+    s.setReservoirs(world.reservoirs->snapshot());
+    const auto restoring = s.waterAt(downstream.x, downstream.z);
+    CHECK(restoring.wet() && restoring.height() < original.height());
+    restored.restore(world.reservoirs->encode());
+    CHECK(restored.snapshot()->riverStages.at(reach.id) ==
+          world.reservoirs->snapshot()->riverStages.at(reach.id));
+    s.setReservoirs(restored.snapshot());
+    EQUAL(s.waterAt(downstream.x, downstream.z).height(), restoring.height(),
+          "save and reload preserve the recovery front");
+    f.chunks.advanceWater(2 * 86400);
     s.setReservoirs(world.reservoirs->snapshot());
     EQUAL(s.waterAt(downstream.x, downstream.z).height(), original.height(),
-          "removing the plug restores the original river");
+          "water eventually restores the original river");
     CHECK(world.reservoirs->snapshot()->cells.empty());
 
     const TilePos ordinary{downstream.x, original.topTile(), downstream.z};
     f.load(ordinary);
     CHECK(f.editor.placeBlock(ordinary, 1) == EditStatus::Applied);
-    f.chunks.advanceWater(3);
+    f.chunks.advanceWater(2 * 86400 + 1);
     CHECK(!world.reservoirs->damAt(reach.id));
     CHECK(f.editor.removeBlock(ordinary) == EditStatus::Applied);
-    f.chunks.advanceWater(4);
+    f.chunks.advanceWater(2 * 86400 + 2);
     EQUAL(f.tile(ordinary).liquidLevel, 255, "the ordinary river tile refills");
     CHECK(world.reservoirs->snapshot()->cells.empty());
     CHECK(world.reservoirs->snapshot()->pools.empty());
+}
+
+TEST(hydrology_junction_refills_a_cut_after_spring_closes) {
+    auto world = riverLodScene(32);
+    world.hydrology = GeneratedHydrology::build(world);
+    world.reservoirs = std::make_shared<Reservoirs>(world.hydrology);
+    WaterEditFixture f(world);
+    const auto& branch = world.hydrology->riverReaches().back();
+    CHECK(branch.end == GeneratedHydrology::RiverEnd::Confluence);
+    const TilePos spring{branch.spring.tile.x, branch.spring.rockY + 1,
+                         branch.spring.tile.y};
+    SurfaceSampler surface(world, f.assets);
+    Reservoirs preview(world.hydrology);
+    CHECK(preview.setSpringOpen(branch.id, false));
+    preview.advanceTo(86400);
+    const auto state = preview.snapshot();
+    CHECK(state->riverStages.at(branch.id).backwaterHead > 0);
+    std::optional<TilePos> cut;
+    for (int dz = -8; dz <= 8 && !cut; ++dz)
+        for (int dx = -8; dx <= 8 && !cut; ++dx) {
+            const int x = int(world.wrap().wrapTile(branch.outlet.x + dx));
+            const int z = branch.outlet.y + dz;
+            const auto sample = surface.column(x, z);
+            if (sample.water.reach == branch.id &&
+                state
+                    ->projectStanding(world.hydrology.get(), x, z,
+                                      sample.surfaceY, sample.water)
+                    .wet())
+                cut = TilePos{x, sample.surfaceY, z};
+        }
+    CHECK(cut);
+    f.load(*cut);
+    f.load({cut->x, cut->y + 1, cut->z});
+    CHECK(f.editor.removeBlock(*cut) == EditStatus::Applied);
+    f.load(spring);
+    CHECK(f.editor.placeBlock(spring, 1) == EditStatus::Applied);
+    f.chunks.advanceWater(86400);
+    f.chunks.advanceWater(86420);
+    CHECK(f.tile(*cut).liquid == LiquidType::Water);
+    CHECK(f.tile(*cut).liquidLevel > 0);
+
+    const auto& main = world.hydrology->riverReaches().front();
+    CHECK(preview.setSpringOpen(branch.id, true));
+    CHECK(preview.setSpringOpen(main.id, false));
+    preview.advanceTo(2 * 86400);
+    const auto settled = preview.snapshot();
+    CHECK(!settled->riverStages.at(main.id).inlets.empty());
+    const auto head = surface.column(main.spring.tile.x, main.spring.tile.y);
+    CHECK(!settled
+               ->projectStanding(world.hydrology.get(), main.spring.tile.x,
+                                 main.spring.tile.y, head.surfaceY, head.water)
+               .wet());
+    const auto junction = surface.column(branch.outlet.x, branch.outlet.y);
+    EQUAL(junction.water.reach, main.id, "the tributary joins the main bed");
+    CHECK(settled
+              ->projectStanding(world.hydrology.get(), branch.outlet.x,
+                                branch.outlet.y, junction.surfaceY,
+                                junction.water)
+              .wet());
+}
+
+TEST(hydrology_junction_backwater_tapers_into_deep_bed) {
+    ReservoirSnapshot snapshot;
+    constexpr int Ground = 399, Top = 408, Period = 1024;
+    const WaterSurface river{Top, 0, 1, {1, 0}, false, 255, 8};
+    auto& stage = snapshot.riverStages[river.reach];
+    stage.receding = true;
+    stage.recessionAge = 64800;
+    stage.junction = {0, 40};
+    stage.periodX = Period;
+    stage.backwaterReach = 2;
+    stage.backwaterHead = Top * 255;
+    int previous = Top * 255;
+    for (int offset = 0; offset <= 32; ++offset) {
+        const auto surface = snapshot.projectStanding(
+            nullptr, (Period - offset) % Period, 40, Ground, river);
+        const int top = surface.wet()
+                            ? surface.topTile() * 255 + surface.topFill
+                            : (Ground + 1) * 255;
+        CHECK(top <= previous && previous - top < 255);
+        if (offset == 31) {
+            EQUAL(surface.topTile(), Ground + 1,
+                  "the last wet cell sits on the bed");
+            CHECK(surface.topFill > 0 && surface.topFill < 255);
+        }
+        previous = top;
+    }
+    EQUAL(previous, (Ground + 1) * 255,
+          "the taper meets the bed across the seam");
 }
 
 TEST(hydrology_editor_reopens_saved_cut) {
@@ -1816,7 +2513,7 @@ TEST(hydrology_editor_reopens_saved_cut) {
 }
 
 TEST(hydrology_time_speed_consumes_the_same_water_steps) {
-    constexpr uint64_t End = 120;
+    constexpr uint64_t End = 360;
     constexpr auto Unlimited = std::chrono::steady_clock::duration::max();
     const auto run = [&](double speed) {
         auto world = riverLodScene(32);
@@ -1837,18 +2534,19 @@ TEST(hydrology_time_speed_consumes_the_same_water_steps) {
         WorldClock clock;
         clock.setSpeed(speed);
         uint64_t target = 0;
-        for (int frame = 0; frame < 1000 && target < End; ++frame) {
+        for (int frame = 0; frame < 2000 && target < End; ++frame) {
             clock.advance(1.0 / 60);
             target = std::min(End, uint64_t(clock.days() * 86400));
             const auto before = world.reservoirs->step();
             const auto budget =
-                speed == 720 ? std::chrono::seconds::zero() : Unlimited;
+                speed >= 720 ? std::chrono::seconds::zero() : Unlimited;
             f.chunks.advanceWater(target, budget);
             CHECK(world.reservoirs->step() - before <=
                   ChunkManager::MaxWaterStepsPerUpdate);
         }
         EQUAL(target, End, "every clock reaches the same target");
-        if (speed == 720)
+        if (speed >= 720) CHECK(world.reservoirs->step() < End);
+        if (speed == 7200)
             EQUAL(
                 world.reservoirs->step(), 1u,
                 "high speed leaves pending water time instead of skipping it");
@@ -1868,6 +2566,7 @@ TEST(hydrology_time_speed_consumes_the_same_water_steps) {
     const auto normal = run(1);
     CHECK(run(60) == normal);
     CHECK(run(720) == normal);
+    CHECK(run(7200) == normal);
 }
 
 TEST(hydrology_water_time_budget_and_coarse_fast_forward) {
@@ -1890,8 +2589,58 @@ TEST(hydrology_water_time_budget_and_coarse_fast_forward) {
     reloaded.restore(world.reservoirs->encode());
     EQUAL(reloaded.step(), 1001u, "save retains only the time simulated");
     f.chunks.advanceWater(2000, std::chrono::steady_clock::duration::max());
-    EQUAL(world.reservoirs->step(), 2000u,
-          "a large jump uses a bounded bulk update, not a step backlog");
+    EQUAL(world.reservoirs->step(),
+          1001u + ChunkManager::MaxWaterStepsPerUpdate,
+          "active water retains the rest of a large jump");
+    while (world.reservoirs->step() < 2000)
+        f.chunks.advanceWater(2000, std::chrono::steady_clock::duration::max());
+}
+
+TEST(hydrology_cavern_fills_up_from_submerged_tunnel) {
+    for (const bool fast : {false, true}) {
+        auto world = basinWorld();
+        world.hydrology = GeneratedHydrology::build(world, {}, false);
+        world.reservoirs = std::make_shared<Reservoirs>(world.hydrology);
+        WaterEditFixture f(world);
+        auto& water = *world.reservoirs;
+        const auto site = center(First);
+        const auto [bed, lake] = world.hydrology->sampleColumn(site.x, site.y);
+        const TilePos source{site.x, bed + 1, site.y};
+        const int bottom = bed - 4;
+        const int exitX = site.x + 1;
+        f.load(source);
+        const auto dig = [&](TilePos p) {
+            f.load(p);
+            CHECK(f.editor.removeBlock(p) == EditStatus::Applied);
+        };
+        for (int y = bottom; y <= bed; ++y) dig({site.x, y, site.y});
+        for (int y = bottom; y <= bed - 2; ++y) dig({exitX, y, site.y});
+        const TilePos ceiling{exitX, bed - 1, site.y};
+        CHECK(f.tile(ceiling).isSolid());
+        const auto before = water.volume(lake.body);
+        if (fast) {
+            WorldClock clock;
+            clock.setSpeed(7200);
+            clock.advance(1.0 / 60);
+            const auto target = uint64_t(clock.days() * 86400);
+            while (water.step() < target)
+                f.chunks.advanceWater(
+                    target, std::chrono::steady_clock::duration::max());
+        } else {
+            for (uint64_t step = 1; step <= 24; ++step)
+                f.chunks.advanceWater(step);
+        }
+        for (int y = bottom; y <= bed - 2; ++y)
+            EQUAL(int(f.tile({exitX, y, site.y}).liquidLevel), 255,
+                  "the cavern fills above its submerged entrance at y=" +
+                      std::to_string(y) +
+                      (fast ? " in bulk" : " in fixed steps"));
+        CHECK(f.tile(ceiling).isSolid());
+        EQUAL(before - water.volume(lake.body) +
+                  water.exchanged(ReservoirExchange::Input),
+              8 * WaterUnitsPerBlock,
+              "the lake pays only for confirmed receiving volume");
+    }
 }
 
 TEST(hydrology_split_lake_drains_channel_at_7200) {
@@ -1954,15 +2703,22 @@ TEST(hydrology_split_lake_drains_channel_at_7200) {
     const uint64_t target = uint64_t(clock.days() * 86400);
     CHECK(target > ChunkManager::MaxWaterStepsPerUpdate);
     f.chunks.advanceWater(target, std::chrono::seconds::zero());
-    EQUAL(water.step(), target, "7200x advances the water clock in one call");
+    EQUAL(water.step(), 2u, "a single fixed step fits the zero frame budget");
+    while (water.step() < target)
+        f.chunks.advanceWater(target,
+                              std::chrono::steady_clock::duration::max());
     CHECK(water.volume(id) < initial);
     CHECK(water.snapshot()->pools.at(id).level <= mouth.y);
     CHECK(f.tile({site.x + 8, tunnelY, site.y}).isLiquid());
-    EQUAL(water.volume(lake.body), before - initial,
+    EQUAL(water.volume(lake.body),
+          before - initial + water.exchanged(ReservoirExchange::Input) - 32,
           "the cut cannot draw from the other side of the wall");
     WaterVolume delivered = 0;
-    for (const auto& [p, fill] : water.snapshot()->cells) delivered += fill;
-    EQUAL(delivered + water.volume(id), initial + original - before,
+    water.snapshot()->cells.forEach(
+        [&](TilePos, uint8_t fill) { delivered += fill; });
+    EQUAL(delivered + water.volume(id),
+          initial + original - before + 32 +
+              water.exchanged(ReservoirExchange::Evaporation),
           "the fast-forward keeps all the drained water in the channel");
     Reservoirs restored(world.hydrology);
     restored.restore(water.encode());
@@ -1981,17 +2737,43 @@ TEST(hydrology_river_fractional_top_matches_detail) {
     WaterEditFixture f(world);
     const auto head = world.hydrology->riverReaches().front().spring.tile;
     SurfaceSampler surface(world, f.assets);
-    std::set<int> topFills;
+    bool checkedBank = false;
     for (int i = 4; i < 18; ++i) {
         const auto s = surface.waterAt(head.x - i, head.y);
         if (!s.reach) continue;
         CHECK(s.topFill > 0 && s.topFill < 255);
         CHECK(s.flow.x != 0 || s.flow.y != 0);
         const TilePos p{head.x - i, s.topTile(), head.y};
+        int low = 255, high = 0;
+        for (int second = 0; second < 8; ++second) {
+            const int fill = s.surfaceFill(p.x + .5f, p.z + .5f, float(second));
+            low = std::min(low, fill);
+            high = std::max(high, fill);
+        }
+        CHECK(high - low >= 5);
         f.load(p);
         EQUAL(f.tile(p).liquidLevel, s.topFill,
               "the loaded top matches the terrain water sampler");
-        topFills.insert(s.topFill);
+        ReservoirSnapshot reduced;
+        reduced.riverStages[s.reach].percent = 99;
+        const int centerGround = surface.height(p.x, p.z);
+        const auto centerStage =
+            reduced.projectStanding(nullptr, p.x, p.z, centerGround, s);
+        for (int dz = -8; dz <= 8; ++dz) {
+            const auto bank = surface.waterAt(p.x, p.z + dz);
+            const int bankGround = surface.height(p.x, p.z + dz);
+            if (bank.reach != s.reach || bank.surfaceY != s.surfaceY ||
+                bankGround <= centerGround)
+                continue;
+            // This headwater stretch has a flat longitudinal grade.
+            EQUAL(bank.topFill, s.topFill,
+                  "cross-channel bed depth does not tilt the water surface");
+            const auto bankStage = reduced.projectStanding(
+                nullptr, p.x, p.z + dz, bankGround, bank);
+            EQUAL(bankStage.height(), centerStage.height(),
+                  "reduced flow lowers both sides of the river equally");
+            checkedBank = true;
+        }
     }
-    CHECK(topFills.size() > 1);
+    CHECK(checkedBank);
 }

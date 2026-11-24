@@ -413,6 +413,10 @@ void TerrainLodManager::collect() {
         try {
             auto mesh = job.future.get();
             if (job.cancel->load()) continue;
+            if (job.waterChanged) {
+                mesh.provisionalWater = true;
+                mesh.bands.clear();
+            }
             if (job.refiningWater) {
                 const auto it = entries.find(job.patch);
                 if (!mesh.waterLevels.empty() && it != entries.end() &&
@@ -660,6 +664,7 @@ bool TerrainLodManager::createWater(Entry& entry, const TerrainLod::Mesh& cpu,
     entry.waterMapUniform.initTexture("u_patch_water", 8, texture);
     entry.waterMesh = std::move(mesh);
     entry.waterBounds = cpu.water.bounds;
+    entry.lakeSurface = cpu.lakeSurface;
     entry.waterBytes = cpu.water.bytes() + cpu.waterLevels.size();
     return true;
 }
@@ -677,7 +682,7 @@ void TerrainLodManager::uploadWater(IRenderer& renderer) {
         entry.bytes = entry.bytes - previous + bytes;
         resident = resident - previous + bytes;
         uploaded += bytes;
-        entry.provisionalWater = false;
+        entry.provisionalWater = cpu.provisionalWater;
         entry.waterReplacement.reset();
         break;
     }
@@ -783,8 +788,8 @@ void TerrainLodManager::editChanged(uint64_t column) {
             const TerrainLod::DetailCoverage::Key nearby{
                 int(wrap.wrapChunk(key.first + dx)), key.second + dz};
             if (nearby.first < 0 || nearby.second < 0) continue;
+            // Keep the last drawable voxel water until the new band is ready.
             surfaceBands.erase(nearby);
-            waterCoverage.remove(nearby);
         }
     joinedCoverageVersion = UINT64_MAX;
 }
@@ -817,27 +822,57 @@ void TerrainLodManager::reservoirsChanged(const ReservoirChange& change) {
     auto next = world.reservoirs->snapshot();
     ReservoirChange projected;
     projected.bodies = change.bodies;
+    projected.reaches = change.reaches;
     projected.pools = change.pools;
     const auto record = [&](TilePos p) {
-        if (next->localTop(p.x, p.z) != waterSnapshot->localTop(p.x, p.z))
+        const int top = next->localTop(p.x, p.z);
+        if (top != waterSnapshot->localTop(p.x, p.z) ||
+            (p.y + 1 == top &&
+             next->cells.fill(p) != waterSnapshot->cells.fill(p)) ||
+            next->streams.contains(ReservoirSnapshot::columnKey(p.x, p.z)) ||
+            waterSnapshot->streams.contains(
+                ReservoirSnapshot::columnKey(p.x, p.z)))
             projected.locals.push_back({p.x, 0, p.z});
     };
     if (change.local) record(*change.local);
     for (const auto p : change.locals) record(p);
     waterSnapshot = std::move(next);
-    if (projected.bodies.empty() && projected.locals.empty()) return;
+    detailSampler.setReservoirs(waterSnapshot);
+    if (projected.bodies.empty() && projected.reaches.empty() &&
+        projected.locals.empty())
+        return;
     std::sort(projected.locals.begin(), projected.locals.end(), TilePosLess{});
     projected.locals.erase(
         std::unique(projected.locals.begin(), projected.locals.end()),
         projected.locals.end());
-    // The proxy only stores an integer top. Fractional changes must not
-    // discard its patch jobs or evict water already drawn at voxel detail.
-    detailSampler.setReservoirs(waterSnapshot);
-    invalidatePatches([&](const TerrainLod::Patch& p) {
+    // Water may change every frame while a lake drains. Let terrain jobs
+    // finish, and refresh their water with a later snapshot after upload.
+    const auto touches = [&](const TerrainLod::Patch& p) {
         return projected.affects(world.hydrology.get(), p.x - p.spacing,
                                  p.z - p.spacing, p.x + p.size() + p.spacing,
                                  p.z + p.size() + p.spacing, periodX);
-    });
+    };
+    for (auto& job : jobs)
+        if (!job.waterChanged && touches(job.patch)) job.waterChanged = true;
+    for (auto& [p, entry] : entries) {
+        if (!touches(p)) continue;
+        entry->provisionalWater = true;
+        entry->bands.clear();
+        for (auto* staged :
+             {&entry->cpu, &entry->replacement, &entry->waterReplacement})
+            if (*staged) {
+                (*staged)->provisionalWater = true;
+                (*staged)->bands.clear();
+            }
+    }
+    for (auto& job : bandJobs) {
+        const int x = int(job.chunk.x) * Chunk::SIZE_X;
+        const int z = int(job.chunk.z) * Chunk::SIZE_Z;
+        if (projected.affects(world.hydrology.get(), x - 1, z - 1,
+                              x + Chunk::SIZE_X + 1, z + Chunk::SIZE_Z + 1,
+                              periodX))
+            job.stale = true;
+    }
     for (auto it = surfaceBands.begin(); it != surfaceBands.end();) {
         const auto key = it->first;
         const int x = key.first * Chunk::SIZE_X, z = key.second * Chunk::SIZE_Z;
@@ -1102,6 +1137,23 @@ void TerrainLodManager::uploadJoins(IRenderer& renderer) {
     joinedLayout = std::move(layout);
     joinedCoverageVersion = detailCoverage.version();
 }
+float TerrainLodManager::lakeMeshOffset(const LakeMeshSurface& surface) {
+    if (!surface.body || surface.mixed) return 0;
+    return surface.offset(
+        detailSampler.waterAt(surface.tile.x, surface.tile.y));
+}
+
+uint8_t TerrainLodManager::surfaceFill(TilePos pos, const Tile& tile) {
+    if (tile.liquid != LiquidType::Water ||
+        tile.waterOrigin != WaterOrigin::Reservoir)
+        return tile.liquidLevel;
+    const auto surface = detailSampler.waterAt(pos.x, pos.z);
+    if (!surface.reach || pos.y != surface.topTile()) return tile.liquidLevel;
+    auto cell = surface;
+    cell.topFill = tile.liquidLevel;
+    return cell.surfaceFill(pos.x + .5f, pos.z + .5f, flowSeconds);
+}
+
 void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                                ChunkManager& chunks, const Camera& camera,
                                Vec2 viewport,
@@ -1142,6 +1194,10 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     fogUniform.setVec4({eye.x, eye.y, eye.z, selectionRange});
     const int x = int(std::floor(eye.x)), y = int(std::floor(eye.y)),
               z = int(std::floor(eye.z));
+    static const auto flowStart = std::chrono::steady_clock::now();
+    flowSeconds = std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - flowStart)
+                      .count();
     underwater = false;
     if (const Tile* tile = chunks.tileAt(x, y, z)) {
         underwater = WaterSurface{}.submerged(eye.y, -1, tile);
@@ -1149,12 +1205,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                (periodX > 0 || (x >= 0 && x < detailSampler.width()))) {
         underwater = detailSampler.submerged(x, z, eye.y);
     }
-    static const auto flowStart = std::chrono::steady_clock::now();
-    const double elapsed = std::chrono::duration<double>(
-                               std::chrono::steady_clock::now() - flowStart)
-                               .count();
     water.setVec4(
-        {float(elapsed), underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
+        {flowSeconds, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
     float view[16], proj[16], vp[16];
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
                   {camera.position.x, camera.position.y, camera.position.z},
@@ -1171,6 +1223,9 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         bounds.minX += shift;
         bounds.maxX += shift;
         AABB waterBounds = entry.waterBounds;
+        const float waterOffset = lakeMeshOffset(entry.lakeSurface);
+        waterBounds.minY += waterOffset;
+        waterBounds.maxY += waterOffset;
         waterBounds.minX += shift;
         waterBounds.maxX += shift;
         const bool groundVisible = frustum.intersects(bounds);
@@ -1194,9 +1249,10 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                                     std::vector(uniforms), false,
                                     std::array(transform), DrawLayer::GAME);
         if (waterVisible)
-            target.drawVertexBuffer(entry.waterMesh.get(), &shader,
-                                    std::move(uniforms), false,
-                                    std::move(transform), DrawLayer::GAME);
+            target.drawVertexBuffer(
+                entry.waterMesh.get(), &shader, std::move(uniforms), false,
+                relativeTransform(camera, shift, waterOffset, 0),
+                DrawLayer::GAME);
     }
     if (joinsDrawable) {
         // World-space vertices, placed relative to the eye.

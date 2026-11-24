@@ -10,26 +10,60 @@ uniform vec4 u_world_water;
 #include "shadow_sampling.sh"
 #include "water_fog.sh"
 
-// The horizontal wavelengths divide the world wrap period (128 * regions).
-// Both voxel and proxy meshes pass world position and the same flow vector.
-vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing)
+// Periodic value noise keeps the same moving highlights across the X wrap.
+float waterHash(vec2 cell)
 {
-    vec3 color = vec3(0.055, 0.24, 0.32);
-    if (!flowing) return color;
-    float t = u_world_water.x;
-    vec2 advected = position.xz - t * flow * 3.25;
-    vec2 phase = 6.2831853 * advected / vec2(8.0, 4.0);
-    float riffle = sin(phase.x + 0.65 * sin(phase.y))
-                 + sin(phase.y - 0.8 * sin(phase.x));
-    if (abs(normal.y) < 0.5) {
-        float stripe = dot(position.xz, vec2(-normal.z, normal.x)) / 4.0;
-        riffle = sin(6.2831853 * (-position.y / 4.0 - t + stripe))
-               + sin(6.2831853 * (-position.y / 8.0 - t * 0.5 - stripe));
-    }
-    float crest = smoothstep(0.8, 1.85, riffle);
-    return color * (1.0 + 0.18 * riffle) + crest * vec3(0.065, 0.095, 0.10);
+    vec3 p = fract(vec3(mod(cell, 32.0).xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
 }
 
+float waterNoise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(waterHash(i), waterHash(i + vec2(1.0, 0.0)), f.x),
+               mix(waterHash(i + vec2(0.0, 1.0)), waterHash(i + 1.0), f.x), f.y);
+}
+
+vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing, float depth, float impact)
+{
+    float t = u_world_water.x;
+    vec3 color = mix(vec3(0.11, 0.34, 0.36), vec3(0.055, 0.24, 0.32), depth);
+    float grazing = 1.0 - abs(normalize(u_world_eye.xyz - position).y);
+    color += vec3(0.035, 0.065, 0.075) * grazing * grazing;
+
+    if (abs(normal.y) < 0.5 && flowing) {
+        // A fast, vertically stretched sheet. Each thread drifts slightly
+        // with its neighbors and breaks up as it descends.
+        float across = dot(position.xz, vec2(-normal.z, normal.x));
+        float down = -position.y - 4.0 * t;
+        vec2 p = vec2(across * 2.0, down * 0.25);
+        p.x += 0.65 * waterNoise(vec2(across, down * 0.5));
+        float thread = waterNoise(p) * 0.7 + waterNoise(p * 2.0) * 0.3;
+        return mix(color, vec3(0.32, 0.53, 0.56), 0.23 + 0.65 * thread);
+    }
+
+    vec2 p = position.xz;
+    if (flowing) p -= flow * t * 2.5;
+    float broad = waterNoise(p + vec2(0.0, t * 0.15));
+    float ripples = sin(6.2831853 * (p.y + broad * 0.7) + t * 0.45);
+    color *= 0.97 + 0.06 * broad + 0.025 * ripples;
+    float bubbles = smoothstep(0.35, 0.75, waterNoise(p * 2.0 + broad));
+    color = mix(color, vec3(0.56, 0.72, 0.71), impact * bubbles);
+    if (!flowing) return color;
+
+    // Pull flecks along the current and leave quiet water between them.
+    float grain = mix(waterNoise(p * vec2(2.0, 0.25) + vec2(broad * 0.5)),
+                      waterNoise(p * vec2(0.25, 2.0) + vec2(broad * 0.5)),
+                      flow.x * flow.x);
+    float foam = smoothstep(0.72, 0.95, grain) * smoothstep(0.35, 0.75, broad);
+    // Broad, bright ripple crests make the moving current readable in shade.
+    float crest = smoothstep(0.48, 0.85, grain) * (0.35 + 0.65 * broad);
+    return color + crest * vec3(0.16, 0.23, 0.24)
+                 + foam * vec3(0.16, 0.21, 0.21);
+}
 
 // Light response: ambient + diffuse * N.L, both scaled by the light level.
 #define SURFACE_AMBIENT 0.6

@@ -17,18 +17,34 @@ struct WaterSurface {
     uint32_t reach = 0;
     Vec2 flow{0, 0};
     bool edited = false;
-    uint8_t topFill = 255;
+    static constexpr uint8_t RestingFill = 223;
+    uint8_t topFill = body && !reach ? RestingFill : 255;
+    uint8_t riverDepth = 0;  // centerline depth for reach-wide drawdown
 
+    // Water vertices carry normalized depth in their color alpha.
+    static constexpr uint32_t depthTint(float depth) {
+        return 0x00ffffffu |
+               (uint32_t(std::clamp(depth / 6.f, 0.f, 1.f) * 255) << 24);
+    }
     constexpr float height() const {
         return wet() ? topTile() + topFill / 255.f : float(surfaceY);
     }
+    // Instantaneous waterline at a point in the reach. Keep the displacement
+    // in sync with river_wave.sh; storage records the mean stage.
+    float surfaceRise(float x, float z, float seconds) const {
+        if (!reach) return 0;
+        constexpr float phase = 0.3926990817f;
+        x = std::fmod(x, 16.f) * phase;
+        z = std::fmod(z, 16.f) * phase;
+        return .045f * std::sin(x + 2 * z - 2.1f * seconds) +
+               .022f * std::sin(2 * x - z + 1.4f * seconds);
+    }
+    uint8_t surfaceFill(float x, float z, float seconds) const {
+        return uint8_t(std::clamp(
+            std::lround(topFill + 255 * surfaceRise(x, z, seconds)), 1l, 255l));
+    }
     constexpr uint8_t fillAt(int y, int groundY) const {
         return fills(y, groundY) ? (y == topTile() ? topFill : 255) : 0;
-    }
-    constexpr void softenShore(int groundY) {
-        // Partial coverage of the first wet tile at a standing shoreline.
-        if (body && !reach && depth(groundY) == 1)
-            topFill = std::min<uint8_t>(topFill, 224);
     }
 
     // A vertical face is owned by the higher column. The lower water or
@@ -66,5 +82,32 @@ struct WaterSurface {
             return !cell->isSolid() && cell->liquid == LiquidType::Water &&
                    y - std::floor(y) < cellHeight(*cell);
         return y >= groundY + 1 && y < height();
+    }
+};
+
+// A mesh covering one continuous lake surface can follow its waterline
+// while adjacent chunks and LOD patches upload at different times.
+struct LakeMeshSurface {
+    uint32_t body = 0;
+    Vec2i tile{};
+    float height = 0;
+    bool mixed = false;
+
+    void include(WaterSurface water, int x, int z) {
+        if (mixed) return;
+        if (water.body <= 1 || water.body >= 0x80000000u || water.reach ||
+            water.edited ||
+            (body && (water.body != body || water.height() != height))) {
+            mixed = true;
+        } else if (!body) {
+            body = water.body;
+            tile = {x, z};
+            height = water.height();
+        }
+    }
+    float offset(WaterSurface current) const {
+        return !mixed && body && current.body == body && !current.reach
+                   ? current.height() - height
+                   : 0.f;
     }
 };

@@ -17,6 +17,7 @@ struct ChunkGeometry {
 
 struct ChunkMesh : ChunkGeometry {
     ChunkGeometry water;
+    LakeMeshSurface lakeSurface;
     std::vector<float>
         waterTops;  // highest exposed surface per column, chunk-local
 };

@@ -37,6 +37,8 @@ class TerrainLodManager {
                 const Camera& camera, Vec2 viewport,
                 LightVolumeManager* lightVolumes = nullptr);
     ShaderProperty& waterUniform() { return water; }
+    uint8_t surfaceFill(TilePos pos, const Tile& tile);
+    float lakeMeshOffset(const LakeMeshSurface& surface);
     bool eyeUnderwater() const { return underwater; }
     // Uniforms appended to every distant terrain draw (lights): patches use
     // the terrain_lod program, joins and structures the block program. They
@@ -103,6 +105,7 @@ class TerrainLodManager {
     struct Entry {
         MeshHandle mesh, waterMesh;
         AABB waterBounds{};
+        LakeMeshSurface lakeSurface;
         bgfx::TextureHandle waterMap = BGFX_INVALID_HANDLE;
         ShaderProperty waterMapUniform;
         bgfx::TextureHandle materialMap = BGFX_INVALID_HANDLE;
@@ -144,6 +147,7 @@ class TerrainLodManager {
         bool refiningWater = false;
         std::shared_ptr<std::atomic_bool> cancel;
         std::future<TerrainLod::Mesh> future;
+        bool waterChanged = false;
     };
     struct BandJob {
         ChunkCoord chunk;
@@ -247,6 +251,7 @@ class TerrainLodManager {
     bgfx::TextureHandle detailMap = BGFX_INVALID_HANDLE;
     ShaderProperty detailUniform, detailOrigin, textureArray, fogUniform;
     ShaderProperty water;
+    float flowSeconds = 0;
     bool underwater = false;
     bool debugEdges = false;
     // Normal maps: stage 3 in terrain_lod, stage 1 in the block program.

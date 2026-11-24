@@ -76,6 +76,11 @@ class GeneratedHydrology {
         float distance;
         float radius;
     };
+    struct LakeInflow {
+        uint32_t body;
+        Vec2i mouth;
+        Channel channel;
+    };
 
     static std::shared_ptr<const GeneratedHydrology> build(
         const World& world, const std::function<bool()>& cancelled = {},
@@ -93,13 +98,16 @@ class GeneratedHydrology {
         const std::function<bool()>& cancelled = {}) const;
     uint32_t catchment(int region) const;
     const Basin* basin(uint32_t id) const;
+    bool lakeSpringAt(uint32_t body, int x, int z) const {
+        const auto* site = basin(body);
+        return site && center(site->seed) == Vec2i{x, z};
+    }
     Lake lake(uint32_t id) const;
     int ceiling(int region) const;
     WaterSurface waterAt(int x, int z, int groundY = -1) const;
     bool needsRefinement(int x0, int z0, int x1, int z1) const;
     int waterCeilingAt(int x, int z) const;
     WaterSurface certifiedSeaAt(int x, int z) const;
-    bool potentialSeaAt(int x, int z) const;
     WaterSurface previewWaterAt(int x, int z, int groundY) const;
     StorageCurve storageCurve(uint32_t body) const;
     bool uniformLoweredSea(int x0, int z0, int x1, int z1, int level) const;
@@ -114,6 +122,7 @@ class GeneratedHydrology {
         return x >= 0 && x < periodX() && z >= 0 && z < height * Side;
     }
     std::optional<Channel> riverAt(int x, int z) const;
+    const LakeInflow* lakeInflowAt(int x, int z) const;
     double carve(int x, int z, double originalY) const;
     std::pair<int, WaterSurface> sampleColumn(int x, int z) const;
     std::pair<int, WaterSurface> sampleRiverColumn(int x, int z) const;
@@ -146,6 +155,7 @@ class GeneratedHydrology {
         bool deep = false;
         bool oceanSource = false;
         bool nearOcean = false;
+        bool possibleOcean = false;
     };
     bool canCrossOcean(const RegionWater& region) const {
         return oceanAcrossBasins || region.body <= Sea;
@@ -153,11 +163,16 @@ class GeneratedHydrology {
     bool canSurveyOcean(const RegionWater& region) const {
         return region.nearOcean && canCrossOcean(region);
     }
+    bool canProjectOcean(const RegionWater& region) const {
+        return oceanAcrossBasins ? region.possibleOcean
+                                 : canSurveyOcean(region);
+    }
     struct Mask {
         static constexpr int WordSize = 64;
         static_assert(Side % WordSize == 0);
         std::array<uint64_t, Area / WordSize> bits{};
         void set(int index);
+        void reset(int index);
         bool test(int index) const;
         bool matches(int x0, int z0, int x1, int z1, bool wet) const;
     };
@@ -203,9 +218,21 @@ class GeneratedHydrology {
     std::unordered_map<uint64_t, std::vector<uint32_t>> riverIndex;
 
     void retainOutletLake(uint32_t body);
+    void buildLakeInflow(const Reach& reach);
+    std::vector<LakeInflow> lakeInflows;
+    std::unordered_map<uint64_t, size_t> lakeInflowTiles;
     Footprint refineCoastalBasin(const Basin& basin) const;
     Footprint refineLake(uint32_t body) const;
     Footprint refineOcean(int region, int level) const;
+    Footprint surveyConnectedOcean(int region, int level) const;
+    uint64_t oceanKey(int region, int level) const;
+    static constexpr uint64_t ConnectedOcean = uint64_t{1} << 63;
+    struct OceanMembership {
+        Mask wet, dry;
+    };
+    mutable std::mutex oceanSurveyMutex;
+    mutable int oceanSurveyLevel = -1;
+    mutable std::unordered_map<int, OceanMembership> oceanMembership;
     const std::vector<int16_t>& seaThresholds() const;
     mutable std::once_flag seaThresholdsOnce;
     mutable std::vector<int16_t> oceanThreshold;

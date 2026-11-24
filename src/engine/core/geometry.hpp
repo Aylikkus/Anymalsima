@@ -49,7 +49,7 @@ struct Vec2 {
         return {x + other.x, y + other.y};
     }
 
-    Vec2(){}
+    constexpr Vec2() : x(0), y(0) {}
 
     constexpr Vec2(float x, float y){
         this->x = x;

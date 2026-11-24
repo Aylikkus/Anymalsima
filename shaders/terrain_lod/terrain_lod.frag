@@ -93,7 +93,7 @@ void main()
     vec3 color;
     vec3 surface = normal;
     if (v_layer < -1.5) {
-        color = surfaceWaterColor(v_position, normal, v_cover, v_layer < -2.5);
+        color = surfaceWaterColor(v_position, normal, v_cover, v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
     } else {
         float layer = floor(v_layer + 0.5);
         if (v_layer < -0.5) {

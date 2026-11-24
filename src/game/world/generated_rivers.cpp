@@ -64,19 +64,21 @@ std::optional<GeneratedHydrology::Channel> GeneratedHydrology::riverAt(
         // New channels have a shallow shelf around the wetted edge.
         const float deepRadius = naturalProfiles ? .88f * radius : radius;
         const float across = std::min(1.f, p.distance / deepRadius);
+        const float centerDepth = std::lerp(span.depth0, span.depth1, t);
         const int depth =
-            std::max(1, int(std::round(std::lerp(span.depth0, span.depth1, t) *
-                                       (1 - across * across))));
+            std::max(1, int(std::round(centerDepth * (1 - across * across))));
         const float dx = span.to.x - span.from.x, dz = span.to.y - span.from.y;
         const float length = std::hypot(dx, dz);
         result = Channel{{level, 0, span.reach, {dx / length, dz / length}},
                          level - depth - 1,
                          p.distance,
                          radius};
+        result->water.riverDepth = uint8_t(std::round(centerDepth));
         if (naturalProfiles) {
             const float grade = std::lerp(span.level0, span.level1, t) - level;
-            const float fill = .72f + .35f * grade - .26f * across * across;
-            result->water.topFill = uint8_t(std::round(255 * fill));
+            // The bed gets shallower toward the banks, not the waterline.
+            result->water.topFill =
+                uint8_t(std::clamp(std::lround(255 * (.5f + grade)), 1l, 255l));
         }
     }
     return result;
@@ -555,5 +557,83 @@ bool GeneratedHydrology::buildReaches(const std::function<bool()>& cancelled,
         }
         publish(profile, reach);
     }
+    for (const auto& reach : reaches)
+        if (reach.end == RiverEnd::Lake) {
+            if (cancelled && cancelled()) return false;
+            buildLakeInflow(reach);
+        }
     return true;
+}
+
+const GeneratedHydrology::LakeInflow* GeneratedHydrology::lakeInflowAt(
+    int x, int z) const {
+    const auto it = lakeInflowTiles.find(bucketKey(x, z));
+    return it == lakeInflowTiles.end() ? nullptr : &lakeInflows[it->second];
+}
+
+void GeneratedHydrology::buildLakeInflow(const Reach& reach) {
+    const auto mouth = reach.outlet;
+    const auto channel = riverAt(mouth.x, mouth.y);
+    if (!channel || channel->water.reach != reach.id) return;
+    const auto wet = footprint((uint64_t(reach.receiver) << 1) | 1);
+    if (wet->ocean) return;
+    constexpr size_t Budget = 256;
+    std::unordered_map<int, TerrainNeighborhood> neighborhoods;
+    std::unordered_map<uint64_t, int> floors;
+    const auto floor = [&](Vec2i p) {
+        const int region = regionAt(p.x, p.y);
+        if (region < 0) return WORLD_HEIGHT_Y;
+        const auto mask = wet->masks.find(region);
+        if (mask == wet->masks.end() ||
+            !mask->second.test(p.y % Side * Side + p.x % Side))
+            return WORLD_HEIGHT_Y;
+        const auto key = bucketKey(p.x, p.y);
+        if (const auto it = floors.find(key); it != floors.end())
+            return it->second;
+        if (floors.size() >= Budget) return WORLD_HEIGHT_Y;
+        auto it = neighborhoods.find(region);
+        if (it == neighborhoods.end())
+            it = neighborhoods.emplace(region, terrain(region)).first;
+        const int y =
+            int(std::floor(TerrainSampler(it->second).surface(p.x, p.y)));
+        return floors.emplace(key, y).first->second;
+    };
+    if (floor(mouth) >= WORLD_HEIGHT_Y) return;
+    const auto id = lakeInflows.size();
+    lakeInflows.push_back({reach.receiver, mouth, *channel});
+    lakeInflowTiles.try_emplace(bucketKey(mouth.x, mouth.y), id);
+    const int period = periodX();
+    auto landing = mouth;
+    // A single thin thread crosses the exposed inlet shelf. Follow the
+    // nearest downhill exit on each flat without crossing a dry sill.
+    for (int elevation = floor(landing);;) {
+        std::vector<Vec2i> flat{landing};
+        std::vector<size_t> parent{0};
+        std::unordered_set<uint64_t> seen{bucketKey(landing.x, landing.y)};
+        bool descended = false;
+        for (size_t i = 0; i < flat.size() && !descended; ++i) {
+            const auto p = flat[i];
+            for (const auto d :
+                 std::array<Vec2i, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+                const Vec2i q{int(WorldWrap::mod(p.x + d.x, period)),
+                              p.y + d.y};
+                const int y = floor(q);
+                if (y < elevation) {
+                    lakeInflowTiles.try_emplace(bucketKey(q.x, q.y), id);
+                    for (auto at = i; at; at = parent[at])
+                        lakeInflowTiles.try_emplace(
+                            bucketKey(flat[at].x, flat[at].y), id);
+                    landing = q;
+                    elevation = y;
+                    descended = true;
+                    break;
+                }
+                if (y == elevation && seen.insert(bucketKey(q.x, q.y)).second) {
+                    flat.push_back(q);
+                    parent.push_back(i);
+                }
+            }
+        }
+        if (!descended) break;
+    }
 }

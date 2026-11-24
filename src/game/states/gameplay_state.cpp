@@ -807,7 +807,9 @@ void GameplayState::update(Game& game, float dt) {
 
             ss << "\n--- Liquid ---\n";
             ss << "liquid:      " << (int)t.liquid << "\n";
-            ss << "liquidLevel: " << (int)t.liquidLevel << "\n";
+            ss << "liquidLevel: "
+               << int(terrainLod->surfaceFill({hit->tx, hit->ty, hit->tz}, t))
+               << "\n";
 
             ss << "\n--- Light ---\n";
             ss << "sun_exposure:     " << (int)t.lightLevel.sun_exposure
@@ -932,7 +934,13 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                   wy + Chunk::SIZE_Y,
                   wz + Chunk::SIZE_Z};
 
-        if (!frustum.intersects(aabb)) return;  // culled
+        const float waterOffset =
+            waterMesh ? terrainLod->lakeMeshOffset(
+                            chunkManager->waterMeshSurface(coord))
+                      : 0;
+        aabb.minY += std::min(0.f, waterOffset);
+        aabb.maxY += std::max(0.f, waterOffset);
+        if (!frustum.intersects(aabb)) return;
 
         // Chunk meshes are chunk-local; place them relative to the eye.
         auto transform = relativeTransform(camera, wx, wy, wz);
@@ -946,9 +954,10 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                                     std::vector(uniforms), false,
                                     std::array(transform), DrawLayer::GAME);
         if (waterMesh)
-            target.drawVertexBuffer(waterMesh->get(), &blockShader,
-                                    std::move(uniforms), false,
-                                    std::move(transform), DrawLayer::GAME);
+            target.drawVertexBuffer(
+                waterMesh->get(), &blockShader, std::move(uniforms), false,
+                relativeTransform(camera, wx, wy + waterOffset, wz),
+                DrawLayer::GAME);
     });
     floraRenderer->render(target, displayedCamera, frustum, *lightRenderer, now,
                           clock.days(), water);

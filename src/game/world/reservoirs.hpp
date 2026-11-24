@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <tuple>
 #include <unordered_map>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "core/signal.hpp"
+#include "local_water_cells.hpp"
 #include "serialization/binary_stream.hpp"
 #include "tile_pos.hpp"
 #include "water_surface.hpp"
@@ -62,7 +64,8 @@ struct PoolState {
     int level = -1;
     uint8_t fill = 255;
     std::shared_ptr<const PoolFootprint> footprint;
-    uint32_t parent = 0;  // a detached lake compartment masks its old owner
+    uint32_t parent = 0;   // a detached lake compartment masks its old owner
+    int closedCrest = -1;  // no suspended spill sheet after a wall opens
 };
 
 struct ReservoirSnapshot {
@@ -71,22 +74,48 @@ struct ReservoirSnapshot {
     // Supply changes relative to the generated steady state. A breach only
     // lowers the channel at and below its inlet head.
     struct RiverStage {
+        static constexpr int DamRadius = 16;
         int head = WORLD_HEIGHT_Y;
         unsigned percent = 100;
         TilePos cut{};
-        Vec2i downstream{};
+        Vec2 downstream{0, 0};
         int periodX = 0;
+        Vec2i spring{};
+        uint64_t recessionAge = 0;
+        uint64_t recoveryAge = 0;
+        bool receding = false;
+        bool recovering = false;
+        unsigned lakeSupplyPercent = 100;
+        Vec2i junction{};
+        int backwaterHead = 0;  // height in water units
+        uint32_t backwaterReach = 0;
+        int backwaterAt(int x, int z, int bottom, int full) const;
+        std::shared_ptr<const std::vector<uint64_t>> damUpstream{};
+        struct Inlet {
+            Vec2i tile;
+            Vec2i downstream;
+            int height;
+            unsigned percent;
+            bool operator==(const Inlet&) const = default;
+        };
+        std::vector<Inlet> inlets{};
         bool operator==(const RiverStage&) const = default;
     };
     std::map<uint32_t, RiverStage> riverStages;
     // Each cell's exact store is authoritative here. Chunk cells are derived.
-    std::unordered_map<TilePos, uint8_t> cells;
-    std::unordered_map<uint64_t, int> localTops;
+    LocalWaterCells cells;
     // Confirmed portal channels from local cells to a standing body: the
     // pocket drains through them without loading the connecting voxels.
     std::map<TilePos, uint32_t, TilePosLess> portals;
     // Runtime pools. Workers read these without the owner thread.
     std::map<uint32_t, PoolState> pools;
+    // A flowing sheet is the visible transit of a certified transfer.
+    // Its cells never enter local storage.
+    struct StreamColumn {
+        int bottom, top;
+        Vec2 flow;
+    };
+    std::unordered_map<uint64_t, StreamColumn> streams;
 
     int level(uint32_t body, int generated) const;
     int localTop(int x, int z) const;
@@ -96,6 +125,8 @@ struct ReservoirSnapshot {
     WaterSurface projectStanding(const GeneratedHydrology* hydrology, int x,
                                  int z, int ground,
                                  WaterSurface baseline) const;
+    WaterSurface projectLakeInflow(const GeneratedHydrology* hydrology, int x,
+                                   int z, int ground, uint32_t body) const;
     WaterSurface project(const GeneratedHydrology* hydrology, int x, int z,
                          int ground, WaterSurface baseline) const;
     WaterSurface projectLocal(int x, int z, int ground, WaterSurface baseline,
@@ -150,6 +181,18 @@ class Reservoirs {
     bool setReachDelivery(uint32_t reach, unsigned percent,
                           uint32_t receiver = 0);
     bool setSpringOpen(uint32_t reach, bool open);
+    // Reservoir-owned water at a cell: a standing body or a river reach and
+    // its surface boundary.
+    struct Sink {
+        uint32_t body = 0;
+        uint32_t reach = 0;
+        int surfaceY = -1;
+    };
+    using SinkQuery = std::function<std::optional<Sink>(TilePos)>;
+    struct ValleyOutlet {
+        Sink receiver;
+        std::vector<TilePos> path;  // from the receiving river back to the pond
+    };
     struct BasinColumn {
         Vec2i tile;
         int floor;  // geometric floor, inclusive first possible water tile
@@ -159,38 +202,42 @@ class Reservoirs {
     struct BreachSurvey {
         int head;
         std::vector<BasinColumn> columns;
+        // Sorted column keys reached from the source inside the dam survey.
+        std::shared_ptr<const std::vector<uint64_t>> damUpstream{};
     };
     using SurfaceFloor = std::function<std::optional<int>(Vec2i)>;
-    static std::optional<BreachSurvey> surveyBreach(Vec2i opening, int head,
-                                                    int periodX,
-                                                    const SurfaceFloor& floor);
+    static std::optional<BreachSurvey> surveyBreach(
+        Vec2i opening, int head, int periodX, const SurfaceFloor& floor,
+        std::vector<TilePos>* route = nullptr, ValleyOutlet* outlet = nullptr,
+        const SinkQuery& receiver = {});
+    bool connectValley(uint32_t source, TilePos gate, TilePos intake,
+                       BreachSurvey survey, std::vector<TilePos> route = {},
+                       ValleyOutlet outlet = {{0, 0, -1}, {}});
     bool openBreach(uint32_t reach, TilePos opening, BreachSurvey survey);
     bool openDam(uint32_t reach, TilePos wall, BreachSurvey survey);
+    bool hasLakeOutletFlow(WaterSurface source) const;
+    std::optional<size_t> lakeOutletIndex(uint32_t body) const;
     std::optional<TilePos> damAt(uint32_t reach) const;
+    std::vector<std::pair<uint32_t, TilePos>> damSites() const;
     bool closeBreach(TilePos opening);
     bool hasBreach(TilePos opening) const;
     WaterVolume held(uint32_t reach) const;
-    // Reservoir-owned water at a cell: a standing body or a river reach and
-    // its surface boundary.
-    struct Sink {
-        uint32_t body = 0;
-        uint32_t reach = 0;
-        int surfaceY = -1;
-    };
-    using SinkQuery = std::function<std::optional<Sink>(TilePos)>;
     // Moves at most budget locally owned cells once. Unknown cells freeze the
     // boundary; the caller must certify loaded, empty recipients. Local water
     // resting on a reservoir cell (sink) merges into that body or reach.
+    // An edit or newly loaded slab can open a face beside resting water.
+    void wakeLocalBox(TilePos lo, TilePos hi, int periodX);
     size_t flow(size_t budget, const CellQuery& access, int periodX = 0,
                 const SinkQuery& sink = {});
     // A verified downhill channel connects a standing body to a lower
-    // receiver. Each mouth cell carries up to one block per second while the
-    // source surface stands above its threshold (the mouth floor, the path
-    // sill and the receiver surface). The ledger moves the volume directly,
-    // so the rate is independent of frame rate, game speed and residency.
+    // receiver (neither body nor reach means discharge onto open terrain).
+    // It runs only above the threshold (mouth, path and tailwater sill).
+    // The ledger moves volume directly, independently of chunk residency.
     static constexpr WaterVolume ChannelUnitsPerMouth = WaterUnitsPerBlock;
     bool setChannelMouth(uint32_t from, Sink to, TilePos mouth, int threshold,
                          std::vector<TilePos> path);
+    bool hasChannelMouth(TilePos mouth) const;
+    bool feedsPool(TilePos mouth) const;
     void blockChannelCell(TilePos cell);
     bool clearChannelMouth(TilePos mouth);
     size_t channelCount() const { return channels.size(); }
@@ -198,6 +245,7 @@ class Reservoirs {
         uint32_t reach;
         TilePos cell;
         bool blocked = false;  // undiverted delivery stays behind a dam
+        WaterSurface head{WORLD_HEIGHT_Y};
     };
     void advanceTo(uint64_t step, std::span<const RiverIntake> intakes = {},
                    const CellQuery& access = {}, int periodX = 0);
@@ -292,6 +340,8 @@ class Reservoirs {
     };
     using ChannelKey = std::tuple<uint32_t, uint32_t, uint32_t>;
     std::map<ChannelKey, Channel> channels;
+    std::set<TilePos, TilePosLess> flowingMouths;
+    bool channelPathsChanged = false;
     // Arrivals at a full body that leave over its spill on the next budget
     // step (or are disposed of at a terminal body).
     std::map<uint32_t, WaterVolume> pendingInflow;
@@ -327,6 +377,9 @@ class Reservoirs {
     // Reach IDs come from saved paths. Short or rejected paths leave gaps,
     // and generation order is independent of ID order.
     std::unordered_map<uint32_t, WaterVolume> springRates;
+    std::unordered_map<uint32_t, size_t> reachIndices;
+    std::unordered_map<uint32_t, std::vector<size_t>> tributaries;
+    std::unordered_map<uint32_t, WaterVolume> naturalReachRates;
     std::map<uint32_t, StorageCurve> curves;
     std::map<uint32_t, WaterVolume> stores;
     std::map<uint32_t, ReachDelivery> deliveries;
@@ -346,6 +399,9 @@ class Reservoirs {
     static StorageCurve breachCurve(const BreachSurvey& survey);
     std::map<TilePos, Breach, TilePosLess> breaches;
     std::unordered_set<uint32_t> sealedSprings;
+    std::map<uint32_t, uint64_t> springClosedAt;
+    std::map<uint32_t, uint64_t> springReopenedAt;
+    std::map<uint32_t, uint32_t> lakeOutletReaches;
     std::map<uint32_t, Outlet> outlets;
     uint32_t nextOutletId = 0;
     // Runtime pool footprints keyed by body: certification that a level
@@ -357,7 +413,14 @@ class Reservoirs {
     Totals totals{};
     uint64_t serial = 0;
     uint64_t budgetStep = 0;
-    size_t flowCursor = 0;
+    struct FlowOrder {
+        bool operator()(TilePos a, TilePos b) const {
+            return std::tie(a.y, a.z, a.x) < std::tie(b.y, b.z, b.x);
+        }
+    };
+    std::set<TilePos, FlowOrder> activeCells;
+    std::optional<TilePos> flowCursor;
+    std::unordered_map<TilePos, uint64_t> filmSince;
     std::atomic<std::shared_ptr<const ReservoirSnapshot>> view =
         std::make_shared<const ReservoirSnapshot>();
 };

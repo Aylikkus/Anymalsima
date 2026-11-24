@@ -737,7 +737,13 @@ int main(int argc, char** argv) {
                             target.drawVertexBuffer(
                                 waterMesh->get(), &blockShader,
                                 std::move(uniforms), false,
-                                std::move(transform), DrawLayer::GAME);
+                                relativeTransform(
+                                    camera, wx,
+                                    double(coord.y) * Chunk::SIZE_Y +
+                                        lod.lakeMeshOffset(
+                                            chunks.waterMeshSurface(coord)),
+                                    double(coord.z) * Chunk::SIZE_Z),
+                                DrawLayer::GAME);
                         ++detailed;
                     });
                 }

@@ -29,7 +29,13 @@ struct WorldMeta : ISerializable {
     static constexpr int LakeOutletVersion = 19;
     static constexpr int CoastalBasinVersion = 20;
     static constexpr int OceanShoreVersion = 21;
-    static constexpr int GeneratorVersion = OceanShoreVersion;
+    // 22 levels generated water surfaces without changing terrain or IDs.
+    // Projected water in existing worlds also uses the leveled surfaces.
+    // 23 projects coastal water through connected tiles past region borders.
+    // Existing coastal worlds get the corrected projection with stable IDs.
+    // 24 leaves freeboard on generated standing water; existing projected
+    // surfaces use the same resting elevation. Terrain and IDs stay stable.
+    static constexpr int GeneratorVersion = 24;
     // Oldest generator version supported by terrain edit comparisons.
     // Later surface changes are selected by the saved generator version.
     static constexpr int SurfaceVersion = 9;

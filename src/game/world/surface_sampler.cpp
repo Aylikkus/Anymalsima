@@ -206,13 +206,7 @@ bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
                                   WaterSurface sample) {
     if (hasChannel(x0, z0, x1, z1) || hasEdits(x0, z0, x1, z1)) return false;
     if (reservoirs) {
-        if (std::any_of(reservoirs->localTops.begin(),
-                        reservoirs->localTops.end(), [&](const auto& local) {
-                            const auto x = int(local.first >> 32),
-                                       z = int(uint32_t(local.first));
-                            return (x >= x0 && x < x1) && (z >= z0 && z < z1);
-                        }))
-            return false;
+        if (reservoirs->cells.intersects(x0, z0, x1, z1)) return false;
         if (world.hydrology)
             for (const auto& [body, level] : reservoirs->levels)
                 if (world.hydrology->mayContainBody(body, x0, z0, x1, z1)) {
@@ -239,10 +233,7 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
     if (auto it = waterSamples.find(key); it != waterSamples.end())
         return it->second;
-    const bool needsHeight = !world.hydrology ||
-                             world.hydrology->riverAt(x, z) ||
-                             (waterDetail == WaterDetail::Preview &&
-                              world.hydrology->potentialSeaAt(x, z));
+    const bool needsHeight = !world.hydrology || world.hydrology->riverAt(x, z);
     auto result = generatedWater(x, z, needsHeight ? height(x, z) : -1);
     if (reservoirs &&
         (reservoirs->levels.contains(result.body) ||
@@ -254,8 +245,12 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
         if (provisionalWater() && world.hydrology &&
             reservoirs->levels.contains(result.body))
             result = world.hydrology->waterAt(x, z, ground);
+        const auto body = result.body;
         result = reservoirs->projectStanding(world.hydrology.get(), x, z,
                                              ground, result);
+        if (!result.wet())
+            result = reservoirs->projectLakeInflow(world.hydrology.get(), x, z,
+                                                   ground, body);
     }
     if (const auto* edit = editAt(x, z)) {
         const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
@@ -265,11 +260,8 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
     // by the live ledger into the newly dug opening.
     if (reservoirs &&
         (reservoirs->poolIntersects(x, z, x + 1, z + 1, width()) ||
-         reservoirs->localTop(x, z) >= 0))
+         reservoirs->localTop(x, z) >= 0 || reservoirs->streams.contains(key)))
         result = reservoirs->projectLocal(x, z, height(x, z), result);
-    if (result.body && !result.reach && !result.edited &&
-        waterDetail == WaterDetail::Exact)
-        result.softenShore(height(x, z));
     if (waterSamples.size() >= 65536) waterSamples.clear();
     waterSamples.emplace(key, result);
     return result;

@@ -48,7 +48,7 @@ std::array<Point, 4> terrainRing(const Patch& p, SurfaceSampler& sampler,
 // "no cover" when negative. The terrain program reads v as the edge kind:
 // 0 ordinary face, 1 smooth skirt, 2 stepped boundary wall.
 void triangle(Geometry& mesh, Point a, Point b, Point c, float layer,
-              float top = -1, float edgeKind = 0) {
+              float top = -1, float edgeKind = 0, uint32_t tint = 0xffffffffu) {
     const Point u{b.x - a.x, b.y - a.y, b.z - a.z};
     const Point v{c.x - a.x, c.y - a.y, c.z - a.z};
     Point n{u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z,
@@ -59,26 +59,29 @@ void triangle(Geometry& mesh, Point a, Point b, Point c, float layer,
     const auto base = uint32_t(mesh.vertices.size());
     for (const auto& p : {a, b, c}) {
         mesh.vertices.push_back({p.x, p.y, p.z, n.x, n.y, n.z, 1, 0, 0, top,
-                                 edgeKind, layer, 0xffffffff});
+                                 edgeKind, layer, tint});
         mesh.bounds.minY = std::min(mesh.bounds.minY, p.y);
         mesh.bounds.maxY = std::max(mesh.bounds.maxY, p.y);
     }
     mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
 }
 void quad(Geometry& mesh, Point a, Point b, Point c, Point d, float layer,
-          float top = -1, float edgeKind = 0) {
-    triangle(mesh, a, b, c, layer, top, edgeKind);
-    triangle(mesh, a, c, d, layer, top, edgeKind);
+          float top = -1, float edgeKind = 0, uint32_t tint = 0xffffffffu) {
+    triangle(mesh, a, b, c, layer, top, edgeKind, tint);
+    triangle(mesh, a, c, d, layer, top, edgeKind, tint);
 }
-void waterTile(Geometry& mesh, SurfaceSampler& sampler, int x, int z,
+void waterTile(Mesh& patch, SurfaceSampler& sampler, int x, int z,
                WaterSurface water, bool wrapX, bool top = true) {
     if (!water.wet()) return;
+    patch.lakeSurface.include(water, x, z);
+    auto& mesh = patch.water;
     const float a = x, b = x + 1, c = z, d = z + 1;
     const float y = water.height();
     if (top)
         quad(mesh, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
-             water.reach ? -3 : -2, water.reach ? water.flow.x : -1,
-             water.flow.y);
+             (water.flow.x || water.flow.y) ? (water.reach ? -3 : -4) : -2,
+             (water.flow.x || water.flow.y) ? water.flow.x : -1, water.flow.y,
+             WaterSurface::depthTint(y - sampler.height(x, z) - 1));
     // Sides wherever the neighbor stands lower: river steps, edits and two
     // standing bodies at different levels. A natural shore is higher ground.
     for (const auto& [dx, dz] :
@@ -95,11 +98,11 @@ void waterTile(Geometry& mesh, SurfaceSampler& sampler, int x, int z,
         const float sx = a + (dx > 0 || dz > 0);
         const float sz = c + (dz > 0 || dx < 0);
         quad(mesh, {sx, bottom, sz}, {sx, y, sz}, {sx - dz, y, sz + dx},
-             {sx - dz, bottom, sz + dx}, -3, flow.x, flow.y);
+             {sx - dz, bottom, sz + dx}, water.reach ? -3 : -4, flow.x, flow.y);
     }
 }
 
-void channelWater(Geometry& out, SurfaceSampler& sampler, int x, int z, int x1,
+void channelWater(Mesh& patch, SurfaceSampler& sampler, int x, int z, int x1,
                   int z1, bool wrapX) {
     constexpr int Side = 8;
     std::array<WaterSurface, Side * Side> samples;
@@ -110,7 +113,7 @@ void channelWater(Geometry& out, SurfaceSampler& sampler, int x, int z, int x1,
         for (int xx = x; xx < x1; ++xx) {
             auto& sample = at(xx, zz);
             sample = sampler.waterAt(xx, zz);
-            waterTile(out, sampler, xx, zz, sample, wrapX, false);
+            waterTile(patch, sampler, xx, zz, sample, wrapX, false);
         }
     const auto same = [](WaterSurface a, WaterSurface b) {
         return a.height() == b.height() && a.reach == b.reach &&
@@ -128,9 +131,11 @@ void channelWater(Geometry& out, SurfaceSampler& sampler, int x, int z, int x1,
                 if (probe != endX) break;
             }
             const float a = xx, b = endX, c = zz, d = endZ, y = water.height();
-            quad(out, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
-                 water.reach ? -3 : -2, water.reach ? water.flow.x : -1,
-                 water.flow.y);
+            quad(patch.water, {a, y, c}, {a, y, d}, {b, y, d}, {b, y, c},
+                 (water.flow.x || water.flow.y) ? (water.reach ? -3 : -4) : -2,
+                 (water.flow.x || water.flow.y) ? water.flow.x : -1,
+                 water.flow.y,
+                 WaterSurface::depthTint(y - sampler.height(xx, zz) - 1));
             for (int iz = zz; iz < endZ; ++iz)
                 for (int ix = xx; ix < endX; ++ix) at(ix, iz) = {};
         }
@@ -472,8 +477,8 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
                     const auto other = sampler.waterAt(tx + dx, tz + dz);
                     if (other.surfaceY >= water.surfaceY) continue;
                     lowWater = std::min(
-                        lowWater, water.dropBottom(other, sampler.height(
-                                                              tx + dx, tz + dz)));
+                        lowWater, water.dropBottom(
+                                      other, sampler.height(tx + dx, tz + dz)));
                 }
                 highWater = std::max(highWater, water.topTile());
             }
@@ -532,8 +537,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
         const float x1 = endCellX, z1 = endCellZ;
         if (stepped) {
             if (waterOnly) {
-                waterTile(mesh.water, sampler, x, z, sampler.waterAt(x, z),
-                          wrapX);
+                waterTile(mesh, sampler, x, z, sampler.waterAt(x, z), wrapX);
                 continue;
             }
             const auto column = sampler.column(x, z);
@@ -591,11 +595,11 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                              boundary ? 2.f : 0.f);
                 }
             }
-            waterTile(mesh.water, sampler, x, z, column.water, wrapX);
+            waterTile(mesh, sampler, x, z, column.water, wrapX);
             continue;
         }
         if (channel && waterOnly) {
-            channelWater(mesh.water, sampler, x, z, endCellX, endCellZ, wrapX);
+            channelWater(mesh, sampler, x, z, endCellX, endCellZ, wrapX);
             continue;
         }
         const auto center = point((x + x1) * .5f, (z + z1) * .5f);
@@ -618,7 +622,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                              -1);
         }
         if (channel) {
-            channelWater(mesh.water, sampler, x, z, endCellX, endCellZ, wrapX);
+            channelWater(mesh, sampler, x, z, endCellX, endCellZ, wrapX);
             continue;
         }
         const auto water = [&](auto&& self, int ax, int az, int bx,
@@ -639,6 +643,7 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 }
             }
             if (!sample.wet()) return;
+            mesh.lakeSurface.include(sample, mx, mz);
             const float level = sample.height();
             const auto cap = [&](Point a, Point b, Point c) {
                 if (std::min({a.y, b.y, c.y}) >= level ||
@@ -671,10 +676,20 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 clip([&](Point v) { return bx - v.x; });
                 clip([&](Point v) { return v.z - az; });
                 clip([&](Point v) { return bz - v.z; });
-                for (size_t i = 0; i < count; ++i) polygon[i].y = level;
-                for (size_t i = 1; i + 1 < count; ++i)
-                    triangle(mesh.water, polygon[0], polygon[i], polygon[i + 1],
-                             -2);
+                for (size_t i = 1; i + 1 < count; ++i) {
+                    const std::array points{polygon[0], polygon[i],
+                                            polygon[i + 1]};
+                    const auto surface = [level](Point p) {
+                        p.y = level;
+                        return p;
+                    };
+                    const size_t first = mesh.water.vertices.size();
+                    triangle(mesh.water, surface(points[0]), surface(points[1]),
+                             surface(points[2]), -2);
+                    for (size_t v = first; v < mesh.water.vertices.size(); ++v)
+                        mesh.water.vertices[v].tint = WaterSurface::depthTint(
+                            level - points[v - first].y);
+                }
             };
             if (flat) {
                 cap(ring[0], ring[1], ring[2]);

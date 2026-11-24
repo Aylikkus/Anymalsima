@@ -2,6 +2,7 @@ $input a_position, a_normal, a_tangent, a_texcoord0, a_texcoord1, a_color0
 $output v_position, v_normal, v_layer, v_color0, v_cover
 
 #include <bgfx_shader.sh>
+#include "../river_wave.sh"
 
 // x = offset (0 or +-world width) placing this patch at its copy nearest the
 // eye when the world wraps on X. Added exactly, so v_position keeps the
@@ -10,11 +11,10 @@ uniform vec4 u_lod_shift;
 
 void main()
 {
-    gl_Position = mul(u_modelViewProj, vec4(a_position, 1.0));
-    // Move waterfall faces off the terrain wall in the rendered image.
-    // Keep the unshifted position for LOD ownership, lighting and flow phase.
-    if (a_texcoord1 < -2.5 && abs(a_normal.y) < 0.5)
-        gl_Position += mul(u_modelViewProj, vec4(a_normal / 64.0, 0.0));
+    vec3 vertex = a_position;
+    if (a_texcoord1 < -2.5 && a_texcoord1 > -3.5)
+        vertex.y += riverRise(a_position.xz);
+    gl_Position = mul(u_modelViewProj, vec4(vertex, 1.0));
     v_position = a_position + vec3(u_lod_shift.x, 0.0, 0.0);
     v_normal = a_normal;
     v_layer = a_texcoord1;

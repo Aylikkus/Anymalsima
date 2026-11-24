@@ -1,6 +1,7 @@
 #include "chunk_mesher.hpp"
 
 #include <cmath>
+#include <span>
 
 #include "items/block.hpp"
 #include "items/material.hpp"
@@ -378,14 +379,14 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
 
     const auto emitWater = [&](float x, float y, float z, float ux, float uy,
                                float uz, float vx, float vy, float vz,
-                               Face face, Vec2 flow) {
+                               Face face, Vec2 flow, bool movingRiver = true) {
         const size_t base = mesh.water.vertices.size();
         emitQuad(mesh.water, x, y, z, ux, uy, uz, vx, vy, vz, face,
                  {nullptr, UINT16_MAX, NeutralTint}, climate);
         if (flow.x || flow.y)
             for (size_t i = base; i < mesh.water.vertices.size(); ++i) {
                 auto& vertex = mesh.water.vertices[i];
-                vertex.layer = -3;
+                vertex.layer = movingRiver ? -3 : -4;
                 vertex.u = flow.x;
                 vertex.v = flow.y;
             }
@@ -413,12 +414,18 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                 const bool fluid =
                     tile.liquid == LiquidType::Water && !tile.block_id;
                 const auto [ground, water] = generated;
+                const bool river =
+                    water.reach && tile.waterOrigin != WaterOrigin::Local;
                 const int wy = originY + y;
                 // A generated sheet can run down the lip's exposed rock
                 // underneath the upstream water cells.
                 const bool cliff = water.reach && wy <= ground &&
                                    wy < water.surfaceY && tile.block_id;
                 if (!fluid && !cliff) continue;
+                if (tile.waterOrigin != WaterOrigin::Reservoir || cliff)
+                    mesh.lakeSurface.mixed = true;
+                else
+                    mesh.lakeSurface.include(water, wx, wz);
                 if (waterColumn && !sampled) {
                     for (size_t i = 0; i < sides.size(); ++i)
                         adjacent[i] =
@@ -429,6 +436,41 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                 const Tile* above = at(0, y + 1, 0);
                 if (!above && generatedWaterHalo)
                     above = generatedWaterHalo(wx, originY + y + 1, wz);
+                // Adjacent free surfaces share corner heights. A thin local
+                // film would otherwise draw a grid of vertical faces between
+                // cells differing by just one unit.
+                const bool localTop =
+                    sampled && tile.waterOrigin == WaterOrigin::Local &&
+                    above && above->isAir() && water.topTile() == wy &&
+                    !water.body && !water.reach && water.edited;
+                const auto joinsLocal = [&](const WaterSurface& s) {
+                    return localTop && s.edited && !s.body && !s.reach &&
+                           s.topTile() == wy;
+                };
+                std::array<float, 4> cornerHeight;
+                cornerHeight.fill(height);
+                if (localTop) {
+                    for (int corner = 0; corner < 4; ++corner) {
+                        const int dx = (corner & 1) ? 1 : -1;
+                        const int dz = (corner & 2) ? 1 : -1;
+                        float sum = height;
+                        int count = 1;
+                        for (const auto& s :
+                             {adjacent[dx > 0 ? 0 : 1].second,
+                              adjacent[dz > 0 ? 2 : 3].second,
+                              waterColumn(wx + dx, wz + dz).second}) {
+                            if (joinsLocal(s)) {
+                                sum += s.topFill / 255.f;
+                                ++count;
+                            }
+                        }
+                        cornerHeight[corner] = sum / count;
+                    }
+                }
+                const auto topAt = [&](const BlockVertex& v) {
+                    return y + cornerHeight[int(v.x > x + .5f) +
+                                            2 * int(v.z > z + .5f)];
+                };
                 if (fluid && above && above->liquid == LiquidType::None &&
                     !above->block_id) {
                     const float top = y + height;
@@ -437,7 +479,64 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                                               -1);
                     mesh.waterTops[z * Chunk::SIZE_X + x] = top;
                     emitWater(x, top, z, 0, 0, 1, 1, 0, 0, Face::PosY,
-                              generated.second.flow);
+                              tile.waterOrigin == WaterOrigin::Local
+                                  ? Vec2{}
+                                  : water.flow,
+                              river);
+                    float depth = height;
+                    for (int h = y - 1; depth < 6 && h >= -1; --h) {
+                        const auto* lower = at(0, h, 0);
+                        if (!lower || lower->liquid != LiquidType::Water) break;
+                        depth += 1;
+                    }
+                    if (tile.waterOrigin == WaterOrigin::Reservoir &&
+                        water.wet())
+                        depth = water.height() - ground - 1;
+                    for (auto& vertex :
+                         std::span(mesh.water.vertices).last(4)) {
+                        if (localTop) vertex.y = topAt(vertex);
+                        vertex.tint = WaterSurface::depthTint(depth);
+                        if (!sampled) continue;
+                        // Red encodes distance from the edge hit by a fall.
+                        // Interpolation fades the churn across the landing
+                        // tile.
+                        for (size_t i = 0; i < sides.size(); ++i) {
+                            const auto& upstream = adjacent[i].second;
+                            const auto [dx, dz] = sides[i];
+                            if (upstream.height() < wy + height + 1 ||
+                                upstream.flow.x * dx + upstream.flow.y * dz >=
+                                    0)
+                                continue;
+                            if ((dx && (vertex.x > x) == (dx > 0)) ||
+                                (dz && (vertex.z > z) == (dz > 0)))
+                                vertex.tint &= 0xffffff00u;
+                        }
+                    }
+                    // Four neighboring channel centers share a corner. Keep
+                    // distinct waterfall lips and detached water levels sharp.
+                    if (water.reach && wy == water.topTile() &&
+                        tile.waterOrigin != WaterOrigin::Local) {
+                        for (auto& vertex :
+                             std::span(mesh.water.vertices).last(4)) {
+                            const int dx = vertex.x > x ? 1 : -1;
+                            const int dz = vertex.z > z ? 1 : -1;
+                            float sum = 0;
+                            int count = 1;
+                            for (const auto& sample :
+                                 {adjacent[dx > 0 ? 0 : 1].second,
+                                  adjacent[dz > 0 ? 2 : 3].second,
+                                  waterColumn(wx + dx, wz + dz).second}) {
+                                const float diff =
+                                    sample.height() - water.height();
+                                if (sample.reach == water.reach &&
+                                    std::abs(diff) < 1.f) {
+                                    sum += diff;
+                                    ++count;
+                                }
+                            }
+                            vertex.y += sum / count;
+                        }
+                    }
                 }
 
                 if (!sampled) continue;
@@ -445,7 +544,10 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     const auto [dx, dz] = sides[i];
                     const auto [bank, lower] = adjacent[i];
                     const Tile* other = at(dx, y, dz);
-                    if (other && other->block_id) continue;
+                    if (other && (other->block_id ||
+                                  (other->waterOrigin == WaterOrigin::Local &&
+                                   joinsLocal(lower))))
+                        continue;
                     const bool drop = water.wet() && wy < water.surfaceY &&
                                       wy >= water.dropBottom(lower, bank);
                     // Any air beside a water cell exposes a face: a lower
@@ -456,15 +558,41 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                                              ? WaterSurface::cellHeight(*other)
                                              : 0;
                     if (bottom >= height) continue;
-                    const float length = height - bottom;
+                    float sheetBottom = bottom;
+                    if (fluid && tile.waterOrigin == WaterOrigin::Local &&
+                        tile.liquidLevel >= 20 && other && other->isAir() &&
+                        above && above->isAir()) {
+                        // Trace the exposed face beneath a dug spillway until
+                        // the neighboring column meets a ledge or tailwater.
+                        const auto* support = at(0, y - 1, 0);
+                        if (support && support->isSolid()) {
+                            for (int h = y - 1; originY + h >= 0; --h) {
+                                const auto* falling = at(dx, h, dz);
+                                if (!falling || falling->isSolid()) break;
+                                sheetBottom = float(h - y);
+                                if (falling->isLiquid()) {
+                                    sheetBottom +=
+                                        WaterSurface::cellHeight(*falling);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    const float length = height - sheetBottom;
                     const Vec2 flow =
                         water.reach ? water.flow : Vec2(float(dx), float(dz));
                     // Match the outward winding of FACES.
                     // Move the sheet just in front of the solid face.
-                    const float offset = drop ? 2 * SeamOverlap : 0.f;
-                    emitWater(x + (dx > 0 || dz > 0) + dx * offset, y + bottom,
+                    const float offset = cliff && drop ? 2 * SeamOverlap : 0.f;
+                    emitWater(x + (dx > 0 || dz > 0) + dx * offset,
+                              y + sheetBottom,
                               z + (dz > 0 || dx < 0) + dz * offset, 0, length,
-                              0, -dz, 0, dx, faces[i], flow);
+                              0, -dz, 0, dx, faces[i], flow, river);
+                    if (localTop) {
+                        auto side = std::span(mesh.water.vertices).last(4);
+                        side[1].y = topAt(side[1]);
+                        side[2].y = topAt(side[2]);
+                    }
                 }
             }
         }

@@ -468,19 +468,32 @@ target_compile_definitions(tree_benchmark PRIVATE
     SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")
 
 foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
+             hydrology_valley_spills_to_river_until_plugged
+             hydrology_draining_lake_mesh_heights
+             hydrology_lake_seep_and_coastal_pool
+             hydrology_still_local_pool_wakes_on_excavation
+             hydrology_exposed_film_dries_after_supply_stops
              hydrology_local_flow_conserves_and_freezes_unknown_boundary
              hydrology_local_flow_falls_across_slab_and_wrap
              hydrology_local_flow_prefers_nearest_drop
+             hydrology_local_flow_settles_saved_suspended_water
+             hydrology_cavern_fills_up_from_submerged_tunnel
              hydrology_editor_connects_generated_water
              hydrology_editor_water_crosses_ready_boundary
              hydrology_broken_bank_fills_unloaded_valley
              hydrology_editor_seals_spring_and_restores_river
+             hydrology_junction_refills_a_cut_after_spring_closes
+             hydrology_junction_backwater_tapers_into_deep_bed
              hydrology_editor_dam_backs_up_river
+             hydrology_editor_staggered_dam_seals_deep_channel
+             hydrology_editor_dam_across_diagonal_reach
+             hydrology_headwater_dam_responds_to_crest_and_floor_edits
              hydrology_editor_reopens_saved_cut
              hydrology_time_speed_consumes_the_same_water_steps
              hydrology_water_time_budget_and_coarse_fast_forward
              hydrology_split_lake_drains_channel_at_7200
              hydrology_channel_fast_forward_and_plug
+             hydrology_surface_runoff_reaches_the_sill
              hydrology_editor_certifies_dry_downspout
              hydrology_river_fractional_top_matches_detail
              hydrology_dam_pool_spills_at_crest
@@ -497,6 +510,7 @@ foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
              hydrology_river_sediment_matches_local_soil
              hydrology_river_continues_from_lake
              hydrology_coastal_basin_fills_at_sea_level
+             hydrology_ocean_crosses_the_coarse_shore_halo
              hydrology_sea_and_high_lake_share_region)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES

@@ -85,8 +85,7 @@ void main()
     vec3 color;
     vec3 normal = geometric;
     if (v_layer < -1.5) {
-        color = surfaceWaterColor(v_position, geometric, v_cover, v_layer < -2.5)
-              * v_color0.rgb;
+        color = surfaceWaterColor(v_position, geometric, v_cover, v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
     } else {
         float layer = floor(v_layer + 0.5);
         color = surfaceTexture(v_position, geometric, layer).rgb;

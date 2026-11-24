@@ -31,6 +31,54 @@ for widths aligned to its 16-region roots and within its view-distance
 constraint. The proposed 2,000-region width meets the alignment rule. Water
 must use the same patch wrapping policy as terrain.
 
+## How water behaves in play
+
+A generated lake or sea rests about one eighth of a block below its
+upper tile edge. Deep water and shore tiles share the same elevation.
+The cut receiving water at that elevation uses the same fractional
+head. Water vertices carry depth in their color alpha so shallow banks
+can read differently from the channel center. Detailed river tops average
+neighboring heights within the same reach on gentle grades. A sharp drop
+keeps its lip. A traveling surface ripple moves river vertices by less
+than a tenth of a block. Adjacent local surface cells share corner heights,
+including shallow films with different fill levels. The tile inspector reports the instantaneous surface fill. River intakes
+sample the ripple at each fixed step, while storage tracks the mean stage. Water flowing over a dug ledge can draw a sheet down to
+the first ledge or tailwater visible to the chunk mesher.
+
+Lakes with river inlets receive their river delivery. A natural basin
+without that supply has a weak groundwater seep at its seed region's
+center. It replaces up to 32 units per game second after a drawdown.
+An exposed spring tile stays visibly wet. Pools created by players
+keep their collected volume when the supply is cut.
+
+Opening a surface bank beside standing water can connect it to a valley.
+The survey follows connected ground downhill, records the route, and
+measures how much the destination can hold at each elevation. Each open
+mouth supplies up to one block per game second. Separate cuts that reach
+the same pool increase delivery. Closing the gate or blocking the saved
+route stops its transfer. The water already delivered stays in the pool.
+Water along a certified feeding route is a visual projection of this
+delivery. Existing local water inside a newly surveyed pool joins its
+store. If the pond reaches a surveyed lip above a river, surplus flows
+over that lip into the reach. Plugging the spill path stops transfer once
+the pond is full. The sea no longer pays for disposal into unverified surface runoff.
+
+The search is bounded to 8,192 samples. If the survey reaches an unknown
+rim, it can retain the lower elevations that it finished checking.
+A very broad flat with no verified receiving bowl still uses local water.
+The source cannot flood a whole map through an unknown passage. Edits
+at arbitrary distances inside an existing pool do not rebuild its entire
+storage curve. Terrain carving remains part of world generation.
+
+Local flow visits at most 512 active cells per game step. Settled water
+sleeps until a neighboring transfer, terrain edit, or newly resident slab
+can give it somewhere to go. An open tile above an unfed film below 20
+units lets it dry after 300 game seconds. An arriving transfer restarts
+the timer. An old save gets a fresh grace period when it loads. Underground
+air can dry a film too. The evaporation debit is recorded in the ledger.
+Mesh workers share unchanged rows of local water between snapshots, so
+a transfer copies only rows it touches.
+
 ## Shared data and ownership
 
 - Define one CPU sampling interface over immutable hydrology snapshots.
@@ -325,6 +373,13 @@ and an inland lake. Seawater follows submerged faces across the region
 border. The lake keeps its own level up to the point where it can spill
 into the surveyed sea.
 
+Generator version 23 also corrects the coastal projection in existing
+coastal saves. A coarse region mask only narrows the search: seawater
+must have a face-connected path to a certified ocean source or the map
+edge, with no fixed region radius. Chunks and distant terrain use the
+same masks. Enclosed low ground stays separate, and persisted river and
+reservoir IDs do not change.
+
 The spring record supplies a bounded per-step input for the fluid solver.
 Water introduced by edits can render exposed faces. Opening new aquifer
 outlets, redirecting flow, and transferring water over runtime drops
@@ -389,10 +444,9 @@ Standing bodies use 255 integer units per block. An owner-thread transfer
 returns the accepted signed amount and records its source or sink. A
 transfer to a confirmed isolated cell commits the reservoir debit and the
 cell credit in the same ledger. The visible top is rounded in sixteenths
-of a block; full cells below it do not change. One-block shallows have a
-small visual shoreline offset. Natural rivers render fractional tops
-according to grade and cross-channel depth, with downstream-moving
-riffles in both detail and terrain LOD.
+of a block and is shared by shallows and deep water in the same body.
+Natural rivers follow the downstream grade without lowering their surface
+over shallow banks. Riffles still move downstream in both detail and LOD.
 Refills stop at the generated waterline, which is the surveyed spill level
 for lakes.
 
@@ -425,7 +479,9 @@ ledger, and changes invalidate intersecting LOD and lighting work.
 
 ## 5. Add local finite-volume flow and edited connections
 
-Locally credited cells fall first. On a flat, they look up to three tiles
+Locally credited cells fall through loaded air to the first available
+landing in one sweep, including after loading an older save. On a flat,
+they look up to three tiles
 for the closest reachable drop and favor its first face; without a drop
 they level across faces. This bounded solver requires verified empty or
 locally owned cells. Unknown cave boundaries still freeze. Placing a
@@ -443,7 +499,12 @@ automatic rejoining of detached compartments is not implemented.
 
 A loaded downhill path from a lake cut to a lower body or river can
 become a persistent channel. Each mouth delivers up to one block of water
-per game second, debited from the source. A raised outlet leaves the
+per game second, debited from the source. A cut that drops onto broad,
+lower, open terrain can also discharge as surface runoff without a
+mapped receiving body. For inland lakes, the coarse runoff budget removes up to eight
+blocks per second per mouth and records the outflow as disposal; enclosed
+or unverified outlets still fill only the local space available.
+A raised outlet leaves the
 water below its sill in place. Plugging a cell on the certified path
 invalidates it, including after a reload. Uncertified paths still use
 local flow. River cuts spend the reach's delivery, which can renew from
@@ -460,41 +521,78 @@ incoming flow and the original channel becomes shallower downstream.
 A full terminal valley stops taking net flow, and plugging the breach
 leaves the collected water in place.
 
-A short dam is certified after the loaded cross-section confirms solid
-blocks from bank to bank. Its saved certificate stays active if the wall
-unloads. While the upstream pool fills, the old receiver loses delivery
-and the projected downstream reach drops. After the pool reaches the
-crest band, surplus resumes toward the original receiver. Removing a
-submerged part of the wall releases the stored head. Alternate spill
-destinations and rebuilding the crest of an existing dam are not covered.
+A short dam is certified when a bounded search of the generated channel
+finds wet approaches on both sides but the edited voxels block every
+face-connected route between them. This includes staggered walls and leaks
+beneath a wall in a deep channel. Near the headwater the open spring
+itself is enough to establish the upstream approach. The saved
+certificate records which nearby columns can actually be reached from
+upstream, so an irregular wall does not leave water on the wrong side of
+a straight cut. Unloaded wet voxels do not count as solid wall, and the
+saved certificate stays active when the wall unloads.
 
-Plugging or reopening the mouth of a generated spring cuts or restores
-its graph input; it no longer creates a second local spring. Replacing
-and removing a block in the original river footprint restores its
-projection without creating a new intake.
+While the upstream pool fills, the downstream reach loses delivery. The
+pool finds the lowest route over the wall and shows water on that route
+when overflow resumes. Nearby placements and removals recheck the crest
+and any loaded cuts through the channel floor or bank. Raising the wall
+keeps its stored water; opening a route releases the stored head and
+removes the spill sheet. The search is local, not a general solution for
+long bypasses or alternate spill destinations.
+
+Plugging a generated spring cuts its graph input; it does not remove
+the water already in the channel. The river recedes from the spring
+downstream over up to three quarters of a game day. Reopening the mouth
+sends a recovery front downstream; delivery to the receiver ramps up
+instead of returning all at once. Near a live confluence, the receiver's
+waterline can keep the lower bed wet and supply connected cuts without
+another terrain edit. Backwater tapers toward the tributary's floor
+instead of ending in a full-height water wall. Active tributaries also
+keep the main bed wet downstream from their junctions. Replacing and
+removing a block in the original river footprint restores its projection
+without creating a new intake.
+
+A lake-fed outlet becomes shallower as the lake drains through its top
+storage band. Once the water falls below that band, the lake no longer
+sustains the channel. Walls in the lake approach can close the outlet
+when they block every submerged path from the lake to the reach. On refill, an active inlet projects a
+thin stream along the generated downhill path across its exposed shelf.
+This stream is a display of the river delivery, not extra lake or local
+cell volume. The path is bounded and does not reroute around player edits.
 
 Certified routes fast-forward from elapsed delivery and available storage.
-For local cuts, an update with more than 256 seconds pending searches a
-bounded downhill or horizontal path, fills confirmed receiving cells first
-at the lowest levels, and advances directly to the clock. It does not
-claim capacity in unknown voxels or replay every second. Small advances
-still step local cells under a 3 ms budget. The bulk path is an
-approximation, not a replay of the flow front or a solver for underground
-pressure and unverified offscreen channels.
+Local cuts and active parcels advance in one-game-second steps. The frame
+budget limits work per update and the ledger retains the outstanding time.
+At 7200×, local simulation can trail the world clock while a basin drains.
+A filled tunnel can feed higher parts of a cavern up to the source head.
+Breaking a block inside the generated lake or river footprint restores
+the projected water at its current level. Dug cells through a bank or bed
+can start a local intake. A dry generated reach stays under river graph
+control. Older saved drains that duplicate a lake outlet are discarded
+on load.
 
 Detailed water uses the uploaded voxel mesh, not an exact match against the
 proxy's integer top. The handoff waits for lit uploads across both the
 proxy and detailed water slabs, and keeps the last drawable detail during
 water-only remeshes. A completed mesh can replace an older one while
 another fluid step is pending; solid edits still reject outdated
-geometry. Fractional storage and river stage changes invalidate the proxy;
-locally simulated cells still use a coarser invalidation.
+geometry. Changes to a river stage or the exposed fill of a local cell schedule a
+water mesh refresh. Detailed chunks and distant patches containing a single
+lake track its current waterline while replacement geometry uploads. A flowing shoreline can keep changing while terrain
+jobs finish and upload.
+The first proxy shows only certified ocean: deep connected regions or
+ready shoreline masks. Low ground in a pending coastal survey stays dry
+until connectivity is known.
 
-`RSVR` v5 adds channel paths, sill heights, receivers and pending arrivals.
-Ledger versions 1 through 4 remain readable. v4 persists detached lake compartments, their footprints and
-their original lake IDs. v3 stores certified surface breaches, dam pool
-footprints, and sealed generated springs. v1–v3 remain readable; v2 stores confirmed
-portals, runtime aquifer outlet records and explicit spill routes.
+`RSVR` v8 stores the surveyed upstream side of dams. v7 adds the clock
+time of spring reopening so a save preserves the recovery front. v6 adds
+surface-runoff certificates and the clock time of each spring seal. Older
+seals are treated as past their recession period.
+v5 adds channel paths, sill heights, receivers and pending arrivals.
+Ledger versions 1 through 7 remain readable. v4 persists detached lake
+compartments, their footprints and their original lake IDs. v3 stores
+certified surface breaches, dam pool footprints, and sealed generated
+springs. v2 stores confirmed portals, runtime aquifer outlet records and
+explicit spill routes.
 `Reservoirs::reconcile` runs each fixed step before `flow`: open outlets
 credit their exposed face cell, and portals exchange volume between a local
 cell and its body in both directions, debiting and crediting the same

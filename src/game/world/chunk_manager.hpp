@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -42,6 +43,7 @@ struct ChunkHandle {
     // leave a slightly older mesh drawable until its successor is ready.
     uint64_t meshTopologyRevision = 0;
     MeshHandle mesh, waterMesh;
+    LakeMeshSurface lakeSurface;
     bool hasWaterGeometry = false;
     bool initialised = false;
     bool uploaded = false;
@@ -54,6 +56,7 @@ struct ChunkHandle {
     bool edited = false;
     std::vector<uint32_t> waterBodies;
     std::vector<uint32_t> waterReaches;
+    std::vector<TilePos> shoreIntakes;
     // Generated structure voxels at the revision used to prepare this chunk.
     // Tree wood is reconciled separately through TreeStamp.
     std::shared_ptr<const structure_voxels::Slab> structureBaseline;
@@ -374,6 +377,7 @@ class ChunkManager {
             handle.initialised = !result.mesh.vertices.empty();
             handle.uploaded = true;
             handle.uploadedRevision = result.revision;
+            handle.lakeSurface = result.mesh.lakeSurface;
             handle.vertices = std::move(result.mesh.vertices);
             handle.indices = std::move(result.mesh.indices);
             handle.hasWaterGeometry = !result.mesh.water.indices.empty();
@@ -387,6 +391,9 @@ class ChunkManager {
     }
     MeshHandle* getMesh(const ChunkCoord& coord);
     MeshHandle* getWaterMesh(const ChunkCoord& coord);
+    const LakeMeshSurface& waterMeshSurface(ChunkCoord coord) const {
+        return chunks.at(coord).lakeSurface;
+    }
 
     bool hasGenerationWork() const {
         return !generationQueue.empty() || !generationJobs.empty() ||
@@ -492,9 +499,12 @@ class ChunkManager {
 
     bool reconcileWater(Chunk& chunk, ChunkCoord coord,
                         const ChunkColumnInputs* columns,
-                        bool refreshLocal = false) const;
+                        bool refreshLocal = false,
+                        const std::bitset<Chunk::SIZE_X * Chunk::SIZE_Z>*
+                            dirty = nullptr) const;
     Reservoirs::CellAccess waterAccess(TilePos pos);
     // The standing body or reach owning a loaded reservoir water cell.
+    WaterSurface waterSourceAt(TilePos pos);
     std::optional<Reservoirs::Sink> waterSinkAt(TilePos pos);
     // Certifies dug channels whose local water links a standing body to a
     // lower receiver; bounded per call.
@@ -505,7 +515,10 @@ class ChunkManager {
     void updateWaterTopology(Reservoirs& water);
     void detectLakeSplit(Reservoirs& water, TilePos outlet);
     std::optional<std::pair<uint32_t, Reservoirs::BreachSurvey>> riverDamAt(
-        TilePos pos);
+        TilePos pos, bool existing = false);
+    std::optional<TilePos> lakeOutletAnchor(Vec2i source, uint32_t reach) const;
+    std::vector<TilePos> riverWallCandidates(TilePos source, uint32_t reach);
+    void findShoreIntakes(ChunkCoord coord, const Reservoirs& water);
     void tickWater(Reservoirs& water, uint64_t step);
     void reservoirChanged(const ReservoirChange& change);
     void indexWater(ChunkCoord coord, const ChunkColumnInputs& columns);
@@ -516,11 +529,14 @@ class ChunkManager {
     std::unordered_map<uint32_t, std::unordered_set<ChunkCoord>> waterChunks;
     std::unordered_map<uint32_t, std::unordered_set<ChunkCoord>>
         waterReachChunks;
+    std::unordered_set<ChunkCoord> pendingShoreChecks;
     std::set<TilePos, TilePosLess> waterEdits;
     std::set<TilePos, TilePosLess> waterTopologyEdits;
+    std::set<TilePos, TilePosLess> waterDirectEdits;
     const TerrainEdits* waterTerrainEdits = nullptr;
     std::optional<TilePos> waterEditCursor;
     std::optional<TilePos> channelCursor;
+    std::unordered_map<TilePos, uint64_t> lastChannelSurvey;
 
     struct ColumnCache {
         size_t registrations = 0;
