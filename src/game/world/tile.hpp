@@ -11,6 +11,11 @@ enum class LiquidType : uint8_t {
 
 enum class WaterOrigin : uint8_t { Independent, Reservoir, Local };
 
+constexpr int waterOpacity(uint8_t fill) {
+    // Legacy water used a zero level for a full cell.
+    return fill ? (8 * fill + 254) / 255 : 8;
+}
+
 struct TileLightning {
     uint8_t sun_exposure : 4 = 0;
     uint8_t artificial_light : 4 = 0;

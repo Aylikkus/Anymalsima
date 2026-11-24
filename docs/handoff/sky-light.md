@@ -72,7 +72,8 @@ The definition stays the voxel rule used today, so existing tests and the
 look carry over:
 
 - **Direct:** light falls straight down at 15 and loses each tile's opacity
-  (`tileOpacity`: block opacity, water 8) as it passes.
+  (`tileOpacity`: block opacity, water up to 8 according to fill) as it
+  passes.
 - **Indirect:** from every lit cell, light spreads to the 6 neighbours,
   losing `max(1, opacity)` per step. A cell's value is the maximum over all
   paths. A positive value travels at most 14 tiles.
@@ -102,9 +103,9 @@ Per tile column (`sky::Column`, `world/sky_column.hpp`):
 Columns are packed per chunk column (`sky::Tile`, 16x16) and built by
 `sky::build` from:
 
-- **Terrain:** the generated surface (`ChunkColumnInputs::surface_y`,
-  through `ChunkManager::columnSources`): solid up to it, sea water (opacity
-  8) above it up to `SEA_LEVEL_Y`. No chunk is generated for it.
+- **Terrain:** the generated surface and projected water from
+  `ChunkManager::columnSources`. Ground is opaque and water attenuates
+  according to its fill. No chunk is generated for it.
 - **Structures:** `structure_voxels::Column` shares its exact voxel tops with
   chunk generation. The highest structure voxel of each tile column counts
   as opaque. The default `Source::skyTops` rasterizes occupied level-zero

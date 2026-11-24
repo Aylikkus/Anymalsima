@@ -141,6 +141,7 @@ set(world_cases
     mesh_winding
     mesh_skips_hidden_chunks
     mesh_local_positions_overlap
+    mesh_river_step_edges
     light_volume_encoding
     light_volume_neighbor_borders
     light_volume_missing_neighbor
@@ -185,7 +186,7 @@ set(boundary_cases
     sunlight_cross_pos_z sunlight_cross_neg_z
     sunlight_cross_three_axis_corner
     sunlight_cross_barrier_edit sunlight_cross_partial_opacity
-    sunlight_cross_water sunlight_cross_competing_sources
+    sunlight_cross_water sunlight_receding_water sunlight_cross_competing_sources
     sunlight_cross_late_neighbor sunlight_cross_load_order_workers
     sunlight_cross_source_unload sunlight_cross_stale_neighbor_result
     sunlight_missing_upper_slab sunlight_unknown_upper_slab
@@ -483,6 +484,7 @@ foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
              hydrology_broken_bank_fills_unloaded_valley
              hydrology_editor_seals_spring_and_restores_river
              hydrology_junction_refills_a_cut_after_spring_closes
+             hydrology_junction_refills_plateau_branch
              hydrology_junction_backwater_tapers_into_deep_bed
              hydrology_editor_dam_backs_up_river
              hydrology_editor_staggered_dam_seals_deep_channel
@@ -492,6 +494,7 @@ foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
              hydrology_time_speed_consumes_the_same_water_steps
              hydrology_water_time_budget_and_coarse_fast_forward
              hydrology_split_lake_drains_channel_at_7200
+             hydrology_reopens_detached_lake_on_reload
              hydrology_channel_fast_forward_and_plug
              hydrology_surface_runoff_reaches_the_sill
              hydrology_editor_certifies_dry_downspout

@@ -25,6 +25,37 @@ TEST(mesh_isolated_block) {
     expectQuads(mesh(chunk), 6);
 }
 
+TEST(mesh_river_step_edges) {
+    const test::Assets assets;
+    const Tile air;
+    Chunk chunk;
+    for (int x : {7, 8}) {
+        for (int y = 0; y <= 4; ++y) chunk.tiles[8][y][x].block_id = 1;
+        auto& water = chunk.tiles[8][5][x];
+        water.liquid = LiquidType::Water;
+        water.liquidLevel = x == 7 ? 192 : 96;
+        water.waterOrigin = WaterOrigin::Reservoir;
+    }
+    const auto column = [&](int x, int z) -> std::pair<int, WaterSurface> {
+        if (z != 8 || (x != 7 && x != 8)) return {-1, {}};
+        return {4, {6, 0, 1, {1, 0}, false, chunk.tiles[8][5][x].liquidLevel}};
+    };
+    const auto result = ChunkMesher(assets).build(
+        chunk, {}, [&](int, int, int) { return &air; }, {}, {}, column);
+    size_t highEdge = 0, lowEdge = 0, between = 0;
+    const float high = 5 + 192 / 255.f, low = 5 + 96 / 255.f;
+    for (const auto& v : result.water.vertices) {
+        CHECK(v.y >= 5);
+        if (v.x != 8) continue;
+        if (v.ny == 1 && v.y == high) ++highEdge;
+        if (v.ny == 1 && v.y == low) ++lowEdge;
+        if (v.nx == 1 && (v.y == high || v.y == low)) ++between;
+    }
+    EQUAL(highEdge, 2u, "higher top meets the step face");
+    EQUAL(lowEdge, 2u, "lower top meets the step face");
+    EQUAL(between, 4u, "one face closes the step");
+}
+
 TEST(mesh_greedy_prism) {
     Chunk chunk;
     chunk.tiles[8][8][8].block_id = 1;

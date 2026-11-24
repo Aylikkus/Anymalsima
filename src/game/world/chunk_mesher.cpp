@@ -512,31 +512,6 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                                 vertex.tint &= 0xffffff00u;
                         }
                     }
-                    // Four neighboring channel centers share a corner. Keep
-                    // distinct waterfall lips and detached water levels sharp.
-                    if (water.reach && wy == water.topTile() &&
-                        tile.waterOrigin != WaterOrigin::Local) {
-                        for (auto& vertex :
-                             std::span(mesh.water.vertices).last(4)) {
-                            const int dx = vertex.x > x ? 1 : -1;
-                            const int dz = vertex.z > z ? 1 : -1;
-                            float sum = 0;
-                            int count = 1;
-                            for (const auto& sample :
-                                 {adjacent[dx > 0 ? 0 : 1].second,
-                                  adjacent[dz > 0 ? 2 : 3].second,
-                                  waterColumn(wx + dx, wz + dz).second}) {
-                                const float diff =
-                                    sample.height() - water.height();
-                                if (sample.reach == water.reach &&
-                                    std::abs(diff) < 1.f) {
-                                    sum += diff;
-                                    ++count;
-                                }
-                            }
-                            vertex.y += sum / count;
-                        }
-                    }
                 }
 
                 if (!sampled) continue;
@@ -553,6 +528,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     // Any air beside a water cell exposes a face: a lower
                     // lake, a drained neighbor or a dug pocket. Liquid
                     // neighbors only need the part above their own fill.
+                    if (cliff && (!drop || !water.fallsToward(lower, dx, dz)))
+                        continue;
                     if (!drop && !(fluid && other)) continue;
                     const float bottom = other && other->isLiquid()
                                              ? WaterSurface::cellHeight(*other)

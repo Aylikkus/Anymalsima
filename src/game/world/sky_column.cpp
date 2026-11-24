@@ -77,7 +77,6 @@ void Tile::set(int i, const Column& column) {
 }
 
 namespace {
-constexpr uint8_t WaterOpacity = 8;  // tileOpacity: liquids
 
 struct EditTiles {
     // Translucent or opaque tiles of the edit's structure, per column:
@@ -113,15 +112,16 @@ Tile build(const TileInputs& in) {
         // Ground: the generated surface, or the edit's ground override.
         int ground = in.surface[s];
         uint8_t groundOpacity = Opaque;
-        int waterTop = in.water[s].topTile();
+        auto water = in.water[s];
         if (in.edit) {
             ground = in.edit->groundY[s];
             groundOpacity =
                 ground >= 0
                     ? std::max<uint8_t>(1, opacity[in.edit->groundBlock[s]])
                     : 0;
-            waterTop = in.edit->waterAt(i, in.water[s]).topTile();
+            water = in.edit->waterAt(i, water);
         }
+        const int waterTop = water.topTile();
         const auto& built = edits.tiles[s];
         const int structure = in.structureTop[s];
         int from = std::max({ground, waterTop, structure});
@@ -140,7 +140,9 @@ Tile build(const TileInputs& in) {
                 o = std::max<int>(o, built[next].second);
             if (y == ground) o = std::max<int>(o, groundOpacity);
             if (y <= floor || (y < ground && ground >= 0)) o = Opaque;
-            if (y > ground && y <= waterTop) o = std::max<int>(o, WaterOpacity);
+            if (y > ground && y <= waterTop)
+                o = std::max(o,
+                             waterOpacity(y == waterTop ? water.topFill : 255));
             return o;
         });
     }

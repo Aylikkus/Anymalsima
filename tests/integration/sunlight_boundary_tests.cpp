@@ -137,6 +137,23 @@ TEST(sunlight_cross_water) {
     f.expectSun(17, 20, 8, 5);
 }
 
+TEST(sunlight_receding_water) {
+    Tunnel f;
+    f.solidPair();
+    f.shaft(8, 20, 8);
+    auto& lower = f.tile(8, 21, 8);
+    auto& upper = f.tile(8, 22, 8);
+    lower.liquid = upper.liquid = LiquidType::Water;
+    lower.liquidLevel = upper.liquidLevel = 255;
+    f.light();
+    f.expectSun(8, 20, 8, 0);
+
+    upper.liquidLevel = 96;
+    f.sunlight.markColumnDirty(0, 0);
+    f.light();
+    f.expectSun(8, 20, 8, 3);
+}
+
 TEST(sunlight_cross_competing_sources) {
     Tunnel f;
     f.solidPair();

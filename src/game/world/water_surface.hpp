@@ -57,6 +57,13 @@ struct WaterSurface {
                         std::max(neighbor.surfaceY, neighborGround + 1));
     }
 
+    // A falling sheet can extend below the upstream bed only where the
+    // channel flows over a lip toward lower water.
+    constexpr bool fallsToward(WaterSurface neighbor, int dx, int dz) const {
+        return reach && neighbor.wet() && surfaceY > neighbor.surfaceY &&
+               flow.x * dx + flow.y * dz > .5f;
+    }
+
     constexpr int depth(int groundY) const {
         return wet() ? surfaceY - groundY - 1 : 0;
     }

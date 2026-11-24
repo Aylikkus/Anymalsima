@@ -108,6 +108,15 @@ TEST(sky_tile_build_sources) {
             tiles[size_t(y)] = 8;
         EQUAL(mismatches(t.column(0), tiles), size_t(0), "sea");
     }
+    // A receding river leaves a partly filled top cell.
+    {
+        auto in = flat(420);
+        in.opacity = &table;
+        in.water[0] = {423, 0, 1, {1, 0}, false, 96};
+        const auto t = sky::build(in);
+        EQUAL(int(t.direct(0, 421)), 11, "partial river top");
+        EQUAL(int(t.direct(0, 420)), 3, "river bed after drawdown");
+    }
     // Wood of a tree over the ground.
     {
         auto in = flat(420);

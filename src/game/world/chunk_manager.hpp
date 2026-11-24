@@ -514,9 +514,10 @@ class ChunkManager {
     bool waterIntakeCandidate(TilePos pos);
     void updateWaterTopology(Reservoirs& water);
     void detectLakeSplit(Reservoirs& water, TilePos outlet);
+    void reconnectLakes(Reservoirs& water);
     std::optional<std::pair<uint32_t, Reservoirs::BreachSurvey>> riverDamAt(
         TilePos pos, bool existing = false);
-    std::optional<TilePos> lakeOutletAnchor(Vec2i source, uint32_t reach) const;
+    std::optional<TilePos> riverMouthAnchor(Vec2i source, uint32_t reach) const;
     std::vector<TilePos> riverWallCandidates(TilePos source, uint32_t reach);
     void findShoreIntakes(ChunkCoord coord, const Reservoirs& water);
     void tickWater(Reservoirs& water, uint64_t step);
@@ -530,6 +531,7 @@ class ChunkManager {
     std::unordered_map<uint32_t, std::unordered_set<ChunkCoord>>
         waterReachChunks;
     std::unordered_set<ChunkCoord> pendingShoreChecks;
+    bool lakeJoinsPending = false;
     std::set<TilePos, TilePosLess> waterEdits;
     std::set<TilePos, TilePosLess> waterTopologyEdits;
     std::set<TilePos, TilePosLess> waterDirectEdits;

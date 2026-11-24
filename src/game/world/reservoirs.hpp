@@ -80,16 +80,26 @@ struct ReservoirSnapshot {
         TilePos cut{};
         Vec2 downstream{0, 0};
         int periodX = 0;
+        bool belowCut(int x, int z, int surface) const;
+        std::optional<uint64_t> damAge{};
+        bool isolatesLake(uint32_t body, int x, int z) const;
+        uint32_t outletLake = 0;
         Vec2i spring{};
         uint64_t recessionAge = 0;
         uint64_t recoveryAge = 0;
         bool receding = false;
         bool recovering = false;
         unsigned lakeSupplyPercent = 100;
-        Vec2i junction{};
-        int backwaterHead = 0;  // height in water units
-        uint32_t backwaterReach = 0;
-        int backwaterAt(int x, int z, int bottom, int full) const;
+        struct Backwater {
+            Vec2i tile;
+            int head;
+            uint32_t reach;
+            bool operator==(const Backwater&) const = default;
+        };
+        std::vector<Backwater> banks;
+        int backwaterAt(int x, int z, int bottom, int full,
+                        uint32_t* source = nullptr,
+                        Vec2* direction = nullptr) const;
         std::shared_ptr<const std::vector<uint64_t>> damUpstream{};
         struct Inlet {
             Vec2i tile;
@@ -123,8 +133,8 @@ struct ReservoirSnapshot {
     static uint64_t columnKey(int x, int z);
 
     WaterSurface projectStanding(const GeneratedHydrology* hydrology, int x,
-                                 int z, int ground,
-                                 WaterSurface baseline) const;
+                                 int z, int ground, WaterSurface baseline,
+                                 bool includeBackwater = true) const;
     WaterSurface projectLakeInflow(const GeneratedHydrology* hydrology, int x,
                                    int z, int ground, uint32_t body) const;
     WaterSurface project(const GeneratedHydrology* hydrology, int x, int z,
@@ -214,7 +224,8 @@ class Reservoirs {
                        BreachSurvey survey, std::vector<TilePos> route = {},
                        ValleyOutlet outlet = {{0, 0, -1}, {}});
     bool openBreach(uint32_t reach, TilePos opening, BreachSurvey survey);
-    bool openDam(uint32_t reach, TilePos wall, BreachSurvey survey);
+    bool openDam(uint32_t reach, TilePos wall, BreachSurvey survey,
+                 const std::function<bool(TilePos)>& solid = {});
     bool hasLakeOutletFlow(WaterSurface source) const;
     std::optional<size_t> lakeOutletIndex(uint32_t body) const;
     std::optional<TilePos> damAt(uint32_t reach) const;
@@ -246,6 +257,7 @@ class Reservoirs {
         TilePos cell;
         bool blocked = false;  // undiverted delivery stays behind a dam
         WaterSurface head{WORLD_HEIGHT_Y};
+        bool belowDam = false;
     };
     void advanceTo(uint64_t step, std::span<const RiverIntake> intakes = {},
                    const CellQuery& access = {}, int periodX = 0);
@@ -298,6 +310,7 @@ class Reservoirs {
     bool needsFixedSteps() const;
     bool detachLake(uint32_t parent, TilePos seed, BreachSurvey survey,
                     WaterVolume trapped);
+    void rejoinLake(uint32_t body);
     WaterVolume drainCut(uint32_t body, TilePos mouth, uint64_t elapsed,
                          const CellQuery& access, int periodX);
 
@@ -379,10 +392,18 @@ class Reservoirs {
     std::unordered_map<uint32_t, WaterVolume> springRates;
     std::unordered_map<uint32_t, size_t> reachIndices;
     std::unordered_map<uint32_t, std::vector<size_t>> tributaries;
+    struct JunctionColumn {
+        Vec2i tile;
+        int ground;
+        WaterSurface water;
+    };
+    const std::vector<JunctionColumn>& junctionBanks(uint32_t reach);
+    std::unordered_map<uint32_t, std::vector<JunctionColumn>> junctionColumns;
     std::unordered_map<uint32_t, WaterVolume> naturalReachRates;
     std::map<uint32_t, StorageCurve> curves;
     std::map<uint32_t, WaterVolume> stores;
     std::map<uint32_t, ReachDelivery> deliveries;
+    std::unordered_set<uint32_t> groundwaterOutlets;
     std::map<uint32_t, WaterVolume> lossRates;
     std::map<uint32_t, Spill> spills;
     struct Breach {
@@ -393,9 +414,11 @@ class Reservoirs {
         bool oddUnit = false;
         bool dam = false;
         uint32_t parent = 0;
+        uint64_t closedAt = 0;
     };
     bool openConnection(uint32_t reach, TilePos opening, BreachSurvey survey,
                         bool dam);
+    WaterVolume breachLimit(const Breach& breach) const;
     static StorageCurve breachCurve(const BreachSurvey& survey);
     std::map<TilePos, Breach, TilePosLess> breaches;
     std::unordered_set<uint32_t> sealedSprings;

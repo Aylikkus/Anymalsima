@@ -8,7 +8,9 @@
 uint8_t tileOpacity(const Tile& tile, const DataStorage<Block>& blocks) {
     const int block =
         tile.block_id ? blocks.get(tile.block_id).properties.opacity : 0;
-    const int liquid = tile.isLiquid() ? 8 : 0;
+    const int liquid = tile.liquid == LiquidType::Water
+                           ? waterOpacity(tile.liquidLevel)
+                           : (tile.isLiquid() ? 8 : 0);
     return static_cast<uint8_t>(std::clamp(std::max(block, liquid), 0, 15));
 }
 

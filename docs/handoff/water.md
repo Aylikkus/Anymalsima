@@ -494,8 +494,12 @@ faces to the bed and waterline instead of assuming a wall on the surface
 seals the lake. The detached footprint does not refill from the old
 lake's projection, even when dry or reloaded. The cut stops draining
 when its source falls to the outlet sill or when it has no confirmed
-room downstream. Unknown or larger enclosures are not certified, and
-automatic rejoining of detached compartments is not implemented.
+room downstream. Unknown or larger enclosures are not certified. An edit
+or a newly loaded slab can reconnect a compartment through an open face
+at its lowest floor directly beside its parent lake. The compartment's
+remaining volume returns to the lake, which can then feed the cut at the
+lake's water level. An opening above the floor may still trap water below
+its sill.
 
 A loaded downhill path from a lake cut to a lower body or river can
 become a persistent channel. Each mouth delivers up to one block of water
@@ -528,28 +532,45 @@ beneath a wall in a deep channel. Near the headwater the open spring
 itself is enough to establish the upstream approach. The saved
 certificate records which nearby columns can actually be reached from
 upstream, so an irregular wall does not leave water on the wrong side of
-a straight cut. Unloaded wet voxels do not count as solid wall, and the
+a straight cut. A survey can use saved wall blocks in unloaded slabs. The
 saved certificate stays active when the wall unloads.
 
-While the upstream pool fills, the downstream reach loses delivery. The
-pool finds the lowest route over the wall and shows water on that route
-when overflow resumes. Nearby placements and removals recheck the crest
-and any loaded cuts through the channel floor or bank. Raising the wall
-keeps its stored water; opening a route releases the stored head and
-removes the spill sheet. The search is local, not a general solution for
-long bypasses or alternate spill destinations.
+Closing a dam starts a recession at the wall. Each downstream column
+retains its water until the front arrives, then loses depth over six in-game
+hours while the upstream pool fills. Downstream excavations draw from
+delivery that passes the dam. At a lake outlet, water cut off from the
+parent lake becomes finite local water. A second survey of the same wall
+keeps the existing parcels and drawdown clock.
+
+The spill survey compares connected paths through the channel and across
+the adjacent banks within 40 tiles of the wall. Connected bank depressions
+store water as it rises, and only a shallow sheet passes over the crest.
+The lowest saddle controls
+the upstream pool level. At equal heights the shorter path wins. Once the
+pool fills, overflow appears along that path and delivery resumes below
+the wall. Changes to the bank, floor or crest trigger another survey.
+Opening the wall releases stored head over time. At a river inlet, a wall
+built on the lake side of the mouth can also intercept delivery. A gap
+through the submerged wall still lets water into the lake. Other
+tributaries continue delivering water while the dam fills.
 
 Plugging a generated spring cuts its graph input; it does not remove
 the water already in the channel. The river recedes from the spring
 downstream over up to three quarters of a game day. Reopening the mouth
 sends a recovery front downstream; delivery to the receiver ramps up
-instead of returning all at once. Near a live confluence, the receiver's
-waterline can keep the lower bed wet and supply connected cuts without
-another terrain edit. Backwater tapers toward the tributary's floor
-instead of ending in a full-height water wall. Active tributaries also
+instead of returning all at once. At a confluence, adjoining wet columns
+supply the drained bed from the shared channel edge. This includes
+tributaries that join the same river side by side. A branch that ends
+on a plateau can still receive water from an adjoining higher channel.
+Where this water fills
+the drained bed, flow points into the bed and depth tapers to zero. Active tributaries also
 keep the main bed wet downstream from their junctions. Replacing and
 removing a block in the original river footprint restores its projection
 without creating a new intake.
+
+A lake with an outlet and no natural river supply receives groundwater at
+32 units per game second. It refills its own deficit before sending the
+remaining water into the outlet.
 
 A lake-fed outlet becomes shallower as the lake drains through its top
 storage band. Once the water falls below that band, the lake no longer
@@ -578,17 +599,20 @@ another fluid step is pending; solid edits still reject outdated
 geometry. Changes to a river stage or the exposed fill of a local cell schedule a
 water mesh refresh. Detailed chunks and distant patches containing a single
 lake track its current waterline while replacement geometry uploads. A flowing shoreline can keep changing while terrain
-jobs finish and upload.
+jobs finish and upload. River tops and exposed step faces use the same tile
+waterlines. Waterfall sheets can extend below the riverbed where the flow
+crosses into lower water.
 The first proxy shows only certified ocean: deep connected regions or
 ready shoreline masks. Low ground in a pending coastal survey stays dry
 until connectivity is known.
 
-`RSVR` v8 stores the surveyed upstream side of dams. v7 adds the clock
-time of spring reopening so a save preserves the recovery front. v6 adds
+`RSVR` v9 adds the dam closure time. v8 stores the surveyed upstream
+side of dams. v7 adds the time of spring reopening so a save preserves
+the recovery front. v6 adds
 surface-runoff certificates and the clock time of each spring seal. Older
 seals are treated as past their recession period.
 v5 adds channel paths, sill heights, receivers and pending arrivals.
-Ledger versions 1 through 7 remain readable. v4 persists detached lake
+Ledger versions 1 through 8 remain readable. v4 persists detached lake
 compartments, their footprints and their original lake IDs. v3 stores
 certified surface breaches, dam pool footprints, and sealed generated
 springs. v2 stores confirmed portals, runtime aquifer outlet records and

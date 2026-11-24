@@ -12,6 +12,7 @@
 
 namespace {
 constexpr auto MaxVolume = std::numeric_limits<WaterVolume>::max();
+constexpr WaterVolume LakeSeepRate = 32;
 constexpr uint64_t ReachFlag = uint64_t{1} << 32;
 
 WaterVolume add(WaterVolume a, WaterVolume b) {
@@ -128,25 +129,68 @@ unsigned riverTransition(uint64_t age, uint64_t delay) {
 }
 }  // namespace
 
+bool ReservoirSnapshot::RiverStage::belowCut(int x, int z, int surface) const {
+    const auto dx = WorldWrap::delta(x, cut.x, periodX);
+    const auto dz = int64_t(z) - cut.z;
+    if (damUpstream && std::abs(dx) <= DamRadius && std::abs(dz) <= DamRadius)
+        return !std::binary_search(
+            damUpstream->begin(), damUpstream->end(),
+            columnKey(int(WorldWrap::mod(x, periodX)), z));
+    if (surface == head && (downstream.x || downstream.y))
+        return dx * downstream.x + dz * downstream.y > 0;
+    return surface <= head;
+}
+
+bool ReservoirSnapshot::RiverStage::isolatesLake(uint32_t body, int x,
+                                                 int z) const {
+    return body && outletLake == body && damUpstream &&
+           std::abs(WorldWrap::delta(x, cut.x, periodX)) <= DamRadius &&
+           std::abs(int64_t(z) - cut.z) <= DamRadius && belowCut(x, z, head);
+}
+
 int ReservoirSnapshot::RiverStage::backwaterAt(int x, int z, int bottom,
-                                               int full) const {
-    if (!backwaterReach || backwaterHead <= bottom) return bottom;
-    const auto distance = std::abs(WorldWrap::delta(x, junction.x, periodX)) +
-                          std::abs(int64_t(z) - junction.y);
+                                               int full, uint32_t* source,
+                                               Vec2* direction) const {
+    int highest = bottom;
+    const Backwater* supplier = nullptr;
     constexpr int Reach = 32;
-    // Keep the receiving level at the join. Upstream, taper the actual
-    // depth (not just the elevation) to the available bed, so even a deep
-    // channel cannot terminate in a vertical wall at the range limit.
-    const int depth = std::max(0, std::min(full, backwaterHead) - bottom);
-    return bottom +
-           depth * int(std::clamp<int64_t>(Reach - distance, 0, Reach - 2)) /
-               (Reach - 2);
+    int nearest = Reach;
+    for (const auto& bank : banks) {
+        const auto distance =
+            std::abs(WorldWrap::delta(x, bank.tile.x, periodX)) +
+            std::abs(int64_t(z) - bank.tile.y);
+        if (distance >= Reach) continue;
+        const int depth = std::min(full, bank.head) - bottom;
+        const int head =
+            bottom + depth *
+                         int(std::min<int64_t>(Reach - 2, Reach - distance)) /
+                         (Reach - 2);
+        if (head <= bottom || head < highest ||
+            (head == highest && distance >= nearest))
+            continue;
+        highest = head;
+        nearest = int(distance);
+        supplier = &bank;
+    }
+    if (supplier) {
+        if (source) *source = supplier->reach;
+        if (direction && nearest) {
+            const float dx =
+                float(WorldWrap::delta(x, supplier->tile.x, periodX));
+            const float dz = float(z - supplier->tile.y);
+            const float length = std::hypot(dx, dz);
+            *direction = {dx / length, dz / length};
+        }
+    }
+    return highest;
 }
 
 WaterSurface ReservoirSnapshot::projectStanding(
     const GeneratedHydrology* hydrology, int x, int z, int ground,
-    WaterSurface baseline) const {
+    WaterSurface baseline, bool includeBackwater) const {
     if (baseline.body && !baseline.reach) {
+        for (const auto& [reach, stage] : riverStages)
+            if (stage.isolatesLake(baseline.body, x, z)) return {};
         const auto key = columnKey(x, z);
         for (const auto& [id, pool] : pools)
             if (pool.parent == baseline.body &&
@@ -172,27 +216,18 @@ WaterSurface ReservoirSnapshot::projectStanding(
     } else if (const auto it = riverStages.find(baseline.reach);
                it != riverStages.end()) {
         const auto& stage = it->second;
-        bool belowCut = baseline.surfaceY <= stage.head;
-        if (baseline.surfaceY == stage.head &&
-            (stage.downstream.x || stage.downstream.y)) {
-            const auto dx = WorldWrap::delta(x, stage.cut.x, stage.periodX);
-            belowCut = dx * stage.downstream.x +
-                           int64_t(z - stage.cut.z) * stage.downstream.y >
-                       0;
+        const bool belowCut = stage.belowCut(x, z, baseline.surfaceY);
+        unsigned limit = belowCut ? stage.percent : 100;
+        if (belowCut && stage.damAge) {
+            const auto delay =
+                riverDelay({stage.cut.x, stage.cut.z}, {x, z}, stage.periodX);
+            limit = 100 - riverTransition(*stage.damAge, delay);
         }
-        if (stage.damUpstream &&
-            std::abs(WorldWrap::delta(x, stage.cut.x, stage.periodX)) <=
-                RiverStage::DamRadius &&
-            std::abs(int64_t(z) - stage.cut.z) <= RiverStage::DamRadius) {
-            const int wx = int(WorldWrap::mod(x, stage.periodX));
-            belowCut =
-                !std::binary_search(stage.damUpstream->begin(),
-                                    stage.damUpstream->end(), columnKey(wx, z));
-        }
-        const unsigned limit = belowCut ? stage.percent : 100;
-        unsigned percent = std::min(limit, stage.lakeSupplyPercent);
+        unsigned percent = stage.damAge && belowCut
+                               ? limit * stage.lakeSupplyPercent / 100
+                               : std::min(limit, stage.lakeSupplyPercent);
         if (stage.receding || stage.recovering ||
-            stage.lakeSupplyPercent < 100) {
+            stage.lakeSupplyPercent < 100 || stage.damAge) {
             if (stage.receding || stage.recovering) {
                 const auto delay =
                     riverDelay(stage.spring, {x, z}, stage.periodX);
@@ -210,6 +245,9 @@ WaterSurface ReservoirSnapshot::projectStanding(
             }
             unsigned tributaryPercent = 0;
             for (const auto& inlet : stage.inlets) {
+                if (stage.damAge && belowCut &&
+                    !stage.belowCut(inlet.tile.x, inlet.tile.y, inlet.height))
+                    continue;
                 if (baseline.surfaceY > inlet.height) continue;
                 const auto dx =
                     WorldWrap::delta(x, inlet.tile.x, stage.periodX);
@@ -219,7 +257,8 @@ WaterSurface ReservoirSnapshot::projectStanding(
                         0)
                     tributaryPercent += inlet.percent;
             }
-            percent = std::max(percent, std::min(limit, tributaryPercent));
+            percent = std::max(percent, std::min(stage.damAge ? 100u : limit,
+                                                 tributaryPercent));
         }
         const int depthAtCenter =
             (std::max<int>(1, baseline.riverDepth) - 1) * 255 +
@@ -230,8 +269,15 @@ WaterSurface ReservoirSnapshot::projectStanding(
             percent
                 ? full - (depthAtCenter - depthAtCenter * int(percent) / 100)
                 : bottom;
-        if (!stage.damUpstream || belowCut)
-            head = std::max(head, stage.backwaterAt(x, z, bottom, full));
+        if (includeBackwater && (!stage.damUpstream || belowCut)) {
+            Vec2 direction = baseline.flow;
+            const int backwater =
+                stage.backwaterAt(x, z, bottom, full, nullptr, &direction);
+            if (backwater > head) {
+                head = backwater;
+                baseline.flow = direction;
+            }
+        }
         const int depth = head - bottom;
         if (depth <= 0) return {};
         baseline.surfaceY = ground + 1 + (depth + 254) / 255;
@@ -253,6 +299,8 @@ WaterSurface ReservoirSnapshot::projectLakeInflow(
     const GeneratedHydrology* hydrology, int x, int z, int ground,
     uint32_t body) const {
     if (!hydrology || !body || !levels.contains(body)) return {};
+    for (const auto& [reach, stage] : riverStages)
+        if (stage.isolatesLake(body, x, z)) return {};
     const auto* inlet = hydrology->lakeInflowAt(x, z);
     if (!inlet || inlet->body != body) {
         if (hydrology->lakeSpringAt(body, x, z) &&
@@ -460,7 +508,8 @@ void Reservoirs::publish(std::shared_ptr<ReservoirSnapshot> next,
     view.store(std::move(next));
     if (!emitted.bodies.empty() || !emitted.reaches.empty() || emitted.local ||
         !emitted.locals.empty()) {
-        if (!emitted.bodies.empty() && !poolFootprints.empty()) {
+        if (!emitted.pools && !emitted.bodies.empty() &&
+            !poolFootprints.empty()) {
             if (!publishedFootprints)
                 publishedFootprints = std::make_shared<
                     const std::map<uint32_t, std::vector<Vec2i>>>(
@@ -865,6 +914,14 @@ StorageCurve Reservoirs::breachCurve(const BreachSurvey& survey) {
     return StorageCurve(std::move(storage));
 }
 
+// A flowing spillway needs only a shallow sheet above its sill.
+WaterVolume Reservoirs::breachLimit(const Breach& breach) const {
+    const auto& shape = curves.at(breach.pool);
+    if (!breach.dam) return shape.capacity();
+    const auto atSill = shape.volumeAt(breach.survey.head - 1);
+    return atSill + (shape.capacity() - atSill + 15) / 16;
+}
+
 bool Reservoirs::hasBreach(TilePos p) const {
     const auto it = breaches.find(p);
     return it != breaches.end() && it->second.open;
@@ -874,8 +931,69 @@ bool Reservoirs::openBreach(uint32_t reach, TilePos p, BreachSurvey survey) {
     return openConnection(reach, p, std::move(survey), false);
 }
 
-bool Reservoirs::openDam(uint32_t reach, TilePos p, BreachSurvey survey) {
-    return openConnection(reach, p, std::move(survey), true);
+bool Reservoirs::openDam(uint32_t reach, TilePos p, BreachSurvey survey,
+                         const std::function<bool(TilePos)>& solid) {
+    const auto before = snapshot();
+    if (!openConnection(reach, p, std::move(survey), true)) return false;
+    const auto current = snapshot();
+    if (before == current) return true;
+    const auto found = current->riverStages.find(reach);
+    if (found == current->riverStages.end() || !found->second.outletLake)
+        return true;
+    const auto& stage = found->second;
+    const auto body = stage.outletLake;
+    std::shared_ptr<ReservoirSnapshot> next;
+    ReservoirChange change;
+    // Transfer each newly isolated lake cell once. Its remaining water can
+    // now run out through the mouth, or stay behind if completely enclosed.
+    constexpr int radius = ReservoirSnapshot::RiverStage::DamRadius;
+    WaterVolume remaining = 0;
+    for (int dz = -radius; dz <= radius; ++dz)
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int x = int(WorldWrap::mod(p.x + dx, stage.periodX)),
+                      z = p.z + dz;
+            if (!stage.isolatesLake(body, x, z)) continue;
+            if (const auto old = before->riverStages.find(reach);
+                old != before->riverStages.end() &&
+                old->second.isolatesLake(body, x, z))
+                continue;
+            const auto [ground, base] = generated->sampleColumn(x, z);
+            if (base.body != body || base.reach) continue;
+            const auto water =
+                before->projectStanding(generated.get(), x, z, ground, base);
+            for (int y = ground + 1; y < water.surfaceY; ++y) {
+                const TilePos cell{x, y, z};
+                if (solid && solid(cell)) continue;
+                if (!next) {
+                    next = std::make_shared<ReservoirSnapshot>(*current);
+                    remaining = volume(body);
+                }
+                const auto fill = next->cells.fill(cell);
+                const int moved = int(std::min<WaterVolume>(
+                    remaining,
+                    std::max(0, int(water.fillAt(y, ground)) - fill)));
+                if (!moved) continue;
+                next->cells.set(cell, uint8_t(fill + moved));
+                remaining -= moved;
+                change.locals.push_back(cell);
+            }
+        }
+    for (auto it = channels.begin(); it != channels.end();) {
+        auto& channel = it->second;
+        if (channel.from == body &&
+            std::erase_if(channel.mouths, [&](const auto& entry) {
+                const auto intake = entry.second.path.back();
+                return stage.isolatesLake(body, intake.x, intake.z);
+            }))
+            channelPathsChanged = true;
+        it = channel.mouths.empty() ? channels.erase(it) : std::next(it);
+    }
+    if (next && !change.locals.empty()) {
+        stores[body] = remaining;
+        updateLevel(*next, *curve(body), body, change);
+        publish(std::move(next), change);
+    }
+    return true;
 }
 
 bool Reservoirs::connectValley(uint32_t source, TilePos gate, TilePos intake,
@@ -972,6 +1090,47 @@ bool Reservoirs::detachLake(uint32_t parent, TilePos seed, BreachSurvey survey,
     return true;
 }
 
+void Reservoirs::rejoinLake(uint32_t body) {
+    const auto current = snapshot();
+    const auto pool = current->pools.find(body);
+    if (pool == current->pools.end() || !pool->second.parent) return;
+    const uint32_t parent = pool->second.parent;
+    auto volumeToReturn = volume(body);
+    if (const auto pending = pendingInflow.find(body);
+        pending != pendingInflow.end()) {
+        volumeToReturn = add(volumeToReturn, pending->second);
+        pendingInflow.erase(pending);
+    }
+
+    // Channels touching the old compartment need a new survey against the
+    // parent lake's head. Local intakes will still run in the meantime.
+    channelPathsChanged |=
+        std::erase_if(channels, [body](const auto& entry) {
+            return entry.second.from == body || entry.second.to.body == body;
+        }) != 0;
+    std::erase_if(breaches, [body](const auto& entry) {
+        return entry.second.pool == body;
+    });
+    stores.erase(body);
+    curves.erase(body);
+    publishedFootprints.reset();
+
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->pools.erase(body);
+    for (auto& [cell, target] : next->portals)
+        if (target == body) target = parent;
+    auto footprint = poolFootprints.extract(body);
+    ReservoirChange change;
+    change.bodies.push_back(body);
+    auto removedFootprint =
+        std::make_shared<std::map<uint32_t, std::vector<Vec2i>>>();
+    removedFootprint->insert(std::move(footprint));
+    change.pools = std::move(removedFootprint);
+    receive({parent}, volumeToReturn, next, change);
+    ++serial;
+    publish(std::move(next), change);
+}
+
 bool Reservoirs::hasLakeOutletFlow(WaterSurface source) const {
     if (!source.reach) return lakeOutletReaches.contains(source.body);
     const auto it = reachIndices.find(source.reach);
@@ -1020,6 +1179,7 @@ bool Reservoirs::openConnection(uint32_t reach, TilePos p, BreachSurvey survey,
         if (same) {
             if (it->second.open) return true;
             it->second.open = true;
+            it->second.closedAt = budgetStep;
             ++serial;
             if (dam) {
                 next = std::make_shared<ReservoirSnapshot>(*snapshot());
@@ -1063,6 +1223,13 @@ bool Reservoirs::openConnection(uint32_t reach, TilePos p, BreachSurvey survey,
         if (!shape.capacity()) return false;
         next = std::make_shared<ReservoirSnapshot>(*current);
         const auto before = replacing ? volume(body) : 0;
+        const auto priorStage = current->riverStages.find(reach);
+        const uint64_t closedAt =
+            replacing && existing->second.open &&
+                    priorStage != current->riverStages.end() &&
+                    priorStage->second.damAge
+                ? existing->second.closedAt
+                : budgetStep;
         if (replacing)
             for (const auto& c : existing->second.survey.columns)
                 for (int slab = c.floor / Chunk::SIZE_Y;
@@ -1080,8 +1247,8 @@ bool Reservoirs::openConnection(uint32_t reach, TilePos p, BreachSurvey survey,
         next->pools.insert_or_assign(body,
                                      PoolState{-1, 255, std::move(geometry)});
         updateLevel(*next, shape, body, change);
-        breaches.insert_or_assign(
-            p, Breach{reach, body, std::move(survey), true, false, dam});
+        breaches.insert_or_assign(p, Breach{reach, body, std::move(survey),
+                                            true, false, dam, 0, closedAt});
     }
     ++serial;
     updateRiverStage(reach, next, change);
@@ -1107,6 +1274,47 @@ bool Reservoirs::closeBreach(TilePos p) {
     return true;
 }
 
+const std::vector<Reservoirs::JunctionColumn>& Reservoirs::junctionBanks(
+    uint32_t reach) {
+    auto [entry, inserted] = junctionColumns.try_emplace(reach);
+    if (!inserted) return entry->second;
+    const auto& route = generated->riverReaches()[reachIndices.at(reach)];
+    // A tributary can stop beside the receiving channel when that channel
+    // is above its grade. The delivery graph stays downhill, but water can
+    // still enter the lower reach across their shared edge.
+    std::vector<Vec2i> joins{route.outlet};
+    if (const auto it = tributaries.find(reach); it != tributaries.end())
+        for (auto index : it->second)
+            joins.push_back(generated->riverReaches()[index].outlet);
+    std::set<std::pair<int, int>> sampled;
+    for (auto join : joins)
+        for (int dz = -16; dz <= 16; ++dz)
+            for (int dx = -16; dx <= 16; ++dx) {
+                const int x =
+                    int(WorldWrap::mod(join.x + dx, generated->periodX()));
+                const int z = join.y + dz;
+                const auto other = generated->riverAt(x, z);
+                if (!other || other->water.reach == reach ||
+                    other->distance > other->radius)
+                    continue;
+                for (auto d :
+                     std::array<Vec2i, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+                    const auto own = generated->riverAt(x + d.x, z + d.y);
+                    if (!own || own->water.reach != reach ||
+                        own->distance > own->radius)
+                        continue;
+                    if (sampled.emplace(x, z).second) {
+                        const auto [ground, water] =
+                            generated->sampleRiverColumn(x, z);
+                        if (water.reach == other->water.reach)
+                            entry->second.push_back({{x, z}, ground, water});
+                    }
+                    break;
+                }
+            }
+    return entry->second;
+}
+
 void Reservoirs::updateRiverStage(uint32_t reach,
                                   std::shared_ptr<ReservoirSnapshot>& next,
                                   ReservoirChange& change) {
@@ -1117,13 +1325,25 @@ void Reservoirs::updateRiverStage(uint32_t reach,
     bool hasBreachStage = false;
     for (const auto& [p, breach] : breaches)
         if (breach.reach == reach && breach.open &&
-            volume(breach.pool) < curves.at(breach.pool).capacity()) {
+            (volume(breach.pool) < breachLimit(breach) ||
+             (breach.dam && route.lakeSource))) {
             if (breach.dam && stage.percent) {
                 const auto channel = generated->riverAt(p.x, p.z);
                 if (!channel) continue;
-                stage = {channel->water.surfaceY, 0, p, channel->water.flow,
-                         generated->periodX()};
+                stage.head = channel->water.surfaceY;
+                stage.percent = 0;
+                stage.cut = p;
+                stage.downstream = channel->water.flow;
+                stage.periodX = generated->periodX();
                 stage.damUpstream = breach.survey.damUpstream;
+                if (volume(breach.pool) >= breachLimit(breach))
+                    stage.percent = 100;
+                else
+                    stage.damAge =
+                        std::min(MaxRiverAge, (budgetStep - breach.closedAt) /
+                                                  RiverStageInterval *
+                                                  RiverStageInterval);
+                if (route.lakeSource) stage.outletLake = route.lakeSource->body;
                 break;
             }
             if (stage.percent == 100 || hasBreachStage) {
@@ -1160,8 +1380,10 @@ void Reservoirs::updateRiverStage(uint32_t reach,
                     : 0;
         }
     }
-    if (stage.receding || stage.recovering || stage.lakeSupplyPercent < 100) {
-        stage.spring = route.spring.tile;
+    if (stage.receding || stage.recovering || stage.lakeSupplyPercent < 100 ||
+        stage.damAge) {
+        stage.spring =
+            route.lakeSource ? route.lakeSource->tile : route.spring.tile;
         stage.periodX = generated->periodX();
         // Coalesce projection invalidations rather than remeshing on each
         // fixed second. A v5 seal without a timestamp has already drained.
@@ -1181,6 +1403,18 @@ void Reservoirs::updateRiverStage(uint32_t reach,
             for (size_t index : it->second) {
                 const auto& branch = generated->riverReaches()[index];
                 auto rate = springRates.at(branch.id);
+                if (branch.lakeSource) {
+                    rate = naturalReachRates.at(branch.id);
+                    const auto lake = branch.lakeSource->body;
+                    if (stores.contains(lake)) {
+                        const auto& shape = curves.at(lake);
+                        const auto stored = stores.at(lake);
+                        rate = shape.levelAt(stored) ==
+                                       shape.levelAt(shape.capacity())
+                                   ? rate * shape.fillAtSurface(stored) / 255
+                                   : 0;
+                    }
+                }
                 if (!rate || sealedSprings.contains(branch.id)) continue;
                 if (const auto open = springReopenedAt.find(branch.id);
                     open != springReopenedAt.end()) {
@@ -1195,8 +1429,7 @@ void Reservoirs::updateRiverStage(uint32_t reach,
                                     const auto& b = entry.second;
                                     return b.reach == branch.id && b.dam &&
                                            b.open &&
-                                           volume(b.pool) <
-                                               curves.at(b.pool).capacity();
+                                           volume(b.pool) < breachLimit(b);
                                 }))
                     continue;
                 if (const auto delivery = deliveries.find(branch.id);
@@ -1219,42 +1452,39 @@ void Reservoirs::updateRiverStage(uint32_t reach,
                                         junction->water.surfaceY,
                                         unsigned(supply)});
             }
-        if (route.end == GeneratedHydrology::RiverEnd::Confluence) {
-            stage.junction = route.outlet;
-            stage.backwaterReach = route.receiver;
-            const auto current = snapshot();
-            const auto& projection = next ? *next : *current;
-            for (int dz = -1; dz <= 1; ++dz)
-                for (int dx = -1; dx <= 1; ++dx) {
-                    const int x =
-                        int(WorldWrap::mod(route.outlet.x + dx, stage.periodX));
-                    const int z = route.outlet.y + dz;
-                    const auto [ground, base] =
-                        generated->sampleRiverColumn(x, z);
-                    if (base.reach != route.receiver) continue;
-                    const auto wet = projection.projectStanding(
-                        generated.get(), x, z, ground, base);
-                    if (wet.wet())
-                        stage.backwaterHead =
-                            std::max(stage.backwaterHead,
-                                     wet.topTile() * 255 + wet.topFill);
-                }
+        const auto current = snapshot();
+        const auto& projection = next ? *next : *current;
+        for (const auto& bank : junctionBanks(reach)) {
+            const auto wet = projection.projectStanding(
+                generated.get(), bank.tile.x, bank.tile.y, bank.ground,
+                bank.water, false);
+            if (wet.wet())
+                stage.banks.push_back(
+                    {bank.tile, wet.topTile() * 255 + wet.topFill, wet.reach});
         }
     }
     const auto view = snapshot();
     const auto* current = next ? next.get() : view.get();
     const auto it = current->riverStages.find(reach);
     const bool natural = stage.percent == 100 && !stage.receding &&
-                         !stage.recovering && stage.lakeSupplyPercent == 100;
+                         !stage.recovering && stage.lakeSupplyPercent == 100 &&
+                         !stage.outletLake;
     if (natural ? it == current->riverStages.end()
                 : it != current->riverStages.end() && it->second == stage)
         return;
+    const bool lakeMaskChanged =
+        route.lakeSource &&
+        (it == current->riverStages.end()
+             ? stage.outletLake != 0
+             : it->second.outletLake != stage.outletLake ||
+                   it->second.damUpstream != stage.damUpstream);
     if (!next) next = std::make_shared<ReservoirSnapshot>(*snapshot());
     if (natural)
         next->riverStages.erase(reach);
     else
         next->riverStages[reach] = stage;
     change.reaches.push_back(reach);
+    if (lakeMaskChanged) change.bodies.push_back(route.lakeSource->body);
     if (route.end == GeneratedHydrology::RiverEnd::Lake &&
         next->levels.contains(route.receiver))
         change.bodies.push_back(route.receiver);
@@ -1900,6 +2130,12 @@ void Reservoirs::buildNaturalBudget() {
             // At a full through-lake, leave half of normal inflow for its
             // outlet. A terminal body loses the entire normal delivery.
             const auto loss = next ? amount / 2 : amount;
+            // An outlet from a groundwater-fed lake also has a water
+            // budget when its source lake is full.
+            if (next && !amount && lakeOutletReaches.contains(uint32_t(node))) {
+                groundwaterOutlets.insert(uint32_t(node));
+                amount = LakeSeepRate;
+            }
             if (loss) lossRates[uint32_t(node)] = loss;
             amount -= loss;
         }
@@ -1979,6 +2215,11 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                     add(totals[size_t(ReservoirExchange::Disposal)], -amount);
         pendingInflow.clear();
     }
+    const auto seepBudget = scale(LakeSeepRate, elapsed);
+    for (const auto body : groundwaterOutlets) {
+        const Node reach = ReachFlag | lakeOutletReaches.at(body);
+        incoming[reach] = add(incoming[reach], seepBudget);
+    }
     // A drawn-down natural basin exposes groundwater. Bound the seep to
     // one eighth block per game second and stop exactly at its resting level.
     for (auto& [body, stored] : stores) {
@@ -1992,8 +2233,10 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                 generated->waterAt(p.x, p.z).body == body)
                 capacity -= curves.at(breach.pool).capacity();
         const auto supplied =
-            std::clamp<WaterVolume>(capacity - stored, 0, scale(32, elapsed));
+            std::clamp<WaterVolume>(capacity - stored, 0, seepBudget);
         if (!supplied) continue;
+        if (groundwaterOutlets.contains(body))
+            incoming[ReachFlag | lakeOutletReaches.at(body)] -= supplied;
         const auto before = stored;
         stored += supplied;
         totals[size_t(ReservoirExchange::Input)] =
@@ -2008,6 +2251,8 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
         if (next) publish(std::move(next), change);
         return;
     }
+    const auto previousStages = snapshot();
+    std::unordered_map<Node, WaterVolume> belowDam;
     std::unordered_map<uint32_t, std::vector<const RiverIntake*>> byReach;
     for (const auto& intake : intakes)
         if (intake.cell.x >= 0 && intake.cell.z >= 0 && intake.cell.y >= 0 &&
@@ -2036,9 +2281,12 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                     recoveredSeconds(age - std::min(age, elapsed), delay);
             }
             amount = add(amount, scale(rate, sourceTime));
-            if (const auto it = byReach.find(id); it != byReach.end()) {
+            const auto offerIntakes = [&](bool downstream) {
+                const auto it = byReach.find(id);
+                if (it == byReach.end()) return false;
                 bool blocked = false;
                 for (const auto* intake : it->second) {
+                    if (intake->belowDam != downstream) continue;
                     blocked |= intake->blocked;
                     const auto current = snapshot();
                     const auto& cells = next ? next->cells : current->cells;
@@ -2066,11 +2314,12 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                     change.locals.push_back(intake->cell);
                     amount -= accepted;
                 }
-                if (blocked) {
-                    auto& delivery = deliveries[id];
-                    delivery.held = add(delivery.held, amount);
-                    continue;
-                }
+                return blocked;
+            };
+            if (offerIntakes(false)) {
+                auto& delivery = deliveries[id];
+                delivery.held = add(delivery.held, amount);
+                amount = 0;
             }
             // Retained head releases once if the wall has been removed.
             for (const auto& [opening, breach] : breaches) {
@@ -2085,25 +2334,37 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                 updateLevel(*next, curves.at(breach.pool), breach.pool, change);
             }
             for (auto& [opening, breach] : breaches) {
-                if (breach.reach != id || !breach.open || !amount) continue;
+                if (breach.reach != id || !breach.open) continue;
                 const auto& shape = curves.at(breach.pool);
                 const auto before = volume(breach.pool);
-                if (before == shape.capacity()) continue;
+                const auto limit = breachLimit(breach);
+                // Older saves may hold a full voxel above the spillway.
+                // Route that excess through the same downstream budget.
+                if (before > limit) {
+                    stores[breach.pool] = limit;
+                    amount = add(amount, before - limit);
+                    if (!next)
+                        next = std::make_shared<ReservoirSnapshot>(*snapshot());
+                    updateLevel(*next, shape, breach.pool, change);
+                }
+                if (before >= limit || !amount) continue;
                 const auto offered =
                     breach.dam ? amount
                                : amount / 2 + (amount % 2 && breach.oddUnit);
                 if (!breach.dam) breach.oddUnit ^= bool(amount % 2);
-                const auto accepted =
-                    std::min(offered, shape.capacity() - before);
+                const auto accepted = std::min(offered, limit - before);
                 if (!accepted) continue;
                 stores[breach.pool] = before + accepted;
                 amount -= accepted;
                 if (!next)
                     next = std::make_shared<ReservoirSnapshot>(*snapshot());
                 updateLevel(*next, shape, breach.pool, change);
-                if (stores.at(breach.pool) == shape.capacity())
+                if (stores.at(breach.pool) == limit)
                     updateRiverStage(id, next, change);
             }
+            if (const auto it = belowDam.find(node); it != belowDam.end())
+                amount = add(amount, it->second);
+            offerIntakes(true);
             if (!target && amount) {
                 // Closed generated routes retain arrivals until a confirmed
                 // receiver becomes available.
@@ -2135,7 +2396,27 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                 target != 0, overflow, next, change);
             amount = overflow;
         }
-        if (target && amount) incoming[target] = add(incoming[target], amount);
+        if (target && amount) {
+            // Water entering below the wall bypasses its upstream pool.
+            auto* arrivals = &incoming;
+            if ((node & ReachFlag) && (target & ReachFlag)) {
+                const auto stage =
+                    previousStages->riverStages.find(uint32_t(target));
+                if (stage != previousStages->riverStages.end() &&
+                    stage->second.damAge) {
+                    const auto join =
+                        generated
+                            ->riverReaches()[reachIndices.at(uint32_t(node))]
+                            .outlet;
+                    const auto column = generated->riverAt(join.x, join.y);
+                    if (column && stage->second.belowCut(
+                                      join.x, join.y, column->water.surfaceY))
+                        arrivals = &belowDam;
+                }
+            }
+            auto& received = (*arrivals)[target];
+            received = add(received, amount);
+        }
     }
     // Dam spills drain the reach's held delivery into their upstream pool
     // band by band until the pool reaches the crest; the surplus crosses
@@ -2191,7 +2472,9 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
             springReopenedAt.erase(reopened);
             springClosedAt.erase(id);
         }
-        if (sealedSprings.contains(id) || recovering || reach.lakeSource)
+        if (sealedSprings.contains(id) || recovering || reach.lakeSource ||
+            (previousStages->riverStages.contains(id) &&
+             previousStages->riverStages.at(id).damAge))
             updateRiverStage(id, next, change);
     }
     if (next) publish(std::move(next), change);
@@ -2223,6 +2506,7 @@ Bytes Reservoirs::encode() const {
         out.write(uint32_t(upstream ? upstream->size() : 0));
         if (upstream)
             for (const auto key : *upstream) out.write(key);
+        out.write(breach.closedAt);
     }
     const std::set<uint32_t> orderedSprings(sealedSprings.begin(),
                                             sealedSprings.end());
@@ -2320,14 +2604,14 @@ Bytes Reservoirs::encode() const {
         out.write(step);
     }
     SectionContainer file;
-    file.put("RSVR", 8, out.take());
+    file.put("RSVR", 9, out.take());
     return file.encode();
 }
 
 void Reservoirs::restore(ByteView bytes) {
     const auto file = SectionContainer::decode(bytes);
     const auto* section = file.find("RSVR");
-    if (!section || section->version > 8 || !section->version)
+    if (!section || section->version > 9 || !section->version)
         throw SerializationError("Unsupported reservoir ledger");
     BinaryReader in(section->data);
     const auto savedStep = in.read<uint64_t>();
@@ -2398,6 +2682,10 @@ void Reservoirs::restore(ByteView bytes) {
                     survey.damUpstream = std::move(upstream);
                 }
             }
+            const uint64_t closedAt =
+                section->version >= 9 ? in.read<uint64_t>() : 0;
+            if (closedAt > savedStep)
+                throw SerializationError("Invalid dam closure time");
             next->pools.emplace(
                 body, PoolState{-1, 255, std::move(geometry), parent,
                                 (open & 2) && !(open & 1) ? head - 1 : -1});
@@ -2405,7 +2693,7 @@ void Reservoirs::restore(ByteView bytes) {
             if (!savedBreaches
                      .emplace(p, Breach{reach, body, std::move(survey),
                                         bool(open & 1), bool(odd),
-                                        bool(open & 2), parent})
+                                        bool(open & 2), parent, closedAt})
                      .second)
                 throw SerializationError("Duplicate river breach");
         }
@@ -2659,6 +2947,11 @@ void Reservoirs::restore(ByteView bytes) {
     for (auto it = order.rbegin(); it != order.rend(); ++it)
         if (it->node & ReachFlag)
             updateRiverStage(uint32_t(it->node), next, change);
+    // Side-by-side channels can supply backwater without a delivery edge.
+    // Recheck against the restored stages, regardless of graph order.
+    const auto stagedReaches = change.reaches;
+    for (const auto reach : stagedReaches)
+        updateRiverStage(reach, next, change);
     view.store(std::move(next));
     ++serial;
 }

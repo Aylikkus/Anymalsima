@@ -83,8 +83,9 @@ Direct sunlight starts at 15 and crosses air vertically without distance loss.
 A cell receives incoming light before its opacity reduces transmission through
 it. Indirect sunlight spreads through all six face neighbors, transmitting
 `max(0, incoming - max(1, current_cell_opacity))`. An opaque cell receives light
-on its surface but transmits none. The strongest contribution wins. Water/liquid
-opacity is 8; combined block/liquid opacity is their maximum.
+on its surface but transmits none. The strongest contribution wins. Water
+opacity is up to 8 according to fill. Combined block/liquid opacity is their
+maximum.
 
 Direct sources are separate from final sunlight. Indirect jobs solve a target
 chunk and a 14-tile halo from fresh direct sources, and publish only that target.

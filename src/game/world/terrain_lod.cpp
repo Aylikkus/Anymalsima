@@ -91,8 +91,10 @@ void waterTile(Mesh& patch, SurfaceSampler& sampler, int x, int z,
             continue;
         const auto other = sampler.waterAt(x + dx, z + dz);
         if (other.height() >= water.height()) continue;
-        const float bottom =
+        float bottom =
             std::max(other.height(), float(sampler.height(x + dx, z + dz) + 1));
+        if (water.reach && !water.fallsToward(other, dx, dz))
+            bottom = std::max(bottom, float(sampler.height(x, z) + 1));
         if (bottom >= y) continue;
         const Vec2 flow = water.reach ? water.flow : Vec2(float(dx), float(dz));
         const float sx = a + (dx > 0 || dz > 0);
@@ -476,9 +478,10 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
                     if (tz + dz < 0 || tz + dz >= sampler.depth()) continue;
                     const auto other = sampler.waterAt(tx + dx, tz + dz);
                     if (other.surfaceY >= water.surfaceY) continue;
-                    lowWater = std::min(
-                        lowWater, water.dropBottom(
-                                      other, sampler.height(tx + dx, tz + dz)));
+                    int bed = sampler.height(tx + dx, tz + dz);
+                    if (water.reach && !water.fallsToward(other, dx, dz))
+                        bed = std::max(bed, ground);
+                    lowWater = std::min(lowWater, water.dropBottom(other, bed));
                 }
                 highWater = std::max(highWater, water.topTile());
             }
