@@ -22,6 +22,7 @@
 #include "render/render_views.hpp"
 #include "resource_manager.hpp"
 #include "sky_renderer.hpp"
+#include "weather_scene.hpp"
 #include "world/block_light_propagator.hpp"
 #include "world/day_night.hpp"
 #include "world/flora_renderer.hpp"
@@ -47,6 +48,9 @@ int main(int argc, char** argv) {
     if (!bgfx::init(init)) return 2;
     int result = 0;
     const std::string scenario = argc > 3 ? argv[3] : "mountains";
+    const bool weatherSeam = scenario == "weather_seam";
+    const bool weatherWalk = scenario == "weather_walk";
+    const bool weather = scenario == "weather" || weatherSeam || weatherWalk;
     const bool riverScene = scenario == "river";
     const char* savedScene = std::getenv("SMOKE_SAVE");
     const bool savedWalk = savedScene && (scenario == "saved_walk" ||
@@ -74,12 +78,13 @@ int main(int argc, char** argv) {
     // Allow forest captures (including handover) to exercise sky shading
     // independently of the lamp and shadow phases of the lights scenario.
     const bool forestLighting =
-        savedScene || lights || std::getenv("SMOKE_FOREST");
+        savedScene || lights || weather || std::getenv("SMOKE_FOREST");
     const bool occlusion = forestLighting && !std::getenv("SMOKE_NO_OCCLUSION");
     const bool handover = scenario == "handover" || walking || structure ||
                           seams || wrapScene || lights || riverScene ||
-                          savedScene || shapes || natural;
-    const bool useVolumes = forestLighting || riverScene || shapes || natural;
+                          savedScene || shapes || natural || weather;
+    const bool useVolumes =
+        forestLighting || riverScene || shapes || natural || weather;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -163,6 +168,15 @@ int main(int argc, char** argv) {
                             ? std::stof(std::getenv("SMOKE_ELDER_SPACING"))
                             : 600.f;
                 }
+        const auto& blocks = assets.getStorage<Block>();
+        // A light-transmitting solid for exposure checks. The shipped block
+        // renderer still draws its quartzite texture opaque.
+        const auto& clearRoof = blocks.get("blocks.quartzite");
+        if (weather) const_cast<Block&>(clearRoof).properties.opacity = 0;
+        if (weather) {
+            world.genSettings.seed = 2024;
+            world.generatorVersion = WorldMeta::GeneratorVersion;
+        }
         ChunkManager chunks(generator, pool, &mesher, world, &assets);
         TerrainEdits edits;
         // Sky heightmap (docs/handoff/sky-light.md): seeds sunlight (unless
@@ -181,7 +195,16 @@ int main(int argc, char** argv) {
         SunLightPropagator sunlight(
             chunks, assets.getStorage<Block>(), pool,
             std::getenv("SMOKE_LEGACY_SUN") ? nullptr : &skyMap);
-        LocationManager locations(chunks, world);
+        std::optional<SaveSlot> weatherSave;
+        std::unique_ptr<RegionStore> weatherStore;
+        if (weather) {
+            const Vec2u region{weatherSeam ? 0u : 48u, 48u};
+            weatherSave =
+                save_catalog::create(world, region, output + "_saves");
+            weatherStore =
+                std::make_unique<RegionStore>(weatherSave->directory, pool);
+        }
+        LocationManager locations(chunks, world, weatherStore.get());
         TerrainEditTracker tracker(chunks, edits);
         WorldEditor editor(chunks, &sunlight, assets.getStorage<Block>());
         tracker.watch(editor);
@@ -359,6 +382,35 @@ int main(int argc, char** argv) {
                           .28f,
                           -1.05f,
                           7};
+        }
+        std::optional<WeatherScene> comparison;
+        if (weather) {
+            const int x = weatherSeam ? 0 : ShapeX;
+            int y = SEA_LEVEL_Y;
+            for (int dx = -6; dx <= 5; ++dx)
+                for (int dz = -5; dz <= 5; ++dz)
+                    y = std::max(y, surface.height(x + dx, ShapeZ + dz));
+            // Leave sufficient vertical margin within the requested slabs.
+            y += 3;
+            comparison.emplace(x, y, ShapeZ, blocks.get("blocks.slate").id,
+                               clearRoof.id,
+                               blocks.get("blocks.loam_topsoil").id);
+            camera = {{float(x), y + 1.f, ShapeZ + .5f}, -.18f, -.75f, 18.f};
+            skyState =
+                skyAtTime(weatherSave->meta.worldDays, world.genSettings.seed);
+            lightRenderer.setSky(skyState);
+            weatherSave->meta.camera = WorldMeta::CameraState{
+                camera.position, camera.yaw, camera.pitch, camera.distance};
+            save_catalog::writeMeta(*weatherSave);
+            std::cout << "weather_site=" << x << ',' << y << ',' << ShapeZ
+                      << " camera=" << x << ',' << y + 1 << ',' << ShapeZ + .5
+                      << ',' << camera.yaw << ',' << camera.pitch << ','
+                      << camera.distance << " seed=" << world.genSettings.seed
+                      << " world_days=" << weatherSave->meta.worldDays
+                      << " terrain=" << terrainQuality
+                      << " chunk_radius=" << terrainSettings.chunkRadius
+                      << " renderer="
+                      << bgfx::getRendererName(bgfx::getRendererType()) << '\n';
         }
         if (natural) {
             // Find the densest natural ramp and junction cluster in a dry
@@ -552,6 +604,48 @@ int main(int argc, char** argv) {
                 lod.setExtraUniforms(std::move(patchLights),
                                      std::move(blockLights));
             }
+            constexpr int WeatherSamples = 60;
+            constexpr int WeatherWalkFrames = 500;
+            int weatherStart = -1;
+            std::vector<double> weatherFrames;
+            size_t workerQueuePeak = 0;
+            bool weatherPlaced = false, weatherMeasured = false;
+            const auto* weatherAdapter = weather ? bgfx::getCaps() : nullptr;
+            if (weatherAdapter)
+                std::cout << "weather_adapter_vendor="
+                          << weatherAdapter->vendorId
+                          << " device=" << weatherAdapter->deviceId << '\n';
+            const auto reportWeather = [&](const char* name) {
+                locations.saveAll(false);
+                weatherStore->flush();
+                save_catalog::writeTerrainEdits(*weatherSave,
+                                                *edits.snapshot());
+                save_catalog::writeStructures(*weatherSave,
+                                              *chunks.treeOverrides(),
+                                              chunks.structureOverrides());
+                uintmax_t bytes = 0;
+                for (const auto& file :
+                     std::filesystem::recursive_directory_iterator(
+                         weatherSave->directory))
+                    if (file.is_regular_file()) bytes += file.file_size();
+                std::sort(weatherFrames.begin(), weatherFrames.end());
+                const auto quantile = [&](size_t percent) {
+                    return weatherFrames.at(
+                        (weatherFrames.size() * percent - 1) / 100);
+                };
+                std::cout << "weather_phase=" << name
+                          << " frames=" << weatherFrames.size()
+                          << " frame_p50_ms=" << quantile(50)
+                          << " frame_p95_ms=" << quantile(95)
+                          << " worker_queue_sampled_peak=" << workerQueuePeak
+                          << " save_bytes=" << bytes
+                          << " save=" << weatherSave->directory << '\n';
+                if (weatherStore->failedWrites() ||
+                    !comparison->verifySave(*weatherSave, world.wrap()))
+                    result = 1;
+                weatherFrames.clear();
+                workerQueuePeak = 0;
+            };
             size_t maxResident = 0, maxUpload = 0;
             double maxFrame = 0;
             int frame = 0, settled = 0, phase = 0;
@@ -631,6 +725,15 @@ int main(int argc, char** argv) {
                                              int(camera.position.z)) +
                               24);
                 }
+                if (weatherWalk && phase == 1) {
+                    camera.position.x =
+                        float(world.wrap().wrapX(camera.position.x - 2.f));
+                    camera.position.z += 1.5f;
+                    camera.position.y =
+                        float(surface.height(int(camera.position.x),
+                                             int(camera.position.z)) +
+                              24);
+                }
                 if (handover) {
                     const int cx = int(camera.position.x) / 16,
                               cy = int(camera.position.y) / 16,
@@ -652,6 +755,18 @@ int main(int argc, char** argv) {
                                      unsigned(y), unsigned(z)});
                     const auto requestEnd = SmokeClock::now();
                     chunks.update();
+                    if (comparison && !weatherPlaced &&
+                        comparison->ready(chunks)) {
+                        weatherPlaced = true;
+                        if (!comparison->place(
+                                chunks, editor, sunlight,
+                                assets.getStorage<Flora>()
+                                    .get("flora.meadow_flower")
+                                    .id,
+                                assets.getStorage<Tree>().get("trees.oak").id,
+                                weatherSave->meta.worldDays))
+                            result = 1;
+                    }
                     if (shapes && !shapesPlaced &&
                         chunks.tileAt(ShapeX - 4, shapeY, ShapeZ) &&
                         chunks.tileAt(ShapeX + 3, shapeY, ShapeZ)) {
@@ -994,7 +1109,11 @@ int main(int argc, char** argv) {
                 }
                 // Keep frames bounded, while allowing background generators to
                 // progress without busy spinning the headless renderer.
-                if (!riverFlight && lod.backlog() == 0 && lod.jobCount() == 0 &&
+                if ((!weather ||
+                     (weatherPlaced && !locations.hasPendingLoads() &&
+                      !chunks.meshInFlight() && !chunks.hasStructureWork() &&
+                      pool.get_tasks_total() == 0)) &&
+                    !riverFlight && lod.backlog() == 0 && lod.jobCount() == 0 &&
                     (!shapeLighting ||
                      (shapesPlaced &&
                       lightRenderer.shadows().slot(beaconId) >= 0)) &&
@@ -1068,7 +1187,8 @@ int main(int argc, char** argv) {
                     std::ofstream image(
                         output +
                             (travel || structure || seams || wrapScene ||
-                                     lights || riverScene || shapeLighting
+                                     lights || riverScene || shapeLighting ||
+                                     weather
                                  ? "_" + std::to_string(phase)
                                  : "") +
                             (transition ? "_transition" : "") + ".ppm",
@@ -1264,11 +1384,41 @@ int main(int argc, char** argv) {
                            maxUpload > terrainSettings.uploadBudget))))
                         result = 1;
                 }
+                const size_t queuedBeforeSubmit =
+                    weather ? pool.get_tasks_queued() : 0;
                 mark = SmokeClock::now();
                 bgfx::frame();
                 renderer.flush();
                 sections[5] = since(mark);
                 sections[4] = since(frameStart);
+                if (weather) {
+                    if (phase == 0 && settled == 10) {
+                        weatherStart = frame + 1;
+                        weatherFrames.clear();
+                        workerQueuePeak = 0;
+                    } else if (phase <= 1 && weatherStart >= 0 &&
+                               frame >= weatherStart) {
+                        weatherFrames.push_back(sections[4]);
+                        workerQueuePeak =
+                            std::max({workerQueuePeak, queuedBeforeSubmit,
+                                      pool.get_tasks_queued()});
+                    }
+                    if (phase == 0 && weatherFrames.size() == WeatherSamples) {
+                        reportWeather("settled");
+                        weatherMeasured = true;
+                        if (!weatherWalk) break;
+                        ++phase;
+                        settled = 0;
+                        weatherStart = frame + 1;
+                    } else if (phase == 1 &&
+                               weatherFrames.size() == WeatherWalkFrames) {
+                        reportWeather("streaming");
+                        ++phase;
+                        settled = 0;
+                    } else if (phase == 2 && settled >= 10) {
+                        break;
+                    }
+                }
                 if (savedScene) {
                     if (sections[4] > 33 || frame % 60 == 0) {
                         std::cout << "slow_frame=" << frame
@@ -2128,7 +2278,7 @@ int main(int argc, char** argv) {
                     finishedSpacing == 1)
                     break;
                 if (settled >= 10) {
-                    if (savedScene) continue;
+                    if (savedScene || weather) continue;
                     if (!travel || phase >= 2) break;
                     ++phase;
                     settled = 0;
@@ -2168,6 +2318,9 @@ int main(int argc, char** argv) {
                     finishedSpacing != 1)
                     result = 1;
             }
+            if (weather && (!weatherMeasured ||
+                            (weatherWalk && (phase != 2 || settled < 10))))
+                result = 1;
             if (riverScene &&
                 (phase < 3 || settled < 10 || !capturedTransition))
                 result = 1;

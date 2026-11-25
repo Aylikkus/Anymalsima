@@ -159,6 +159,43 @@ the map for repeatability, without writing to the save.
 SMOKE_SAVE=/path/to/save SMOKE_TERRAIN=2   build/tests/lod_render_smoke /tmp/saved-view 850 saved
 ```
 
+## Weather comparison
+
+The weather handoff's pre-weather fixture uses the normal chunk streaming,
+editing, lighting, meshing and region save paths. Run the Vulkan capture
+from the repository root on a device that supports the smoke harness.
+
+```bash
+cmake --build build --target app world_logic_tests lod_render_smoke shape_benchmark --parallel 4
+mkdir -p build/weather-baseline
+SMOKE_TERRAIN=0 build/tests/lod_render_smoke build/weather-baseline/weather-walk 2800 weather_walk
+SMOKE_TERRAIN=0 build/tests/lod_render_smoke build/weather-baseline/weather-seam 1600 weather_seam
+build/tests/shape_benchmark --legacy
+build/tests/shape_benchmark
+```
+
+`weather` runs the ordinary chunk-face view alone. `weather_walk` measures 60
+frames after the view settles, moves the camera for 500 frames, then captures
+the settled destination. Each step moves 2 m west and 1.5 m south, following
+terrain at 24 m above the surface. `weather_seam` repeats the stationary view
+at the world wrap. The camera and clock are printed at startup. Preset 0 is
+Low with a four-chunk radius. Leave other `SMOKE_*` settings unset for
+comparison.
+
+The run writes captures and a dated save under the output prefix. It decodes
+the saved ramp, plant layer, planted oak record and water after the checkpoints.
+To inspect the save in the app, copy the dated folder into `saves/` and open
+the copy through Load World. The smoke harness treats the quartzite roof as
+fully light-transmitting. It has the regular opaque quartzite texture, and the
+app copy uses the shipped block definition.
+
+Frame times are wall-clock update, draw submission and flush time. The
+measurement excludes the harness sleep, the stationary warm-up capture and
+checkpoint writes. The queue peak is sampled immediately before submission and
+after flush. The shape benchmark measures isolated CPU mesh builds with air
+neighbors. The [weather handoff](../docs/handoff/weather.md#execution-log)
+records the fixture coordinates and reference measurements.
+
 ## Natural shape budget
 
 `shape_benchmark` reports natural ramp coverage, column and mesh time,

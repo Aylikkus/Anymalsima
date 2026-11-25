@@ -346,6 +346,11 @@ int main(int argc, char** argv) {
         100.0 * double(shapeCells) / double(chunkCells), columnMs, generateMs,
         meshMs, shapeBytes, encodedBytes, vertices, triangles,
         columnMs + chunkMs);
+    std::printf("chunk_tile_bytes=%zu chunk_object_bytes=%zu "
+                "mean_encoded_chunk_bytes=%.2f mean_mesh_ms=%.4f\n",
+                sizeof(Chunk::tiles), sizeof(Chunk),
+                double(encodedBytes) / columns.size(),
+                meshMs / columns.size());
     std::printf(
         "dense shapes=%zu shape_bytes=%zu encoded_bytes=%zu "
         "encode_ms=%.1f mesh_ms=%.1f vertices=%zu triangles=%zu\n",
