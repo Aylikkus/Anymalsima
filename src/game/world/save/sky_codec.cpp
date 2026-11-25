@@ -6,7 +6,7 @@
 
 namespace sky_codec {
 namespace {
-constexpr uint16_t Version = 1;
+constexpr uint16_t Version = 2;
 constexpr uint32_t MaxColumns = 1u << 24;
 
 bool validY(int y) { return y >= 0 && y < WORLD_HEIGHT_Y; }
@@ -31,12 +31,14 @@ Bytes encode(const sky::Overrides& overrides, const SectionContainer& extra) {
             const auto& column = columns.at(index);
             out.write(uint8_t(index));
             out.write(column.opaque);
+            out.write(column.opaqueShape.code());
             out.write(uint8_t(column.overflow));
             out.write(uint8_t(column.spans.size()));
             for (const auto& span : column.spans) {
                 out.write(span.top);
                 out.write(span.bottom);
                 out.write(span.opacity);
+                out.write(span.shape.code());
             }
         }
     }
@@ -49,9 +51,15 @@ File decode(ByteView bytes) {
     File file;
     file.extra = SectionContainer::decode(bytes);
     if (const auto* section = file.extra.find("SKYO")) {
-        if (section->version != Version)
+        if (section->version != 1 && section->version != Version)
             throw SerializationError("unsupported SKYO version");
         BinaryReader in(section->data);
+        const auto readShape = [&] {
+            if (section->version == 1) return TileShape{};
+            const auto shape = TileShape::fromCanonicalCode(in.read<uint8_t>());
+            if (!shape) throw SerializationError("bad sky shape");
+            return *shape;
+        };
         const auto count = in.read<uint32_t>();
         if (count > MaxColumns)
             throw SerializationError("too many sky override columns");
@@ -71,6 +79,12 @@ File decode(ByteView bytes) {
                 column.opaque = in.read<int16_t>();
                 if (column.opaque != sky::None && !validY(column.opaque))
                     throw SerializationError("sky top out of range");
+                column.opaqueShape = readShape();
+                if (column.opaqueShape.code() &&
+                    (column.opaque == sky::None ||
+                     voxel_light::verticalLoss(
+                         {sky::Opaque, column.opaqueShape}) < sky::Opaque))
+                    throw SerializationError("bad opaque sky shape");
                 const auto overflow = in.read<uint8_t>();
                 if (overflow > 1) throw SerializationError("bad sky flags");
                 column.overflow = overflow != 0;
@@ -83,9 +97,11 @@ File decode(ByteView bytes) {
                     span.top = in.read<int16_t>();
                     span.bottom = in.read<int16_t>();
                     span.opacity = in.read<uint8_t>();
+                    span.shape = readShape();
                     if (!validY(span.top) || !validY(span.bottom) ||
                         span.bottom > span.top || span.top >= below ||
-                        span.opacity == 0 || span.opacity >= sky::Opaque)
+                        span.opacity == 0 || span.opacity > sky::Opaque ||
+                        voxel_light::verticalLoss(span.cell()) >= sky::Opaque)
                         throw SerializationError("bad sky span");
                     below = span.bottom;
                     column.spans.push_back(span);

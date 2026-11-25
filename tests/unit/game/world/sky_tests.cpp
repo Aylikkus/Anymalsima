@@ -214,3 +214,66 @@ TEST(sky_codec_roundtrip) {
         CHECK(threw);
     }
 }
+
+TEST(sky_shape_transmission_and_overrides) {
+    using enum TileShapeProfile;
+    const auto table = opacities();
+    auto in = flat(400);
+    in.opacity = &table;
+    auto edit = std::make_shared<ColumnEdit>();
+    edit->groundY.fill(400);
+    edit->groundBlock.fill(1);
+    edit->waterY.fill(-1);
+    const auto wall = TileShape::make(Wall10);
+    const auto slab = TileShape::make(Slab);
+    const auto ramp = TileShape::make(Ramp);
+    edit->groundShape[5] = wall;
+    Chunk roof;
+    constexpr int Y = 800;
+    for (const auto& [x, shape] :
+         {std::pair{1, slab}, std::pair{2, ramp}, std::pair{3, wall},
+          std::pair{4, wall.rotated(1)}}) {
+        ::Tile tile;
+        tile.block_id = x == 4 ? 2 : 1;
+        roof.setCell(Chunk::cell(x, Y % Chunk::SIZE_Y, 0), tile, shape);
+    }
+    edit->structure.emplace_back(
+        Y / Chunk::SIZE_Y,
+        std::make_shared<const Bytes>(chunk_codec::encode(roof)));
+    edit->finish();
+    in.edit = edit;
+    const auto tiles = sky::build(in);
+    EQUAL(int(tiles.direct(0, Y - 1)), 15, "empty control");
+    EQUAL(int(tiles.direct(1, Y - 1)), 0, "roof slab blocks overhead light");
+    EQUAL(int(tiles.direct(2, Y)), 15, "ramp top receives overhead light");
+    EQUAL(int(tiles.direct(3, Y - 1)), 13, "thin wall subtracts two levels");
+    EQUAL(int(tiles.direct(4, Y - 1)), 15, "thin glass wall rounds down");
+    EQUAL(int(tiles.direct(5, 399)), 13,
+          "shaped ground projects its footprint");
+    CHECK(tiles.column(1).cellAt(Y).shape == slab);
+    CHECK(tiles.column(4).cellAt(Y).shape == wall.rotated(1));
+    sky::Overrides overrides;
+    for (int i = 1; i <= 5; ++i) overrides[1][i] = tiles.column(i);
+    CHECK(sky_codec::decode(sky_codec::encode(overrides)).overrides ==
+          overrides);
+
+    // The v1 payloads carried no profile codes.
+    BinaryWriter legacy;
+    legacy.write(uint32_t(1));
+    legacy.write(uint32_t(0));
+    legacy.write(uint32_t(1));
+    legacy.write(uint16_t(1));
+    legacy.write(uint8_t(0));
+    legacy.write(int16_t(500));
+    legacy.write(uint8_t(0));
+    legacy.write(uint8_t(1));
+    legacy.write(int16_t(600));
+    legacy.write(int16_t(600));
+    legacy.write(uint8_t(3));
+    SectionContainer container;
+    container.put("SKYO", 1, legacy.take());
+    const auto old =
+        sky_codec::decode(container.encode()).overrides.at(1).at(0);
+    CHECK(!old.cellAt(500).shape.code() && !old.cellAt(600).shape.code());
+    EQUAL(int(old.direct(599)), 12, "legacy cube opacity");
+}

@@ -12,14 +12,31 @@ SunLightPropagator::SunLightPropagator(ChunkManager& chunks,
                                        const DataStorage<Block>& blocks,
                                        ThreadPool& pool, SkyHeightMap* sky)
     : chunks(chunks), blocks(blocks), pool(pool), sky(sky) {
-    // A changed heightmap (edits, tree growth, overrides) sweeps the
-    // column again; its spreads rerun only where direct light changed.
+    // Heightmap changes can affect both direct seeds and unloaded halos.
     if (sky)
         skyConnection = sky->changed.connect([this](uint64_t column) {
-            if (!columnChunks.contains(column) || columnChunks[column].empty())
-                return;
-            columnRevisions[column] = ++nextRevision;
-            pendingDirect.insert(column);
+            if (const auto it = columnChunks.find(column);
+                it != columnChunks.end() && !it->second.empty()) {
+                columnRevisions[column] = ++nextRevision;
+                pendingDirect.insert(column);
+            }
+            // Unloaded slabs supply directional opacity from this map too.
+            const ChunkCoord anchor{unsigned(column >> 32), 0,
+                                    unsigned(column)};
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    ChunkCoord neighbor;
+                    if (!offset(anchor, dx, 0, dz, neighbor)) continue;
+                    const auto found =
+                        columnChunks.find(columnKey(neighbor.x, neighbor.z));
+                    if (found == columnChunks.end()) continue;
+                    for (const auto coord : found->second) {
+                        auto& state = states.at(coord);
+                        state.revision = ++nextRevision;
+                        state.complete = false;
+                        pendingIndirect.insert(coord);
+                    }
+                }
         });
     waterConnection = chunks.columnWaterChanged.connect([this](uint64_t key) {
         markColumnDirty(unsigned(key >> 32), unsigned(key));
@@ -57,10 +74,6 @@ bool SunLightPropagator::offset(ChunkCoord coord, int dx, int dy, int dz,
     out = {static_cast<unsigned>(x), static_cast<unsigned>(y),
            static_cast<unsigned>(z)};
     return true;
-}
-
-uint8_t SunLightPropagator::opacity(const Tile& tile) const {
-    return tileOpacity(tile, blocks);
 }
 
 void SunLightPropagator::invalidateAround(const ChunkCoord& coord) {
@@ -152,13 +165,15 @@ SunLightPropagator::snapshotColumn(uint64_t column) {
             input.slabs.push_back({coord, state.opacity});
             continue;
         }
-        auto opacities = std::make_shared<Light>();
+        auto opacities = std::make_shared<Opacity>();
         chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
+            opacities->shapes.capture(chunk);
             for (int z = 0; z < Z; ++z)
                 for (int y = 0; y < Y; ++y)
                     for (int x = 0; x < X; ++x) {
                         const auto& tile = chunk.tiles[z][y][x];
-                        (*opacities)[index(x, y, z)] = opacity(tile);
+                        opacities->material[index(x, y, z)] =
+                            tileOpacity(tile, blocks);
                         if (!tile.isAir())
                             top = std::max(top,
                                            static_cast<int>(coord.y) * Y + y);
@@ -198,8 +213,9 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
                         auto& incoming = sun[size_t(z * X + x)];
                         const int i = index(x, y, z);
                         output.light[i] = incoming;
-                        incoming = static_cast<uint8_t>(
-                            std::max(0, int(incoming) - (*slab.opacity)[i]));
+                        const auto loss =
+                            voxel_light::verticalLoss(slab.opacity->at(i));
+                        incoming = uint8_t(std::max(0, int(incoming) - loss));
                     }
             result.chunks.push_back(std::move(output));
         }
@@ -239,8 +255,9 @@ SunLightPropagator::DirectResult SunLightPropagator::sweep(DirectInput input) {
                     auto& incoming = sun[z * X + x];
                     const int i = index(x, y, z);
                     output.light[i] = incoming;
-                    incoming = static_cast<uint8_t>(
-                        std::max(0, int(incoming) - (*slab.opacity)[i]));
+                    const auto loss =
+                        voxel_light::verticalLoss(slab.opacity->at(i));
+                    incoming = uint8_t(std::max(0, int(incoming) - loss));
                 }
         result.chunks.push_back(std::move(output));
     }
@@ -272,8 +289,9 @@ SunLightPropagator::IndirectInput SunLightPropagator::snapshotHalo(
 SunLightPropagator::IndirectResult SunLightPropagator::spread(
     IndirectInput in) {
     struct Halo {
-        std::vector<uint8_t> opacity, light;
-    } input{std::vector<uint8_t>(HX * HY * HZ, 255),
+        std::vector<voxel_light::Cell> opacity;
+        std::vector<uint8_t> light;
+    } input{std::vector<voxel_light::Cell>(HX * HY * HZ, voxel_light::Unknown),
             std::vector<uint8_t>(HX * HY * HZ, 0)};
     for (int dz = -1; dz <= 1; ++dz)
         for (int dy = -1; dy <= 1; ++dy)
@@ -304,7 +322,7 @@ SunLightPropagator::IndirectResult SunLightPropagator::spread(
                                 haloIndex(HALO + dx * X + x, HALO + dy * Y + y,
                                           HALO + dz * Z + z);
                             if (opacity) {
-                                input.opacity[i] = (*opacity)[index(x, y, z)];
+                                input.opacity[i] = opacity->at(index(x, y, z));
                                 input.light[i] = (*direct)[index(x, y, z)];
                                 continue;
                             }
@@ -312,7 +330,7 @@ SunLightPropagator::IndirectResult SunLightPropagator::spread(
                             if (column.opaque != sky::None &&
                                 wy < column.opaque)
                                 continue;  // unknown: opaque padding
-                            input.opacity[i] = column.opacityAt(wy);
+                            input.opacity[i] = column.cellAt(wy);
                             input.light[i] = column.direct(wy);
                         }
                     }
@@ -321,22 +339,25 @@ SunLightPropagator::IndirectResult SunLightPropagator::spread(
     // at least one level, so no source outside the halo can affect the target.
     std::array<std::vector<int>, 16> buckets;
     for (int i = 0; i < HX * HY * HZ; ++i)
-        if (input.light[i] > std::max<uint8_t>(1, input.opacity[i]))
+        if (input.light[i] > 1 && !input.opacity[i].solidOpaque())
             buckets[input.light[i]].push_back(i);
     for (int level = 15; level > 0; --level) {
         for (const int i : buckets[level]) {
             if (input.light[i] != level) continue;
-            const int outgoing = level - std::max(1, int(input.opacity[i]));
-            if (outgoing <= 0) continue;
+            const auto source = input.opacity[i];
+            if (source.solidOpaque()) continue;
             const int x = i % HX, y = (i / HX) % HY, z = i / (HX * HY);
             const int neighbors[6] = {
-                x > 0 ? i - 1 : -1,       x + 1 < HX ? i + 1 : -1,
-                y > 0 ? i - HX : -1,      y + 1 < HY ? i + HX : -1,
-                z > 0 ? i - HX * HY : -1, z + 1 < HZ ? i + HX * HY : -1};
-            for (const int n : neighbors) {
-                if (n < 0 || input.opacity[n] == 255 ||
-                    input.light[n] >= outgoing)
-                    continue;
+                x + 1 < HX ? i + 1 : -1,       x > 0 ? i - 1 : -1,
+                y + 1 < HY ? i + HX : -1,      y > 0 ? i - HX : -1,
+                z + 1 < HZ ? i + HX * HY : -1, z > 0 ? i - HX * HY : -1};
+            for (int f = 0; f < 6; ++f) {
+                const int n = neighbors[f];
+                if (n < 0 || input.light[n] >= level - 1) continue;
+                const int loss =
+                    voxel_light::spreadLoss(source, input.opacity[n], Face(f));
+                const int outgoing = level - std::max(1, loss);
+                if (input.light[n] >= outgoing) continue;
                 input.light[n] = static_cast<uint8_t>(outgoing);
                 buckets[outgoing].push_back(n);
             }
@@ -436,18 +457,7 @@ void SunLightPropagator::collect() {
         }
         const auto it = states.find(coord);
         if (it == states.end()) continue;
-        if (it->second.revision != result.revision) {
-            // Outdated (a neighbour arrived or changed meanwhile; the chunk
-            // is queued again). A chunk never lit still shows it: closer to
-            // its light than the estimate, and arrivals under heavy
-            // streaming could otherwise outdate every attempt.
-            if (sky && !it->second.lit) {
-                publish(coord, result.light);
-                it->second.lit = true;
-                it->second.estimated = false;
-            }
-            continue;
-        }
+        if (it->second.revision != result.revision) continue;
         publish(coord, result.light);
         it->second.complete = true;
         it->second.lit = true;
@@ -535,8 +545,9 @@ bool SunLightPropagator::spreadIsIdentity(const ChunkCoord& coord) {
     // no light other than the direct sweep reaches any cell. Read from the
     // sweep snapshots, which every opacity change refreshes first.
     const auto* own = it->second.opacity.get();
-    if (!own || !std::all_of(own->begin(), own->end(),
-                             [](uint8_t o) { return o >= 15; }))
+    if (!own || !own->shapes.empty() ||
+        !std::all_of(own->material.begin(), own->material.end(),
+                     [](uint8_t o) { return o >= 15; }))
         return false;
     const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
                                {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
@@ -556,7 +567,7 @@ bool SunLightPropagator::spreadIsIdentity(const ChunkCoord& coord) {
                 const int i = o[0]   ? index(o[0] > 0 ? 0 : 15, b, a)
                               : o[1] ? index(b, o[1] > 0 ? 0 : 15, a)
                                      : index(b, a, o[2] > 0 ? 0 : 15);
-                if (cells[size_t(i)] < 15) return false;
+                if (!cells.at(i).solidOpaque()) return false;
             }
     }
     return true;

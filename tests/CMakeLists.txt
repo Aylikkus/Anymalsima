@@ -21,6 +21,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_column.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_height_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_volume.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/voxel_light.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/world_editor.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edits.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_edit_tracker.cpp
@@ -160,7 +161,7 @@ set(world_cases
     mesh_skips_hidden_chunks
     mesh_local_positions_overlap
     mesh_river_step_edges
-    light_volume_encoding
+    light_volume_encoding shaped_light_shared_face_and_volume
     light_volume_neighbor_borders
     light_volume_missing_neighbor
     light_volume_shared_face
@@ -227,6 +228,7 @@ set(block_light_cases
     block_light_additive block_light_spot_into_wall
     block_light_sealed_registry block_light_spot_sealed_by_front
     block_light_open_faces_neighbor_arrives light_registry_buckets
+    block_light_shape_rotation_across_chunk_edge
     shadow_face_mapping shadow_tile_layout shadow_reachable_faces
     shadow_guard_band
     lod_light_map_splat lod_light_map_wraps block_light_far_spreads_directly
@@ -337,7 +339,7 @@ set_tests_properties(game.world.structure_chunk_stamping PROPERTIES
     LABELS "integration;gameplay;world;structures" TIMEOUT 10)
 # Sky heightmap (docs/handoff/sky-light.md).
 foreach(case sky_column_scan_and_direct sky_tile_build_sources
-             sky_tile_overrides sky_codec_roundtrip tree_wood_tops_match_raster
+             sky_tile_overrides sky_codec_roundtrip sky_shape_transmission_and_overrides tree_wood_tops_match_raster
              sky_heightmap_matches_chunks sky_queries_and_far_shade_without_chunks
              sky_sunlight_without_upper_slabs
              sky_spread_without_waiting)

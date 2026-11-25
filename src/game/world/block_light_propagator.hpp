@@ -10,6 +10,7 @@
 
 #include "chunk_manager.hpp"
 #include "light_sources.hpp"
+#include "voxel_light.hpp"
 #include "world_editor.hpp"
 
 // Near-field artificial light: flood-fills light from emissive tiles (and
@@ -75,6 +76,10 @@ class BlockLightPropagator {
     struct Inputs {
         uint8_t uniform = 0;           // opacity when `opacity` is empty
         std::vector<uint8_t> opacity;  // Cells entries, or empty
+        voxel_light::Shapes shapes;
+        voxel_light::Cell at(int i) const {
+            return {opacity.empty() ? uniform : opacity[i], shapes.at(i)};
+        }
         std::vector<LocalEmitter> emitters;
     };
     struct Emitter {

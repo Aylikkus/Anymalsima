@@ -34,8 +34,8 @@ struct LightSource {
     LightEmission emission;
     std::array<double, 3> position{0, 0, 0};   // world tiles, light centre
     std::array<float, 3> direction{0, -1, 0};  // world forward (cones)
-    // Block: faces whose neighbor tile lets light out (not opaque, or not
-    // loaded yet). Entities sit in open space.
+    // Block: faces whose neighbor leaves some transmission. Unknown
+    // neighbors are assumed open. Entities sit in open space.
     uint8_t openFaces = AllFaces;
 
     // Faces light may leave through: all for omnidirectional lights, the

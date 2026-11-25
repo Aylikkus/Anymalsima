@@ -66,7 +66,8 @@ int main(int argc, char** argv) {
     // glare), then the same lamps from 350 tiles away and high above (far
     // light on distant terrain and glare).
     const bool lights = scenario == "lights";
-    const bool shapes = scenario == "shapes";
+    const bool shapeLighting = scenario == "shape_lighting";
+    const bool shapes = scenario == "shapes" || shapeLighting;
     // Allow forest captures (including handover) to exercise sky shading
     // independently of the lamp and shadow phases of the lights scenario.
     const bool forestLighting =
@@ -300,6 +301,10 @@ int main(int argc, char** argv) {
         constexpr int ShapeX = 6144, ShapeZ = 6148;
         int shapeY = 0;
         bool shapesPlaced = false;
+        constexpr float ShapeBeaconRadius = 32;
+        const auto wallPos = [&] {
+            return TilePos{ShapeX, shapeY, ShapeZ + 2};
+        };
         if (seams) {
             // Dry land as far from the origin as the scene allows.
             int x = surface.width() - 1500;
@@ -343,6 +348,11 @@ int main(int argc, char** argv) {
                                       surface.height(ShapeX + dx, ShapeZ + dz));
             shapeY += 3;
             camera = {{ShapeX, float(shapeY) + .5f, ShapeZ}, -.24f, -.49f, 10};
+            if (shapeLighting)
+                camera = {{ShapeX - .5f, shapeY + .65f, ShapeZ + .9f},
+                          .28f,
+                          -1.05f,
+                          7};
         }
         // SMOKE_CAMERA="x z yaw pitch distance above": look at (x, z) from
         // `above` tiles over its surface (close-ups of plants and cover).
@@ -584,6 +594,23 @@ int main(int argc, char** argv) {
                             });
                             chunks.markModified(owner);
                         }
+                        if (shapeLighting) {
+                            LightSource beacon;
+                            beacon.owner = LightSource::Owner::Entity;
+                            beacon.emission.radius = ShapeBeaconRadius;
+                            beacon.position = {ShapeX - 1.5, shapeY + .65,
+                                               ShapeZ + 2.5};
+                            beaconId = registry.add(beacon);
+                            LightSource sideLamp;
+                            sideLamp.owner = LightSource::Owner::Entity;
+                            sideLamp.emission.radius = 8;
+                            sideLamp.emission.color = {1, .65f, .35f};
+                            sideLamp.position = {ShapeX - 5.5, shapeY + .75,
+                                                 ShapeZ - .5};
+                            registry.add(sideLamp);
+                            skyState = skyAtTime(0.0, world.genSettings.seed);
+                            lightRenderer.setSky(skyState);
+                        }
                         shapesPlaced = true;
                     }
                     const auto chunkUpdateEnd = SmokeClock::now();
@@ -623,7 +650,7 @@ int main(int argc, char** argv) {
                 const double now = std::chrono::duration<double>(
                                        std::chrono::steady_clock::now() - begin)
                                        .count();
-                if (lights)
+                if (lights || shapeLighting)
                     lightRenderer.update(registry, camera, world.wrap(), now);
                 const auto lodStageStart = SmokeClock::now();
                 lod.setStructures(trees.landmarkVoxels(0));
@@ -672,7 +699,7 @@ int main(int argc, char** argv) {
                 const bool compareLamp = lights && phase >= 4;
                 if (compareLamp)
                     water.setVec4({0, lod.eyeUnderwater() ? 1.f : 0.f, 0, 0});
-                if (lights) {
+                if (lights || shapeLighting) {
                     static uint64_t lodVersion = 0;
                     if (lod.drawnVersion() != lodVersion) {
                         lodVersion = lod.drawnVersion();
@@ -881,6 +908,9 @@ int main(int argc, char** argv) {
                 // Keep frames bounded, while allowing background generators to
                 // progress without busy spinning the headless renderer.
                 if (!riverFlight && lod.backlog() == 0 && lod.jobCount() == 0 &&
+                    (!shapeLighting ||
+                     (shapesPlaced &&
+                      lightRenderer.shadows().slot(beaconId) >= 0)) &&
                     (!handover || (sunlight.isIdle() && blockLight.isIdle() &&
                                    !chunks.hasGenerationWork() &&
                                    (detailed > 0 || farLights))))
@@ -951,7 +981,7 @@ int main(int argc, char** argv) {
                     std::ofstream image(
                         output +
                             (travel || structure || seams || wrapScene ||
-                                     lights || riverScene
+                                     lights || riverScene || shapeLighting
                                  ? "_" + std::to_string(phase)
                                  : "") +
                             (transition ? "_transition" : "") + ".ppm",
@@ -982,6 +1012,39 @@ int main(int argc, char** argv) {
                         if (gaps) result = 1;
                     }
                     lastPixels = pixels;
+                    if (shapeLighting && settled >= 10) {
+                        // Read the +X ray through the centre of the edited
+                        // cell across the chunk seam. The beacon stays fixed.
+                        constexpr int Tile = LightShadows::TileSize;
+                        const int w = LightShadowMath::Columns * Tile;
+                        const int h =
+                            lightRenderer.shadows().atlasRows() * Tile;
+                        const auto back = bgfx::createTexture2D(
+                            uint16_t(w), uint16_t(h), false, 1,
+                            bgfx::TextureFormat::R32F,
+                            BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
+                        std::vector<float> texels(size_t(w) * h);
+                        bgfx::blit(
+                            3, back, 0, 0,
+                            lightRenderer.shadows().atlasTextureHandle());
+                        const auto ready =
+                            bgfx::readTexture(back, texels.data());
+                        auto frame = bgfx::frame();
+                        while (frame < ready) frame = bgfx::frame();
+                        bgfx::destroy(back);
+                        int x, y;
+                        LightShadowMath::tileOrigin(
+                            lightRenderer.shadows().slot(beaconId), 0, Tile, x,
+                            y);
+                        const float depth =
+                            texels[size_t(y + Tile / 2) * w + x + Tile / 2] *
+                            ShapeBeaconRadius;
+                        constexpr float expected[] = {32, 1.5f, 1.5f, 32};
+                        std::cout << "shape_shadow_phase=" << phase
+                                  << " depth=" << depth << '\n';
+                        if (std::abs(depth - expected[phase]) > .15f)
+                            result = 1;
+                    }
                     if (lights && (phase == 5 || phase == 1) &&
                         std::getenv("SHADOW_DUMP")) {
                         // Slot 0's six faces, log-scaled distance.
@@ -1633,6 +1696,18 @@ int main(int argc, char** argv) {
                     camera.pitch = .1f;
                     camera.distance = .5f;
                 }
+                if (settled >= 10 && shapeLighting) {
+                    if (phase == 3) break;
+                    ++phase;
+                    settled = 0;
+                    const auto wall = TileShape::make(TileShapeProfile::Wall10);
+                    const auto shape = phase == 1   ? TileShape{}
+                                       : phase == 2 ? wall.rotated(3)
+                                                    : wall;
+                    if (editor.setBlock(wallPos(), 1, shape) !=
+                        EditStatus::Applied)
+                        result = 1;
+                }
                 if (settled >= 10 && lights) {
                     // Pixels differing from the baseline capture.
                     auto changedPixels = [&] {
@@ -2011,6 +2086,7 @@ int main(int argc, char** argv) {
                 result = 1;
             if (lights && (phase < 8 || settled < 10)) result = 1;
             if (shapes && (!shapesPlaced || settled < 10)) result = 1;
+            if (shapeLighting && phase < 3) result = 1;
             if (travel && (phase < 2 || settled < 10)) result = 1;
             if (structure &&
                 (phase < 2 || edits.size() == 0 || lod.structureCount() == 0))

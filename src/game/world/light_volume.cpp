@@ -26,7 +26,8 @@ void encode(const Chunk& chunk, const DataStorage<Block>& blocks,
                 const int c = ((z * CellsY + y) * CellsX + x) * 2;
                 out[i + 2] = chroma ? chroma[c] : 128;
                 out[i + 3] = chroma ? chroma[c + 1] : 128;
-                if (tileOpacity(tile, blocks) >= 15) {
+                if (tileOpacity(tile, blocks) >= 15 &&
+                    !chunk.shapeAt(Chunk::cell(x, y, z)).code()) {
                     out[i] = out[i + 1] = 0;
                     continue;
                 }

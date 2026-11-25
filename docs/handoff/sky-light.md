@@ -75,7 +75,9 @@ look carry over:
   (`tileOpacity`: block opacity, water up to 8 according to fill) as it
   passes.
 - **Indirect:** from every lit cell, light spreads to the 6 neighbours,
-  losing `max(1, opacity)` per step. A cell's value is the maximum over all
+  losing at least one level per step. Cube-only paths use the source
+  material's opacity. For shaped crossings, light loss comes from the
+  occupied area of the shared face. A cell takes the maximum over all
   paths. A positive value travels at most 14 tiles.
 - **Under an opaque top:** the value at height y is `15 - d`, where d is the
   4-neighbour distance to the nearest column open to the sky down to y,
@@ -89,14 +91,15 @@ through generated slabs; it is read from the heightmap.
 
 Per tile column (`sky::Column`, `world/sky_column.hpp`):
 
-- `opaque`: the highest tile with opacity 15 or more.
-- `spans`: runs of translucent tiles above it (glass, water), top-down, at
-  most `sky::MaxSpans` (8). A column with more is marked `overflow`: the
-  lowest kept run's bottom counts as opaque (darker than the truth, never
-  brighter), and step 2 sweeps such columns through their loaded tiles.
-- `top()`: the highest attenuating tile. Above it the direct light is 15.
-- `direct(y)`: 15 minus the opacity of every tile above y, the
-  propagator's sweep rule. This attenuated level is gameplay's "direct
+- `opaque` is the highest tile that blocks overhead light across the
+  full footprint. It retains the profile when that tile is shaped.
+- `spans` records runs of material opacity and tile profile above it,
+  top-down, up to `sky::MaxSpans` (8). A column with more runs is marked
+  `overflow` and treats the first discarded run as opaque. Loaded slabs
+  sweep their actual tiles.
+- `top()` is the highest recorded tile. Above it the direct light is 15.
+- `direct(y)` subtracts the projected opacity of each tile above y from
+  15, matching the propagator's sweep. This attenuated level is gameplay's "direct
   sunlight" (decided 2026-11-19): each rule picks its threshold, so a glass
   greenhouse (opacity 3: 12) can count as lit.
 
@@ -115,8 +118,8 @@ Columns are packed per chunk column (`sky::Tile`, 16x16) and built by
 - **Edits:** `TerrainEdits` already records every edited column world-wide
   and saves it (`terrain_edits.dat`): the ground override (topmost solid
   tile at or below the generated surface), water above it, and every solid
-  tile above the generated surface (block ids, so glass keeps its
-  opacity). This answers "a top block removed above unloaded slabs": the
+  tile above the generated surface. Block IDs preserve material opacity,
+  and tile profiles supply the overhead footprint and boundary coverage. This answers "a top block removed above unloaded slabs": the
   tracker recomputes the column, and the map rebuilds from it. A
   translucent ground block counts the tile under it as opaque.
 - **Overrides:** what none of the above records, chiefly holes dug into
@@ -130,7 +133,9 @@ Columns are packed per chunk column (`sky::Tile`, 16x16) and built by
 
 Storage (decided 2026-11-19): only overrides are saved, in `sky.dat`
 (`save/sky_codec.hpp`, section `SKYO`), written with the autosave cycle and
-on exit. Everything else is rebuilt on load from the sources, which are
+on exit. Version 2 includes the profile at the opaque cutoff and the
+profile for each span. Version 1 columns decode as cubes. Everything else
+is rebuilt on load from the sources, which are
 saved already (seed, `terrain_edits.dat`, `trees.dat`). There is no region
 file change. Holes dug into wood before `sky.dat` existed are not known
 until that column is edited again.

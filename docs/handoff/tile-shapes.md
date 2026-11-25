@@ -1,6 +1,6 @@
 # Tile shapes, terrain ramps, and placement
 
-**Current step: 5 — directional light transport and shadows.**
+**Current step: 6 — natural ramps and distant terrain.**
 This handoff covers the terrain foundation for weather. Snowfall,
 melting, temperature simulation, and NPC building generation have their own
 future work.
@@ -13,7 +13,7 @@ future work.
 | 2 | Durable edits, save compatibility, generated-terrain comparisons | 1 | Complete |
 | 3 | Near mesh, material shading, grass and plant support | 1–2 | Complete |
 | 4 | Accurate picking, debug placement and grounded traversal | 1–3 | Complete |
-| 5 | Directional light transport and shadows | 1–3 | Pending |
+| 5 | Directional light transport and shadows | 1–3 | Complete |
 | 6 | Natural ramps, distant terrain and structure handoff | 1–5 | Pending |
 | 7 | End-to-end validation, performance and documentation | 1–6 | Pending |
 
@@ -115,6 +115,34 @@ removed it, moved in Walk mode, and returned to orbit. The controls passed
 at 1280×720 and 80% text scale, then at 1000×600 and 120% text scale in
 English, Russian and Japanese. The ramp and corner traversal matrix ran
 headlessly.
+
+Step 5 adds shared face and overhead transmission in `voxel_light.*`.
+The sunlight and block-light propagators capture optional shape data with
+material opacity. Shape edits invalidate the relevant workers and emitter
+faces across chunk borders. Light publication still follows the light-volume
+update path. `sky_column.*`, `sky_height_map.*`, and `save/sky_codec.cpp`
+carry profiles through unloaded estimates and saved overrides. SKYO v2
+adds profiles to the opaque cutoff and each span, with cube defaults for v1.
+The coarse distant occlusion texture uses the fully blocked cutoff. Partial
+attenuation is available in the heightmap's per-tile estimates and the swept
+voxel light.
+
+`chunk_mesher.cpp`, `light_volume.cpp`, and `shaders/block/block.vert`
+keep light for the open part of a shaped cell. Inset faces sample that
+cell's texel. Boundary faces sample the outward adjacent cell. The existing
+`LightShadows` render pass uses the shaped chunk and structure proxy meshes.
+Chunk mesh uploads invalidate affected shadow faces, and proxy uploads
+advance the distant caster revision.
+
+The Release app built and all 380 CTest cases passed. Nine focused cases
+passed under ASan and UBSan with leak detection disabled. They cover shared
+face overlap, translucent walls, slab roofs, exposed ramps, sky estimates
+before and after the first sweep, saved overrides, and stale results after
+edits and unloads. The Vulkan `shape_lighting` smoke scene measured shadow
+depths of 32, 1.5, 1.5, and 32 metres for the empty cell, cube, flush wall,
+and quarter-turned wall at the same chunk edge. The night capture showed
+light on both grassy junction facets and across their diagonal. The Vulkan
+`lights` regression scene passed all nine phases.
 
 When picking this up, update the current step and its row. Before marking a row
 done, record the affected paths, tests run and outcome in the row or immediately
@@ -365,6 +393,17 @@ chunk across a boundary. Trace distant sky overrides and `light_shadows`
 caster geometry so a wall rotates in its cast shadow too. Preserve the
 existing behavior where a light-only update refreshes volumes without
 remeshing. Test stale jobs published after an edit or unload.
+
+The voxel approximation weights each boundary polygon by its material
+opacity. Overlapping coverage counts once at the higher opacity. The
+vertical sweep weights opacity by the profile's footprint and gives the
+receiving cell its incoming light before subtracting its own loss. Both
+losses round to the nearest 4-bit level, with half levels rounding up.
+Only full opaque coverage reaches 15. Indirect paths lose at least one
+level per crossing, and cube-only paths retain their existing material
+penalty. The straight near field of a far light tests actual shape
+intersections to match the shadow map. Both light paths let a block
+emitter leave its own tile and apply the neighboring coverage.
 
 **Accept when** a roof slab blocks direct sky below, an exposed ramp top
 receives sky, and a torch placed across a wall casts a different shadow after

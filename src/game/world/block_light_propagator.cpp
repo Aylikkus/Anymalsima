@@ -12,7 +12,7 @@ constexpr int R = BlockLightPropagator::Range;
 constexpr int Side = 2 * R + 1;  // per-emitter search box
 constexpr int MaxCost = 63;
 // Opacity of cells outside the loaded area: impassable, never lit.
-constexpr uint8_t Unknown = 255;
+using voxel_light::Steps;
 
 float smoothstep(float a, float b, float x) {
     const float t = std::clamp((x - a) / (b - a), 0.f, 1.f);
@@ -98,6 +98,7 @@ std::shared_ptr<const BlockLightPropagator::Inputs> BlockLightPropagator::scan(
     std::vector<uint8_t> opacity(Cells);
     bool uniform = true;
     const bool found = chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
+        inputs->shapes.capture(chunk);
         for (int z = 0; z < Chunk::SIZE_Z; ++z)
             for (int y = 0; y < Chunk::SIZE_Y; ++y)
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {
@@ -206,8 +207,6 @@ void BlockLightPropagator::reconcileRegistry(const ChunkCoord& coord,
 
 uint8_t BlockLightPropagator::openFaces(const ChunkCoord& coord, int x, int y,
                                         int z) const {
-    constexpr int Steps[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                 {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
     uint8_t mask = 0;
     for (int i = 0; i < 6; ++i) {
         int nx = x + Steps[i][0], ny = y + Steps[i][1], nz = z + Steps[i][2];
@@ -226,10 +225,9 @@ uint8_t BlockLightPropagator::openFaces(const ChunkCoord& coord, int x, int y,
         nx -= ox * Chunk::SIZE_X;
         ny -= oy * Chunk::SIZE_Y;
         nz -= oz * Chunk::SIZE_Z;
-        const uint8_t opacity = inputs.opacity.empty()
-                                    ? inputs.uniform
-                                    : inputs.opacity[index(nx, ny, nz)];
-        if (opacity < 15) mask |= uint8_t(1u << i);
+        if (voxel_light::faceLoss({}, inputs.at(index(nx, ny, nz)), Face(i)) <
+            voxel_light::Opaque)
+            mask |= uint8_t(1u << i);
     }
     return mask;
 }
@@ -361,46 +359,56 @@ BlockLightPropagator::Input BlockLightPropagator::snapshot(
 }
 
 namespace {
-// Line of sight from the centre of the emitter cell to the centre of a
-// target cell through the opacity grid (Amanatides-Woo traversal). Returns
-// false when an opaque or unknown cell blocks it; otherwise adds the
-// translucent penalty (opacity - 1 per cell crossed, as the flood fill
-// charges) to `penalty`. Where the line passes exactly through an edge or a
-// corner it is blocked only if every cell around that crossing blocks, so
-// light does not leak through diagonal cracks of a wall but passes beside a
-// single block.
+// Far lights keep a straight near field to match their shadow maps. A
+// profiled caster blocks this ray only where its actual geometry intersects.
 template <typename Opacity>
-bool lineOfSight(int ex, int ey, int ez, int dx, int dy, int dz,
+bool lineOfSight(int ex, int ey, int ez, int dx, int dy, int dz, uint8_t exits,
                  const Opacity& opacity, int& penalty) {
     const int target[3] = {ex + dx, ey + dy, ez + dz};
     int cell[3] = {ex, ey, ez};
     const int d[3] = {dx, dy, dz};
+    const Vec3 ray{float(dx), float(dy), float(dz)};
+    const auto rayOpacity = [&](const int (&at)[3], float enter, float leave) {
+        const auto material = opacity(at[0], at[1], at[2]);
+        if (material.opacity && material.shape.code() &&
+            !tile_geometry::intersectRay(
+                material.shape,
+                {ex + .5f - at[0], ey + .5f - at[1], ez + .5f - at[2]}, ray,
+                enter, leave))
+            return uint8_t(0);
+        return material.opacity;
+    };
     int step[3];
     double tMax[3], tDelta[3];
     for (int a = 0; a < 3; ++a) {
         step[a] = d[a] > 0 ? 1 : (d[a] < 0 ? -1 : 0);
-        // From the cell centre, the first boundary is half a cell away.
         tDelta[a] = d[a] ? 1.0 / std::abs(d[a]) : 1e30;
         tMax[a] = d[a] ? 0.5 * tDelta[a] : 1e30;
     }
+    bool first = true;
     while (true) {
         const double t = std::min({tMax[0], tMax[1], tMax[2]});
-        if (t >= 1.0 - 1e-9) return true;  // reached the target cell
+        if (t >= 1.0 - 1e-9) return true;
         bool tied[3];
         int ties = 0;
+        uint8_t crossed = 0;
         for (int a = 0; a < 3; ++a) {
             tied[a] = std::abs(tMax[a] - t) < 1e-9;
-            ties += tied[a];
+            if (!tied[a]) continue;
+            ++ties;
+            crossed |= uint8_t(1u << (2 * a + (step[a] < 0)));
         }
+        if (first && !(crossed & exits)) return false;
+        first = false;
         if (ties > 1) {
-            // Crossing an edge or a corner: blocked only when every cell the
-            // line grazes (one step along each tied axis) blocks.
+            // At an edge or corner, a single caster only grazes the ray.
+            // Keep the existing closed-diagonal rule when all sides block.
             bool all = true;
             for (int a = 0; a < 3 && all; ++a) {
                 if (!tied[a]) continue;
                 int n[3] = {cell[0], cell[1], cell[2]};
                 n[a] += step[a];
-                all = opacity(n[0], n[1], n[2]) >= 15;
+                all = rayOpacity(n, float(t), float(t)) >= voxel_light::Opaque;
             }
             if (all) return false;
         }
@@ -412,8 +420,9 @@ bool lineOfSight(int ex, int ey, int ez, int dx, int dy, int dz,
         if (cell[0] == target[0] && cell[1] == target[1] &&
             cell[2] == target[2])
             return true;
-        const uint8_t o = opacity(cell[0], cell[1], cell[2]);
-        if (o >= 15) return false;
+        const auto o = rayOpacity(cell, float(t),
+                                  float(std::min({tMax[0], tMax[1], tMax[2]})));
+        if (o >= voxel_light::Opaque) return false;
         penalty += std::max(0, int(o) - 1);
     }
 }
@@ -423,6 +432,14 @@ template <typename Opacity, typename Contribute>
 void BlockLightPropagator::directLight(const Emitter& e, float limit,
                                        const Opacity& opacity,
                                        Contribute&& contribute) {
+    uint8_t exits = LightSource::frontFaces(e.emission, e.forward);
+    for (int f = 0; f < 6; ++f) {
+        const auto& step = Steps[f];
+        if (voxel_light::faceLoss(
+                {}, opacity(e.x + step[0], e.y + step[1], e.z + step[2]),
+                Face(f)) >= voxel_light::Opaque)
+            exits &= uint8_t(~(1u << f));
+    }
     // Only cells of the target chunk are written.
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
         for (int y = 0; y < Chunk::SIZE_Y; ++y)
@@ -434,10 +451,10 @@ void BlockLightPropagator::directLight(const Emitter& e, float limit,
                 const bool origin = dx == 0 && dy == 0 && dz == 0;
                 // Opaque cells hold no light (LightVolume stores zero); a
                 // lamp block's own cell stays dark too.
-                if (opacity(x, y, z) >= 15) continue;
+                if (opacity(x, y, z).solidOpaque()) continue;
                 int penalty = 0;
-                if (!origin &&
-                    !lineOfSight(e.x, e.y, e.z, dx, dy, dz, opacity, penalty))
+                if (!origin && !lineOfSight(e.x, e.y, e.z, dx, dy, dz, exits,
+                                            opacity, penalty))
                     continue;
                 const float d = straight + float(penalty);
                 if (d >= limit) continue;
@@ -450,15 +467,14 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
     if (input.emitters.empty()) return result;
 
     // Target-relative cell -> opacity; the area spans [-32, 48) per axis.
-    auto opacity = [&](int x, int y, int z) -> uint8_t {
+    auto opacity = [&](int x, int y, int z) -> voxel_light::Cell {
         constexpr int Lo = -(AreaSide / 2) * 16, Hi = Lo + AreaSide * 16;
         if (x < Lo || y < Lo || z < Lo || x >= Hi || y >= Hi || z >= Hi)
-            return Unknown;
+            return voxel_light::Unknown;
         const int cx = (x - Lo) >> 4, cy = (y - Lo) >> 4, cz = (z - Lo) >> 4;
         const auto& chunk = input.area[(cz * AreaSide + cy) * AreaSide + cx];
-        if (!chunk) return Unknown;
-        if (chunk->opacity.empty()) return chunk->uniform;
-        return chunk->opacity[index(x & 15, y & 15, z & 15)];
+        if (!chunk) return voxel_light::Unknown;
+        return chunk->at(index(x & 15, y & 15, z & 15));
     };
 
     const bool colored =
@@ -479,8 +495,6 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
     auto box = [](int dx, int dy, int dz) {
         return ((dz + R) * Side + (dy + R)) * Side + (dx + R);
     };
-    constexpr int Steps[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                 {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
 
     for (const auto& e : input.emitters) {
         const auto& emission = e.emission;
@@ -533,20 +547,18 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
                           dz = at / (Side * Side) - R;
                 const int x = e.x + dx, y = e.y + dy, z = e.z + dz;
                 const bool origin = dx == 0 && dy == 0 && dz == 0;
-                const uint8_t own = opacity(x, y, z);
+                const auto own = opacity(x, y, z);
                 // A lamp block keeps its own cell dark (it is opaque); an
                 // entity light in open air lights its cell fully.
-                if ((!origin || own < 15) && x >= 0 && y >= 0 && z >= 0 &&
-                    x < Chunk::SIZE_X && y < Chunk::SIZE_Y &&
+                if ((!origin || !own.solidOpaque()) && x >= 0 && y >= 0 &&
+                    z >= 0 && x < Chunk::SIZE_X && y < Chunk::SIZE_Y &&
                     z < Chunk::SIZE_Z) {
                     contribute(dx, dy, dz, effective(dx, dy, dz, k), origin);
                 }
                 // Opaque tiles receive light on their faces but pass none on.
-                if (!origin && own >= 15) continue;
-                const int leave = origin ? 1 : std::max<int>(1, own);
-                const int next = k + leave;
-                if (next > MaxCost) continue;
-                for (const auto& s : Steps) {
+                if (!origin && own.solidOpaque()) continue;
+                for (int f = 0; f < 6; ++f) {
+                    const auto& s = Steps[f];
                     // A spotlight leaves its tile only through faces of its
                     // front hemisphere: one facing a wall lights nothing.
                     if (origin && emission.cone &&
@@ -559,9 +571,13 @@ BlockLightPropagator::Result BlockLightPropagator::compute(Input input) {
                         std::abs(nz) > R)
                         continue;
                     const int n = box(nx, ny, nz);
-                    if (cost[n] <= next) continue;
-                    if (opacity(e.x + nx, e.y + ny, e.z + nz) == Unknown)
-                        continue;
+                    if (cost[n] <= k + 1) continue;
+                    const auto adjacent = opacity(e.x + nx, e.y + ny, e.z + nz);
+                    const int loss = voxel_light::spreadLoss(
+                        origin ? voxel_light::Cell{} : own, adjacent, Face(f));
+                    if (loss >= voxel_light::Opaque) continue;
+                    const int next = k + std::max(1, loss);
+                    if (next > MaxCost || cost[n] <= next) continue;
                     if (effective(nx, ny, nz, next) >= limit) continue;
                     cost[n] = uint8_t(next);
                     buckets[next].push_back(n);

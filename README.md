@@ -164,6 +164,17 @@ The project is currently developed and built using Visual Studio Code with the C
 
 After running the dependency downloader, open the project in VS Code and configure it using the CMake Tools extension. Select the desired CMake build configuration and build the project from the CMake Tools interface (build was tested on recent versions of GCC and Clang).
 
+## Device targets
+
+Build `lod_render_smoke` to run the opt-in Vulkan smoke tests. They need a GPU
+and a display environment. From the repository root, capture the tile-shape
+lighting scene to check the shadow depth with a fixed light.
+
+```bash
+cmake --build build --target lod_render_smoke
+build/tests/lod_render_smoke /tmp/shape-lighting 1600 shape_lighting
+```
+
 # Controls
 
 The current gameplay camera uses:

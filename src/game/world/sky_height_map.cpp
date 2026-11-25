@@ -306,19 +306,20 @@ sky::Column SkyHeightMap::scanLoaded(unsigned cx, unsigned cz, int lx, int lz,
     // keep what the map knew there.
     int cachedSlab = -1;
     bool loaded = false;
-    std::array<uint8_t, Chunk::SIZE_Y> slab{};
-    return sky::scanColumn(from, 0, [&](int y) -> int {
+    std::array<voxel_light::Cell, Chunk::SIZE_Y> slab{};
+    return sky::scanColumn(from, 0, [&](int y) {
         const int s = y / Chunk::SIZE_Y;
         if (s != cachedSlab) {
             cachedSlab = s;
             loaded = chunks.withChunkLocked(
                 {cx, unsigned(s), cz}, [&](const Chunk& chunk) {
                     for (int ly = 0; ly < Chunk::SIZE_Y; ++ly)
-                        slab[size_t(ly)] =
-                            tileOpacity(chunk.tiles[lz][ly][lx], blocks);
+                        slab[size_t(ly)] = {
+                            tileOpacity(chunk.tiles[lz][ly][lx], blocks),
+                            chunk.shapeAt(Chunk::cell(lx, ly, lz))};
                 });
         }
-        return loaded ? slab[size_t(y % Chunk::SIZE_Y)] : known.opacityAt(y);
+        return loaded ? slab[size_t(y % Chunk::SIZE_Y)] : known.cellAt(y);
     });
 }
 
@@ -416,23 +417,54 @@ std::optional<uint8_t> SkyHeightMap::skyAt(int64_t x, int y, int64_t z) const {
 
     const auto direct = directSky(x, y, z);
     if (!direct || *direct == sky::Opaque) return direct;
-    int best = *direct;
-    const auto target = column(x, z);
-    // Below the highest opaque tile the column has no cavity geometry.
-    // Treat the queried point there as open for this lateral estimate.
-    const int excess =
-        y < target->opaque ? 0 : std::max(1, int(target->opacityAt(y))) - 1;
-    // Heightmap approximation: horizontal 4-neighbour distance from direct
-    // light. The column profile supplies attenuation, even under glass.
-    for (int d = 1; d + excess < sky::Opaque - best; ++d)
-        for (int dx = -d; dx <= d; ++dx) {
-            const int dz = d - std::abs(dx);
-            if (const auto light = directSky(x + dx, y, z + dz))
-                best = std::max(best, int(*light) - d - excess);
-            if (dz != 0)
-                if (const auto light = directSky(x + dx, y, z - dz))
-                    best = std::max(best, int(*light) - d - excess);
+    // Find nearby direct sources at this height, tracing the same face
+    // losses as a voxel spread in reverse. Below the recorded opaque top
+    // the heightmap has no cavity geometry, so assume space for this estimate.
+    constexpr int Range = sky::Opaque - 1;
+    constexpr int Side = 2 * Range + 1;
+    struct Sample {
+        voxel_light::Cell cell;
+        uint8_t direct = voxel_light::Unknown;
+        uint8_t cost = sky::Opaque;
+    };
+    std::array<Sample, Side * Side> samples;
+    const auto index = [](int dx, int dz) {
+        return (dz + Range) * Side + dx + Range;
+    };
+    const auto sample = [&](int dx, int dz) -> Sample& {
+        auto& out = samples[index(dx, dz)];
+        if (out.direct == voxel_light::Unknown) {
+            const auto col = column(x + dx, z + dz);
+            out.direct = col ? col->direct(y) : 0;
+            if (col && y >= col->opaque) out.cell = col->cellAt(y);
         }
+        return out;
+    };
+    std::array<std::vector<int>, sky::Opaque> queue;
+    queue[0].push_back(index(0, 0));
+    sample(0, 0).cost = 0;
+    int best = *direct;
+    for (int cost = 0; cost + best < sky::Opaque; ++cost) {
+        for (const int at : queue[cost]) {
+            const auto& target = samples[at];
+            if (target.cost != cost) continue;
+            best = std::max(best, int(target.direct) - cost);
+            if (cost + 1 + best >= sky::Opaque) continue;
+            const int dx = at % Side - Range, dz = at / Side - Range;
+            for (const int face : {0, 1, 4, 5}) {
+                const auto& step = voxel_light::Steps[face];
+                auto& source = sample(dx + step[0], dz + step[2]);
+                if (source.cost <= cost + 1) continue;
+                const int next =
+                    cost +
+                    std::max(1, int(voxel_light::spreadLoss(
+                                    source.cell, target.cell, Face(face ^ 1))));
+                if (next + best >= sky::Opaque || source.cost <= next) continue;
+                source.cost = uint8_t(next);
+                queue[next].push_back(index(dx + step[0], dz + step[2]));
+            }
+        }
+    }
     return uint8_t(best);
 }
 

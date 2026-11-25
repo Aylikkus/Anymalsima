@@ -2942,6 +2942,14 @@ TEST(sky_queries_and_far_shade_without_chunks) {
     Chunk roof;
     for (auto& row : roof.tiles)
         for (auto& tile : row[0]) tile.block_id = 1;
+    const auto wall = TileShape::make(TileShapeProfile::Wall10);
+    for (int z = 0; z < 4; ++z)
+        for (int x = 4; x < 8; ++x)
+            roof.setCell(Chunk::cell(x, 0, z), roof.tiles[z][0][x], wall);
+    roof.setCell(Chunk::cell(10, 0, 2), roof.tiles[2][0][10],
+                 TileShape::make(TileShapeProfile::Slab));
+    roof.setCell(Chunk::cell(11, 0, 2), roof.tiles[2][0][11],
+                 TileShape::make(TileShapeProfile::Ramp));
     edit->structure.emplace_back(
         Roof / Chunk::SIZE_Y,
         std::make_shared<const Bytes>(chunk_codec::encode(roof)));
@@ -2966,6 +2974,8 @@ TEST(sky_queries_and_far_shade_without_chunks) {
     EQUAL(far->at(X + 10, Z + 10)[0], float(Roof + 1), "unloaded roof");
     EQUAL(far->at(X + 2, Z + 2)[0], 401.f, "unloaded override");
 
+    EQUAL(far->at(X + 6, Z + 2)[0], 401.f,
+          "thin walls leave the ground as the opaque cutoff");
     CHECK(!map.directSky(X + 10, Roof - 1, Z + 10));
     map.requestUnloaded(X + 10 - f.world.wrap().tiles, Z + 10);
     settle(f, map);
@@ -2976,10 +2986,49 @@ TEST(sky_queries_and_far_shade_without_chunks) {
     EQUAL(int(*direct), 0, "roof blocks overhead sunlight");
     EQUAL(int(*map.directSky(X + 2, Roof - 1, Z + 2)), 15,
           "override opens sky");
+    EQUAL(int(*map.directSky(X + 6, Roof - 1, Z + 2)), 13,
+          "unloaded thin wall transmits overhead light");
+    EQUAL(int(*map.directSky(X + 10, Roof - 1, Z + 2)), 0,
+          "unloaded slab stops overhead light");
+    EQUAL(int(*map.directSky(X + 11, Roof, Z + 2)), 15,
+          "unloaded ramp top sees the sky");
     // At the diagonal corner beside the 4x4 opening, light travels 2 cells.
     EQUAL(int(*map.skyAt(X + 4, Roof - 1, Z + 4)), 13,
           "unloaded lateral falloff");
     EQUAL(int(*map.skyAt(X + 10, Roof + 1, Z + 10)), 15, "open sky above roof");
+
+    // Load the slab below the roof and compare its estimate to the sweep.
+    // The roof remains unloaded, so the shaped sky column seeds the slab.
+    constexpr ChunkCoord underRoof{17, (Roof - 1) / Chunk::SIZE_Y, 18};
+    const auto& region = f.world.regions[2 * f.world.width + 2];
+    f.chunks->registerChunk({17, 0, 18}, {16, 0, 16}, &region);
+    f.chunks->registerChunk(underRoof, {16, 0, 16}, &region);
+    f.chunks->request(underRoof);
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    do {
+        f.chunks->update();
+        CHECK(f.pool.wait_for(std::chrono::seconds(5)));
+        CHECK(std::chrono::steady_clock::now() < deadline);
+    } while (!f.chunks->isReady(underRoof));
+    map.request(17, 18);
+    SunLightPropagator sun(*f.chunks, f.assets.getStorage<Block>(), f.pool,
+                           &map);
+    CHECK(sun.isEstimated(underRoof));
+    const auto estimated = map.skyAt(X + 6, Roof - 1, Z + 2);
+    CHECK(estimated);
+    EQUAL(int(*estimated), 13, "estimated sky under a thin wall");
+    do {
+        map.update();
+        sun.update();
+        CHECK(f.pool.wait_for(std::chrono::seconds(5)));
+        CHECK(std::chrono::steady_clock::now() < deadline);
+    } while (!sun.isIdle() || !map.isIdle());
+    CHECK(sun.isComplete(underRoof));
+    CHECK(!sun.isEstimated(underRoof));
+    CHECK(!f.chunks->isReady({17, Roof / Chunk::SIZE_Y, 18}));
+    EQUAL(int(*map.skyAt(X + 6, Roof - 1, Z + 2)), int(*estimated),
+          "first sweep matches the under-wall estimate");
 }
 
 namespace {
@@ -3043,7 +3092,11 @@ TEST(sky_sunlight_without_upper_slabs) {
             roofEdit->groundY[i] = int16_t(f.chunks->generatedSurfaceY(
                 Cx * Chunk::SIZE_X + x, Cz * Chunk::SIZE_Z + z));
             roofEdit->groundBlock[i] = 1;
-            roof.tiles[z][0][x].block_id = 1;
+            ::Tile tile;
+            tile.block_id = 1;
+            const auto profile = x == 8 && z == 8 ? TileShapeProfile::Ramp
+                                                  : TileShapeProfile::Slab;
+            roof.setCell(Chunk::cell(x, 0, z), tile, TileShape::make(profile));
         }
     roofEdit->structure.emplace_back(
         RoofSlab, std::make_shared<const Bytes>(chunk_codec::encode(roof)));
@@ -3054,12 +3107,15 @@ TEST(sky_sunlight_without_upper_slabs) {
             {Cx, RoofSlab, Cz}, [&](Chunk& chunk) {
                 for (int z = 0; z < Chunk::SIZE_Z; ++z)
                     for (int x = 0; x < Chunk::SIZE_X; ++x)
-                        chunk.tiles[z][0][x] = roof.tiles[z][0][x];
+                        chunk.setCell(Chunk::cell(x, 0, z), roof.tiles[z][0][x],
+                                      roof.shapeAt(Chunk::cell(x, 0, z)));
             }));
     sun.markColumnDirty(Cx, Cz);
     full.markColumnDirty(Cx, Cz);
     lightAll(f, sun, &map);
     lightAll(reference, full);
+    EQUAL(int(*map.directSky(Cx * 16 + 8, RoofSlab * 16 - 1, Cz * 16 + 9)), 0,
+          "roof slab still blocks direct sky after the sweep");
     const int x = 18 * Chunk::SIZE_X, z = 18 * Chunk::SIZE_Z;
     const int y = TreeStream::Low * Chunk::SIZE_Y;
     const auto* voxel = f.chunks->tileAt(x, y, z);

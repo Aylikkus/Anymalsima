@@ -60,10 +60,10 @@ class SkyHeightMap {
     sky::TilePtr tile(unsigned chunkX, unsigned chunkZ) const;
     // One tile column (X wraps), or std::nullopt while not built.
     std::optional<sky::Column> column(int64_t x, int64_t z) const;
-    // Highest tile attenuating sky light (sky::None: none).
+    // Highest recorded sky tile (sky::None: none).
     std::optional<int> top(int64_t x, int64_t z) const;
-    // Direct sunlight 0-15 at a tile: 15 minus the opacity of the tiles
-    // above it. Gameplay "direct sunlight" (plants) reads this.
+    // Direct sunlight 0-15 at a tile: 15 minus the projected opacity of
+    // the tiles above it. Gameplay "direct sunlight" (plants) reads this.
     std::optional<uint8_t> directSky(int64_t x, int y, int64_t z) const;
 
     // Request a heightmap column without generating any voxel slabs.

@@ -6,8 +6,8 @@
 #include "chunk.hpp"
 #include "core/assets_api.hpp"
 
-// Light attenuation of one tile on the 0-15 scale. Sunlight propagation and
-// the GPU light volumes share this rule.
+// Material and liquid opacity on the 0-15 scale. Profile-aware crossings
+// use voxel_light with this opacity.
 uint8_t tileOpacity(const Tile& tile, const DataStorage<Block>& blocks);
 
 // The light field of one chunk, encoded for the GPU. Texel layout is X

@@ -31,6 +31,7 @@ add_library(game
     world/sky_column.cpp
     world/sky_height_map.cpp
     world/light_volume.cpp
+    world/voxel_light.cpp
     world/light_volume_manager.cpp
     world/world_editor.cpp
     world/terrain_edits.cpp

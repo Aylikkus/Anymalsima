@@ -11,22 +11,24 @@ namespace sky {
 uint8_t Column::direct(int y) const {
     int light = Opaque;
     for (const auto& span : spans) {
+        const int loss = voxel_light::verticalLoss(span.cell());
         if (span.bottom <= y) {
             // Tiles of the run above y (none when y is above the run).
-            if (span.top > y) light -= (span.top - y) * span.opacity;
+            if (span.top > y) light -= (span.top - y) * loss;
             break;
         }
-        light -= (span.top - span.bottom + 1) * span.opacity;
+        light -= (span.top - span.bottom + 1) * loss;
         if (light <= 0) return 0;
     }
     if (opaque != None && y < opaque) return 0;
     return uint8_t(std::max(0, light));
 }
 
-uint8_t Column::opacityAt(int y) const {
-    if (opaque != None && y <= opaque) return Opaque;
+voxel_light::Cell Column::cellAt(int y) const {
+    if (opaque != None && y <= opaque)
+        return {Opaque, y == opaque ? opaqueShape : TileShape{}};
     for (const auto& span : spans)
-        if (y <= span.top && y >= span.bottom) return span.opacity;
+        if (y <= span.top && y >= span.bottom) return span.cell();
     return 0;
 }
 
@@ -36,6 +38,10 @@ Tile::Tile(const std::array<Column, Size>& columns) {
     for (int i = 0; i < Size; ++i) {
         const auto& c = columns[size_t(i)];
         opaque[size_t(i)] = c.opaque;
+        if (c.opaqueShape.code()) {
+            if (opaqueShapes.empty()) opaqueShapes.resize(Size);
+            opaqueShapes[i] = c.opaqueShape;
+        }
         spanBegin[size_t(i)] = uint16_t(spans.size());
         spanCount[size_t(i)] = uint8_t(c.spans.size());
         flags[size_t(i)] = c.overflow ? OverflowFlag : 0;
@@ -46,6 +52,7 @@ Tile::Tile(const std::array<Column, Size>& columns) {
 Column Tile::column(int i) const {
     Column c;
     c.opaque = opaque[size_t(i)];
+    if (!opaqueShapes.empty()) c.opaqueShape = opaqueShapes[i];
     c.spans.assign(spans.begin() + spanBegin[size_t(i)],
                    spans.begin() + spanBegin[size_t(i)] + spanCount[size_t(i)]);
     c.overflow = overflow(i);
@@ -80,8 +87,9 @@ namespace {
 
 struct EditTiles {
     // Translucent or opaque tiles of the edit's structure, per column:
-    // (y, opacity), highest first.
-    std::array<std::vector<std::pair<int, uint8_t>>, Tile::Size> tiles;
+    // (y, material opacity and profile), highest first.
+    std::array<std::vector<std::pair<int, voxel_light::Cell>>, Tile::Size>
+        tiles;
 };
 
 EditTiles decodeEdit(const ColumnEdit& edit, const OpacityTable& opacity) {
@@ -95,7 +103,9 @@ EditTiles decodeEdit(const ColumnEdit& edit, const OpacityTable& opacity) {
                     const uint8_t block = part.tiles[z][y][x].block_id;
                     if (!block || !opacity[block]) continue;
                     out.tiles[size_t(Tile::index(x, z))].emplace_back(
-                        int(it->first) * Chunk::SIZE_Y + y, opacity[block]);
+                        int(it->first) * Chunk::SIZE_Y + y,
+                        voxel_light::Cell{opacity[block],
+                                          part.shapeAt(Chunk::cell(x, y, z))});
                 }
     }
     return out;
@@ -111,14 +121,12 @@ Tile build(const TileInputs& in) {
         const size_t s = size_t(i);
         // Ground: the generated surface, or the edit's ground override.
         int ground = in.surface[s];
-        uint8_t groundOpacity = Opaque;
+        voxel_light::Cell groundCell = Opaque;
         auto water = in.water[s];
         if (in.edit) {
             ground = in.edit->groundY[s];
-            groundOpacity =
-                ground >= 0
-                    ? std::max<uint8_t>(1, opacity[in.edit->groundBlock[s]])
-                    : 0;
+            groundCell = {opacity[in.edit->groundBlock[s]],
+                          in.edit->groundShape[s]};
             water = in.edit->waterAt(i, water);
         }
         const int waterTop = water.topTile();
@@ -127,23 +135,15 @@ Tile build(const TileInputs& in) {
         int from = std::max({ground, waterTop, structure});
         if (!built.empty()) from = std::max(from, built.front().first);
         size_t next = 0;
-        // The edit's ground tile, when translucent, rests on unknown
-        // tiles: the one below counts as opaque (darker than or equal to
-        // the truth).
-        const int floor =
-            ground >= 0 && groundOpacity < Opaque ? ground - 1 : INT_MIN;
-        columns[s] = scanColumn(from, 0, [&](int y) -> int {
-            int o = 0;
-            if (y == structure) o = Opaque;
+        columns[s] = scanColumn(from, 0, [&](int y) -> voxel_light::Cell {
+            if (y == structure || (y < ground && ground >= 0)) return Opaque;
+            if (y == ground) return groundCell;
             while (next < built.size() && built[next].first > y) ++next;
             if (next < built.size() && built[next].first == y)
-                o = std::max<int>(o, built[next].second);
-            if (y == ground) o = std::max<int>(o, groundOpacity);
-            if (y <= floor || (y < ground && ground >= 0)) o = Opaque;
+                return built[next].second;
             if (y > ground && y <= waterTop)
-                o = std::max(o,
-                             waterOpacity(y == waterTop ? water.topFill : 255));
-            return o;
+                return waterOpacity(y == waterTop ? water.topFill : 255);
+            return {};
         });
     }
     return Tile(columns);

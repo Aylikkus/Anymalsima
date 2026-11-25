@@ -36,13 +36,13 @@ void main()
         vec3 owner = vec3(x, y, z) + 1.5;
         v_owner = vec4(owner, a_tangent.y);
 
-        // Until light transport accounts for partial solids, use the
-        // adjacent voxel in the outward direction. On inclined tops that
-        // is always above. Keep bilinear filtering along the other axes.
-        vec3 axis = abs(a_normal.y) > 0.0
-            ? vec3(0.0, sign(a_normal.y), 0.0)
-            : sign(a_normal);
-        v_light = mix(a_position + 1.0, owner + axis, abs(axis));
+        // An inset surface opens into its own cell. Both facets of a
+        // junction use the same light texel along their shared edge.
+        // Boundary faces use the lit cell outside the solid.
+        vec3 axis = sign(a_normal);
+        v_light = a_tangent.z > 0.5
+            ? owner
+            : mix(a_position + 1.0, owner + axis, abs(axis));
     }
     // Ground cover (ChunkMesher::build): x = overlay layer or -1, y = side
     // fringe range; a_color0 is then the cover tint.

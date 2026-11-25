@@ -70,6 +70,14 @@ class SunLightPropagator {
     static constexpr int HZ = Z + 2 * HALO;
     using Light = std::array<uint8_t, VOLUME>;
 
+    struct Opacity {
+        Light material{};
+        voxel_light::Shapes shapes;
+        voxel_light::Cell at(int i) const {
+            return {material[i], shapes.at(i)};
+        }
+    };
+
     struct State {
         Light direct{};
         uint64_t revision = 0;
@@ -91,7 +99,7 @@ class SunLightPropagator {
         // Tile opacity as of the last sweep snapshot (every opacity change
         // sweeps the column again before a spread may run), shared with
         // spread jobs so halos are assembled on the workers.
-        std::shared_ptr<const Light> opacity;
+        std::shared_ptr<const Opacity> opacity;
         // Tiles changed since `opacity` was taken (an edit): the next sweep
         // copies them again. Untouched chunks reuse their snapshot (sky
         // mode), so a column sweep reads only new or edited chunks.
@@ -99,7 +107,7 @@ class SunLightPropagator {
     };
     struct Slab {
         ChunkCoord coord;
-        std::shared_ptr<const Light> opacity;
+        std::shared_ptr<const Opacity> opacity;
     };
     struct ChunkLight {
         ChunkCoord coord;
@@ -129,7 +137,7 @@ class SunLightPropagator {
     struct IndirectInput {
         ChunkCoord coord;
         uint64_t revision;
-        std::array<std::shared_ptr<const Light>, 27> opacity;
+        std::array<std::shared_ptr<const Opacity>, 27> opacity;
         std::array<std::shared_ptr<const Light>, 27> direct;
         std::array<sky::TilePtr, 27> sky;
         std::array<int, 27> baseY{};  // world Y of each neighbour slab
@@ -158,7 +166,6 @@ class SunLightPropagator {
                 ChunkCoord& out) const;
     static DirectResult sweep(DirectInput input);
     static IndirectResult spread(IndirectInput input);
-    uint8_t opacity(const Tile& tile) const;
     void ready(const ChunkCoord& coord);
     void removed(const ChunkCoord& coord);
     void invalidateAround(const ChunkCoord& coord);

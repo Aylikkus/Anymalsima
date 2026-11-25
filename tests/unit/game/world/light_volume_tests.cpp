@@ -1,6 +1,7 @@
 #include <set>
 
 #include "world/light_volume.hpp"
+#include "world/voxel_light.hpp"
 #include "world_fixture.hpp"
 
 namespace {
@@ -145,4 +146,43 @@ TEST(light_volume_signals) {
     CHECK(lit.empty());
     f.chunks.markModified(low);  // edits change opacity
     CHECK(lit.contains({low.x, low.y, low.z}));
+}
+
+TEST(shaped_light_shared_face_and_volume) {
+    using enum TileShapeProfile;
+    using voxel_light::faceLoss;
+    const auto slab = TileShape::make(Slab);
+    const auto ramp = TileShape::make(Ramp);
+    const auto wall = TileShape::make(Wall10);
+    EQUAL(int(faceLoss({15, slab}, {15, slab}, Face::PosX)), 8,
+          "coincident halves cover only half the face");
+    EQUAL(int(faceLoss({15, ramp}, {15, ramp.rotated(2)}, Face::PosX)), 11,
+          "crossing slopes cover three quarters of the face");
+    EQUAL(int(faceLoss({15, wall}, {}, Face::PosZ)), 15,
+          "flush wall face is sealed");
+    EQUAL(int(faceLoss({15, wall}, {}, Face::NegZ)), 0,
+          "inset side opens into the cell");
+    EQUAL(int(faceLoss({15, wall}, {}, Face::PosX)), 2,
+          "thin wall covers a tenth of its edge");
+    EQUAL(int(faceLoss({3, wall}, {15, wall.rotated(2)}, Face::PosX)), 2,
+          "disjoint edges with different material opacity");
+    const auto halfWall = TileShape::make(Wall50);
+    EQUAL(int(faceLoss({15, halfWall}, {15, halfWall.rotated(2)}, Face::PosX)),
+          15, "opposite half strips close the entire face");
+    EQUAL(int(faceLoss({3, slab}, {15, slab}, Face::PosX)), 8,
+          "overlap uses the stronger material opacity");
+
+    test::Assets assets;
+    Chunk chunk;
+    test::fill(chunk);
+    ::Tile solid;
+    solid.block_id = 1;
+    solid.lightLevel.sun_exposure = 15;
+    solid.lightLevel.artificial_light = 6;
+    chunk.setCell(Chunk::cell(1, 1, 1), solid, ramp);
+    chunk.setCell(Chunk::cell(2, 1, 1), solid);
+    Cells encoded;
+    LightVolume::encode(chunk, assets.getStorage<Block>(), nullptr, encoded);
+    expectSame(cell(encoded, 1, 1, 1), {255, 102}, "ramp open portion");
+    expectSame(cell(encoded, 2, 1, 1), {0, 0}, "cube interior");
 }

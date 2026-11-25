@@ -204,6 +204,7 @@ void ChunkMesher::emitSurface(ChunkGeometry& mesh,
                               TileShape shape, const FaceKey& key,
                               const CoverClimate& climate) const {
     const auto normal = face.plane.normal;
+    const bool inset = !tile_geometry::boundaryFace(face);
     const auto* cover = coverInfo(key.cover);
     static_assert(Chunk::SIZE_X == 16 && Chunk::SIZE_Y == 16 &&
                   Chunk::SIZE_Z == 16);  // block.vert decodes the owner index
@@ -230,6 +231,7 @@ void ChunkMesher::emitSurface(ChunkGeometry& mesh,
             vertex.tx =
                 float(BlockVertex::ExplicitCellTag +
                       Chunk::cell(int(cell.x), int(cell.y), int(cell.z)));
+            vertex.tz = inset ? 1.f : 0.f;
             if (cover) {
                 vertex.u = cover->layer;
                 if (normal.y == 0) {

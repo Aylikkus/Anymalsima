@@ -46,8 +46,8 @@ struct LightFixture : test::SunlightFixture {
                  chunks.hasGenerationWork());
     }
     static TilePos at(int x, int y, int z) { return {x, y + BASE_Y, z}; }
-    void place(int x, int y, int z, uint8_t block) {
-        EQUAL(int(editor.setBlock(at(x, y, z), block)),
+    void place(int x, int y, int z, uint8_t block, TileShape shape = {}) {
+        EQUAL(int(editor.setBlock(at(x, y, z), block, shape)),
               int(EditStatus::Applied), "edit applied");
     }
     int light(int x, int y, int z) {
@@ -414,4 +414,70 @@ TEST(block_light_far_spreads_directly) {
     f.place(8, 8, 8, Lamp);
     f.relight();
     CHECK(f.light(8, 5, 8) > 0);
+}
+
+TEST(block_light_shape_rotation_across_chunk_edge) {
+    LightFixture f;
+    f.air({0, 0, 0});
+    f.air({1, 0, 0});
+    constexpr int Y = 8, Z = 8;
+    for (int x = 15; x <= 20; ++x) {
+        f.place(x, Y - 1, Z, Stone);
+        f.place(x, Y + 1, Z, Stone);
+        f.place(x, Y, Z - 1, Stone);
+        f.place(x, Y, Z + 1, Stone);
+    }
+    f.place(14, Y, Z, Stone);
+    f.place(15, Y, Z, Lamp);
+    const auto emitter = LightFixture::at(15, Y, Z);
+    const auto wall = TileShape::make(TileShapeProfile::Wall10);
+    const auto sealed = wall.rotated(3);  // full -X face against the lamp
+    const auto shines = [&](int expected) {
+        f.relight();
+        f.expect(18, Y, Z, expected);
+    };
+    shines(lamp(3));  // empty control
+    f.place(16, Y, Z, Stone);
+    shines(0);  // cube control
+    f.place(16, Y, Z, Stone, wall);
+    shines(lamp(5));  // 10% coverage on each side adds two steps
+    f.place(16, Y, Z, Stone, sealed);
+    shines(0);
+    CHECK(f.registry.blockLight(emitter)->sealed());
+
+    // Finish an open-wall job off-thread, then rotate before collection.
+    f.place(16, Y, Z, Stone, wall);
+    f.blockLight.update();
+    CHECK(f.blockLight.inFlightCount() > 0);
+    f.wait();
+    f.place(16, Y, Z, Stone, sealed);
+    f.blockLight.update();
+    f.expect(18, Y, Z, 0);
+    shines(0);
+    CHECK(f.registry.blockLight(emitter)->sealed());
+
+    f.place(16, Y, Z, Glass, sealed);
+    shines(lamp(5));
+    CHECK(!f.registry.blockLight(emitter)->sealed());
+
+    // The far light traces the real wall surface in its straight near field.
+    f.place(15, Y, Z, Beacon);
+    f.place(16, Y, Z, Stone, sealed);
+    shines(0);
+    f.place(16, Y, Z, Stone, wall);
+    f.relight();
+    CHECK(f.light(18, Y, Z) > 0);
+    CHECK(!f.registry.blockLight(emitter)->sealed());
+
+    // A result from the previous slab cannot be collected into its replacement.
+    f.place(16, Y, Z, Stone, wall.rotated(2));
+    f.blockLight.update();
+    CHECK(f.blockLight.inFlightCount() > 0);
+    f.wait();
+    f.chunks.unregister(f.coord({1, 0, 0}));
+    f.air({1, 0, 0});
+    f.place(16, Y, Z, Stone);
+    f.blockLight.update();
+    f.expect(18, Y, Z, 0);
+    shines(0);
 }
