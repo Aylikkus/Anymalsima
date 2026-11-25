@@ -2,6 +2,7 @@
 #include <set>
 
 #include "flora_assets.hpp"
+#include "world/day_night.hpp"
 #include "world/flora_generator.hpp"
 #include "world/flora_mesh_builder.hpp"
 #include "world/flora_simulation.hpp"
@@ -523,8 +524,20 @@ TEST(flora_meshes) {
 TEST(flora_world_clock) {
     WorldClock clock;
     EQUAL(clock.day(), int64_t(0), "starts at day 0");
-    clock.advance(WorldClock::DayLengthSeconds / 2);
+    const auto midnight = skyAtTime(clock.timeOfDay()).sun;
+    CHECK(midnight[1] < -0.9f);
+    clock.advance(WorldClock::DayLengthSeconds / 4);
+    const auto sunrise = skyAtTime(clock.timeOfDay()).sun;
+    CHECK(std::abs(sunrise[1]) < 1e-6f);
+    clock.advance(WorldClock::DayLengthSeconds / 4);
     EQUAL(clock.timeOfDay(), 0.5, "noon after half a day");
+    const auto noon = skyAtTime(clock.timeOfDay()).sun;
+    CHECK(noon[1] > 0.9f);
+    CHECK(midnight[3] < sunrise[3] && sunrise[3] < noon[3]);
+    const auto seededSky = skyAtTime(0.0, 17);
+    CHECK(seededSky.seed == skyAtTime(0.5, 17).seed);
+    CHECK(seededSky.seed != skyAtTime(0.0, 17 + (uint64_t{1} << 63)).seed);
+    CHECK(seededSky.sun == midnight);
     clock.setSpeed(60);
     clock.advance(WorldClock::DayLengthSeconds * 2);
     EQUAL(clock.day(), int64_t(120), "debug speed");
@@ -540,6 +553,8 @@ TEST(flora_world_clock) {
     WorldMeta loaded;
     loaded.deserialize(meta.serialize());
     EQUAL(loaded.worldDays, 12.25, "saved game time");
+    clock.set(loaded.worldDays);
+    CHECK(skyAtTime(clock.timeOfDay()).sun == sunrise);
     auto old = meta.serialize();
     old.erase("worldDays");
     loaded.deserialize(old);

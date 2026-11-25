@@ -7,6 +7,7 @@
 #include <variant>
 #include <vector>
 
+#include "sky_state.hpp"
 #include "text_layout_state.hpp"
 
 enum class RenderCategory : uint8_t {
@@ -37,6 +38,7 @@ struct Camera {
     float viewDistance = 4096.f;
     bool terrainSky = false;
     bool underwater = false;
+    SkyState sky{};
     Vec3 eye() const {
         return {position.x - std::cos(pitch) * std::sin(yaw) * distance,
                 position.y - std::sin(pitch) * distance,

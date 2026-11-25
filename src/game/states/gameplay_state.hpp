@@ -12,7 +12,6 @@
 #include "widgets/button.hpp"
 #include "widgets/scroll_bar.hpp"
 #include "widgets/scroll_container.hpp"
-#include "widgets/slider.hpp"
 #include "widgets/text.hpp"
 #include "widgets/text_box.hpp"
 #include "world/block_light_propagator.hpp"
@@ -156,9 +155,6 @@ class GameplayState : public IGameState {
     TextButton* lightButton = nullptr;
     static constexpr const char* TestLightBlock = "blocks.test_light";
     std::optional<uint8_t> testLightId;
-    // Debug sky dimmer (not saved): 0 = day, 1 = no sky light.
-    Text* skyText = nullptr;
-    Slider* skySlider = nullptr;
     void setTool(EditTool value);
     void useTool(int mouseX, int mouseY);
     // First solid block under the cursor.

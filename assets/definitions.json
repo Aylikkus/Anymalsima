@@ -6,6 +6,8 @@
     "bold_cjk": "assets/fonts/noto_universal_cjk_bold.ttf"
   },
   "textures": {
+    "sky.moon": "assets/textures/sky/moon.png",
+    "sky.sun": "assets/textures/sky/sun.png",
     "ui.black.9slice": "assets/textures/ui/black/9slice.png",
     "ui.black.9slice_thin": "assets/textures/ui/black/9slice_thin.png",
     "ui.black.thumb_circle": "assets/textures/ui/black/thumb_circle.png",

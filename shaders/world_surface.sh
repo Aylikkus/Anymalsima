@@ -73,10 +73,7 @@ vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing, floa
 // maps authored OpenGL-style (+green = up) need -1 here, DirectX-style +1.
 #define NORMAL_GREEN_SIGN -1.0
 
-vec3 surfaceSunDirection()
-{
-    return normalize(vec3(-0.35, 0.85, 0.4));
-}
+#include "sky_colors.sh"
 
 vec3 triplanarWeights(vec3 normal)
 {
@@ -125,8 +122,7 @@ vec3 surfaceNormal(vec3 position, vec3 normal, float layer)
 #define SURFACE_MAX_FAR_LIGHTS 32
 #define SURFACE_NEAR_RANGE 15.0
 uniform vec4 u_lights[128];
-// x = far light count, y = sky darkening (0 = full daylight, 1 = no sky
-// light). Zero when unbound, so programs without lights stay sky-lit.
+// x = far light count.
 uniform vec4 u_light_info;
 // Distant glow of small lights (LodLightMap): xy = world XZ of the map's
 // minimum corner, z = 1 / world extent, w = 1 when the map is valid.
@@ -263,9 +259,9 @@ vec3 surfaceLightTint(vec2 chroma)
 vec3 surfaceLight(vec3 normal, vec3 albedo, vec2 light, vec3 blockTint,
                   vec3 blockDir, float blockDirStrength, vec3 far)
 {
-    float sun = max(dot(normal, surfaceSunDirection()), 0.0);
-    float daylight = 1.0 - clamp(u_light_info.y, 0.0, 1.0);
-    float sky = light.x * daylight * (SURFACE_AMBIENT + SURFACE_DIFFUSE * sun);
+    float sun = max(dot(normal, skySunDirection()), 0.0) * skyDirectSun();
+    float sky = light.x * skyDaylight()
+              * (SURFACE_AMBIENT + SURFACE_DIFFUSE * sun);
     float toward = mix(1.0, max(dot(normal, blockDir), 0.0), blockDirStrength);
     vec3 block = blockTint * (light.y
                               * (SURFACE_AMBIENT + SURFACE_DIFFUSE * toward))
@@ -289,7 +285,7 @@ vec3 surfaceFog(vec3 position, vec3 color)
         return mix(color, WATER_FOG_COLOR, fog);
     }
     float fog = smoothstep(u_world_eye.w * 0.45, u_world_eye.w, distanceToEye);
-    return mix(color, vec3(0.68, 0.77, 0.84), fog);
+    return mix(color, skyHorizon(skySunDirection().y), fog);
 }
 vec4 surfaceTexture(vec3 position, vec3 normal, float layer)
 {

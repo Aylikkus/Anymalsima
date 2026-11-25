@@ -80,9 +80,8 @@ void main()
     vec3 far = surfaceFarLight(v_position, normal, normal, 1.0);
     vec3 lit = surfaceLight(normal, color, light, tint, normal, 0.0, far);
     // Translucency: sunlight through leaves seen against the sun.
-    float daylight = 1.0 - clamp(u_light_info.y, 0.0, 1.0);
-    float back = max(dot(-toEye, surfaceSunDirection()), 0.0);
-    lit += color * v_params.x * light.x * daylight
+    float back = max(dot(-toEye, skySunDirection()), 0.0);
+    lit += color * v_params.x * light.x * skyDaylight() * skyDirectSun()
          * (0.15 + 0.85 * back * back) * 0.3;
     gl_FragColor = vec4(surfaceFog(v_position, lit), 1.0);
 }

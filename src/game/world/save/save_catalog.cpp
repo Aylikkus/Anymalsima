@@ -62,6 +62,7 @@ SaveSlot create(const World& world, Vec2u startRegion,
     slot.meta.createdAt = WorldMeta::now();
     slot.meta.lastPlayed = slot.meta.createdAt;
     slot.meta.startRegion = startRegion;
+    slot.meta.worldDays = 8.0 / 24.0;  // Start new worlds at 08:00.
 
     const auto base = folderName(slot.meta.seed, slot.meta.createdAt);
     FileIO::ensureDirectory(root);

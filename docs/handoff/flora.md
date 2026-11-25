@@ -752,8 +752,8 @@ the epoch-free seed. What a quest needs next:
 
 ### Smaller follow-ups
 
-- Day/night cycle on `WorldClock::timeOfDay()` (sky light, then
-  `docs/handoff/light-query.md`).
+- Gameplay light queries using the day/night cycle's sky light. See
+  `docs/handoff/light-query.md`.
 - Cover regrowth in unloaded areas (analytic, from an edit day stored per
   chunk) and spreading of cover onto bare topsoil next to grass.
 - Walking wears paths: lower cover density where entities walk (the

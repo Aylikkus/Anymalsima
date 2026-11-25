@@ -8,6 +8,7 @@
 #include "gettext_wrapper.hpp"
 #include "main_menu_state.hpp"
 #include "render/frustrum.hpp"
+#include "world/day_night.hpp"
 #include "world/generated_hydrology.hpp"
 
 // How many chunks out from the camera chunk to request and draw.
@@ -117,22 +118,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                       << " is not defined; PLACE LIGHT is disabled\n";
     }
 
-    // Debug sky dimmer: there is no day/night cycle yet, and sky light
-    // outshines block light outdoors.
-    skyText = ui_manager->createWidget(std::make_unique<Text>(), root_ptr);
-    skyText->setGridPlacement({9.5f, 15, 3, 1});
-    skyText->setFontRole(FontRole::Bold);
-    skyText->setVerticalAlign(VerticalAlign::Middle);
-    skyText->setText(_F("SKY {0}%", 100));
-    skySlider = ui_manager->createWidget(
-        std::make_unique<Slider>(context, "ui.white.track_horizontal",
-                                 "ui.white.thumb_circle"),
-        root_ptr);
-    skySlider->setRange(0.0f, 100.0f);
-    skySlider->setStep(1.0f);
-    skySlider->setAxis(ScrollAxis::Horizontal);
-    skySlider->setGridPlacement({12, 15, 5, 1});
-    harvestButton = makeToolButton(_("HARVEST"), 17, EditTool::Harvest);
+    harvestButton = makeToolButton(_("HARVEST"), 9, EditTool::Harvest);
     // Debug: plant a tree sapling; clicking again while armed picks the
     // next species.
     plantButton = ui_manager->createWidget(
@@ -140,7 +126,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         root_ptr);
     plantButton->setTextAlignment(TextAlign::Center, VerticalAlign::Middle);
     plantButton->setFontRole(FontRole::Bold);
-    plantButton->setGridPlacement({17, 14, 7, 1});
+    plantButton->setGridPlacement({12, 15, 7, 1});
     plantButton->onClick.connect([this]() {
         if (tool == EditTool::PlantTree) {
             const size_t count = chunkManager->treeSpecies().species().size();
@@ -164,11 +150,6 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         for (size_t i = 0; i < std::size(Speeds); ++i)
             if (clock.speed() == Speeds[i]) next = (i + 1) % std::size(Speeds);
         clock.setSpeed(Speeds[next]);
-    });
-    skySlider->setValue(100.0f);
-    skySlider->onValueChanged.connect([this](float value) {
-        skyText->setText(_F("SKY {0}%", int(value)));
-        lightRenderer->setSkyDarkness(1.f - value / 100.f);
     });
 
     generator = std::make_unique<LocationGenerator>();
@@ -877,6 +858,8 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     const double now = std::chrono::duration<double>(
                            std::chrono::steady_clock::now() - started)
                            .count();
+    camera.sky = skyAtTime(clock.timeOfDay(), world->genSettings.seed);
+    lightRenderer->setSky(camera.sky);
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
     lightRenderer->setSkyOcclusion(skyMap->skyOcclusion());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,

@@ -1,8 +1,7 @@
 # Handoff: gameplay light queries (`LightQuery`)
 
-Status: **planned, not started.** Implement only after a real day/night cycle
-exists: the sky part of a sample must follow the time of day, not the debug
-SKY slider.
+Status: **planned, not started.** Use the strength from
+`skyAtTime(WorldClock::timeOfDay())` to scale the sky part of a sample.
 
 ## Why
 
@@ -95,8 +94,8 @@ Notes for the implementation:
   estimate from the heightmap (see `sky-light.md`). For unloaded
   positions, request the column and any nearby columns within 14 tiles
   through `requestUnloaded` and retry while data is pending. Scale the
-  sample by the day/night cycle's daylight when it exists. Sun direction
-  drives rendering (shadows and normal maps).
+  sample by the day/night cycle's daylight. Sun direction drives surface
+  shading.
 - **Colour**: return linear RGB; gameplay helpers such as "is it mostly
   red?" (hue/saturation of `artificial`) belong to the NPC side.
 - **Caching**: results depend on the registry (`version()`), edited chunks

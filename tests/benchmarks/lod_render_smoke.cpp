@@ -21,7 +21,9 @@
 #include "render/frustrum.hpp"
 #include "render/render_views.hpp"
 #include "resource_manager.hpp"
+#include "sky_renderer.hpp"
 #include "world/block_light_propagator.hpp"
+#include "world/day_night.hpp"
 #include "world/flora_renderer.hpp"
 #include "world/generated_hydrology.hpp"
 #include "world/light_renderer.hpp"
@@ -78,7 +80,9 @@ int main(int argc, char** argv) {
         ResourceManager assets;
         auto definitions = FileIO::readJson("assets/definitions.json");
         definitions.erase("fonts");
-        definitions.erase("textures");
+        const auto& textures = definitions.at("textures");
+        definitions["textures"] = {{"sky.sun", textures.at("sky.sun")},
+                                   {"sky.moon", textures.at("sky.moon")}};
         definitions.erase("sounds");
         definitions.erase("music");
         assets.loadFromJson(definitions);
@@ -266,8 +270,8 @@ int main(int argc, char** argv) {
             {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
         static const uint16_t skyIndices[] = {0, 1, 2, 0, 2, 3};
         auto sky = renderer.createStaticMesh(skyVertices, 4, skyIndices, 6);
-        ShaderProperty skyCamera;
-        skyCamera.initVec4("u_sky_camera", {0, 0, 1280.f / 720, 0});
+        SkyRenderer skyRenderer(assets);
+        SkyState skyState;
         const auto readback = bgfx::createTexture2D(
             1280, 720, false, 1, bgfx::TextureFormat::RGBA8,
             BGFX_TEXTURE_BLIT_DST | BGFX_TEXTURE_READ_BACK);
@@ -782,16 +786,14 @@ int main(int argc, char** argv) {
                 // NO_GLARE=1 renders without glare, for image diffs.
                 if (lights && !std::getenv("NO_GLARE"))
                     lightRenderer.drawGlare(target, camera, {1280, 720});
-                skyCamera.setVec4({camera.yaw, camera.pitch, 1280.f / 720,
-                                   lod.eyeUnderwater() ? 1.f : 0.f});
-                skyCamera.bind();
-                bgfx::setVertexBuffer(0, sky.vbh);
-                bgfx::setIndexBuffer(sky.ibh);
-                bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
-                if (!magenta)
-                    bgfx::submit(2, assets.getProgram("terrain_sky"));
-                else
+                if (!magenta) {
+                    Camera skyCamera = camera;
+                    skyCamera.sky = skyState;
+                    skyCamera.underwater = lod.eyeUnderwater();
+                    skyRenderer.draw(skyCamera, 1280.f / 720, sky);
+                } else {
                     bgfx::touch(2);
+                }
                 size_t draws = 0;
                 for (const auto& cmd : target.commands) {
                     const auto& draw = std::get<DrawVertexBufferCmd>(cmd.data);
@@ -1730,7 +1732,8 @@ int main(int argc, char** argv) {
                                                 1);
                                 }
                             }
-                        lightRenderer.setSkyDarkness(.9f);
+                        skyState = skyAtTime(0.0, world.genSettings.seed);
+                        lightRenderer.setSky(skyState);
                         home = camera;
                         // A "town": small warm entity lights beyond the voxel
                         // range, shown by the distant glow map and glare.

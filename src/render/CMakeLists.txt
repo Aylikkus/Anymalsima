@@ -1,6 +1,7 @@
 add_library(render
     resource_manager.cpp
     renderer.cpp
+    sky_renderer.cpp
 )
 
 target_include_directories(render

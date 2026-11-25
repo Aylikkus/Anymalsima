@@ -35,6 +35,7 @@ LightRenderer::LightRenderer(IRenderer& renderer, int quality)
     : shadowMaps(std::make_unique<LightShadows>(quality)) {
     lights.initVec4Array("u_lights", MaxLights * 4);
     info.initVec4("u_light_info", {0, 0, 0, 0});
+    sun.initVec4("u_sky_sun", SkyState{}.sun);
     glowOrigin.initVec4("u_lod_light_origin", {0, 0, 0, 0});
     glowTexture =
         bgfx::createTexture2D(LodLightMap::Size, LodLightMap::Size, false, 1,
@@ -168,7 +169,7 @@ void LightRenderer::fillLightUniforms() {
         v[15] = float(view.source->openFaces);
     }
     lights.setVec4Array(data.data(), MaxLights * 4);
-    info.setVec4({float(activeLights), skyDarkness, 0, 0});
+    info.setVec4({float(activeLights), 0, 0, 0});
 }
 
 void LightRenderer::appendUniforms(std::vector<ShaderProperty*>& uniforms,
@@ -176,6 +177,7 @@ void LightRenderer::appendUniforms(std::vector<ShaderProperty*>& uniforms,
     const bool block = program == Program::Block;
     uniforms.push_back(&lights);
     uniforms.push_back(&info);
+    uniforms.push_back(&sun);
     uniforms.push_back(&glowOrigin);
     uniforms.push_back(shadowMaps->info());
     uniforms.push_back(

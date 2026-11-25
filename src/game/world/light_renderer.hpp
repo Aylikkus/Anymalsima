@@ -36,9 +36,7 @@ class LightRenderer {
     LightRenderer(const LightRenderer&) = delete;
     LightRenderer& operator=(const LightRenderer&) = delete;
 
-    // 0 = full daylight, 1 = no sky light (debug night).
-    void setSkyDarkness(float value) { skyDarkness = value; }
-    float getSkyDarkness() const { return skyDarkness; }
+    void setSky(const SkyState& sky) { sun.setVec4(sky.sun); }
 
     // Selects far lights and shadow slots, and refreshes the distant glow.
     // Call once per frame before any world draw. now: monotonic seconds.
@@ -71,6 +69,7 @@ class LightRenderer {
     double lastGlowBuild = -1e9;
     ShaderProperty lights;
     ShaderProperty info;
+    ShaderProperty sun;
     ShaderProperty glowOrigin;
     ShaderProperty glowBlock;  // u_lod_light_map at the block stage
     ShaderProperty glowLod;    // ... at the terrain_lod stage
@@ -85,7 +84,6 @@ class LightRenderer {
     const LightSourceRegistry* registry = nullptr;
     std::vector<FarLightView> visible;
     WorldWrap wrap;
-    float skyDarkness = 0;
     int activeLights = 0;
     int activeGlares = 0;
 };

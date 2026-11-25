@@ -6,8 +6,7 @@
 
 // Game time (docs/handoff/flora.md, step 8): days since the world began,
 // fractional. Saved in world.json (WorldMeta::worldDays). Plants evaluate
-// their growth from it; a day/night cycle and light queries
-// (docs/handoff/light-query.md) will read timeOfDay().
+// their growth from it; the day/night cycle reads timeOfDay().
 class WorldClock {
    public:
     // Real seconds per game day at speed 1.

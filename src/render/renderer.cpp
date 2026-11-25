@@ -27,7 +27,7 @@ Renderer::Renderer(Platform &platform)
     u_color = bgfx::createUniform("u_color", bgfx::UniformType::Vec4);
     u_uvRect = bgfx::createUniform("u_uvRect", bgfx::UniformType::Vec4);
     u_tex = bgfx::createUniform("u_tex", bgfx::UniformType::Sampler);
-    u_sky_camera = bgfx::createUniform("u_sky_camera", bgfx::UniformType::Vec4);
+    skyRenderer = std::make_unique<SkyRenderer>(resources);
 }
 
 void Renderer::draw(const RenderTarget &target) {
@@ -123,16 +123,10 @@ void Renderer::beginFrame() {
     // Shadow views always run first, whether or not they are used.
     RenderViews::applyOrder(RenderViews::MaxShadowViews);
     if (camera.terrainSky) {
-        bgfx::setViewRect(2, 0, 0, uint16_t(res.x), uint16_t(res.y));
-        bgfx::setViewClear(2, BGFX_CLEAR_COLOR, 0xaec4d6ff, 1.f, 0);
-        const std::array<float, 4> sky{camera.yaw, camera.pitch, aspect,
-                                       camera.underwater ? 1.f : 0.f};
-        bgfx::setUniform(u_sky_camera, sky.data());
-        const auto mesh = std::get<StaticMesh>(rect.get());
-        bgfx::setVertexBuffer(0, mesh.vbh);
-        bgfx::setIndexBuffer(mesh.ibh);
-        bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
-        bgfx::submit(2, resources.getProgram("terrain_sky"));
+        bgfx::setViewRect(RenderViews::Sky, 0, 0, uint16_t(res.x),
+                          uint16_t(res.y));
+        bgfx::setViewClear(RenderViews::Sky, BGFX_CLEAR_NONE);
+        skyRenderer->draw(camera, aspect, std::get<StaticMesh>(rect.get()));
     }
 }
 
@@ -1470,7 +1464,7 @@ void Renderer::buildSelectionRects(TextLayoutState &state, size_t selStart,
 AudioSystem &Renderer::getAudioSystem() { return audio_system; }
 
 void Renderer::clear() {
-    if (bgfx::isValid(u_sky_camera)) bgfx::destroy(u_sky_camera);
+    skyRenderer.reset();
     if (bgfx::isValid(u_tex)) bgfx::destroy(u_tex);
     if (bgfx::isValid(u_color)) bgfx::destroy(u_color);
     if (bgfx::isValid(u_uvRect)) bgfx::destroy(u_uvRect);

@@ -3,6 +3,7 @@
 #include <bgfx/platform.h>
 #include <bx/math.h>
 
+#include <memory>
 #include <queue>
 
 #include "audio_system.hpp"
@@ -11,10 +12,10 @@
 #include "render/render_views.hpp"
 #include "render/renderer_api.hpp"
 #include "render/ui_context.hpp"
-#include "render_cache.hpp"
 #include "render/vertex.hpp"
+#include "render_cache.hpp"
 #include "resource_manager.hpp"
-
+#include "sky_renderer.hpp"
 
 struct Line {
     std::vector<int32_t> codepoints;
@@ -84,7 +85,7 @@ class Renderer : public IRenderer {
     bgfx::UniformHandle u_color;
     bgfx::UniformHandle u_tex;
     bgfx::UniformHandle u_uvRect;
-    bgfx::UniformHandle u_sky_camera = BGFX_INVALID_HANDLE;
+    std::unique_ptr<SkyRenderer> skyRenderer;
     MeshHandle rect;
     MeshHandle uv_rect;
 };
