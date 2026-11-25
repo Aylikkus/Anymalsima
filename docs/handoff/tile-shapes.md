@@ -1,6 +1,7 @@
 # Tile shapes, terrain ramps, and placement
 
-**Current step: 7 — end-to-end validation, performance and documentation.**
+**Current step: none — step 7 is complete; interactive in-game save travel
+remains a manual check (recorded below).**
 This handoff covers the terrain foundation for weather. Snowfall,
 melting, temperature simulation, and NPC building generation have their own
 future work.
@@ -14,8 +15,8 @@ future work.
 | 3 | Near mesh, material shading, grass and plant support | 1–2 | Complete |
 | 4 | Accurate picking, debug placement and grounded traversal | 1–3 | Complete |
 | 5 | Directional light transport and shadows | 1–3 | Complete |
-| 6 | Natural ramps, distant terrain and structure handoff | 1–5 | Complete (headless; device capture in step 7) |
-| 7 | End-to-end validation, performance and documentation | 1–6 | Pending |
+| 6 | Natural ramps, distant terrain and structure handoff | 1–5 | Complete |
+| 7 | End-to-end validation, performance and documentation | 1–6 | Complete (automated + device; manual save travel listed) |
 
 Step 1 adds the shared geometry in `src/game/world/tile_shape.*` and the
 paired tile/shape API in `tile.hpp`, `chunk.hpp`, and `chunk_manager.*`.
@@ -178,12 +179,131 @@ Vulkan `shapes` smoke scene passed as a regression. The natural-terrain device
 check (natural ramp, both junction forms, near/LOD transition, shoreline and
 structure foundation) is recorded as remaining for step 7.
 
+Step 7 validates and profiles the rollout. Generator 26
+(`WorldMeta::NaturalShapeRidgeVersion`) replaces the step-6 requirement that
+both ends of a ramp stay whole cubes with a world-space comparison of the
+shared edge. Ramps may now meet another ramp at a ridge, meet a higher cell as
+a wall at their high edge, and stand on a two-cell plateau. Generator 25 worlds
+keep the older `Cube`-landing rule through
+`TerrainNeighborhood::ridgeShapes()`; generator 26 is the current
+`WorldMeta::GeneratorVersion`. `natural_shape::Field` has an explicit
+compatibility switch so both rules stay testable and a saved 25 world never
+changes under an unseen chunk.
+
+The natural-shape query path was the measurable regression. Step 6 rebuilt a
+`natural_shape::Field` per `TerrainSampler::surfaceShape` call, re-sampled
+noise for every rule query, and created a fresh `TerrainSampler` per LOD
+column, so a new world spent 340.9 ms of column evaluation for 64 chunks and
+12.51 s building the 244-patch LOD benchmark. `TerrainSampler` now memoizes the
+column heights used by the pure rule (`shapeHeights`), shares them with
+`sample`, `tileSurface` and `surfaceShape`, and keeps one `Field` per sampler.
+`SurfaceSampler` keeps one sampler per region (`samplerFor`), and
+`ChunkMesher` copies the sparse table into a dense 16³ lookup per build so the
+greedy sweep does not binary-search it for every visited cell. The same
+workloads now take 30.9–37.3 ms for 64 chunks and 4.07–4.14 s for the LOD
+benchmark, against 22.6 ms and 3.21 s cube-only. At the step-7 baseline the
+near mesh was 16.9 ms per 64 surface chunks (12.0 ms cube-only); the 2,696
+shapes occupied 11,973 resident sparse-table bytes including capacity and
+encoded to 14,799 bytes (8,460 cube-only). The diagonal follow-up below raises
+those counts; the cache gains are unchanged. The dense worst case (4,096
+shaped cells in one chunk) needs 12,336 table bytes, 12,302 encoded bytes and
+10.3 ms to mesh, so the sparse table still wins and no dense representation
+was added. The LOD scene's triangles and resident bytes are slightly lower
+with shapes (624,362 versus 652,124 triangles; 54.02 versus 54.70 MiB).
+Profiling tooling is `tests/benchmarks/shape_benchmark.cpp` (`--legacy`,
+`--stats` and `--map`); the full numbers and reproduction commands are in
+`tests/README.md`.
+
+Tests: the Release app and `world_logic_tests` built. All 396 registered CTest
+cases passed. The focused natural-shape, meshing, codec and revision cases
+(35) also passed under ASan and UBSan in a clang
+`-DANYMALSIMA_TEST_SANITIZERS=ON` build with leak detection disabled because
+the sandbox blocks LeakSanitizer. New cases cover the legacy cube-landing
+rule, ridge pairs, a ramp against a higher wall, query-order-independent
+caches, and a generated natural chunk surviving CHNK encode/decode with all
+4,096 cells compared.
+
+Device captures used `lod_render_smoke` (Vulkan, 1280×720, default Low terrain
+detail) with the shared `lodScene` seed 1234/5678. The `shapes` scene settled
+(2 edited columns, no failed meshes); `shape_lighting` reported shadow depths
+32, 1.5, 1.5 and 32 m for the empty, cube, flush wall and quarter-turned wall
+phases. The new `natural` scene enables generator 26, searches region 45,45,
+and picks the densest dry window at (5793, 5876): 2,522 natural shape cells and
+23 corners in the region, centre height 409, peak 416, first corner at
+(5766, 5762). It streamed chunks, built near and LOD terrain and settled with
+no backlog or failed meshes. Natural junctions are sparse in this smooth scene;
+both junction forms remain covered by the manual `shapes` and `shape_lighting`
+scenes.
+
+Automated persistence now includes a generated natural chunk through CHNK and
+the existing region/eviction shape tests. The remaining manual check is the
+step-7 device walkthrough on a disposable save: place each variant, rotate a
+boundary piece, travel three regions away, return, exit and reload (including
+an older save copy), and stress edits while meshing, saving and relighting.
+That was not run interactively here; the headless codec, region persistence,
+stale-job and provider tests are the current evidence. The known visual
+limitation is that a diagonal terrace corner with two low cardinal neighbours
+and a low diagonal has no continuous single-profile top; step 7 left it a
+whole block, and the follow-up below adds a diagonal-ramp approximation.
+
+## Follow-up: diagonal corner ramps
+
+Generator 27 (`WorldMeta::NaturalShapeDiagonalVersion`) adds profile 24, a
+single-plane `DiagonalRamp` with top `(x + z) / 2` and rotations for the four
+diagonal orientations. It is the shape used for a high cell with two
+perpendicular one-metre-low cardinal neighbours and a taller hillside behind
+them, where a level straight ramp or an outer corner would need a
+discontinuity inside the cell. The old `OuterCorner` is still chosen first
+when its two approaches and all four shared edges agree; the diagonal ramp is
+the fallback, not a replacement for valid junctions. Generator 26 worlds keep
+their block corners and generator 25 keeps its original rule.
+
+The rule change is in `natural_shape.*` (`Kind::Diagonal`,
+`diagonalCorners`), the profile and geometry in `tile_shape.*`, and the
+light/coverage table bound in `voxel_light.cpp`. `gameplay_state` describes a
+hovered diagonal ramp as a corner ramp; its catalog string is in
+`translations/game.pot` and the PO catalogs. No chunk codec version change is
+needed because profile bytes were already versioned by value; an older build
+will reject a save that contains profile 24, so do not downgrade a world after
+using generator 27.
+
+The first device check exposed sky through the close stepped LOD over the new
+ramps. The stepped cube path emits no wall for a same-level cube neighbour
+(it relies on the shaped cell covering the shared face), and `shapedColumn`
+only drew the shaped cell's own side down to its top, so the part of the
+cube's face above a sloped top was open. `shapedColumn` now draws that exposed
+cube-side ribbon with the neighbour's material when the neighbour is an
+unshaped column at the same ground height. `lod_shape_cube_gap_closed` builds
+a flat chunk with one diagonal ramp and asserts the vertical face exists; it
+fails without the fix and passes with it.
+
+In the shared scene (region 16,16, seed 1234/5678) generator 27 raises natural
+coverage from 2,696 to 4,181 shaped surface cells (16.5% to 25.5%): 2,657
+straight ramps, 1,485 diagonal ramps, 20 outer corners and 19 inner corners.
+The 64-chunk near mesh is 17,346 triangles (18.7 ms), 16,254 resident shape
+bytes and 18,096 encoded bytes. LOD is about 4.2 s for the 244-patch scene,
+still about 1.25x the cube-only 3.3 s. All 396 registered CTest cases pass;
+the 35 focused shape/mesh/codec/revision/LOD cases pass under ASan+UBSan with
+leak detection disabled. The `natural` smoke capture at region 45,45 now
+reports 3,392 shaped cells, 23 junctions and 871 diagonal ramps at window
+(5794, 5855) and settles without backlog.
+
+The remaining visual trade-off is explicit: a two-axis step cannot match all
+four neighbours with the current one-metre profiles. The cube reads as a
+protruding block; the diagonal ramp reads as a shallow diagonal notch. The
+ramp is the smoother silhouette and removes the vertical downhill faces, but
+a true smooth diagonal would require a denser height field or profiles taller
+than one cell. Treating the diagonal-notch cells as inner corners was tried
+and produced deep square pits, so those cells still stay whole blocks.
+
 When picking this up, update the current step and its row. Before marking a row
 done, record the affected paths, tests run and outcome in the row or immediately
 below it. Record any remaining device check, blocking dependency, or changed
 decision explicitly. Use the acceptance checks in each step to resume midway.
-Natural ramps stay gated by the saved generator version; never enable them for
-a world that recorded an older generator.
+Natural ramps stay gated by the saved generator version; never enable the
+edge-matching (26) rule for a world that recorded 25 or older. The only
+outstanding step-7 item is the manual in-game save/travel/reload walkthrough
+listed above; extend it with screenshots when it is performed.
 
 ## 1. Define geometry once and keep ordinary chunks cheap
 
@@ -208,7 +328,8 @@ Define the canonical +Z shape once, then rotate about the cell centre.
 | 10, 11 | Low and high halves of a 2 m ramp. For k = 0, 1, top height is (k + local Z) / 2. |
 | 12–17 | Outer corner junction. In order, the six height intervals are the full rise, low/high halves, and low/middle/high thirds. |
 | 18–23 | Inner corner junction, in the same interval order. |
-| 24–63 | Reserved for later profiles. |
+| 24 | Diagonal corner ramp: a single plane whose top height is (x + z) / 2 in canonical coordinates, high at the (+X,+Z) corner. Rotations cover the four diagonal orientations. |
+| 25–63 | Reserved for later profiles. |
 
 **Ramp runs.** Each straight flight rises 1 m over a horizontal run of 1, 2,
 or 3 m. Each piece is one cell wide across the slope. For run length L and

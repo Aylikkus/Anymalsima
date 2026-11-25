@@ -5,13 +5,16 @@
 #include "items/ground_cover.hpp"
 
 const SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
-    const unsigned rx = wrapX(x) / TerrainTuning::RegionX;
-    const unsigned rz = std::clamp(z, 0, depth() - 1) / TerrainTuning::RegionZ;
-    const uint64_t key = (uint64_t(rx) << 32) | rz;
+    const uint64_t key = regionKey(x, z);
     if (auto it = regions.find(key); it != regions.end()) return *it->second;
     // Large fallback meshes may touch many regions. Bound this worker-local
     // cache; samples and results never retain references into it.
-    if (regions.size() >= 64) regions.clear();
+    if (regions.size() >= 64) {
+        samplers.clear();
+        regions.clear();
+    }
+    const unsigned rx = wrapX(x) / TerrainTuning::RegionX;
+    const unsigned rz = std::clamp(z, 0, depth() - 1) / TerrainTuning::RegionZ;
     const auto make = [&] {
         return RegionInput{
             TerrainNeighborhood::capture(world, {rx, rz}, assets),
@@ -22,6 +25,20 @@ const SurfaceSampler::RegionInput& SurfaceSampler::input(int x, int z) {
     return *regions.emplace(key, std::move(value)).first->second;
 }
 
+uint64_t SurfaceSampler::regionKey(int x, int z) const {
+    const unsigned rx = wrapX(x) / TerrainTuning::RegionX;
+    const unsigned rz = std::clamp(z, 0, depth() - 1) / TerrainTuning::RegionZ;
+    return (uint64_t(rx) << 32) | rz;
+}
+
+TerrainSampler& SurfaceSampler::samplerFor(int x, int z) {
+    const uint64_t key = regionKey(x, z);
+    if (auto it = samplers.find(key); it != samplers.end()) return *it->second;
+    const auto& data = input(x, z);
+    auto value = std::make_unique<TerrainSampler>(data.terrain);
+    return *samplers.emplace(key, std::move(value)).first->second;
+}
+
 int SurfaceSampler::height(int x, int z) {
     x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
@@ -29,11 +46,9 @@ int SurfaceSampler::height(int x, int z) {
     if (auto it = heights.find(key); it != heights.end()) return it->second;
     if (heights.size() > 65536) heights.clear();
     const auto* edit = editAt(x, z);
-    const int value =
-        edit ? edit->groundY[ColumnEdit::index(x % Chunk::SIZE_X,
-                                               z % Chunk::SIZE_Z)]
-             : int(std::floor(
-                   TerrainSampler(input(x, z).terrain).surface(x, z)));
+    const int value = edit ? edit->groundY[ColumnEdit::index(x % Chunk::SIZE_X,
+                                                             z % Chunk::SIZE_Z)]
+                           : samplerFor(x, z).tileSurface(x, z);
     heights[key] = value;
     return value;
 }
@@ -151,8 +166,8 @@ SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
     if (auto it = columns.find(key); it != columns.end()) return it->second;
     if (columns.size() > 8192) columns.clear();
+    auto& sampler = samplerFor(x, z);
     const auto& data = input(x, z);
-    TerrainSampler sampler(data.terrain);
     const auto terrain = sampler.sample(x, z);
     SurfaceColumn result;
     result.surfaceY = terrain.surface_y;

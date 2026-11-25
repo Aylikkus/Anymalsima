@@ -43,6 +43,8 @@ std::string describeShape(TileShape shape) {
         return fmt::format(fmt::runtime(_("Wall, {0} cm, {1}")), thickness,
                            facing);
     }
+    if (profile == Profile::DiagonalRamp)
+        return fmt::format(fmt::runtime(_("Corner ramp, {0}")), facing);
     for (unsigned form = 0; form < std::size(RampProfiles); ++form) {
         unsigned index = 0;
         for (unsigned run = 1; run <= 3; ++run)

@@ -430,6 +430,12 @@ foreach(case terrain_caps_repeatability terrain_shared_edges_corners
              terrain_natural_ramps terrain_natural_outer_corner
              terrain_natural_inner_corner terrain_natural_landing_is_not_cut
              terrain_natural_ramp_wraps_x
+             terrain_natural_legacy_rule_keeps_blocks
+             terrain_natural_ridge_pairs_meet
+             terrain_natural_ramp_meets_higher_wall
+             terrain_natural_diagonal_corner_ramp
+             terrain_natural_shape_queries_are_order_independent
+             terrain_natural_shapes_survive_chunk_codec
              terrain_generation_and_lod_apply_natural_shapes)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
@@ -448,6 +454,7 @@ foreach(case lod_surface_matches_chunks lod_geology_order_independent
              lod_local_water_keeps_drawable_detail_during_remesh
              lod_detail_hysteresis lod_detail_low_handoff_wraps
              lod_mesh_height_matches_triangles lod_natural_shape_geometry
+             lod_shape_cube_gap_closed
              lod_detail_coarse_joins)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
@@ -461,6 +468,12 @@ endforeach()
 add_executable(lod_benchmark EXCLUDE_FROM_ALL benchmarks/lod_benchmark.cpp)
 target_link_libraries(lod_benchmark PRIVATE world_logic_cpu)
 target_include_directories(lod_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+
+# Dev tool: shape-table and meshing cost of natural ramps against the legacy
+# cube-only surface (docs/handoff/tile-shapes.md, step 7).
+add_executable(shape_benchmark EXCLUDE_FROM_ALL benchmarks/shape_benchmark.cpp)
+target_link_libraries(shape_benchmark PRIVATE world_logic_cpu)
+target_include_directories(shape_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
 if(ANYMALSIMA_TEST_SANITIZERS)
     target_compile_options(lod_benchmark PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(lod_benchmark PRIVATE -fsanitize=address,undefined)

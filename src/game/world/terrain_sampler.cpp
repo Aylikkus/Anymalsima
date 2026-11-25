@@ -107,6 +107,14 @@ bool TerrainNeighborhood::naturalShapes() const {
     return generatorVersion >= WorldMeta::NaturalShapeVersion;
 }
 
+bool TerrainNeighborhood::ridgeShapes() const {
+    return generatorVersion >= WorldMeta::NaturalShapeRidgeVersion;
+}
+
+bool TerrainNeighborhood::diagonalShapes() const {
+    return generatorVersion >= WorldMeta::NaturalShapeDiagonalVersion;
+}
+
 // Half-region lattice: centers take their region ceiling, edge midpoints the
 // lower adjoining ceiling, and corners the minimum of the four ceilings.
 // Amplitudes use the same shared lattice with averaged terrain strengths.
@@ -232,6 +240,10 @@ double TerrainSampler::surface(double x, double z) const {
     return heightsAt(x, z).ground;
 }
 
+int TerrainSampler::tileSurface(int64_t x, int64_t z) const {
+    return int(std::floor(shapeHeights(x, z).ground));
+}
+
 TerrainSampler::Heights TerrainSampler::heightsAt(double x, double z) const {
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     // X wraps around the world; Z clamps to its edges.
@@ -340,13 +352,13 @@ bool TerrainSampler::belowSea(int x, int z) const {
 }
 
 TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
-    const auto center = heightsAt(x, z);
+    const auto center = shapeHeights(x, z);
     // Compare against the center as well: central differences alone can hide
     // the slope at a narrow ridge or one-column cliff.
     TerrainSample result{int(std::floor(center.ground))};
     for (const auto& [dx, dz] : std::array<std::pair<int, int>, 4>{
              {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-        const auto neighbor = heightsAt(x + dx, z + dz);
+        const auto neighbor = shapeHeights(x + dx, z + dz);
         result.slope =
             std::max(result.slope, std::abs(neighbor.ground - center.ground));
         result.originalSlope =
@@ -358,39 +370,78 @@ TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
 
 bool TerrainSampler::shapeEligible(int64_t x, int64_t z) const {
     if (!data.naturalShapes() || data.periodX() <= 0) return false;
-    const int ground = int(std::floor(heightsAt(x, z).ground));
+    const uint64_t key = (uint64_t(x) << 32) ^ uint32_t(z);
+    if (const auto found = shapeEligibleCache.find(key);
+        found != shapeEligibleCache.end())
+        return found->second;
+    const auto center = shapeHeights(x, z);
+    const int ground = int(std::floor(center.ground));
     // A partial solid owns its whole fluid cell, so keep ramps out of wet
     // ground and hydrology-controlled banks.
     const auto surfaceWater = water(x, z, ground);
-    if (surfaceWater.wet() && surfaceWater.surfaceY > ground) return false;
-    const auto terrain = sample(x, z);
-    if (terrain.slope > 1.0 + 1e-6) return false;
-    // Carved river banks and coastal cuts have a different ground and
-    // original profile; leave them to hydrology so a ramp cannot breach the
-    // water barrier.
-    if (terrain.originalSlope > terrain.slope + 1e-6) return false;
+    bool eligible = !(surfaceWater.wet() && surfaceWater.surfaceY > ground);
+    double slope = 0, originalSlope = 0;
+    if (eligible) {
+        for (const auto& [dx, dz] : std::array<std::pair<int, int>, 4>{
+                 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+            const auto neighbor = shapeHeights(x + dx, z + dz);
+            slope = std::max(slope, std::abs(neighbor.ground - center.ground));
+            originalSlope = std::max(
+                originalSlope, std::abs(neighbor.original - center.original));
+        }
+        // Carved river banks and coastal cuts have a different ground and
+        // original profile; leave them to hydrology so a ramp cannot breach
+        // the water barrier.
+        eligible = slope <= 1.0 + 1e-6 && originalSlope <= slope + 1e-6;
+    }
     constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
     const int period = data.periodX();
     const int wx = period > 0 ? int(WorldWrap::mod(x, period)) : int(x);
-    if (data.hydrology && data.hydrology->riverAt(wx, int(z))) return false;
+    if (eligible && data.hydrology && data.hydrology->riverAt(wx, int(z)))
+        eligible = false;
     const int rx = wx / sx, rz = int(z) / sz;
-    if (data.hydrology && !data.hydrology->containsColumn(wx, int(z)))
-        return false;
-    const auto& region = data.at(rx, rz).region;
-    if (region.hasFeature(FeatureMask::CLIFF) ||
-        region.hasFeature(FeatureMask::RAVINE))
-        return false;
-    return true;
+    if (eligible && data.hydrology &&
+        !data.hydrology->containsColumn(wx, int(z)))
+        eligible = false;
+    if (eligible) {
+        const auto& region = data.at(rx, rz).region;
+        eligible = !region.hasFeature(FeatureMask::CLIFF) &&
+                   !region.hasFeature(FeatureMask::RAVINE);
+    }
+    if (shapeEligibleCache.size() >= (1u << 16)) shapeEligibleCache.clear();
+    shapeEligibleCache.emplace(key, eligible);
+    return eligible;
+}
+
+TerrainSampler::Heights TerrainSampler::shapeHeights(int64_t x,
+                                                     int64_t z) const {
+    const uint64_t key = (uint64_t(x) << 32) ^ uint32_t(z);
+    if (const auto found = shapeHeightCache.find(key);
+        found != shapeHeightCache.end())
+        return found->second;
+    if (shapeHeightCache.size() >= (1u << 16)) shapeHeightCache.clear();
+    return shapeHeightCache.emplace(key, heightsAt(double(x), double(z)))
+        .first->second;
+}
+
+void TerrainSampler::rememberShapeHeight(int64_t x, int64_t z,
+                                         Heights value) const {
+    const uint64_t key = (uint64_t(x) << 32) ^ uint32_t(z);
+    if (shapeHeightCache.size() >= (1u << 16)) shapeHeightCache.clear();
+    shapeHeightCache.emplace(key, value);
 }
 
 TileShape TerrainSampler::surfaceShape(int64_t x, int64_t z) const {
     if (!data.naturalShapes()) return {};
-    natural_shape::Field field(
-        [this](int64_t px, int64_t pz) {
-            return int(std::floor(heightsAt(px, pz).ground));
-        },
-        [this](int64_t px, int64_t pz) { return shapeEligible(px, pz); });
-    return field.at(x, z);
+    if (!shapeField) {
+        shapeField = std::make_unique<natural_shape::Field>(
+            [this](int64_t px, int64_t pz) {
+                return int(std::floor(shapeHeights(px, pz).ground));
+            },
+            [this](int64_t px, int64_t pz) { return shapeEligible(px, pz); },
+            data.ridgeShapes(), data.diagonalShapes());
+    }
+    return shapeField->at(x, z);
 }
 
 WaterSurface TerrainSampler::water(int64_t x, int64_t z, int groundY) const {
@@ -540,27 +591,25 @@ SoilColumn TerrainSampler::soil(int64_t x, int64_t z,
 
 ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
                                           unsigned chunkZ) const {
-    constexpr int pitch = Chunk::SIZE_X + 2;
-    std::array<Heights, pitch*(Chunk::SIZE_Z + 2)> heights{};
+    // The natural-shape rule inspects neighbours up to two cells away (a
+    // candidate's landing can itself be inspected by an approach test). Use a
+    // two-cell halo so the height field is evaluated once and shared by slope,
+    // eligibility and shape lookups instead of re-sampling noise per query.
+    constexpr int margin = 2;
+    constexpr int pitch = Chunk::SIZE_X + margin * 2;
+    std::array<Heights, pitch*(Chunk::SIZE_Z + margin * 2)> heights{};
     const int64_t originX = int64_t(chunkX) * Chunk::SIZE_X;
     const int64_t originZ = int64_t(chunkZ) * Chunk::SIZE_Z;
-    // Evaluate the halo once, then reuse adjacent samples for every slope.
-    for (int z = -1; z <= Chunk::SIZE_Z; ++z)
-        for (int x = -1; x <= Chunk::SIZE_X; ++x)
-            heights[(z + 1) * pitch + x + 1] =
-                heightsAt(originX + x, originZ + z);
-    // One resolver per chunk shares the eligibility and proposal caches
-    // with every column, so border decisions do not depend on the caller's
-    // chunk order.
-    natural_shape::Field shapes(
-        [this](int64_t px, int64_t pz) {
-            return int(std::floor(heightsAt(px, pz).ground));
-        },
-        [this](int64_t px, int64_t pz) { return shapeEligible(px, pz); });
+    for (int z = -margin; z < Chunk::SIZE_Z + margin; ++z)
+        for (int x = -margin; x < Chunk::SIZE_X + margin; ++x) {
+            const auto index = (z + margin) * pitch + x + margin;
+            heights[index] = heightsAt(originX + x, originZ + z);
+            rememberShapeHeight(originX + x, originZ + z, heights[index]);
+        }
     ChunkColumnInputs out;
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
         for (int x = 0; x < Chunk::SIZE_X; ++x) {
-            const int index = (z + 1) * pitch + x + 1;
+            const int index = (z + margin) * pitch + x + margin;
             const auto center = heights[index];
             TerrainSample terrain{int(std::floor(center.ground))};
             for (const int offset : {-1, 1, -pitch, pitch}) {
@@ -577,7 +626,7 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
                 terrain.surface_y,
                 soil(originX + x, originZ + z, terrain, surfaceWater),
                 terrain.slope, surfaceWater,
-                data.naturalShapes() ? shapes.at(originX + x, originZ + z)
+                data.naturalShapes() ? surfaceShape(originX + x, originZ + z)
                                      : TileShape{}};
         }
     return out;

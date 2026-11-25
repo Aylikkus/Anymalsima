@@ -603,20 +603,21 @@ void shapedColumn(Mesh& mesh, SurfaceSampler& sampler, int x, int z,
         const bool outside = nz < 0 || nz >= sampler.depth() ||
                              (!wrapX && (nx < 0 || nx >= sampler.width()));
         std::optional<float> neighbour0, neighbour1;
+        std::optional<SurfaceColumn> columnAt;
         if (!outside) {
-            const auto columnAt = sampler.column(nx, nz);
+            columnAt = sampler.column(nx, nz);
             // Where a partial neighbour does not reach the shared point, the
             // solid below its surface cell bounds the exposed wall.
             const float fallback =
-                std::min(base, float(columnAt.surfaceY) + 1.f);
+                std::min(base, float(columnAt->surfaceY) + 1.f);
             const auto neighbour = [&](float axis) -> float {
                 const float lx =
                     xAxis ? (face == Face::PosX ? 0.f : 1.f) : axis;
                 const float lz =
                     xAxis ? axis : (face == Face::PosZ ? 0.f : 1.f);
                 const auto height =
-                    tile_geometry::supportHeight(columnAt.groundShape, lx, lz);
-                return height ? float(columnAt.surfaceY) + *height : fallback;
+                    tile_geometry::supportHeight(columnAt->groundShape, lx, lz);
+                return height ? float(columnAt->surfaceY) + *height : fallback;
             };
             neighbour0 = neighbour(low);
             neighbour1 = neighbour(high);
@@ -645,6 +646,22 @@ void shapedColumn(Mesh& mesh, SurfaceSampler& sampler, int x, int z,
                         {x1, bottom1, z1},
                         {x0, bottom0, z0}}},
                       {*top0, *top1, *top1, *top0}, normal, column.material);
+        }
+        // A same-level cube neighbour emits no wall of its own (the stepped
+        // path assumes the shaped cell covers the shared face up to the cube
+        // top). Above a sloped top it does not, so draw the exposed part of
+        // the cube's face here. A taller cube is already closed by its own
+        // substrate walls.
+        if (!outside && columnAt && !columnAt->groundShape.code() &&
+            columnAt->surfaceY == column.surfaceY &&
+            (*neighbour0 > *top0 + .0001f || *neighbour1 > *top1 + .0001f)) {
+            shadeQuad(mesh,
+                      {{{x0, *neighbour0, z0},
+                        {x1, *neighbour1, z1},
+                        {x1, *top1, z1},
+                        {x0, *top0, z0}}},
+                      {*neighbour0, *neighbour1, *top1, *top0}, normal,
+                      columnAt->material);
         }
         // Below the shaped cell the substrate is a cube. Close the exposed
         // cliff down to the lower neighbour, as the stepped cube path does.

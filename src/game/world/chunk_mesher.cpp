@@ -303,12 +303,21 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
     const int dims[3] = {W, H, D};
 
     const bool hasShapes = chunk.hasShapes();
+    // A dense cell lookup keeps the greedy sweep and border clipping from
+    // binary-searching the sorted sparse table for every visited cell. Only
+    // chunks that actually carry shapes pay for it.
+    std::array<TileShape, Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z>
+        shapeGrid{};
+    if (hasShapes)
+        chunk.forEachShape(
+            [&](uint16_t index, TileShape shape) { shapeGrid[index] = shape; });
+    const auto localShape = [&](int x, int y, int z) {
+        return hasShapes ? shapeGrid[Chunk::cell(x, y, z)] : TileShape{};
+    };
     const auto getNeighbour = [&](int x, int y, int z) -> Neighbour {
         // inside current chunk
         if ((unsigned)x < W && (unsigned)y < H && (unsigned)z < D) {
-            return {
-                &chunk.tiles[z][y][x],
-                hasShapes ? chunk.shapeAt(Chunk::cell(x, y, z)) : TileShape{}};
+            return {&chunk.tiles[z][y][x], localShape(x, y, z)};
         }
 
         // outside chunk -> fallback
@@ -404,9 +413,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     const Tile* tile = localTile(local[0], local[1], local[2]);
                     if (!tile || tile->block_id == 0 ||
                         (hasShapes &&
-                         chunk
-                             .shapeAt(Chunk::cell(local[0], local[1], local[2]))
-                             .code()))
+                         localShape(local[0], local[1], local[2]).code()))
                         continue;
 
                     const Block& block = blocks.get(tile->block_id);

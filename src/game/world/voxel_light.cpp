@@ -66,7 +66,7 @@ float overlap(Polygon subject, const Polygon& clip) {
     return signedArea(subject);
 }
 
-constexpr int Codes = int(TileShapeProfile::InnerThirdHigh) * 4 + 4;
+constexpr int Codes = (int(TileShapeProfile::DiagonalRamp) + 1) * 4;
 struct Coverage {
     std::array<std::array<float, 6>, Codes> area{};
     std::array<std::array<std::array<float, 6>, Codes>, Codes> shared{};

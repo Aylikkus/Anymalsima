@@ -32,6 +32,10 @@ enum class TileShapeProfile : uint8_t {
     InnerThirdLow = 21,
     InnerThirdMiddle = 22,
     InnerThirdHigh = 23,
+    // A single-plane diagonal ramp: top rises toward the canonical (+X,+Z)
+    // corner, half as steep as two straight steps. Used where a surface
+    // height field steps down in both horizontal axes at once.
+    DiagonalRamp = 24,
 };
 
 enum class TileFacing : uint8_t { PosZ, PosX, NegZ, NegX };
@@ -42,7 +46,7 @@ class TileShape {
 
     static constexpr std::optional<TileShape> fromCode(uint8_t code) {
         const auto profile = code >> 2;
-        if (profile > static_cast<uint8_t>(TileShapeProfile::InnerThirdHigh))
+        if (profile > static_cast<uint8_t>(TileShapeProfile::DiagonalRamp))
             return std::nullopt;
         TileShape shape;
         shape.code_ = profile <= 1 ? uint8_t(profile << 2) : code;
@@ -57,7 +61,7 @@ class TileShape {
     static constexpr TileShape make(TileShapeProfile profile,
                                     TileFacing facing = TileFacing::PosZ) {
         const auto id = static_cast<uint8_t>(profile);
-        if (id > static_cast<uint8_t>(TileShapeProfile::InnerThirdHigh))
+        if (id > static_cast<uint8_t>(TileShapeProfile::DiagonalRamp))
             return {};
         return *fromCode(uint8_t((id << 2) | (uint8_t(facing) & 3)));
     }

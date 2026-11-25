@@ -31,15 +31,24 @@ next ring. The outer ring supplies mesh neighbors.
 
 Generator 25 (`WorldMeta::NaturalShapeVersion`) selects one-metre natural
 ramps and their junctions through `world/natural_shape.*`: a high cell is cut
-only when its low neighbour, opposite landing and (for bends) both approach
-ramps agree. `TerrainSampler::columns` stores the result in
+only when its low neighbour and opposite landing agree. Generator 26
+(`NaturalShapeRidgeVersion`) compares both shared edges in world space, so
+ramps may meet each other at a ridge or meet a higher wall. Generator 27
+(`NaturalShapeDiagonalVersion`) adds profile 24, a single-plane diagonal
+corner ramp for cells that step down in both horizontal axes; a 26 world keeps
+its block corners and a 25 world the narrower cube-landing rule.
+`TerrainSampler::columns` stores the result in
 `ColumnGenerationInput::groundShape`; `SurfaceSampler`, chunk generation, the
 edit baseline, flora and trees all read the same field. Worlds saved with an
-older generator stay cube-only, including unseen chunks. Stepped `terrain_lod`
-patches draw the actual profile, corner diagonal and rim height; coarse
-patches may simplify the interior, so keep their joins and skirts consistent
-with the shaped near mesh. Structure proxies pass the ground profile to the
-mesher when a wall rests on a partially occupied substrate cell.
+older generator stay cube-only, including unseen chunks. `TerrainSampler`
+memoizes the column heights used by the pure shape rule, and `SurfaceSampler`
+keeps one sampler per region so a patch does not rebuild the shape caches per
+column. Stepped `terrain_lod` patches draw the actual profile, corner diagonal
+and rim height; they also draw the exposed part of a same-level cube
+neighbour's face above a shaped top, which the cube path leaves to the shaped
+cell. Coarse patches may simplify the interior, so keep their joins and skirts
+consistent with the shaped near mesh. Structure proxies pass the ground profile
+to the mesher when a wall rests on a partially occupied substrate cell.
 
 ### Lighting
 

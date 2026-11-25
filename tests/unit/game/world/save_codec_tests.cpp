@@ -101,6 +101,8 @@ TEST(chunk_codec_shapes) {
         TileShape::make(TileShapeProfile::OuterHalfHigh, TileFacing::NegX);
     const auto third =
         TileShape::make(TileShapeProfile::InnerThirdLow, TileFacing::PosX);
+    const auto diagonal =
+        TileShape::make(TileShapeProfile::DiagonalRamp, TileFacing::NegX);
     const auto rootCell = Chunk::cell(0, 0, 0);
     chunk.setCell(rootCell, soil, ramp);
     Chunk decoded;
@@ -113,9 +115,11 @@ TEST(chunk_codec_shapes) {
     chunk.setCell(rootCell, Tile{.block_id = 7, .lightLevel = {}});
     chunk.setCell(1, soil, half);
     chunk.setCell(4095, soil, third);
+    chunk.setCell(2, soil, diagonal);
     chunk_codec::decode(chunk_codec::encode(chunk), decoded);
     CHECK(decoded.rootAt(rootCell) && decoded.rootAt(rootCell)->shape == ramp);
     CHECK(decoded.shapeAt(1) == half && decoded.shapeAt(4095) == third);
+    CHECK(decoded.shapeAt(2) == diagonal);
     GrownBlockSet grown;
     grown.set(7);
     decoded.restoreRootSubstrate(grown);
@@ -167,8 +171,8 @@ TEST(chunk_codec_shapes) {
     malformed(5, 1, {{4096, ramp.code()}});
     malformed(0, 1, {{0, ramp.code()}});
     malformed(5, 1, {{0, 0}});
-    malformed(5, 1, {{0, 5}});   // slab with noncanonical facing
-    malformed(5, 1, {{0, 96}});  // reserved profile
+    malformed(5, 1, {{0, 5}});    // slab with noncanonical facing
+    malformed(5, 1, {{0, 100}});  // reserved profile
     CHECK(throwsSerialization(
         [&] { chunk_codec::decode(ByteView(uniform).first(8), decoded); }));
 }

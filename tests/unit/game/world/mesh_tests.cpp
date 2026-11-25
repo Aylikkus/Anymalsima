@@ -194,7 +194,7 @@ TEST(mesh_winding) {
 TEST(mesh_shape_surfaces) {
     const Tile solid{.block_id = 1, .lightLevel = {}};
     const auto everything = [](const BlockVertex&) { return true; };
-    for (uint8_t profile = 1; profile <= 23; ++profile) {
+    for (uint8_t profile = 1; profile <= 24; ++profile) {
         float referenceArea = 0;
         for (uint8_t rotation = 0; rotation < 4; ++rotation) {
             const auto shape = TileShape::make(TileShapeProfile(profile),
@@ -210,7 +210,7 @@ TEST(mesh_shape_surfaces) {
             EQUAL(result.indices.size(), triangles * 3, "exterior triangles");
             if (rotation == 0) referenceArea = total;
             CHECK(std::abs(total - referenceArea) < 1e-5f);
-            if (profile >= 12) {
+            if (profile >= 12 && profile <= 23) {
                 std::vector<Vec3> topNormals;
                 for (const auto& v : result.vertices)
                     if (v.ny > 0) {

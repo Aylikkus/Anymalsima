@@ -37,6 +37,13 @@ struct Chunk {
     }
     bool hasShapes() const { return bool(shapes); }
     size_t shapeCount() const { return shapes ? shapes->cells.size() : 0; }
+    // Resident sparse-table bytes including spare capacity, for profiling.
+    size_t shapeStorageBytes() const {
+        return shapes ? sizeof(ShapeTable) +
+                            shapes->cells.capacity() * sizeof(uint16_t) +
+                            shapes->codes.capacity() * sizeof(TileShape)
+                      : 0;
+    }
     TileShape shapeAt(uint16_t index) const {
         if (!shapes) return {};
         const auto it =

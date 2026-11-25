@@ -38,11 +38,21 @@ struct WorldMeta : ISerializable {
     // 25 cuts natural one-metre ramps and their junctions into eligible
     // surface columns. Existing worlds keep cube-only terrain until they are
     // recreated; explicit shape edits still load in them.
-    static constexpr int GeneratorVersion = 25;
+    // 26 lets ramps meet each other and a higher wall, so terrace edges and
+    // short ridges fill with slopes instead of alternating whole blocks. A
+    // 25 world keeps the narrow cube-landing rule.
+    // 27 cuts diagonal corner ramps where the surface steps down in both
+    // horizontal axes. A 26 world keeps its block corners.
+    static constexpr int GeneratorVersion = 27;
     // First generator that selects natural surface shapes. Kept separate from
     // the codec versions: shape payloads are understood by every format that
     // can read the current chunk data.
     static constexpr int NaturalShapeVersion = 25;
+    // First generator whose ramps match shared edges instead of requiring
+    // cube landings on both sides.
+    static constexpr int NaturalShapeRidgeVersion = 26;
+    // First generator that uses the single-plane diagonal corner ramp.
+    static constexpr int NaturalShapeDiagonalVersion = 27;
     // Oldest generator version supported by terrain edit comparisons.
     // Later surface changes are selected by the saved generator version.
     static constexpr int SurfaceVersion = 9;

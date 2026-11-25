@@ -2,10 +2,13 @@
 
 #include <array>
 #include <cmath>
+#include <memory>
+#include <unordered_map>
 
 #include "chunk.hpp"
 #include "ground_cover_generator.hpp"
 #include "height_profile.hpp"
+#include "natural_shape.hpp"
 #include "soil_generator.hpp"
 #include "water_surface.hpp"
 #include "world.hpp"
@@ -93,6 +96,10 @@ struct TerrainNeighborhood {
     // Natural ramps were introduced with WorldMeta::NaturalShapeVersion.
     // Older saved generators keep the cube-only surface rule.
     bool naturalShapes() const;
+    // Generator 26 matches shared ramp edges; 25 kept cube landings.
+    bool ridgeShapes() const;
+    // Generator 27 uses the diagonal corner ramp for two-axis steps.
+    bool diagonalShapes() const;
     // World width in tiles: the X period of every sampled field.
     int periodX() const {
         return width > 0 ? width * TerrainTuning::RegionX : 0;
@@ -129,7 +136,16 @@ struct ChunkColumnInputs {
 class TerrainSampler {
    public:
     explicit TerrainSampler(const TerrainNeighborhood& data) : data(data) {}
+    // The pure-shape cache is owned per sampler; the field's callbacks point
+    // back at it, so a sampler must stay in place.
+    TerrainSampler(const TerrainSampler&) = delete;
+    TerrainSampler& operator=(const TerrainSampler&) = delete;
+    TerrainSampler(TerrainSampler&&) = delete;
+    TerrainSampler& operator=(TerrainSampler&&) = delete;
     double surface(double x, double z) const;
+    // Floor of the generated surface at a whole tile, memoized with the
+    // natural-shape rule's column heights.
+    int tileSurface(int64_t x, int64_t z) const;
     bool belowSea(int x, int z) const;
     TerrainSample sample(int64_t x, int64_t z) const;
     // Generated surface profile of one tile, using the same deterministic
@@ -149,9 +165,18 @@ class TerrainSampler {
     };
     Heights heightsAt(double x, double z) const;
     bool shapeEligible(int64_t x, int64_t z) const;
+    // Memoized column heights for the pure shape rule. A region-wide sampler
+    // reuses them across every query, including the terrain halo primed by
+    // columns(); a bounded cache keeps a long-lived sampler cheap.
+    Heights shapeHeights(int64_t x, int64_t z) const;
+    void rememberShapeHeight(int64_t x, int64_t z, Heights value) const;
 
     const TerrainNeighborhood& data;
     double control(int gx, int gz, bool amplitude) const;
     double cliffLift(int rx, int rz, double x, double z) const;
     double coastDistance(int rx, int rz, double x, double z) const;
+
+    mutable std::unordered_map<uint64_t, Heights> shapeHeightCache;
+    mutable std::unordered_map<uint64_t, bool> shapeEligibleCache;
+    mutable std::unique_ptr<natural_shape::Field> shapeField;
 };

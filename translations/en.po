@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-16 19:11+0300\n"
+"POT-Creation-Date: 2026-11-25 16:50+0300\n"
 "PO-Revision-Date: 2026-04-28 01:07+0300\n"
 "Last-Translator: Automatically generated\n"
 "Language-Team: none\n"
@@ -27,76 +27,203 @@ msgid "LOAD WORLD"
 msgstr "LOAD WORLD"
 
 #: src/game/states/create_or_load_state.cpp:49
-#: src/game/states/create_world_state.cpp:34
+#: src/game/states/create_world_state.cpp:35
 #: src/game/states/load_world_state.cpp:85
 msgid "RETURN"
 msgstr "RETURN"
 
-#: src/game/states/create_world_state.cpp:45
+#: src/game/states/create_world_state.cpp:47
+#: src/game/states/create_world_state.cpp:159
 msgid "GENERATE"
 msgstr "GENERATE"
 
-#: src/game/states/create_world_state.cpp:65
+#: src/game/states/create_world_state.cpp:53
+#: src/game/states/create_world_state.cpp:180
+#: src/game/states/load_world_state.cpp:111
+msgid "Loading..."
+msgstr ""
+
+#: src/game/states/create_world_state.cpp:71
+#: src/game/states/create_world_state.cpp:207
 msgid "CHOOSE"
 msgstr ""
 
-#: src/game/states/create_world_state.cpp:85
+#: src/game/states/create_world_state.cpp:95
 msgid "Height"
 msgstr "Height"
 
-#: src/game/states/create_world_state.cpp:87
+#: src/game/states/create_world_state.cpp:97
 msgid "Temperature C"
 msgstr "Temperature C"
 
-#: src/game/states/create_world_state.cpp:89
+#: src/game/states/create_world_state.cpp:99
 msgid "Humidity"
 msgstr "Humidity"
 
-#: src/game/states/create_world_state.cpp:91
+#: src/game/states/create_world_state.cpp:101
 msgid "Biome"
 msgstr "Biome"
 
-#: src/game/states/create_world_state.cpp:95
+#: src/game/states/create_world_state.cpp:105
 msgid "Land"
 msgstr "Land"
 
-#: src/game/states/create_world_state.cpp:99
+#: src/game/states/create_world_state.cpp:109
 #: src/game/utils/items_enum_maps.hpp:26
 msgid "Vegetation"
 msgstr "Vegetation"
 
-#: src/game/states/create_world_state.cpp:105
+#: src/game/states/create_world_state.cpp:115
 msgid "River"
 msgstr "River"
 
-#: src/game/states/create_world_state.cpp:106
+#: src/game/states/create_world_state.cpp:116
 msgid "Direction"
 msgstr "Direction"
 
-#: src/game/states/create_world_state.cpp:111
+#: src/game/states/create_world_state.cpp:121
 msgid "Flow Strength"
 msgstr "Flow Strength"
 
-#: src/game/states/create_world_state.cpp:115
+#: src/game/states/create_world_state.cpp:125
 msgid "Features"
 msgstr "Features"
 
-#: src/game/states/create_world_state.cpp:129
+#: src/game/states/create_world_state.cpp:139
 #: src/game/utils/region_enum_maps.hpp:148
 #: src/game/utils/region_enum_maps.hpp:178
 msgid "None"
 msgstr "None"
 
-#: src/game/states/gameplay_state.cpp:152
-msgid "PLACE BLOCK"
+#: src/game/states/create_world_state.cpp:182
+#: src/game/states/create_world_state.cpp:208
+#: src/game/states/load_world_state.cpp:138
+msgid "This world could not be loaded"
 msgstr ""
 
-#: src/game/states/gameplay_state.cpp:153
-msgid "REMOVE BLOCK"
+#: src/game/states/gameplay_state.cpp:19
+msgid "Straight"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:19
+msgid "Outer corner"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:20
+msgid "Inner corner"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Cube"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Slab"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Ramp"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:33
+msgid "Wall"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:43
+#, c++-format
+msgid "Wall, {0} cm, {1}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:47
+#, c++-format
+msgid "Corner ramp, {0}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:54
+#, c++-format
+msgid "{0} ramp, {1} m, piece {2}, {3}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:136
+#: src/game/states/gameplay_state.cpp:934
+msgid "No tile"
 msgstr ""
 
 #: src/game/states/gameplay_state.cpp:154
+msgid "PLACE BLOCK"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:155
+msgid "REMOVE BLOCK"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:156
 msgid "PLACE LIGHT"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:167
+msgid "HARVEST"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:235
+#: src/game/states/gameplay_state.cpp:750
+msgid "Walk mode"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:729
+#, c++-format
+msgid "Shape: {}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:732
+#, c++-format
+msgid "Rotate: {}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:733
+#, c++-format
+msgid "Thickness: {} cm"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:736
+#, c++-format
+msgid "Form: {}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:737
+#, c++-format
+msgid "Run: {} m"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:739
+#, c++-format
+msgid "Piece: {0}/{1}"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:757
+msgid "No walkable ground"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:765
+msgid "Orbit camera"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:918
+msgid "Walking: WASD, Shift to run"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:919
+msgid "Falling"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:922
+#, c++-format
+msgid "Placing: {}\n"
+msgstr ""
+
+#: src/game/states/gameplay_state.cpp:956
+#, c++-format
+msgid "Picked shape: {}\n"
 msgstr ""
 
 #: src/game/states/load_world_state.cpp:61
@@ -110,14 +237,6 @@ msgstr ""
 
 #: src/game/states/load_world_state.cpp:76
 msgid "LOAD"
-msgstr ""
-
-#: src/game/states/load_world_state.cpp:111
-msgid "Loading..."
-msgstr ""
-
-#: src/game/states/load_world_state.cpp:132
-msgid "This world could not be loaded"
 msgstr ""
 
 #: src/game/states/main_menu_state.cpp:123
@@ -428,111 +547,3 @@ msgstr "West"
 #, c++-format
 #~ msgid "Text Scale {:.0f}%"
 #~ msgstr "Text Scale {:.0f}%"
-
-#: src/game/states/gameplay_state.cpp:19
-msgid "Straight"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:19
-msgid "Outer corner"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:20
-msgid "Inner corner"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:32
-msgid "Cube"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:32
-msgid "Slab"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:32
-msgid "Ramp"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:33
-msgid "Wall"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:43
-#, c++-format
-msgid "Wall, {0} cm, {1}"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:52
-#, c++-format
-msgid "{0} ramp, {1} m, piece {2}, {3}"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:134
-#: src/game/states/gameplay_state.cpp:932
-msgid "No tile"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:165
-msgid "HARVEST"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:233
-#: src/game/states/gameplay_state.cpp:748
-msgid "Walk mode"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:727
-#, c++-format
-msgid "Shape: {}"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:730
-#, c++-format
-msgid "Rotate: {}"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:731
-#, c++-format
-msgid "Thickness: {} cm"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:734
-#, c++-format
-msgid "Form: {}"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:735
-#, c++-format
-msgid "Run: {} m"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:737
-#, c++-format
-msgid "Piece: {0}/{1}"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:755
-msgid "No walkable ground"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:763
-msgid "Orbit camera"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:916
-msgid "Walking: WASD, Shift to run"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:917
-msgid "Falling"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:920
-#, c++-format
-msgid "Placing: {}\n"
-msgstr ""
-
-#: src/game/states/gameplay_state.cpp:954
-#, c++-format
-msgid "Picked shape: {}\n"
-msgstr ""

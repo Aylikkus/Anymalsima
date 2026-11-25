@@ -5,6 +5,7 @@
 #include "lod_scene.hpp"
 #include "test_assets.hpp"
 #include "world/generated_hydrology.hpp"
+#include "world/save/world_meta.hpp"
 #include "world/terrain_lod.hpp"
 
 int main(int argc, char** argv) {
@@ -39,7 +40,10 @@ int main(int argc, char** argv) {
         return 0;
     }
     test::Assets assets;
-    const auto world = lodScene();
+    auto world = lodScene();
+    world.generatorVersion = argc > 1 && std::string_view(argv[1]) == "--legacy"
+                                 ? 0
+                                 : WorldMeta::GeneratorVersion;
     const Vec3 eye{6144, 450, 6144};
     float threshold = 2;
     std::vector<TerrainLod::Patch> layout;

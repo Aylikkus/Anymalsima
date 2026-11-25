@@ -27,9 +27,9 @@ float dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 }  // namespace
 
 TEST(tile_shape_profiles) {
-    for (unsigned code = 96; code < 256; ++code)
+    for (unsigned code = 100; code < 256; ++code)
         CHECK(!TileShape::fromCode(uint8_t(code)));
-    for (int id = 0; id < 24; ++id) {
+    for (int id = 0; id < 25; ++id) {
         for (unsigned turn = 0; turn < 4; ++turn) {
             const auto code = shape(id, turn);
             EQUAL(int(code.code()), id * 4 + (id <= 1 ? 0 : int(turn)),
@@ -61,6 +61,13 @@ TEST(tile_shape_profiles) {
     CHECK(!boundaryFace(shape(6), Face::NegZ));
     CHECK(boundaryFace(shape(6), Face::PosZ)->count == 4);
     CHECK(boundaryFace(shape(6, 1), Face::PosX)->count == 4);
+    // Diagonal corner ramp: a single plane from the SW floor to the NE top.
+    near(height(shape(24), {0, 0, 0}), 0, "diagonal low corner");
+    near(height(shape(24), {1, 0, 1}), 1, "diagonal high corner");
+    near(height(shape(24), {.5f, 0, .5f}), .5f, "diagonal middle");
+    near(height(shape(24), {1, 0, 0}), .5f, "diagonal SE");
+    near(height(shape(24), {0, 0, 1}), .5f, "diagonal NW");
+    near(height(shape(24, 2), {0, 0, 0}), 1, "rotated diagonal high");
 }
 
 TEST(tile_shape_seams) {

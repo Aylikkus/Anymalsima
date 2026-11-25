@@ -7,7 +7,7 @@
 namespace tile_geometry {
 namespace {
 
-enum class Top { Flat, Straight, Outer, Inner };
+enum class Top { Flat, Straight, Outer, Inner, Diagonal };
 
 struct Profile {
     int low;
@@ -31,6 +31,9 @@ struct Profile {
             case Top::Inner:
                 rise = std::max(x, z);
                 break;
+            case Top::Diagonal:
+                rise = (x + z) * .5f;
+                break;
         }
         return (float(low) + rise) / float(run);
     }
@@ -38,7 +41,7 @@ struct Profile {
 
 // Indices are persisted profile IDs. Integer intervals give adjacent pieces
 // identical endpoint calculations, including when they belong to a junction.
-constexpr std::array<Profile, 24> profiles{{
+constexpr std::array<Profile, 25> profiles{{
     {1, 1},
     {1, 2},
     {0, 1, Top::Straight},
@@ -63,6 +66,7 @@ constexpr std::array<Profile, 24> profiles{{
     {0, 3, Top::Inner},
     {1, 3, Top::Inner},
     {2, 3, Top::Inner},
+    {0, 1, Top::Diagonal},
 }};
 
 constexpr std::array<Vec3, 6> faceNormals{{
@@ -209,8 +213,13 @@ ConvexParts convexParts(TileShape shape) {
         const bool risesX =
             profile.corner() && ((i == 0) == (profile.top == Top::Inner));
         // Keep the top first for a stable normal at ties with a perimeter face.
-        addPlane(part, facing, {risesX ? -slope : 0, 1, risesX ? 0 : -slope},
-                 {0, profile.height(0, 0), 0});
+        if (profile.top == Top::Diagonal)
+            addPlane(part, facing, {-.5f, 1, -.5f},
+                     {0, profile.height(0, 0), 0});
+        else
+            addPlane(part, facing,
+                     {risesX ? -slope : 0, 1, risesX ? 0 : -slope},
+                     {0, profile.height(0, 0), 0});
         addPlane(part, facing, {0, -1, 0}, {0, 0, 0});
         addPlane(part, facing, {-1, 0, 0}, {0, 0, 0});
         addPlane(part, facing, {1, 0, 0}, {1, 0, 0});

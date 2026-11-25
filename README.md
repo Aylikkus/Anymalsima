@@ -173,6 +173,7 @@ lighting scene to check the shadow depth with a fixed light.
 ```bash
 cmake --build build --target lod_render_smoke
 build/tests/lod_render_smoke /tmp/shape-lighting 1600 shape_lighting
+build/tests/lod_render_smoke /tmp/natural 900 natural
 ```
 
 # Controls

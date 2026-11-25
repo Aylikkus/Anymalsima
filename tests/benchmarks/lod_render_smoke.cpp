@@ -68,6 +68,9 @@ int main(int argc, char** argv) {
     const bool lights = scenario == "lights";
     const bool shapeLighting = scenario == "shape_lighting";
     const bool shapes = scenario == "shapes" || shapeLighting;
+    // Natural generator 26 hillside: the ramps and junctions are produced by
+    // TerrainSampler rather than placed by the scene (step 7 device check).
+    const bool natural = scenario == "natural";
     // Allow forest captures (including handover) to exercise sky shading
     // independently of the lamp and shadow phases of the lights scenario.
     const bool forestLighting =
@@ -75,8 +78,8 @@ int main(int argc, char** argv) {
     const bool occlusion = forestLighting && !std::getenv("SMOKE_NO_OCCLUSION");
     const bool handover = scenario == "handover" || walking || structure ||
                           seams || wrapScene || lights || riverScene ||
-                          savedScene || shapes;
-    const bool useVolumes = forestLighting || riverScene || shapes;
+                          savedScene || shapes || natural;
+    const bool useVolumes = forestLighting || riverScene || shapes || natural;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -104,6 +107,7 @@ int main(int argc, char** argv) {
             world = std::move(*save_catalog::readWorldMap(slot));
         }
         const GeneratedHydrology::Reach* river = nullptr;
+        if (natural) world.generatorVersion = WorldMeta::GeneratorVersion;
         if (riverScene) {
             world.hydrology = GeneratedHydrology::build(world);
             if (world.hydrology->riverReaches().empty() ||
@@ -301,6 +305,8 @@ int main(int argc, char** argv) {
         constexpr int ShapeX = 6144, ShapeZ = 6148;
         int shapeY = 0;
         bool shapesPlaced = false;
+        size_t naturalShapeCells = 0, naturalCorners = 0, naturalDiagonals = 0;
+        int naturalCornerX = 0, naturalCornerZ = 0;
         constexpr float ShapeBeaconRadius = 32;
         const auto wallPos = [&] {
             return TilePos{ShapeX, shapeY, ShapeZ + 2};
@@ -353,6 +359,87 @@ int main(int argc, char** argv) {
                           .28f,
                           -1.05f,
                           7};
+        }
+        if (natural) {
+            // Find the densest natural ramp and junction cluster in a dry
+            // hillside region of tests/support/lod_scene.hpp (seed
+            // 1234/5678), rather than hard-coding coordinates. Region 45,45
+            // is HILLS well above sea level with no cliff feature.
+            constexpr int Region = 45, Size = 128, Window = 24;
+            const int x0 = Region * TerrainTuning::RegionX;
+            const int z0 = Region * TerrainTuning::RegionZ;
+            std::vector<int> score(size_t(Size) * Size);
+            std::vector<int> ground(size_t(Size) * Size);
+            for (int z = 0; z < Size; ++z)
+                for (int x = 0; x < Size; ++x) {
+                    ground[size_t(z) * Size + x] =
+                        surface.height(x0 + x, z0 + z);
+                    const auto shape = surface.groundShape(x0 + x, z0 + z);
+                    if (!shape.code()) continue;
+                    ++naturalShapeCells;
+                    if (shape.profile() == TileShapeProfile::OuterCorner ||
+                        shape.profile() == TileShapeProfile::InnerCorner) {
+                        ++naturalCorners;
+                        if (naturalCorners == 1) {
+                            naturalCornerX = x0 + x;
+                            naturalCornerZ = z0 + z;
+                        }
+                    } else if (shape.profile() ==
+                               TileShapeProfile::DiagonalRamp) {
+                        ++naturalDiagonals;
+                    }
+                    score[size_t(z) * Size + x] =
+                        shape.profile() == TileShapeProfile::Ramp
+                            ? 1
+                            : (shape.profile() ==
+                                           TileShapeProfile::OuterCorner ||
+                                       shape.profile() ==
+                                           TileShapeProfile::InnerCorner ||
+                                       shape.profile() ==
+                                           TileShapeProfile::DiagonalRamp
+                                   ? 6
+                                   : 0);
+                }
+            int best = -1, bx = 0, bz = 0;
+            for (int z = 0; z + Window <= Size; ++z)
+                for (int x = 0; x + Window <= Size; ++x) {
+                    int sum = 0, peak = 0;
+                    for (int dz = 0; dz < Window; ++dz)
+                        for (int dx = 0; dx < Window; ++dx) {
+                            sum += score[size_t(z + dz) * Size + x + dx];
+                            peak = std::max(
+                                peak, ground[size_t(z + dz) * Size + x + dx]);
+                        }
+                    // Prefer dry, high ground: the target must be above sea
+                    // level so the camera does not start under water.
+                    const int centre =
+                        ground[size_t(z + Window / 2) * Size + x + Window / 2];
+                    if (centre <= SEA_LEVEL_Y + 8 || peak <= SEA_LEVEL_Y + 10)
+                        continue;
+                    sum += (peak - SEA_LEVEL_Y) / 4;
+                    if (sum > best) best = sum, bx = x, bz = z;
+                }
+            if (best < 0) bx = bz = Size / 2 - Window / 2;
+            const int NaturalX = x0 + bx + Window / 2;
+            const int NaturalZ = z0 + bz + Window / 2;
+            int peak = 0;
+            for (int dz = 0; dz < Window; ++dz)
+                for (int dx = 0; dx < Window; ++dx)
+                    peak = std::max(peak,
+                                    ground[size_t(bz + dz) * Size + bx + dx]);
+            const int centre =
+                ground[size_t(bz + Window / 2) * Size + bx + Window / 2];
+            camera = {{float(NaturalX), float(peak) + 2.f, float(NaturalZ)},
+                      0.f,
+                      -.45f,
+                      20.f};
+            std::cout << "natural_shape_cells=" << naturalShapeCells
+                      << " corners=" << naturalCorners
+                      << " diagonals=" << naturalDiagonals
+                      << " best_window=" << NaturalX << ' ' << NaturalZ
+                      << " centre=" << centre << " peak=" << peak
+                      << " score=" << best << " first_corner=" << naturalCornerX
+                      << ' ' << naturalCornerZ << '\n';
         }
         // SMOKE_CAMERA="x z yaw pitch distance above": look at (x, z) from
         // `above` tiles over its surface (close-ups of plants and cover).
@@ -2086,6 +2173,7 @@ int main(int argc, char** argv) {
                 result = 1;
             if (lights && (phase < 8 || settled < 10)) result = 1;
             if (shapes && (!shapesPlaced || settled < 10)) result = 1;
+            if (natural && (naturalShapeCells == 0 || settled < 10)) result = 1;
             if (shapeLighting && phase < 3) result = 1;
             if (travel && (phase < 2 || settled < 10)) result = 1;
             if (structure &&

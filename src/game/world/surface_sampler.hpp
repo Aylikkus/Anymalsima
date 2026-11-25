@@ -120,6 +120,10 @@ class SurfaceSampler {
     bool hasEdits(int x0, int z0, int x1, int z1);
     using RegionInput = SurfaceRegionInput;
     const RegionInput& input(int x, int z);
+    uint64_t regionKey(int x, int z) const;
+    // Region-scoped terrain sampler so the natural-shape height and proposal
+    // caches survive every column of a patch instead of being rebuilt.
+    TerrainSampler& samplerFor(int x, int z);
     // Edit of the chunk column containing the wrapped/clamped tile, or null.
     const ColumnEdit* editAt(int x, int z);
     WaterSurface generatedWater(int x, int z, int groundY) const;
@@ -134,6 +138,7 @@ class SurfaceSampler {
     uint64_t lastEditKey = UINT64_MAX;
     const ColumnEdit* lastEdit = nullptr;
     std::unordered_map<uint64_t, std::shared_ptr<const RegionInput>> regions;
+    std::unordered_map<uint64_t, std::unique_ptr<TerrainSampler>> samplers;
     std::unordered_map<uint64_t, int> heights;
     std::unordered_map<uint64_t, WaterSurface> waterSamples;
     std::unordered_map<uint64_t, SurfaceColumn> columns;

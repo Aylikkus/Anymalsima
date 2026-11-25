@@ -169,6 +169,42 @@ TEST(lod_natural_shape_geometry) {
     CHECK(low && high && sloped);
 }
 
+TEST(lod_shape_cube_gap_closed) {
+    // A same-level cube neighbour of a sloped shaped cell has no wall in the
+    // stepped cube path; the shaped cell must draw the exposed part of the
+    // cube's face or the sky shows through from above.
+    test::Assets assets;
+    auto world = worldForLod();
+    auto edits = std::make_shared<EditMap>();
+    auto edit = std::make_shared<ColumnEdit>();
+    edit->waterY.fill(-1);
+    for (int z = 0; z < 16; ++z)
+        for (int x = 0; x < 16; ++x) {
+            const int i = ColumnEdit::index(x, z);
+            edit->groundY[i] = 400;
+            edit->groundBlock[i] = 1;
+        }
+    constexpr int RampX = 8, RampZ = 8;
+    edit->groundShape[ColumnEdit::index(RampX, RampZ)] =
+        TileShape::make(TileShapeProfile::DiagonalRamp);
+    edit->finish();
+    (*edits)[editKey(17, 17)] = std::move(edit);
+    SurfaceSampler sampler(world, assets, nullptr, edits);
+    const TerrainLod::Patch patch{17 * 16, 17 * 16, 1};
+    const auto mesh = TerrainLod::build(patch, sampler, running);
+    // The ramp's +X edge rises from y=400.5 to 401; the cube beside it is at
+    // y=401. A vertical quad on x=281 must close the upper half.
+    bool foundTop = false;
+    for (const auto& vertex : mesh.vertices)
+        if (vertex.nx > .99f &&
+            std::abs(vertex.x - (17 * 16 + RampX + 1)) < .001f &&
+            vertex.z >= float(17 * 16 + RampZ) - .001f &&
+            vertex.z <= float(17 * 16 + RampZ + 1) + .001f &&
+            vertex.y > 400.99f)
+            foundTop = true;
+    CHECK(foundTop);
+}
+
 TEST(lod_geology_order_independent) {
     test::Assets assets;
     auto world = worldForLod();

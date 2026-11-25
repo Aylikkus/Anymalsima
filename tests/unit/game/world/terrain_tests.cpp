@@ -1,9 +1,11 @@
 #include <chrono>
 #include <climits>
 #include <map>
+#include <vector>
 
 #include "world/location_manager.hpp"
 #include "world/natural_shape.hpp"
+#include "world/save/chunk_codec.hpp"
 #include "world/save/world_meta.hpp"
 #include "world/terrain_sampler.hpp"
 #include "world_fixture.hpp"
@@ -56,9 +58,9 @@ using Profile = TileShapeProfile;
 using Heights = std::map<std::pair<int, int>, int>;  // top, not surface_y
 
 natural_shape::Field shapeField(const Heights& tops, int fallback, int width,
-                                int height) {
-    const auto wrap = [&](int x) {
-        const int period = width;
+                                int height, bool edgeCompatibility = true,
+                                bool diagonalCorners = true) {
+    const auto wrap = [period = width](int x) {
         return period > 0 ? (x % period + period) % period : x;
     };
     return natural_shape::Field(
@@ -68,7 +70,8 @@ natural_shape::Field shapeField(const Heights& tops, int fallback, int width,
             const int top = it == tops.end() ? fallback : it->second;
             return top - 1;
         },
-        [](int64_t, int64_t) { return true; });
+        [](int64_t, int64_t) { return true; }, edgeCompatibility,
+        diagonalCorners);
 }
 }  // namespace
 
@@ -82,6 +85,101 @@ TEST(terrain_natural_ramps) {
     EQUAL(int(ramp.profile()), int(Profile::Ramp), "terrace ramp");
     EQUAL(int(ramp.facing()), int(TileFacing::PosX), "uphill landing");
     CHECK(!field.at(11, 10).code());
+}
+
+TEST(terrain_natural_diagonal_corner_ramp) {
+    constexpr int H = 6;
+    Heights tops;
+    // Downhill in both -X and -Z, uphill in both +X and +Z: no level ramp or
+    // junction can meet the taller hillside, so use one diagonal ramp plane.
+    tops[{9, 10}] = H - 1;
+    tops[{10, 9}] = H - 1;
+    tops[{11, 10}] = H + 1;
+    tops[{10, 11}] = H + 1;
+    auto field = shapeField(tops, H, 32, 32);
+    const auto corner = field.at(10, 10);
+    EQUAL(int(corner.profile()), int(Profile::DiagonalRamp),
+          "diagonal corner ramp");
+    EQUAL(int(corner.facing()), 0, "diagonal high corner NE");
+
+    // Generator 25 leaves the same pattern as a whole block.
+    auto strict = shapeField(tops, H, 32, 32, false, false);
+    CHECK(!strict.at(10, 10).code());
+    // Generator 26 keeps cubes here too; diagonal corners start at 27.
+    auto ridge = shapeField(tops, H, 32, 32, true, false);
+    CHECK(!ridge.at(10, 10).code());
+}
+
+TEST(terrain_natural_legacy_rule_keeps_blocks) {
+    constexpr int H = 6;
+    // Generator 25 required cube landings on both ends, so a two-cell ridge
+    // and a ramp against a higher wall stayed full blocks.
+    Heights ridge;
+    ridge[{9, 10}] = H - 1;
+    ridge[{12, 10}] = H - 1;
+    auto strict = shapeField(ridge, H, 32, 32, false, false);
+    CHECK(!strict.at(10, 10).code());
+    CHECK(!strict.at(11, 10).code());
+
+    Heights wall;
+    wall[{9, 10}] = H - 1;
+    wall[{11, 10}] = H + 1;
+    auto wallField = shapeField(wall, H, 32, 32, false, false);
+    CHECK(!wallField.at(10, 10).code());
+}
+
+TEST(terrain_natural_ridge_pairs_meet) {
+    constexpr int H = 6;
+    Heights tops;
+    // A two-cell plateau with a one-metre drop on both outer sides. Each
+    // high cell is the other's landing, so both must cut into ramps that
+    // meet as a ridge instead of leaving two whole blocks.
+    tops[{9, 10}] = H - 1;
+    tops[{12, 10}] = H - 1;
+    auto field = shapeField(tops, H, 32, 32);
+    const auto west = field.at(10, 10);
+    const auto east = field.at(11, 10);
+    EQUAL(int(west.profile()), int(Profile::Ramp), "west ridge ramp");
+    EQUAL(int(east.profile()), int(Profile::Ramp), "east ridge ramp");
+    EQUAL(int(west.facing()), int(TileFacing::PosX), "west rises east");
+    EQUAL(int(east.facing()), int(TileFacing::NegX), "east rises west");
+}
+
+TEST(terrain_natural_ramp_meets_higher_wall) {
+    constexpr int H = 6;
+    Heights tops;
+    // The high neighbour is one cell above the ramp top. The ramp is still
+    // useful: it reaches the wall's foot instead of leaving a whole block.
+    tops[{9, 10}] = H - 1;
+    tops[{11, 10}] = H + 1;
+    auto field = shapeField(tops, H, 32, 32);
+    const auto ramp = field.at(10, 10);
+    EQUAL(int(ramp.profile()), int(Profile::Ramp), "ramp to higher wall");
+    EQUAL(int(ramp.facing()), int(TileFacing::PosX), "wall uphill");
+}
+
+TEST(terrain_natural_shape_queries_are_order_independent) {
+    test::Assets assets;
+    auto world = terrainWorld(5, 5, 420, LandType::HILLS);
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    const auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    TerrainSampler forward(data), reverse(data);
+    std::vector<std::pair<int, int>> cells;
+    for (int z = 0; z < 12; ++z)
+        for (int x = 0; x < 12; ++x) cells.emplace_back(16 + x, 16 + z);
+    std::vector<uint8_t> first;
+    for (const auto& [x, z] : cells)
+        first.push_back(forward.surfaceShape(x, z).code());
+    size_t index = cells.size();
+    for (auto it = cells.rbegin(); it != cells.rend(); ++it, --index)
+        EQUAL(int(reverse.surfaceShape(it->first, it->second).code()),
+              int(first[index - 1]), "reverse query");
+    // A sampler used for one cell only must agree with the warm cache.
+    for (size_t i = 0; i < cells.size(); i += 17) {
+        TerrainSampler fresh(data);
+        EQUAL(int(fresh.surfaceShape(cells[i].first, cells[i].second).code()),
+              int(first[i]), "cold query");
+    }
 }
 
 TEST(terrain_natural_outer_corner) {
@@ -185,6 +283,20 @@ TEST(terrain_generation_and_lod_apply_natural_shapes) {
         }
     CHECK(found);
 
+    // Generator 25 still selects natural shapes, but keeps its narrow
+    // cube-landing compatibility rule; 26 matches shared edges.
+    world.generatorVersion = WorldMeta::NaturalShapeVersion;
+    auto strict = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    CHECK(strict.naturalShapes() && !strict.ridgeShapes());
+    world.generatorVersion = WorldMeta::NaturalShapeRidgeVersion;
+    auto ridge = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    CHECK(ridge.naturalShapes() && ridge.ridgeShapes());
+    CHECK(!ridge.diagonalShapes());
+    world.generatorVersion = WorldMeta::NaturalShapeDiagonalVersion;
+    auto diagonal = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    CHECK(diagonal.naturalShapes() && diagonal.ridgeShapes() &&
+          diagonal.diagonalShapes());
+
     // The same map under the previous generator stays cube-only.
     world.generatorVersion = WorldMeta::NaturalShapeVersion - 1;
     auto legacy = TerrainNeighborhood::capture(world, {2, 2}, assets);
@@ -192,6 +304,44 @@ TEST(terrain_generation_and_lod_apply_natural_shapes) {
     const auto columns = TerrainSampler(legacy).columns(16, 16);
     for (const auto& column : columns.columns)
         CHECK(!column.groundShape.code());
+}
+
+TEST(terrain_natural_shapes_survive_chunk_codec) {
+    test::Assets assets;
+    auto world = terrainWorld(5, 5, 420, LandType::HILLS);
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    const auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    TerrainSampler sampler(data);
+    const std::vector<RegionLayer> layers = {
+        {RegionLayerType::Rock, 1, 1024, 0, 0, 1}};
+    bool found = false;
+    for (int cz = 16; cz < 24 && !found; ++cz)
+        for (int cx = 16; cx < 24 && !found; ++cx) {
+            const auto columns = sampler.columns(cx, cz);
+            int top = 0;
+            for (const auto& column : columns.columns)
+                top = std::max(top, column.surface_y);
+            Chunk chunk;
+            LocationGenerator{}.generateChunk(
+                chunk,
+                {unsigned(cx), unsigned(top / Chunk::SIZE_Y), unsigned(cz)}, {},
+                world.regions[12], layers, {}, &columns);
+            if (!chunk.hasShapes()) continue;
+            found = true;
+            Chunk decoded;
+            chunk_codec::decode(chunk_codec::encode(chunk), decoded);
+            EQUAL(decoded.shapeCount(), chunk.shapeCount(), "shape count");
+            for (int z = 0; z < Chunk::SIZE_Z; ++z)
+                for (int y = 0; y < Chunk::SIZE_Y; ++y)
+                    for (int x = 0; x < Chunk::SIZE_X; ++x) {
+                        const auto index = Chunk::cell(x, y, z);
+                        CHECK(decoded.shapeAt(index) == chunk.shapeAt(index));
+                        EQUAL(int(decoded.tiles[z][y][x].block_id),
+                              int(chunk.tiles[z][y][x].block_id),
+                              "generated block");
+                    }
+        }
+    CHECK(found);
 }
 
 TEST(terrain_caps_repeatability) {

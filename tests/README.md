@@ -159,6 +159,34 @@ the map for repeatability, without writing to the save.
 SMOKE_SAVE=/path/to/save SMOKE_TERRAIN=2   build/tests/lod_render_smoke /tmp/saved-view 850 saved
 ```
 
+## Natural shape budget
+
+`shape_benchmark` reports natural ramp coverage, column and mesh time,
+resident sparse shape-table bytes, encoded chunk size and the dense
+worst case (every cell shaped). It uses the scene in
+`tests/support/lod_scene.hpp`; compare `--legacy` for the cube-only
+baseline. A `--stats` pass explains why cells stay whole blocks, and
+`--map out.ppm` writes a shape map (red straight ramps, blue outer corners,
+green inner corners, yellow diagonal corner ramps).
+
+```bash
+cmake --build build --target shape_benchmark
+build/tests/shape_benchmark
+build/tests/shape_benchmark --legacy
+build/tests/shape_benchmark --stats
+build/tests/shape_benchmark --map /tmp/shape-map.ppm
+```
+
+The natural device scene generates the hillside with generator 27, finds the
+densest ramp cluster in region 45,45, streams chunks and draws near plus LOD
+terrain. Use `SMOKE_CAMERA` for close-ups of a junction.
+
+```bash
+build/tests/lod_render_smoke /tmp/natural 900 natural
+SMOKE_CAMERA="5793 5876 0 -0.28 12 4" \
+  build/tests/lod_render_smoke /tmp/natural-close 700 natural
+```
+
 The walking variant halves the chosen terrain budget, moves the saved
 camera through new regions for 500 frames and checks that the stationary
 camera regains tile-spacing terrain and the terrain queue drains. Use
