@@ -105,8 +105,8 @@ struct Surface {
 };
 
 struct ConvexPart {
-    // The first exteriorCount planes describe exposed sides. The remaining
-    // plane, when present, closes the part at the junction's diagonal.
+    // The first exteriorCount planes describe exposed sides, with the top
+    // first. The remaining plane closes a corner part at its diagonal.
     std::array<Plane, 7> planes{};
     unsigned exteriorCount = 0;
     unsigned count = 0;

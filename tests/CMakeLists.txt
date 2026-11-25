@@ -11,6 +11,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_shape.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tile_piece.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/grounded_probe.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
@@ -68,6 +69,7 @@ target_link_libraries(world_logic_cpu PUBLIC
 add_executable(world_logic_tests
     support/test_main.cpp
     unit/game/world/tile_shape_tests.cpp
+    unit/game/world/tile_piece_tests.cpp
     unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
     unit/game/world/hydrology_tests.cpp
@@ -124,6 +126,10 @@ set(world_cases
     tile_shape_intersections
     tile_shape_storage
     tile_shape_snapshots
+    tile_piece_layers
+    tile_piece_complementary_profiles
+    tile_piece_wall_and_layer
+    tile_piece_clipping_and_rejection
     tile_classification
     generation_surface_layers
     generation_sea_level

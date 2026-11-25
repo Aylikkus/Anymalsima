@@ -19,6 +19,7 @@ add_library(game
     world/terrain_lod_manager.cpp
     world/structure_lod.cpp
     world/tile_shape.cpp
+    world/tile_piece.cpp
     world/grounded_probe.cpp
     world/chunk_mesher.cpp
     world/chunk_manager.cpp

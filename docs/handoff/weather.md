@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Step 01 complete · Step 02 pending · First maintainer playcheck after step 05.**
+**Steps 01–02 complete · Step 03 pending · First maintainer playcheck after step 05.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -13,7 +13,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | Step | Deliverable | Status | Maintainer playcheck before advancing |
 |---|---|---|---|
 | 01 | Reproducible terrain, water and performance baseline | Complete | |
-| 02 | Geometry for positioned pieces and horizontal layers | Pending | |
+| 02 | Geometry for positioned pieces and horizontal layers | Complete | |
 | 03 | Sparse compound storage and immutable snapshots | Pending | |
 | 04 | Durable piece edits and save migration | Pending | |
 | 05 | Build, pick, walk on and render compound tiles | Pending | A · Construction |
@@ -260,4 +260,54 @@ The matching wrapped slot is
 The run decoded the shaped edit, flora, planted oak override and shallow
 water from both slots, including the ordinary slot after streaming.
 Opening the save through the interactive app was outside this verification.
-The next implementation step is 02. The first maintainer playcheck is step 05.
+
+### Step 02 · 2026-11-25
+
+The shared [cell geometry API](../../src/game/world/tile_piece.hpp) uses
+the existing profile planes and quarter-turn facings. A piece carries its
+cell-local translation, cell-scoped ID and block ID for material lookup.
+The 50 cm layer uses the slab profile. Other thicknesses use a horizontal
+ceiling on the cube profile. A profile facet can serve as the top of a
+lower piece or as the underside of a complementary piece. The cell clips
+both at its boundaries.
+
+Placement rejects overlapping interiors and allows face, edge and point
+contact. Geometry comparisons treat distances within one micrometre as
+contact. Exterior faces and ray hits report the owning piece and block.
+Footprint support can query below an overhang by setting a height limit.
+Free intervals and boundary openings describe the unoccupied space for
+future fluid and light consumers.
+
+The [headless cases](../../tests/unit/game/world/tile_piece_tests.cpp)
+use synthetic one-cell fixtures with fixed coordinates and materials. No
+seed or save is required. They exercise the six thicknesses, an elevated
+slab, complementary straight, diagonal and corner profiles in all four
+rotations, a wall beside a layer in each rotation, a capped 5 cm ramp toe,
+boundary clipping and rejected placements. Compound storage and snapshots
+start in step 03. In-game construction, picking and rendering start in
+step 05.
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 4
+ctest --test-dir build -R 'game.world.tile_(piece|shape)' --output-on-failure --no-tests=error
+ctest --test-dir build -L gameplay -j 4 --output-on-failure --no-tests=error
+
+mkdir -p build/weather-geometry
+clang++ -std=c++20 -Wall -Wextra -Wpedantic -g -O1 \
+  -fsanitize=address,undefined -fno-sanitize-recover=all \
+  -Isrc/game -Isrc/engine -Itests/support \
+  src/game/world/tile_shape.cpp src/game/world/tile_piece.cpp \
+  tests/support/test_main.cpp tests/unit/game/world/tile_piece_tests.cpp \
+  -o build/weather-geometry/tile_piece_sanitized
+(
+  for case in layers complementary_profiles wall_and_layer clipping_and_rejection; do
+    ASAN_OPTIONS=detect_leaks=0 build/weather-geometry/tile_piece_sanitized "tile_piece_$case" || exit 1
+  done
+)
+```
+
+The Release app and logic tests built. All 9 focused CTest cases and all
+395 gameplay cases passed. The four new geometry cases passed under ASan
+and UBSan with LeakSanitizer disabled for sandbox execution. This step's
+acceptance checks ran headlessly. The first device playcheck remains
+scheduled after step 05.
