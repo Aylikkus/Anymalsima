@@ -82,11 +82,11 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         ui_manager->createWidget(std::make_unique<Panel>(), root_ptr);
     tile_debug_panel->setGrid({32, 32});
     tile_debug_panel->setAnchor({0, 0, 1, 1});
-    tile_debug_panel->setBackgroundColor({30, 30, 30, 180});
 
     tileDebugText =
         ui_manager->createWidget(std::make_unique<Text>(), tile_debug_panel);
     tileDebugText->setGridPlacement({0, 0, 6, 8});
+    tileDebugText->setBackgroundColor({255, 255, 255, 0});
     tileDebugText->setText("No tile selected");
 
     auto makeToolButton = [&](const std::string& label, int column,
