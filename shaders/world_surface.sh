@@ -13,7 +13,7 @@ uniform vec4 u_world_water;
 // Periodic value noise keeps the same moving highlights across the X wrap.
 float waterHash(vec2 cell)
 {
-    vec3 p = fract(vec3(mod(cell, 32.0).xyx) * vec3(0.1031, 0.1030, 0.0973));
+    vec3 p = fract(vec3(mod(cell, 16.0).xyx) * vec3(0.1031, 0.1030, 0.0973));
     p += dot(p, p.yzx + 33.33);
     return fract((p.x + p.y) * p.z);
 }
@@ -27,45 +27,57 @@ float waterNoise(vec2 p)
                mix(waterHash(i + vec2(0.0, 1.0)), waterHash(i + 1.0), f.x), f.y);
 }
 
-vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing, float depth, float impact)
+// Keep transitions narrow on screen without turning a moving band edge into
+// a staircase. The cap keeps distant triangles from losing their contrast.
+float surfaceBand(float value, float edge)
+{
+    float width = clamp(fwidth(value), 0.015, 0.085);
+    return smoothstep(edge - width, edge + width, value);
+}
+
+vec3 surfaceWaterColor(vec3 position, vec3 normal, vec2 flow, bool flowing,
+                       float depth, float impact)
 {
     float t = u_world_water.x;
-    vec3 color = mix(vec3(0.11, 0.34, 0.36), vec3(0.055, 0.24, 0.32), depth);
-    float grazing = 1.0 - abs(normalize(u_world_eye.xyz - position).y);
-    color += vec3(0.035, 0.065, 0.075) * grazing * grazing;
-
+    vec3 color = mix(vec3(0.16, 0.47, 0.47), vec3(0.08, 0.30, 0.42), depth);
     if (abs(normal.y) < 0.5 && flowing) {
-        // A fast, vertically stretched sheet. Each thread drifts slightly
-        // with its neighbors and breaks up as it descends.
+        // Use long ribbons on falls and break them up as they descend.
         float across = dot(position.xz, vec2(-normal.z, normal.x));
         float down = -position.y - 4.0 * t;
         vec2 p = vec2(across * 2.0, down * 0.25);
-        p.x += 0.65 * waterNoise(vec2(across, down * 0.5));
-        float thread = waterNoise(p) * 0.7 + waterNoise(p * 2.0) * 0.3;
-        return mix(color, vec3(0.32, 0.53, 0.56), 0.23 + 0.65 * thread);
+        p.x += 0.4 * waterNoise(vec2(across, down * 0.5));
+        float ribbon = waterNoise(p);
+        color = mix(color, vec3(0.36, 0.63, 0.68), surfaceBand(ribbon, 0.48));
+        return mix(color, vec3(0.74, 0.88, 0.86), surfaceBand(ribbon, 0.79));
     }
 
-    vec2 p = position.xz;
-    if (flowing) p -= flow * t * 2.5;
-    float broad = waterNoise(p + vec2(0.0, t * 0.15));
-    float ripples = sin(6.2831853 * (p.y + broad * 0.7) + t * 0.45);
-    color *= 0.97 + 0.06 * broad + 0.025 * ripples;
-    float bubbles = smoothstep(0.35, 0.75, waterNoise(p * 2.0 + broad));
-    color = mix(color, vec3(0.56, 0.72, 0.71), impact * bubbles);
-    if (!flowing) return color;
+    // The broad tint survives at a distance. Fade the finer crests as their
+    // screen footprint shrinks so ocean and river LODs do not sparkle.
+    vec2 p = position.xz - (flowing ? flow * t * 2.5 : vec2(t * 0.12, 0.0));
+    float footprint = max(length(dFdx(p)), length(dFdy(p)));
+    float broad = waterNoise(p * 0.125);
+    float grazing = 1.0 - abs(normalize(u_world_eye.xyz - position).y);
+    color += vec3(0.05, 0.09, 0.12) * grazing * grazing;
+    color += vec3(0.018, 0.034, 0.043) * surfaceBand(broad, 0.53)
+           * (1.0 - smoothstep(1.0, 6.0, footprint));
 
-    // Pull flecks along the current and leave quiet water between them.
-    float grain = mix(waterNoise(p * vec2(2.0, 0.25) + vec2(broad * 0.5)),
-                      waterNoise(p * vec2(0.25, 2.0) + vec2(broad * 0.5)),
-                      flow.x * flow.x);
-    float foam = smoothstep(0.72, 0.95, grain) * smoothstep(0.35, 0.75, broad);
-    // Broad, bright ripple crests make the moving current readable in shade.
-    float crest = smoothstep(0.48, 0.85, grain) * (0.35 + 0.65 * broad);
-    return color + crest * vec3(0.16, 0.23, 0.24)
-                 + foam * vec3(0.16, 0.21, 0.21);
+    // Fixed frequencies keep the curved contours periodic across the wrap
+    // (one region is 128 tiles), even when the current is diagonal.
+    vec2 bend = vec2_splat(broad * 0.65);
+    float wave = flowing
+        ? mix(waterNoise(p * vec2(0.875, 0.25) + bend),
+              waterNoise(p * vec2(0.25, 0.875) + bend), flow.x * flow.x)
+        : waterNoise(p * vec2(0.25, 0.5) + bend);
+    float detail = 1.0 - smoothstep(0.25, 1.1, footprint);
+    float ridge = 1.0 - abs(wave - 0.63) * 2.0;
+    float crest = surfaceBand(ridge, 0.90) * surfaceBand(broad, 0.48);
+    color += vec3(0.11, 0.18, 0.18) * crest * detail * (flowing ? 1.0 : 0.40);
+    float foam = surfaceBand(wave, 0.70) * impact;
+    return mix(color, vec3(0.70, 0.87, 0.84), foam * detail);
 }
 
-// Light response: ambient + diffuse * N.L, both scaled by the light level.
+// Artificial light response: ambient + diffuse * N.L, both scaled by the
+// light level.
 #define SURFACE_AMBIENT 0.6
 #define SURFACE_DIFFUSE 0.4
 #define SURFACE_MIN_LIGHT 0.08
@@ -231,7 +243,10 @@ vec3 surfaceFarLight(vec3 position, vec3 normal, vec3 geometric, float nearField
             shadowFace(-toLight, face, ndc);
             if ((int(extra.w) & (1 << int(face))) == 0) continue;
         }
-        strength *= shadowVisibility(extra.z, -toLight, geometric, placement.w);
+        float visibility = shadowVisibility(extra.z, -toLight, geometric,
+                                            placement.w);
+        // Retain filtering across the silhouette while sharpening the edge.
+        strength *= smoothstep(0.32, 0.68, visibility);
         float facing = SURFACE_AMBIENT
                      + SURFACE_DIFFUSE * max(dot(normal, l), 0.0);
         sum += color.rgb * (strength * facing);
@@ -250,23 +265,35 @@ vec3 surfaceLightTint(vec2 chroma)
     return rgb / max(max(rgb.r, rgb.g), max(rgb.b, 0.0001));
 }
 
-// light.x = sky light, light.y = block (artificial) light, both 0..1;
-// blockTint colors the block light. Sky light comes from the sun direction.
+// Use the underlying shape so texture detail and its mipmaps do not break
+// up the broad shadow bands. Sky exposure stays continuous in caves, under
+// canopies and in water, with the warm bands strongest under open sky.
+vec3 surfaceSunLight(vec3 geometric, float exposure)
+{
+    float facing = dot(geometric, skySunDirection());
+    float direct = skyDirectSun() * smoothstep(0.55, 0.95, exposure);
+    vec3 shade = vec3(0.49, 0.53, 0.63);
+    vec3 ramp = mix(shade, vec3(0.76, 0.77, 0.80), surfaceBand(facing, 0.14));
+    ramp = mix(ramp, vec3(1.0, 0.97, 0.91), surfaceBand(facing, 0.60));
+    return mix(shade, ramp, direct) * (exposure * skyDaylight());
+}
+
+// light.x = sky exposure, light.y = block (artificial) light, both 0..1.
+// blockTint colors the block light.
 // Block light comes from blockDir (toward brighter space); blockDirStrength
 // fades that to non-directional where the light field is flat. far is
 // surfaceFarLight() plus surfaceLodLight(). Block light saturates at 1 per
 // channel, like the voxel field, so near and far light hand over smoothly.
-vec3 surfaceLight(vec3 normal, vec3 albedo, vec2 light, vec3 blockTint,
-                  vec3 blockDir, float blockDirStrength, vec3 far)
+vec3 surfaceLight(vec3 geometric, vec3 normal, vec3 albedo, vec2 light,
+                  vec3 blockTint, vec3 blockDir, float blockDirStrength,
+                  vec3 far)
 {
-    float sun = max(dot(normal, skySunDirection()), 0.0) * skyDirectSun();
-    float sky = light.x * skyDaylight()
-              * (SURFACE_AMBIENT + SURFACE_DIFFUSE * sun);
+    vec3 sky = surfaceSunLight(geometric, light.x);
     float toward = mix(1.0, max(dot(normal, blockDir), 0.0), blockDirStrength);
     vec3 block = blockTint * (light.y
                               * (SURFACE_AMBIENT + SURFACE_DIFFUSE * toward))
                + far;
-    vec3 lit = max(vec3_splat(sky), min(block, vec3_splat(1.0)));
+    vec3 lit = max(sky, min(block, vec3_splat(1.0)));
     return albedo * max(lit, vec3_splat(SURFACE_MIN_LIGHT));
 }
 float surfaceWaterSky(float y, float waterHeight)

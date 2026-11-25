@@ -93,7 +93,8 @@ void main()
     vec3 color;
     vec3 surface = normal;
     if (v_layer < -1.5) {
-        color = surfaceWaterColor(v_position, normal, v_cover, v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
+        color = surfaceWaterColor(v_position, normal, v_cover,
+                                  v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
     } else {
         float layer = floor(v_layer + 0.5);
         if (v_layer < -0.5) {
@@ -134,7 +135,7 @@ void main()
               * surfaceStructureSky(v_position, normal);
     vec3 far = surfaceFarLight(v_position, surface, normal, 0.0)
              + surfaceLodLight(v_position);
-    color = surfaceLight(surface, color, vec2(sky, 0.0), vec3_splat(1.0),
-                         normal, 0.0, far);
+    color = surfaceLight(normal, surface, color, vec2(sky, 0.0),
+                         vec3_splat(1.0), normal, 0.0, far);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

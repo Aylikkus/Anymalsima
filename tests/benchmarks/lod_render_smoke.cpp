@@ -623,6 +623,11 @@ int main(int argc, char** argv) {
                            useVolumes ? &volumes : nullptr);
                 sections[2] = since(mark);
                 auto& water = lod.waterUniform();
+                // The boxed and open lamp checks compare whole frames.
+                // Freeze scenery animation for those comparisons.
+                const bool compareLamp = lights && phase >= 4;
+                if (compareLamp)
+                    water.setVec4({0, lod.eyeUnderwater() ? 1.f : 0.f, 0, 0});
                 if (lights) {
                     static uint64_t lodVersion = 0;
                     if (lod.drawnVersion() != lodVersion) {
@@ -752,6 +757,7 @@ int main(int argc, char** argv) {
                     });
                 }
                 if (forestLighting) {
+                    const double windTime = compareLamp ? 0.0 : frame / 60.0;
                     float worldView[16], worldProj[16], viewProj[16];
                     bx::mtxLookAt(worldView, {eye.x, eye.y, eye.z},
                                   {camera.position.x, camera.position.y,
@@ -762,12 +768,12 @@ int main(int argc, char** argv) {
                     bx::mtxMul(viewProj, worldView, worldProj);
                     flora.render(target, camera,
                                  Frustum::fromViewProj(viewProj), lightRenderer,
-                                 frame / 60.0, 0, water);
+                                 windTime, 0, water);
                     floraMaxMs = std::max(floraMaxMs, flora.cpuMilliseconds());
                     mark = SmokeClock::now();
                     trees.render(target, camera,
                                  Frustum::fromViewProj(viewProj), lightRenderer,
-                                 frame / 60.0, 0, water);
+                                 windTime, 0, water);
                     sections[3] = since(mark);
                     treesMaxMs = std::max(treesMaxMs, trees.cpuMilliseconds());
                 }

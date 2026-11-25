@@ -78,7 +78,8 @@ void main()
     // Near-field block light takes the voxel field's colour, like blocks.
     vec3 tint = surfaceLightTint(v_tint.xy);
     vec3 far = surfaceFarLight(v_position, normal, normal, 1.0);
-    vec3 lit = surfaceLight(normal, color, light, tint, normal, 0.0, far);
+    vec3 lit = surfaceLight(normal, normal, color, light, tint, normal, 0.0,
+                            far);
     // Translucency: sunlight through leaves seen against the sun.
     float back = max(dot(-toEye, skySunDirection()), 0.0);
     lit += color * v_params.x * light.x * skyDaylight() * skyDirectSun()

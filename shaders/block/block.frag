@@ -85,7 +85,8 @@ void main()
     vec3 color;
     vec3 normal = geometric;
     if (v_layer < -1.5) {
-        color = surfaceWaterColor(v_position, geometric, v_cover, v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
+        color = surfaceWaterColor(v_position, geometric, v_cover,
+                                  v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
     } else {
         float layer = floor(v_layer + 0.5);
         color = surfaceTexture(v_position, geometric, layer).rgb;
@@ -134,7 +135,7 @@ void main()
     // Without a volume (distant joins and structures) small lights come
     // from the coarse distant glow map.
     if (u_light_chunk.w < 0.5) far += surfaceLodLight(v_position);
-    color = surfaceLight(normal, color, light, tint, blockDir,
+    color = surfaceLight(geometric, normal, color, light, tint, blockDir,
                          blockDirStrength, far);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }
