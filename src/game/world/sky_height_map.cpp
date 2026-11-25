@@ -100,7 +100,8 @@ void SkyHeightMap::watch(WorldEditor& source) {
     if (editor) editor->blockChanged.disconnect(editConnection);
     editor = &source;
     editConnection = source.blockChanged.connect([this](const BlockChange& c) {
-        if (tileOpacity(c.before, blocks) == tileOpacity(c.after, blocks))
+        if (c.beforeShape == c.afterShape &&
+            tileOpacity(c.before, blocks) == tileOpacity(c.after, blocks))
             return;
         const auto x = unsigned(chunks.wrap().wrapTile(c.pos.x));
         const auto z = unsigned(c.pos.z);

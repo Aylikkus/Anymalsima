@@ -84,6 +84,70 @@ TEST(editor_bulk_statuses) {
     EQUAL(modified, 1, "one light notification for the batch");
 }
 
+TEST(editor_shape_changes) {
+    EditorFixture f;
+    const auto pos = EditorFixture::at(5, 5, 5);
+    auto& chunk = f.load({0, 0, 0});
+    const auto cell = Chunk::cell(5, 5, 5);
+    const auto ramp = TileShape::make(TileShapeProfile::Ramp);
+    const auto wall = TileShape::make(TileShapeProfile::Wall25);
+    std::vector<BlockChange> changes;
+    f.editor.blockChanged.connect(
+        [&](const BlockChange& c) { changes.push_back(c); });
+    expectStatus(f.editor.placeBlock(pos, 1), EditStatus::Applied, "cube");
+    const Chunk snapshot = chunk;
+    const EditRequest batch[] = {
+        {.pos = pos, .mode = EditMode::Replace, .block = 1, .shape = ramp},
+        {.pos = pos, .mode = EditMode::Replace, .block = 1, .shape = ramp},
+        {.pos = pos,
+         .mode = EditMode::Replace,
+         .block = 1,
+         .shape = ramp.rotated(1)},
+    };
+    const auto status = f.editor.apply(batch);
+    CHECK(status[0] == EditStatus::Applied &&
+          status[1] == EditStatus::Unchanged &&
+          status[2] == EditStatus::Applied);
+    CHECK(changes.size() == 3);
+    CHECK(changes[1].beforeShape == TileShape{} &&
+          changes[1].afterShape == ramp);
+    CHECK(changes[2].beforeShape == ramp &&
+          changes[2].afterShape == ramp.rotated(1));
+    CHECK(changes[2].before.block_id == 1 && changes[2].after.block_id == 1);
+    CHECK(!snapshot.hasShapes() && chunk.shapeAt(cell) == ramp.rotated(1));
+    expectStatus(f.editor.removeBlock(pos), EditStatus::Applied,
+                 "shaped removal");
+    CHECK(!chunk.hasShapes() && changes.back().afterShape == TileShape{});
+
+    Tile& localWater = f.tile(5, 5, 5);
+    localWater.liquid = LiquidType::Water;
+    localWater.waterOrigin = WaterOrigin::Local;
+    localWater.liquidLevel = 91;
+    expectStatus(f.editor.placeBlock(pos, 1, wall), EditStatus::Blocked,
+                 "local water ledger");
+    CHECK(localWater.liquidLevel == 91 && !chunk.hasShapes());
+    localWater.waterOrigin = WaterOrigin::Reservoir;
+    expectStatus(f.editor.placeBlock(pos, 1, wall), EditStatus::Applied,
+                 "partial block displaces the whole projected cell");
+    CHECK(!localWater.isLiquid() && chunk.shapeAt(cell) == wall);
+    expectStatus(f.editor.setBlock(pos, 1), EditStatus::Applied,
+                 "legacy API sets a cube");
+    CHECK(!chunk.hasShapes());
+
+    const auto natural = EditorFixture::at(6, 5, 5);
+    const auto rootCell = Chunk::cell(6, 5, 5);
+    // Roots can claim only unedited natural substrate.
+    chunk.setCell(rootCell, Tile{.block_id = 1, .lightLevel = {}}, ramp);
+    expectStatus(f.editor.apply({.pos = natural,
+                                 .mode = EditMode::Replace,
+                                 .block = 2,
+                                 .treeGrowth = true,
+                                 .rootOwner = 17}),
+                 EditStatus::Applied, "growth displaces the substrate");
+    CHECK(chunk.rootAt(rootCell) && chunk.rootAt(rootCell)->shape == ramp);
+    CHECK(!chunk.hasShapes() && changes.back().beforeShape == ramp);
+}
+
 TEST(editor_relights_column) {
     EditorFixture f;
     f.load({0, 0, 0});

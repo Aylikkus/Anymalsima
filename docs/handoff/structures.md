@@ -150,9 +150,9 @@ Known limits:
 
 ### Step 4: generated versus edited (done)
 
-- Chunk jobs compare saved voxel material IDs against the expected structure
-  slab above the generated terrain and water. The terrain comparison still
-  uses solidity. Tree wood uses the existing tree cut and growth records.
+- Chunk jobs compare saved material and shape against generated terrain and
+  the expected structure slab above terrain and water. Tree wood uses the
+  existing tree cut and growth records.
 - The edit tracker compares loaded slabs with the baseline they were prepared
   against. It indexes only added or replaced blocks and the positions where
   an expected structure block was suppressed. Restoring the baseline removes
@@ -161,9 +161,9 @@ Known limits:
   recalculate affected coarse voxel cells. Tree proxies omit coarse cells
   containing a wound so narrow excavations remain visible. The streamed and
   far sky projections look for the next intact occluder below a suppressed top.
-- `terrain_edits.dat` stores suppression masks in EDIT v2. EDIT v1 still
-  loads with additions only. Region CHNK data supplies the actual tiles for
-  the reconciliation in step 5.
+- `terrain_edits.dat` stores ground shapes and shaped additions in EDIT v4.
+  EDIT v2 introduced suppression masks. EDIT v1 loads with additions only.
+  Region CHNK data supplies the actual tiles for reconciliation.
 
 
 ### Step 5: structure persistence (done)
@@ -173,7 +173,8 @@ Known limits:
   `trees.dat` when `structures.dat` is absent. It leaves the legacy file
   intact and prefers the new file after the first successful write. Unknown
   sections survive migration and subsequent saves.
-- `VOXL` v1 groups records by stable kind ID and source key. A record can
+- `VOXL` v2 groups records by stable kind ID and source key, with a shape
+  code per voxel. VOXL v1 records imply cubes. A record can
   remove a source, patch its voxels (block ID zero clears a cell), or supply
   all voxels of a rebuilt or newly planted source. Patch records apply
   after their kind registers the generated source. Replacement records can
@@ -183,11 +184,12 @@ Known limits:
   the main thread to publish the new records.
 - Region `STRB` v1 stores the previous generated structure baseline with
   each saved slab. An empty payload records a known empty baseline.
-  Reconciliation compares old generated blocks, actual tiles, and the new
-  generated blocks. An unchanged tile follows the source revision. Player
-  damage, replacement blocks and occupied cells survive where they differ
-  from the old baseline. Legacy chunks without `STRB` keep their saved
-  tiles on first load. Tree wood still uses `TreeStamp` for growth and cuts.
+  Reconciliation compares the material and shape of old generated voxels,
+  actual tiles, and new generated voxels. An unchanged tile follows the
+  source revision. Player damage, replacements and occupied cells survive
+  where they differ from the old baseline. Legacy chunks without `STRB` keep
+  their saved tiles on first load. Tree wood still uses `TreeStamp` for
+  growth and cuts.
 - A revised source updates the landmark and shade without streaming the
   region. Resident slabs reconcile in bounded jobs, and saved slabs
   reconcile on request. The world file is written atomically, with

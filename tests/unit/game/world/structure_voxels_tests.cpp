@@ -170,11 +170,16 @@ TEST(structure_voxels_slab_merge) {
     stone.block = 4;
     stone.bits.set(cellIndex(2, 1, 1));
     stone.bits.set(cellIndex(3, 1, 1));
+    const auto wall = TileShape::make(TileShapeProfile::Wall10);
+    stone.setShape(cellIndex(2, 1, 1), wall);
+    stone.setShape(cellIndex(3, 1, 1), wall.rotated(1));
     wood.merge(stone);
     EQUAL(int(wood.bits.count()), 3, "union of cells");
     EQUAL(int(wood.blockAt(cellIndex(1, 1, 1))), 9, "own cell");
     EQUAL(int(wood.blockAt(cellIndex(2, 1, 1))), 9, "first keeps overlap");
     EQUAL(int(wood.blockAt(cellIndex(3, 1, 1))), 4, "other block");
+    CHECK(wood.shapeAt(cellIndex(2, 1, 1)) == TileShape{});
+    CHECK(wood.shapeAt(cellIndex(3, 1, 1)) == wall.rotated(1));
     // Same single block: no per-cell ids needed.
     Slab a, b;
     a.block = b.block = 9;
@@ -182,6 +187,22 @@ TEST(structure_voxels_slab_merge) {
     a.merge(b);
     CHECK(a.blocks.empty());
     CHECK(a.bits.test(5));
+
+    Slabs enclosed;
+    const ChunkCoord center{3, 3, 3}, neighbor{4, 3, 3};
+    for (const ChunkCoord c : {center,
+                               neighbor,
+                               {2, 3, 3},
+                               {3, 4, 3},
+                               {3, 2, 3},
+                               {3, 3, 4},
+                               {3, 3, 2}})
+        enclosed[c].bits.set();
+    markEnclosed(enclosed, {});
+    CHECK(enclosed.at(center).enclosed);
+    enclosed.at(neighbor).setShape(cellIndex(0, 8, 8), wall);
+    markEnclosed(enclosed, {});
+    CHECK(!enclosed.at(center).enclosed);
 }
 
 namespace {
@@ -299,11 +320,16 @@ TEST(structure_stamp_only_fills_air) {
     Slab slab;
     slab.block = 5;
     for (int x = 0; x < 3; ++x) slab.bits.set(cellIndex(x, 0, 0));
+    const auto slabShape = TileShape::make(TileShapeProfile::Slab);
+    slab.setShape(cellIndex(1, 0, 0), slabShape);
+    slab.setShape(cellIndex(2, 0, 0), slabShape);
     EQUAL(stamp(chunk, slab), 1, "only one air tile");
     EQUAL(chunk.tiles[0][0][0].block_id, 1, "keeps existing terrain");
     CHECK(chunk.tiles[0][0][1].isLiquid());
     EQUAL(chunk.tiles[0][0][1].block_id, 0, "keeps liquid");
     EQUAL(chunk.tiles[0][0][2].block_id, 5, "fills air");
+    CHECK(chunk.cellAt(1, 0, 0).shape == TileShape{});
+    CHECK(chunk.cellAt(2, 0, 0).shape == slabShape);
 }
 
 // Footprints and sky occlusion (docs/handoff/structures.md, step 2).

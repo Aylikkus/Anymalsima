@@ -11,6 +11,9 @@
 //   "EDIT" v2: adds {u16 removalSlabCount,
 //               {u16 slabY, u16 voxelCount, u16 voxelIndex...}...} to each
 //              column record. Voxel indices use structure_voxels::cellIndex.
+//   "EDIT" v3: inserts 256 x i16 reservoirCeiling after waterY.
+//   "EDIT" v4: inserts 256 canonical u8 ground shape codes after groundBlock.
+//              Structure additions carry shapes in their chunk_codec blobs.
 // It mirrors edits stored in region files so distant terrain can show them
 // for regions that are not loaded. Unknown sections are kept in `extra`.
 namespace terrain_edits_codec {

@@ -14,7 +14,8 @@ bool hasTileEdits(const Chunk& chunk) {
 
 bool sameEdit(const ColumnEdit& a, const ColumnEdit& b) {
     if (a.groundY != b.groundY || a.groundBlock != b.groundBlock ||
-        a.waterY != b.waterY || a.reservoirCeiling != b.reservoirCeiling ||
+        a.groundShape != b.groundShape || a.waterY != b.waterY ||
+        a.reservoirCeiling != b.reservoirCeiling ||
         a.structure.size() != b.structure.size() || a.removed != b.removed)
         return false;
     for (size_t i = 0; i < a.structure.size(); ++i)
@@ -101,6 +102,7 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             int ground = -1, water = -1, reservoirTop = -1;
             bool projected = false;
             uint8_t block = 0;
+            TileShape shape;
             for (int y = std::max({surface, baseline.water.topTile(),
                                    old ? old->waterY[i] - 1 : -1});
                  y >= 0; --y) {
@@ -109,9 +111,13 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 if (!chunk) {
                     // Unloaded below: keep what was known, or assume the
                     // unloaded slab starts with solid ground.
-                    if (old) {
+                    if (old && old->groundY[i] <= y) {
                         ground = old->groundY[i];
                         block = old->groundBlock[i];
+                        if (!block)
+                            block = chunks.generatedGroundBlock(
+                                cx, cz, baseline, ground);
+                        shape = old->groundShape[i];
                         const int oldCap = old->reservoirCeiling[i];
                         const int oldWater = old->waterY[i];
                         if (water < 0 && oldWater >= 0 && y > ground)
@@ -126,20 +132,22 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                         }
                     } else {
                         ground = y;
+                        block =
+                            chunks.generatedGroundBlock(cx, cz, baseline, y);
                         complete = false;
                     }
                     break;
                 }
                 const Tile& tile = chunk->tiles[lz][y % Chunk::SIZE_Y][lx];
-                const auto* root =
-                    chunk->rootAt(Chunk::cell(lx, y % Chunk::SIZE_Y, lz));
+                const auto cell = Chunk::cell(lx, y % Chunk::SIZE_Y, lz);
+                const auto* root = chunk->rootAt(cell);
                 if (y <= surface && tile.isSolid() &&
                     (root || !grown.test(tile.block_id))) {
                     ground = y;
                     block = root ? root->block : tile.block_id;
+                    shape = root ? root->shape : chunk->shapeAt(cell);
                     break;
                 }
-                const auto cell = Chunk::cell(lx, y % Chunk::SIZE_Y, lz);
                 const bool inReservoir =
                     chunk->projectsWater &&
                     (baseline.water.body || baseline.water.reach) &&
@@ -158,6 +166,10 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             }
             next->groundY[i] = int16_t(ground);
             next->groundBlock[i] = block;
+            next->groundShape[i] = shape;
+            generated &=
+                ground == surface && !shape.code() &&
+                block == chunks.generatedGroundBlock(cx, cz, baseline, surface);
             const int generatedWater = baseline.water.surfaceY;
             if (projected) {
                 const bool unchanged =
@@ -166,13 +178,13 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     unchanged ? ColumnEdit::GeneratedWater : int16_t(water);
                 if (!unchanged)
                     next->reservoirCeiling[i] = int16_t(reservoirTop);
-                generated &= ground == surface && unchanged;
+                generated &= unchanged;
             } else {
                 next->waterY[i] = chunks.reservoirs() && !baseline.water.body &&
                                           water == generatedWater
                                       ? ColumnEdit::GeneratedWater
                                       : int16_t(water);
-                generated &= ground == surface && water == generatedWater;
+                generated &= water == generatedWater;
             }
         }
     // Compare each loaded slab with the source snapshot it was built against.
@@ -241,9 +253,10 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     if (worldY <= column.surface_y) continue;
                     const bool aboveWater = worldY >= column.water.surfaceY;
                     const auto cell = structure_voxels::cellIndex(x, y, z);
-                    auto expected =
+                    const auto expected =
                         baseline && aboveWater ? baseline->tileAt(cell) : 0;
-                    if (grown.test(expected)) expected = 0;
+                    const auto expectedShape =
+                        expected ? baseline->shapeAt(cell) : TileShape{};
                     const bool livingWood = grown.test(tile.block_id);
                     const auto actual = livingWood ? 0 : tile.block_id;
                     const bool wound =
@@ -253,11 +266,15 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                          (previous &&
                           std::binary_search(previous->begin(), previous->end(),
                                              uint16_t(cell))));
-                    if (wound || (expected && actual != expected))
-                        removed.push_back(uint16_t(cell));
-                    if (actual == expected) continue;
-                    if (actual) {
-                        part.tiles[z][y][x].block_id = actual;
+                    const auto shape =
+                        actual ? chunk->shapeAt(cell) : TileShape{};
+                    const bool changed =
+                        actual != expected || shape != expectedShape;
+                    if (wound || (expected && changed)) removed.push_back(cell);
+                    if (changed && actual) {
+                        Tile added;
+                        added.block_id = actual;
+                        part.setCell(cell, added, shape);
                         any = true;
                     }
                 }

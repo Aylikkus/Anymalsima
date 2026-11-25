@@ -5,6 +5,10 @@
 
 // Compact per-chunk encoding for save files.
 //
+// v6: paletteCount bit 14 marks a shape section following the palette and
+//     any indices: u32 byte length, u16 count, then sorted
+//     {u16 cell, u8 canonical noncube code} entries. Bit 13 marks a root
+//     tail, which adds a u8 canonical substrate shape code to each root.
 // v5: the high bit of paletteCount marks slabs eligible for reservoir
 //     projection. Derived water is omitted from the palette and rebuilt
 //     from the reservoir ledger on load.
@@ -16,7 +20,7 @@
 //     then u16 editCount and u16 per edited cell.
 // v2: u8 version, u16 paletteCount, palette {block_id, liquid, liquidLevel,
 //     cover, coverState}.
-//     paletteCount == 1 → uniform chunk, nothing follows.
+//     paletteCount == 1 → uniform palette, no index stream.
 //     Otherwise: u8 codec, u32 storedSize, indices (u8 when the palette fits
 //     in 256 entries, else u16 LE) in [z][y][x] order, zstd when codec == 1.
 // v1: the same with a three-byte palette {block_id, liquid, liquidLevel};
@@ -25,7 +29,7 @@
 // and decoded tiles have zeroed light.
 namespace chunk_codec {
 
-inline constexpr uint8_t Version = 5;
+inline constexpr uint8_t Version = 6;
 inline constexpr uint8_t MinVersion = 1;
 
 Bytes encode(const Chunk& chunk);

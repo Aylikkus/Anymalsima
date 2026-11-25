@@ -11,12 +11,14 @@ namespace structure_voxels {
 
 void Slab::merge(const Slab& other) {
     enclosed |= other.enclosed;
+    const auto added = other.bits & ~bits;
+    for (const auto& [cell, shape] : other.shapes)
+        if (added.test(cell)) setShape(cell, shape);
     if (blocks.empty() && other.blocks.empty() && block == other.block) {
         bits |= other.bits;
         return;
     }
     if (blocks.empty()) blocks.assign(Cells, block);
-    const auto added = other.bits & ~bits;
     if (added.none()) return;
     for (size_t i = 0; i < Cells; ++i)
         if (added.test(i)) blocks[i] = other.blockAt(i);
@@ -253,9 +255,10 @@ int stamp(Chunk& chunk, const Slab& slab) {
         for (int y = 0; y < Side; ++y)
             for (int x = 0; x < Side; ++x) {
                 const size_t i = cellIndex(x, y, z);
-                auto& tile = chunk.tiles[z][y][x];
+                auto tile = chunk.tiles[z][y][x];
                 if (!slab.bits.test(i) || !tile.isAir()) continue;
                 tile.block_id = slab.blockAt(i);
+                chunk.setCell(uint16_t(i), tile, slab.shapeAt(uint16_t(i)));
                 ++placed;
             }
     return placed;
@@ -429,10 +432,10 @@ void markEnclosed(Slabs& slabs, const WorldWrap& wrap) {
                                int(base.z) + dz, wrap);
         if (!key) return false;
         const auto it = slabs.find(*key);
-        return it != slabs.end() && it->second.bits.all();
+        return it != slabs.end() && it->second.fullCoverage();
     };
     for (auto& [coord, slab] : slabs)
-        slab.enclosed = slab.bits.all() && full(coord, 1, 0, 0) &&
+        slab.enclosed = slab.fullCoverage() && full(coord, 1, 0, 0) &&
                         full(coord, -1, 0, 0) && full(coord, 0, 1, 0) &&
                         full(coord, 0, -1, 0) && full(coord, 0, 0, 1) &&
                         full(coord, 0, 0, -1);

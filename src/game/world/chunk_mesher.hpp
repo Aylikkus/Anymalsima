@@ -39,15 +39,6 @@ struct CoverClimate {
     }
 };
 
-enum class Face : uint8_t {
-    PosX = 0,
-    NegX = 1,
-    PosY = 2,
-    NegY = 3,
-    PosZ = 4,
-    NegZ = 5,
-};
-
 class ChunkMesher {
    public:
     explicit ChunkMesher(const IAssets& assets);

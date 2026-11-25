@@ -90,6 +90,89 @@ TEST(chunk_codec_uniform) {
     EQUAL(chunk_codec::highestSolidY(Chunk{}), -1, "empty chunk");
 }
 
+TEST(chunk_codec_shapes) {
+    Chunk chunk;
+    const Tile soil{.block_id = 5, .lightLevel = {}};
+    for (auto& plane : chunk.tiles)
+        for (auto& row : plane)
+            for (auto& tile : row) tile = soil;
+    const auto ramp = TileShape::make(TileShapeProfile::Ramp, TileFacing::NegZ);
+    const auto half =
+        TileShape::make(TileShapeProfile::OuterHalfHigh, TileFacing::NegX);
+    const auto third =
+        TileShape::make(TileShapeProfile::InnerThirdLow, TileFacing::PosX);
+    const auto rootCell = Chunk::cell(0, 0, 0);
+    chunk.setCell(rootCell, soil, ramp);
+    Chunk decoded;
+    const auto uniform = chunk_codec::encode(chunk);
+    chunk_codec::decode(uniform, decoded);
+    CHECK(decoded.shapeCount() == 1 && decoded.shapeAt(rootCell) == ramp);
+    CHECK(sameTiles(chunk, decoded));
+
+    chunk.recordRoot(rootCell, 41, soil);
+    chunk.setCell(rootCell, Tile{.block_id = 7, .lightLevel = {}});
+    chunk.setCell(1, soil, half);
+    chunk.setCell(4095, soil, third);
+    chunk_codec::decode(chunk_codec::encode(chunk), decoded);
+    CHECK(decoded.rootAt(rootCell) && decoded.rootAt(rootCell)->shape == ramp);
+    CHECK(decoded.shapeAt(1) == half && decoded.shapeAt(4095) == third);
+    GrownBlockSet grown;
+    grown.set(7);
+    decoded.restoreRootSubstrate(grown);
+    CHECK(!decoded.rootAt(rootCell));
+    CHECK(decoded.cellAt(0, 0, 0).tile.block_id == 5);
+    CHECK(decoded.shapeAt(rootCell) == ramp);
+
+    // A v5 uniform palette with a v5 root tail (no substrate shape byte).
+    BinaryWriter old;
+    old.write(uint8_t(5));
+    old.write(uint16_t(1));
+    for (const uint8_t byte : {7, 0, 0, 0, 0}) old.write(byte);
+    old.write(uint8_t(0));
+    old.write(uint16_t(1));
+    old.write(rootCell);
+    old.write(uint64_t(41));
+    for (const uint8_t byte : {5, 0, 0}) old.write(byte);
+    old.write(uint16_t(0));
+    chunk_codec::decode(old.bytes(), decoded);
+    CHECK(!decoded.hasShapes());
+    CHECK(decoded.rootAt(rootCell) &&
+          decoded.rootAt(rootCell)->shape == TileShape{});
+    decoded.restoreRootSubstrate(grown);
+    CHECK(decoded.cellAt(0, 0, 0).tile.block_id == 5 && !decoded.hasShapes());
+
+    const auto malformed =
+        [&](uint8_t material, uint16_t count,
+            std::initializer_list<std::pair<uint16_t, uint8_t>> values) {
+            BinaryWriter entries, payload;
+            entries.write(count);
+            for (const auto& [index, code] : values) {
+                entries.write(index);
+                entries.write(code);
+            }
+            payload.write(chunk_codec::Version);
+            payload.write(uint16_t(0x4001));
+            payload.write(material);
+            payload.write(uint32_t(0));
+            payload.writeBlock(entries.bytes());
+            CHECK(throwsSerialization(
+                [&] { chunk_codec::decode(payload.bytes(), decoded); }));
+            CHECK(decoded.cellAt(0, 0, 0).tile.block_id == 5 &&
+                  !decoded.hasShapes());
+        };
+    malformed(5, 0, {});
+    malformed(5, 2, {{0, ramp.code()}});
+    malformed(5, 2, {{1, ramp.code()}, {0, half.code()}});
+    malformed(5, 2, {{1, ramp.code()}, {1, half.code()}});
+    malformed(5, 1, {{4096, ramp.code()}});
+    malformed(0, 1, {{0, ramp.code()}});
+    malformed(5, 1, {{0, 0}});
+    malformed(5, 1, {{0, 5}});   // slab with noncanonical facing
+    malformed(5, 1, {{0, 96}});  // reserved profile
+    CHECK(throwsSerialization(
+        [&] { chunk_codec::decode(ByteView(uniform).first(8), decoded); }));
+}
+
 TEST(chunk_codec_mixed_strips_light) {
     Chunk chunk{};
     for (int z = 0; z < 16; ++z)
@@ -294,8 +377,10 @@ TEST(structure_save_migrates_trees) {
                                  true,
                                  {{{20, 431, 24}, 0}, {{21, 432, 24}, 1}}};
     file.voxels["castle"][21] = {OverrideMode::Removed, 3, 0, 0, false, {}};
-    file.voxels["settlement"][22] = {OverrideMode::Replace, 1, 15, 2, true,
-                                     {{{-1, 500, 2}, 1}}};
+    const auto wall =
+        TileShape::make(TileShapeProfile::Wall10, TileFacing::PosX);
+    file.voxels["settlement"][22] = {OverrideMode::Replace,      1, 15, 2, true,
+                                     {{{-1, 500, 2}, {1, wall}}}};
     save_catalog::writeStructures(slot, file.trees, file.voxels, file.extra);
     const auto saved = save_catalog::readStructures(slot);
     CHECK(!saved.migratedTrees);
@@ -308,6 +393,7 @@ TEST(structure_save_migrates_trees) {
         kind.addTo(column, WorldWrap{256});
     const auto planted = column.rasterize(500 / Side);
     CHECK(planted && planted->tileAt(cellIndex(15, 500 % Side, 2)) == 1);
+    CHECK(planted->shapeAt(cellIndex(15, 500 % Side, 2)) == wall);
     // A later save may deliberately remove the final tree record. The old
     // copy must never resurrect it.
     save_catalog::writeStructures(slot, {}, saved.voxels, saved.extra);

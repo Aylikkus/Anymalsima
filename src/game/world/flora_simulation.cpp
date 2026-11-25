@@ -392,8 +392,9 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
             if (inFootprint(baseX + dx, anchorY + 1, pz, changed)) return false;
             const bool under = dx >= 0 && dz >= 0 && dx < sizeX && dz < sizeZ;
             if (under) {
-                const Tile* t = chunks.tileAt(px, anchorY, pz);
-                if (!t || !t->isSolid()) return false;
+                const auto ground = chunks.cellAt(px, anchorY, pz);
+                if (!ground || !ground->tile.isSolid() || ground->shape.code())
+                    return false;
                 for (int h = 1; h <= rule.heightTiles; ++h)
                     if (!open(px, anchorY + h, pz)) return false;
             } else if (dx >= -1 && dx <= sizeX && dz >= -1 && dz <= sizeZ) {

@@ -115,8 +115,7 @@ void LocationManager::unloadDistant(const Vec2u& centre, int keepRadius,
 
 void LocationManager::unloadRegion(const Vec2u& rc) {
     if (store) {
-        // Moving the live chunks is safe: they are unregistered right below.
-        auto snapshot = chunks.snapshotRegion(rc, false);
+        auto snapshot = chunks.snapshotRegion(rc);
         unregisterRegionChunks(rc);
         store->store(rc, std::move(snapshot), true);
     } else {
@@ -127,7 +126,7 @@ void LocationManager::unloadRegion(const Vec2u& rc) {
 
 void LocationManager::saveRegion(const Vec2u& rc) {
     if (!store || !loadedRegions.contains(rc)) return;
-    store->store(rc, chunks.snapshotRegion(rc, true), false);
+    store->store(rc, chunks.snapshotRegion(rc), false);
 }
 
 void LocationManager::saveAll(bool unload) {

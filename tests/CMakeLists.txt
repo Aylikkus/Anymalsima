@@ -9,6 +9,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_rivers.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/tile_shape.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
@@ -63,6 +64,7 @@ target_link_libraries(world_logic_cpu PUBLIC
 )
 add_executable(world_logic_tests
     support/test_main.cpp
+    unit/game/world/tile_shape_tests.cpp
     unit/game/world/generation_tests.cpp
     unit/game/world/hydrology_tests.cpp
     unit/game/world/soil_tests.cpp
@@ -113,6 +115,11 @@ foreach(target world_logic_cpu world_logic_tests lighting_benchmark)
 endforeach()
 
 set(world_cases
+    tile_shape_profiles
+    tile_shape_seams
+    tile_shape_intersections
+    tile_shape_storage
+    tile_shape_snapshots
     tile_classification
     generation_surface_layers
     generation_sea_level
@@ -150,6 +157,7 @@ set(world_cases
     editor_place_remove
     editor_raises_column_top
     editor_bulk_statuses
+    editor_shape_changes
     editor_relights_column
     ray_reports_face
     editor_relight_keeps_indirect
@@ -168,7 +176,7 @@ list(APPEND world_cases
     edit_structure_overhang
     edit_structure_crosses_region
     edit_unloaded_slab_keeps_structure
-    edit_detected_from_save edit_generated_castle_damage edit_generated_castle_revision
+    edit_detected_from_save edit_ground_shape_rebuild edit_generated_castle_damage edit_generated_castle_revision
     structure_revision_rebases_saved_and_ready_chunks
 )
 foreach(case IN LISTS world_cases)
@@ -250,7 +258,7 @@ foreach(case binary_stream_roundtrip binary_stream_truncation
     set_tests_properties(engine.serialization.${case} PROPERTIES
         LABELS "unit;engine;save" TIMEOUT 10)
 endforeach()
-foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
+foreach(case chunk_codec_uniform chunk_codec_shapes chunk_codec_mixed_strips_light
              chunk_codec_wide_palette chunk_codec_rejects_corrupt
              region_file_roundtrip world_seed_derivation world_map_roundtrip
              save_catalog_slots region_index_covers_world_height
@@ -262,7 +270,7 @@ foreach(case chunk_codec_uniform chunk_codec_mixed_strips_light
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "unit;gameplay;save" TIMEOUT 10)
 endforeach()
-foreach(case region_save_and_reload region_edit_persists
+foreach(case region_save_and_reload region_edit_persists region_shapes_persist
              region_reload_while_writing region_corrupt_file_regenerates
              region_unload_while_opening region_gradual_unload
              region_reload_while_unloading)

@@ -369,7 +369,8 @@ void Generator::add(FloraLayer& out, const FloraSpeciesRule& r, double x,
              ++tz)
             for (int tx = std::max(0, x0);
                  tx < std::min(Chunk::SIZE_X, x0 + sx); ++tx) {
-                if (!in.tiles->tiles[tz][ly][tx].isSolid()) return;
+                const auto ground = in.tiles->cellAt(tx, ly, tz);
+                if (!ground.tile.isSolid() || ground.shape.code()) return;
                 for (int h = 1; h <= r.heightTiles && ly + h < Chunk::SIZE_Y;
                      ++h)
                     if (!in.tiles->tiles[tz][ly + h][tx].isAir()) return;

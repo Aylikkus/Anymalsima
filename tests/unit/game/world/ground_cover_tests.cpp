@@ -371,7 +371,7 @@ TEST(cover_cleared_by_edits) {
     EQUAL(int(f.tile(7, 5, 5).cover), 0, "replaced block");
 
     // Across a chunk border: grass on top of the lower chunk.
-    f.chunks.snapshotRegion({0, 0}, true);  // clear persistDirty flags
+    f.chunks.snapshotRegion({0, 0});  // clear persistDirty flags
     CHECK(!f.chunks.isPersistDirty(lower));
     f.grass(3, 15, 3);
     f.editor.placeBlock(CoverEditFixture::at(3, 16, 3), 2);

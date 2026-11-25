@@ -2,6 +2,7 @@
 #include <cstdint>
 
 #include "items/block.hpp"
+#include "tile_shape.hpp"
 
 enum class LiquidType : uint8_t {
     None = 0,
@@ -52,3 +53,9 @@ struct Tile {
     bool isLiquid() const { return liquid != LiquidType::None; }
 };
 static_assert(sizeof(Tile) == 6, "Tile layout is saved and cached per chunk");
+
+// A value read of the material and shape from the same chunk revision.
+struct ShapedTile {
+    Tile tile;
+    TileShape shape;
+};

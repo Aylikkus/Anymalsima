@@ -1,7 +1,7 @@
 #include "location_generator.hpp"
 
 const RegionLayer* LocationGenerator::layerAtDepth(
-    const std::vector<RegionLayer>& layers, int depth_m) const {
+    const std::vector<RegionLayer>& layers, int depth_m) {
     for (const auto& layer : layers) {
         int top = layer.depth_from_surface_m;
         int bottom = top + layer.thickness_m;
@@ -9,6 +9,21 @@ const RegionLayer* LocationGenerator::layerAtDepth(
     }
     if (layers.empty()) throw std::runtime_error("Empty rock layer stack");
     return &layers.back();
+}
+
+uint8_t LocationGenerator::terrainBlock(const Region& region,
+                                        const std::vector<RegionLayer>& layers,
+                                        const SoilColumn& soil, int surfaceY,
+                                        int y) {
+    const int depth = surfaceY - y;
+    for (int i = 0; i < soil.count; ++i) {
+        const auto& horizon = soil.layers[i];
+        if (depth >= horizon.depth_from_surface_m &&
+            depth < horizon.depth_from_surface_m + horizon.thickness_m)
+            return horizon.block_id;
+    }
+    return layerAtDepth(layers, std::max(0, region.land_height_m - y))
+        ->block_id;
 }
 
 void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
@@ -20,26 +35,15 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
         const int tileY = chunkBaseY + localY;
         Tile& tile = chunk.tiles[localZ][localY][localX];
         tile.clearCover();
+        tile.waterOrigin = WaterOrigin::Independent;
 
         if (tileY <= surfaceY) {
-            int depth_m = surfaceY - tileY;
-            const RegionLayer* layer =
-                layerAtDepth(layers, std::max(0, region.land_height_m - tileY));
-            for (int i = 0; i < soil.count; ++i) {
-                const auto& horizon = soil.layers[i];
-                if (depth_m >= horizon.depth_from_surface_m &&
-                    depth_m <
-                        horizon.depth_from_surface_m + horizon.thickness_m) {
-                    layer = &horizon;
-                    break;
-                }
-            }
-            tile.block_id = layer->block_id;
+            tile.block_id = terrainBlock(region, layers, soil, surfaceY, tileY);
             tile.liquid = LiquidType::None;
             tile.liquidLevel = 0;
             // Only the surface tile carries cover (soil.cover is set only
             // when that tile is topsoil on dry land).
-            if (depth_m == 0 && soil.cover)
+            if (tileY == surfaceY && soil.cover)
                 tile.setCover(soil.cover, soil.coverDensity);
 
         } else if (water.fills(tileY, surfaceY)) {
@@ -61,6 +65,10 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
                                       const std::vector<RegionLayer>& layers,
                                       const SoilProfile& soil,
                                       const ChunkColumnInputs* columns) const {
+    chunk.clearShapes();
+    chunk.rootTerrain.reset();
+    chunk.legacyRootTerrain = false;
+    chunk.legacyRootShape = false;
     const int chunkBaseY = coord.y * Chunk::SIZE_Y;
 
     (void)regionOriginChunk;

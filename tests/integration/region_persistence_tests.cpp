@@ -1,12 +1,15 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <tuple>
 
 #include "render/ui_context.hpp"
 #include "test.hpp"
 #include "test_assets.hpp"
 #include "world/location_manager.hpp"
+#include "world/save/chunk_codec.hpp"
 #include "world/save/region_store.hpp"
+#include "world/terrain_edit_tracker.hpp"
 
 namespace {
 
@@ -147,6 +150,90 @@ TEST(region_edit_persists) {
               "edited tile");
         // The saved column ceiling covers the edit for sunlight.
         CHECK(s.chunks.getColumnTopY(Surface.x, Surface.z) >= 431);
+    }
+}
+
+TEST(region_shapes_persist) {
+    const auto world = flatWorld();
+    const auto dir = scratch("shapes");
+    constexpr ChunkCoord west{3, 30, 4}, east{4, 30, 4};
+    const TilePos low{63, 480, 66}, high{64, 480, 66}, wet{64, 480, 67};
+    const auto lowRamp =
+        TileShape::make(TileShapeProfile::RampHalfLow, TileFacing::PosX);
+    const auto highRamp =
+        TileShape::make(TileShapeProfile::RampHalfHigh, TileFacing::PosX);
+    const auto corner =
+        TileShape::make(TileShapeProfile::OuterThirdMiddle, TileFacing::NegX);
+    TilePos ground;
+    uint8_t groundBlock = 0;
+    {
+        Session s(world, dir);
+        s.locations.loadRegion({0, 0}, 0);
+        s.ready(west);
+        auto& eastChunk = s.ready(east);
+        eastChunk.tiles[wet.z % 16][wet.y % 16][wet.x % 16] = Tile{
+            .liquid = LiquidType::Water, .liquidLevel = 172, .lightLevel = {}};
+        ground = {low.x, s.chunks.generatedSurfaceY(low.x, low.z), low.z};
+        s.ready({west.x, unsigned(ground.y / 16), west.z});
+        groundBlock = s.chunks.tileAt(ground.x, ground.y, ground.z)->block_id;
+        WorldEditor editor(s.chunks, nullptr, s.assets.getStorage<Block>());
+        CHECK(editor.setBlock(ground, groundBlock, corner) ==
+              EditStatus::Applied);
+        CHECK(editor.placeBlock(low, 1) == EditStatus::Applied);
+        CHECK(editor.placeBlock(high, 1) == EditStatus::Applied);
+        const EditRequest batch[] = {
+            {.pos = low,
+             .mode = EditMode::Replace,
+             .block = 1,
+             .shape = lowRamp},
+            {.pos = high,
+             .mode = EditMode::Replace,
+             .block = 1,
+             .shape = highRamp},
+        };
+        CHECK(editor.apply(batch) ==
+              (std::vector{EditStatus::Applied, EditStatus::Applied}));
+        s.locations.unloadDistant({2, 2}, 0);
+        CHECK(!s.chunks.isRegistered(west) && !s.chunks.isRegistered(east));
+        s.store.flush();
+        CHECK(s.store.failedWrites() == 0);
+    }
+    {
+        Session s(world, dir);
+        TerrainEdits edits;
+        TerrainEditTracker tracker(s.chunks, edits);
+        s.locations.loadRegion({0, 0}, 0);
+        s.ready(west);
+        s.ready(east);
+        const ChunkCoord surface{west.x, unsigned(ground.y / 16), west.z};
+        s.ready(surface);
+        CHECK(s.chunks.isEdited(west) && s.chunks.isEdited(east));
+        CHECK(s.chunks.isEdited(surface));
+        const auto groundTile = s.chunks.cellAt(ground.x, ground.y, ground.z);
+        CHECK(groundTile && groundTile->tile.block_id == groundBlock &&
+              groundTile->shape == corner);
+        CHECK(s.chunks.cellAt(low.x, low.y, low.z)->shape == lowRamp);
+        CHECK(s.chunks.cellAt(high.x, high.y, high.z)->shape == highRamp);
+        CHECK(!s.chunks.tileAt(high.x, high.y, high.z)->isLiquid());
+        const auto* water = s.chunks.tileAt(wet.x, wet.y, wet.z);
+        CHECK(water && water->isLiquid() && water->liquidLevel == 172);
+
+        tracker.update();
+        const auto groundEdit = edits.find(editKey(west.x, west.z));
+        CHECK(groundEdit && groundEdit->groundShape[ColumnEdit::index(
+                                ground.x % 16, ground.z % 16)] == corner);
+        for (const auto& [coord, pos, shape] :
+             {std::tuple{west, low, lowRamp},
+              std::tuple{east, high, highRamp}}) {
+            const auto column = edits.find(editKey(coord.x, coord.z));
+            CHECK(column);
+            const auto* blob = column->slab(uint16_t(coord.y));
+            CHECK(blob);
+            Chunk distant;
+            chunk_codec::decode(**blob, distant);
+            CHECK(distant.cellAt(pos.x % 16, pos.y % 16, pos.z % 16).shape ==
+                  shape);
+        }
     }
 }
 

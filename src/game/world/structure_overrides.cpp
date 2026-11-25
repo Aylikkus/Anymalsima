@@ -23,15 +23,15 @@ class OverrideSource final : public Source {
         revision = ((record.revision + 1) * 0x9e3779b97f4a7c15ULL) ^
                    (this->original ? this->original->revision : 0);
         if (this->original) bounds = this->original->bounds;
-        for (const auto& [pos, block] : record.voxels) {
+        for (const auto& [pos, voxel] : record.voxels) {
             const auto [x, y, z] = pos;
             patches[packSlab(x >> 4, y >> 4, z >> 4)].emplace_back(
-                uint16_t(cellIndex(x & 15, y & 15, z & 15)), block);
+                uint16_t(cellIndex(x & 15, y & 15, z & 15)), voxel);
             patchBounds = united(patchBounds, {x, y, z, x + 1, y + 1, z + 1});
         }
         bounds = united(bounds, patchBounds);
         auto occupied = std::make_shared<Occupancy>();
-        for (const auto& [pos, block] : record.voxels)
+        for (const auto& [pos, voxel] : record.voxels)
             occupied->add(pos[0] >> 4, pos[1] >> 4, pos[2] >> 4);
         patchOccupancy = std::move(occupied);
     }
@@ -113,9 +113,10 @@ class OverrideSource final : public Source {
         if (at == patches.end()) return result;
         if (!result) result.emplace();
         if (result->blocks.empty()) result->blocks.assign(Cells, result->block);
-        for (const auto& [cell, block] : at->second) {
-            result->bits.set(cell, block != 0);
-            result->blocks[cell] = block;
+        for (const auto& [cell, voxel] : at->second) {
+            result->bits.set(cell, voxel.block != 0);
+            result->blocks[cell] = voxel.block;
+            result->setShape(cell, voxel.shape);
         }
         return result->bits.any() ? std::move(result) : std::nullopt;
     }
@@ -123,7 +124,8 @@ class OverrideSource final : public Source {
     SourcePtr original;
     uint64_t recordRevision;
     TileBox patchBounds;
-    std::unordered_map<uint64_t, std::vector<std::pair<uint16_t, uint8_t>>>
+    std::unordered_map<uint64_t,
+                       std::vector<std::pair<uint16_t, OverrideVoxel>>>
         patches;
     OccupancyPtr patchOccupancy;
     mutable std::once_flag occupancyOnce;
@@ -139,11 +141,12 @@ void validateOverride(std::string_view kind, const Override& record) {
         record.anchorX < 0 || record.anchorX >= CoordinateLimit ||
         record.anchorZ < 0 || record.anchorZ >= CoordinateLimit)
         throw std::invalid_argument("invalid structure override");
-    for (const auto& [pos, block] : record.voxels) {
+    for (const auto& [pos, voxel] : record.voxels) {
         const auto [x, y, z] = pos;
         if (x < -CoordinateLimit || x >= CoordinateLimit || y < 0 ||
             y >= WORLD_HEIGHT_Y || z < 0 || z >= CoordinateLimit ||
-            (record.mode == OverrideMode::Replace && !block))
+            (!voxel.block && voxel.shape.code()) ||
+            (record.mode == OverrideMode::Replace && !voxel.block))
             throw std::invalid_argument("invalid structure override voxel");
     }
 }

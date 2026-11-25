@@ -53,7 +53,7 @@ struct ChunkHandle {
     bool persistDirty = false;
     // Loaded from disk with solid/air different from generated terrain
     // (an earlier gameplay edit).
-    bool edited = false;
+    mutable std::optional<bool> edited;
     std::vector<uint32_t> waterBodies;
     std::vector<uint32_t> waterReaches;
     std::vector<TilePos> shoreIntakes;
@@ -152,9 +152,11 @@ class ChunkManager {
     bool isReady(const ChunkCoord& coord) const;
     // Requested and waiting for (or running) its generation job.
     bool isQueued(const ChunkCoord& coord) const;
-    // Ready and read from a save whose terrain or structure voxels differ
-    // from the generated content.
+    // A ready slab differs from the terrain or structures it was built against.
     bool isEdited(const ChunkCoord& coord) const;
+    uint8_t generatedGroundBlock(unsigned chunkX, unsigned chunkZ,
+                                 const ColumnGenerationInput& column,
+                                 int y) const;
     const structure_voxels::Slab* structureBaseline(
         const ChunkCoord& coord) const;
     // Generated surface inputs of a registered chunk column, or null for an
@@ -169,6 +171,7 @@ class ChunkManager {
     Chunk* getChunk(const ChunkCoord& coord);
     std::shared_ptr<Chunk> getChunkShared(const ChunkCoord& coord);
     const Tile* tileAt(int tx, int ty, int tz);
+    std::optional<ShapedTile> cellAt(int tx, int ty, int tz);
     // Main-thread view of the substrate under a living root.
     const RootVoxel* rootAt(int x, int y, int z);
     void unregister(const ChunkCoord& coord);
@@ -177,7 +180,8 @@ class ChunkManager {
     void markAllDirty();
     // Announces new light values without remeshing.
     void markLightChanged(const ChunkCoord& coord);
-    // Records a gameplay edit of a Ready chunk: it will be saved and remeshed.
+    // Records a gameplay edit of a Ready chunk, including shape-only changes.
+    // This invalidates pending topology work and marks the chunk for saving.
     void markModified(const ChunkCoord& coord);
     bool isPersistDirty(const ChunkCoord& coord) const;
     // Plants of a Ready chunk (null when none or not ready).
@@ -306,12 +310,10 @@ class ChunkManager {
     // seed varied by `salt`, on its live tiles. Synchronous (a few ms);
     // empty without generation inputs (map-less fixtures).
     FloraLayer regenerateFlora(const ChunkCoord& coord, uint32_t salt);
-    // Captures Ready chunks of a region that need saving and clears their
-    // persistDirty flags. copy=false shares the live data and is only valid
-    // when the region is unregistered right afterwards.
-    RegionSnapshot snapshotRegion(Vec2u region, bool copy);
-    // The same for one chunk column (all slabs), appended to `out`; shares
-    // the live data, so the column must be unregistered right afterwards.
+    // Captures immutable copies of dirty Ready chunks and clears their
+    // persistDirty flags.
+    RegionSnapshot snapshotRegion(Vec2u region);
+    // The same for one chunk column (all slabs), appended to out.
     void snapshotColumn(unsigned cx, unsigned cz, RegionSnapshot& out);
     int getColumnTopY(unsigned cx, unsigned cz) const;
     int getStructureTopY(unsigned cx, unsigned cz) const;

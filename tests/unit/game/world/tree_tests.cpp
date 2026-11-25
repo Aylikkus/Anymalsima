@@ -1033,7 +1033,7 @@ TEST(tree_saved_chunks_not_edits) {
             CHECK(++cz < 22);
         }
     }
-    const auto snapshot = f.chunks->snapshotRegion({2, 2}, true);
+    const auto snapshot = f.chunks->snapshotRegion({2, 2});
     const auto data = region_file::decode(
         region_file::encode(region_file::merge(RegionData{}, snapshot)));
     std::map<unsigned, ChunkBlob> stored, plants;
@@ -2048,7 +2048,7 @@ TEST(tree_cut_and_regrowth) {
     CHECK(woodNear(f, a, cutY + 1, cutY + 8, 3, wood) > 0);
 
     // Saved chunks with the cut reload the same way, rebuilt from trees.dat.
-    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8}, true);
+    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8});
     const auto data = region_file::decode(
         region_file::encode(region_file::merge(RegionData{}, snapshot)));
     TreeStream g;
@@ -2215,7 +2215,7 @@ TEST(tree_reload_catches_up) {
            !(f.chunks->tileAt(x, y, z) && f.chunks->tileAt(x, y, z)->isSolid()))
         --y;
     CHECK(sim.plant({x, y, z}, species("trees.spruce").id, 0));
-    const auto snapshot = f.chunks->snapshotRegion({2, 2}, true);
+    const auto snapshot = f.chunks->snapshotRegion({2, 2});
     const auto data = region_file::decode(
         region_file::encode(region_file::merge(RegionData{}, snapshot)));
     std::map<unsigned, ChunkBlob> stored, plants;
@@ -2249,7 +2249,7 @@ TEST(tree_reload_same_day_cut) {
     const int cutY = a.y + 3;
     CHECK(woodNear(f, a, cutY + 2, cutY + 6, 4, wood) > 0);
     // Saved before the cut, on day 0.
-    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8}, true);
+    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8});
     const auto data = region_file::decode(
         region_file::encode(region_file::merge(RegionData{}, snapshot)));
     std::map<unsigned, ChunkBlob> stored, plants;
@@ -3672,7 +3672,7 @@ TEST(tree_live_roots_respect_edits_and_support) {
     tracker.watch(editor);
     // A pending seedling loaded from a save and a live seedling should
     // reconcile to identical roots, including the same-material edit.
-    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8}, true);
+    const auto snapshot = f.chunks->snapshotRegion({cx / 8, cz / 8});
     const auto saved = region_file::merge(RegionData{}, snapshot);
     std::map<unsigned, ChunkBlob> chunks, flora;
     for (unsigned slab = TreeStream::Low; slab < TreeStream::High; ++slab) {

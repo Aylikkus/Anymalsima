@@ -6,7 +6,9 @@
 #include "world/location_manager.hpp"
 #include "world/save/chunk_codec.hpp"
 #include "world/save/structures_codec.hpp"
+#include "world/save/terrain_edits_codec.hpp"
 #include "world/sky_height_map.hpp"
+#include "world/surface_sampler.hpp"
 #include "world/terrain_edit_tracker.hpp"
 
 namespace {
@@ -237,10 +239,57 @@ TEST(edit_detected_from_save) {
           "detected dug tile");
 }
 
+TEST(edit_ground_shape_rebuild) {
+    EditFixture f;
+    const TilePos pos{40, f.surface(40, 40), 40};
+    const ChunkCoord slab{2, unsigned(pos.y / 16), 2};
+    const auto key = editKey(2, 2);
+    const int index = ColumnEdit::index(8, 8);
+    f.load(2, 2, 2, 2, pos.y - 16, pos.y + 16);
+    const auto original = *f.chunks.cellAt(pos.x, pos.y, pos.z);
+    const auto ramp =
+        TileShape::make(TileShapeProfile::InnerHalfHigh, TileFacing::NegZ);
+    const auto block = original.tile.block_id;
+    CHECK(f.editor.setBlock(pos, block, ramp) == EditStatus::Applied);
+    CHECK(f.chunks.isEdited(slab));
+    f.tracker.update();
+    CHECK(f.edits.find(key) && f.edits.find(key)->groundShape[index] == ramp);
+    CHECK(f.editor.setBlock(pos, block, ramp.rotated(1)) ==
+          EditStatus::Applied);
+    f.tracker.update();
+    const auto saved = *f.chunks.getChunk(slab);
+    f.chunks.unregister(slab);
+    f.tracker.markDirty(2, 2);
+    f.tracker.update();
+    const auto file = terrain_edits_codec::decode(
+        terrain_edits_codec::encode(*f.edits.snapshot()));
+    CHECK(file.columns.at(key)->groundShape[index] == ramp.rotated(1));
+    SurfaceSampler distant(f.world, f.assets, nullptr,
+                           std::make_shared<const EditMap>(file.columns));
+    CHECK(distant.column(pos.x, pos.z).groundShape == ramp.rotated(1));
+
+    f.chunks.registerChunk(
+        slab, {}, &f.world.regions.front(),
+        std::make_shared<const Bytes>(chunk_codec::encode(saved)));
+    f.load(2, 2, 2, 2, pos.y, pos.y);
+    CHECK(f.chunks.isEdited(slab));
+    const uint8_t substitute = block == 1 ? 2 : 1;
+    CHECK(f.editor.setBlock(pos, substitute) == EditStatus::Applied);
+    CHECK(f.chunks.isEdited(slab));
+    f.tracker.update();
+    CHECK(f.edits.find(key) &&
+          f.edits.find(key)->groundBlock[index] == substitute);
+    CHECK(f.editor.setBlock(pos, block) == EditStatus::Applied);
+    CHECK(!f.chunks.isEdited(slab));
+    f.tracker.update();
+    CHECK(!f.edits.contains(key));
+}
+
 namespace {
 class CastleSource final : public structure_voxels::Source {
    public:
-    explicit CastleSource(bool tower = false) : tower(tower) {
+    explicit CastleSource(bool tower = false, TileShape roofShape = {})
+        : tower(tower), roofShape(roofShape) {
         key = 701;
         revision = tower ? 2 : 1;
         bounds = {40, 478, 40, 44, tower ? 517 : 481, 41};
@@ -254,12 +303,13 @@ class CastleSource final : public structure_voxels::Source {
         Slab out;
         out.block = 1;
         std::array<int, Cells> counts{};
-        const auto add = [&](int x, int y) {
+        const auto add = [&](int x, int y, TileShape shape = TileShape{}) {
             if (slab.intersect({x, y, 40, x + 1, y + 1, 41}).empty()) return;
             const size_t i =
                 cellIndex((x - slab.x0) / scale, (y - slab.y0) / scale,
                           (40 - slab.z0) / scale);
             if (++counts[i] * 4 >= scale * scale * scale) out.bits.set(i);
+            if (!level) out.setShape(i, shape);
         };
         add(40, 478);
         add(41, 480);
@@ -267,13 +317,14 @@ class CastleSource final : public structure_voxels::Source {
             add(40, 516);
         else
             add(40, 480);
-        add(42, 480);
+        add(42, 480, roofShape);
         add(43, 480);
         return out.bits.any() ? std::optional{std::move(out)} : std::nullopt;
     }
 
    private:
     bool tower;
+    TileShape roofShape;
 };
 }  // namespace
 
@@ -365,20 +416,27 @@ TEST(edit_generated_castle_revision) {
 TEST(structure_revision_rebases_saved_and_ready_chunks) {
     using namespace structure_voxels;
     EditFixture f;
-    const auto castle = std::make_shared<const CastleSource>();
+    const auto generated = TileShape::make(TileShapeProfile::OuterHalfLow);
+    const auto castle = std::make_shared<const CastleSource>(false, generated);
     f.chunks.setGeneratedStructureKinds(
         {Kind(4, {{castle, 40, 40, true}}, "castle")});
     f.load(2, 2, 2, 2, f.surface(40, 40) - 16, 526);
     const ChunkCoord roof{2, 30, 2}, tower{2, 32, 2};
     // Keep a player replacement where the NPCs are about to remove the roof.
-    CHECK(f.editor.setBlock({42, 480, 40}, 2) == EditStatus::Applied);
+    const TilePos rotatedRoof{42, 480, 40};
+    const auto shape = generated.rotated(1);
+    CHECK(f.editor.setBlock(rotatedRoof, 1, shape) == EditStatus::Applied);
     f.tracker.update();
+    CHECK(f.edits.find(editKey(2, 2))->suppresses(10, 480, 8));
 
     const auto before = region_file::decode(region_file::encode(
-        region_file::merge({}, f.chunks.snapshotRegion({0, 0}, true))));
+        region_file::merge({}, f.chunks.snapshotRegion({0, 0}))));
     const auto roofIndex = RegionData::localIndex(roof);
     const auto towerIndex = RegionData::localIndex(tower);
     CHECK(!before.structureBaselines.at(roofIndex)->empty());
+    Chunk baseline;
+    chunk_codec::decode(*before.structureBaselines.at(roofIndex), baseline);
+    CHECK(baseline.cellAt(10, 0, 8).shape == generated);
     CHECK(before.structureBaselines.at(towerIndex)->empty());
     f.chunks.unregister(roof);
 
@@ -408,12 +466,16 @@ TEST(structure_revision_rebases_saved_and_ready_chunks) {
         before.flora.at(roofIndex), before.structureBaselines.at(roofIndex));
     f.load(2, 2, 2, 2, 480, 480);
     CHECK(f.chunks.tileAt(40, 480, 40)->isAir());
-    EQUAL(f.chunks.tileAt(42, 480, 40)->block_id, 2, "player replacement");
+    const auto player = f.chunks.cellAt(42, 480, 40);
+    CHECK(player && player->tile.block_id == 1 && player->shape == shape);
     CHECK(f.chunks.isPersistDirty(roof));
     f.tracker.update();
     const auto edit = f.edits.find(editKey(2, 2));
     CHECK(edit && edit->removed.empty());
     CHECK((f.structureTiles() == std::set<Tile3>{{42, 480, 40}}));
+    Chunk distant;
+    chunk_codec::decode(**edit->slab(30), distant);
+    CHECK(distant.cellAt(10, 0, 8).shape == shape);
 
     f.chunks.registerChunk(
         tower, {}, &f.world.regions.front(), before.chunks.at(towerIndex),

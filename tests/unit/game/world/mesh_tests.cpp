@@ -1,3 +1,4 @@
+#include "world/world_editor.hpp"
 #include "world_fixture.hpp"
 
 namespace {
@@ -54,6 +55,23 @@ TEST(mesh_river_step_edges) {
     EQUAL(highEdge, 2u, "higher top meets the step face");
     EQUAL(lowEdge, 2u, "lower top meets the step face");
     EQUAL(between, 4u, "one face closes the step");
+
+    const auto side = Chunk::cell(9, 5, 8);
+    const Tile bank{.block_id = 1, .lightLevel = {}};
+    chunk.setCell(side, bank);
+    const auto cube = ChunkMesher(assets).build(
+        chunk, {}, [&](int, int, int) { return &air; }, {}, {}, column);
+    chunk.setCell(side, bank, TileShape::make(TileShapeProfile::Wall10));
+    const auto partial = ChunkMesher(assets).build(
+        chunk, {}, [&](int, int, int) { return &air; }, {}, {}, column);
+    CHECK(partial.water.indices == cube.water.indices);
+    CHECK(partial.water.vertices.size() == cube.water.vertices.size());
+    for (size_t i = 0; i < cube.water.vertices.size(); ++i) {
+        const auto& a = cube.water.vertices[i];
+        const auto& b = partial.water.vertices[i];
+        CHECK(a.x == b.x && a.y == b.y && a.z == b.z && a.nx == b.nx &&
+              a.ny == b.ny && a.nz == b.nz);
+    }
 }
 
 TEST(mesh_greedy_prism) {
@@ -160,12 +178,34 @@ TEST(mesh_skips_hidden_chunks) {
     f.chunks.markDirty(center, true);
     f.chunks.update();
     EQUAL(f.chunks.meshInFlight(), size_t(0), "hidden chunk skips meshing");
-    // One opening in a touching neighbour layer exposes a centre face.
-    f.chunks.getChunk({5, 4, 4})->tiles[8][8][0].block_id = 0;
-    f.chunks.markDirty(center, true);
+    // A partial tile in the neighbour's touching layer also opens the boundary.
+    WorldEditor editor(f.chunks, &f.sunlight, f.assets.getStorage<Block>());
+    const TilePos neighbor{80, 72, 72};
+    const auto wall = TileShape::make(TileShapeProfile::Wall10);
+    CHECK(editor.setBlock(neighbor, 1, wall) == EditStatus::Applied);
+    f.chunks.update();
+    CHECK(f.chunks.meshInFlight(center));
+
+    // Leave that job uncollected, then rotate the same material at the border.
+    // The job retains its old shape snapshot and a new topology revision
+    // queues.
+    CHECK(editor.setBlock(neighbor, 1, wall.rotated(1)) == EditStatus::Applied);
+    f.wait();
     f.chunks.update();
     CHECK(f.chunks.meshInFlight(center));
     f.wait();
+    f.chunks.update();
+    CHECK(!f.chunks.meshInFlight(center));
+
+    const TilePos interior{72, 72, 72};
+    CHECK(editor.setBlock(neighbor, 1) == EditStatus::Applied);
+    CHECK(editor.setBlock(interior, 1, wall) == EditStatus::Applied);
+    f.chunks.update();
+    CHECK(f.chunks.meshInFlight(center));
+    f.chunks.unregister(center);
+    f.wait();
+    f.chunks.update();
+    CHECK(!f.chunks.isRegistered(center) && !f.chunks.meshInFlight(center));
 }
 
 TEST(mesh_local_positions_overlap) {

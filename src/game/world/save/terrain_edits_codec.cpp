@@ -6,7 +6,7 @@
 
 namespace terrain_edits_codec {
 namespace {
-constexpr uint16_t EditSectionVersion = 3;
+constexpr uint16_t EditSectionVersion = 4;
 constexpr uint16_t TilesPerSlab = Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
 constexpr uint32_t MaxColumns = 1u << 24;
 }  // namespace
@@ -25,6 +25,7 @@ Bytes encode(const EditMap& columns, const SectionContainer& extra) {
         out.write(uint32_t(key));
         for (const auto y : edit.groundY) out.write(y);
         for (const auto block : edit.groundBlock) out.write(block);
+        for (const auto shape : edit.groundShape) out.write(shape.code());
         for (const auto y : edit.waterY) out.write(y);
         for (const auto y : edit.reservoirCeiling) out.write(y);
         out.write(uint16_t(edit.structure.size()));
@@ -64,6 +65,15 @@ File decode(ByteView bytes) {
                     throw SerializationError("ground height out of range");
             }
             for (auto& block : edit->groundBlock) block = in.read<uint8_t>();
+            if (section->version >= 4)
+                for (int i = 0; i < ColumnEdit::Tiles; ++i) {
+                    const auto shape =
+                        TileShape::fromCanonicalCode(in.read<uint8_t>());
+                    if (!shape || (shape->code() && (!edit->groundBlock[i] ||
+                                                     edit->groundY[i] < 0)))
+                        throw SerializationError("bad edited ground shape");
+                    edit->groundShape[i] = *shape;
+                }
             for (auto& y : edit->waterY) {
                 y = in.read<int16_t>();
                 if (y < (section->version >= 3 ? ColumnEdit::GeneratedWater

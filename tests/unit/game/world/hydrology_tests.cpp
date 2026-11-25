@@ -1241,7 +1241,7 @@ TEST(hydrology_reservoir_reconciles_saved_and_unloaded_water) {
     const auto regionPath = region_file::path(slot.directory, {0, 2});
     FileIO::ensureDirectory(regionPath.parent_path());
     const auto saveChunks = [&](ChunkManager& chunks) {
-        disk = region_file::merge(disk, chunks.snapshotRegion({0, 2}, true));
+        disk = region_file::merge(disk, chunks.snapshotRegion({0, 2}));
         FileIO::writeBytesAtomic(regionPath, region_file::encode(disk));
     };
     const auto detailedTop = [&](ChunkManager& chunks, ChunkCoord c, int wx,
@@ -2031,7 +2031,10 @@ TEST(hydrology_editor_dam_backs_up_river) {
     f.load({backedUp.x, backedUp.y - 1, backedUp.z});
     f.chunks.advanceWater(1);
     CHECK(world.reservoirs->snapshot()->cells.empty());
-    CHECK(f.editor.placeBlock(open, 1) == EditStatus::Applied);
+    const auto gate =
+        TileShape::make(TileShapeProfile::Wall10, TileFacing::NegX);
+    CHECK(f.editor.placeBlock(open, 1, gate) == EditStatus::Applied);
+    CHECK(!f.chunks.tileAt(open.x, open.y, open.z)->isLiquid());
     f.chunks.advanceWater(2);
     const auto pond = world.reservoirs->snapshot();
     CHECK(world.reservoirs->damAt(main.id));
@@ -2076,6 +2079,9 @@ TEST(hydrology_editor_dam_backs_up_river) {
           "delivery resumes over the crest");
     CHECK(world.reservoirs->volume(pool) > 0);
     f.load(open, wallBlob);
+    const auto reloadedGate = f.chunks.cellAt(open.x, open.y, open.z);
+    CHECK(reloadedGate && reloadedGate->shape == gate &&
+          !reloadedGate->tile.isLiquid());
     CHECK(f.editor.removeBlock(open) == EditStatus::Applied);
     const auto retained = world.reservoirs->volume(pool);
     f.chunks.advanceWater(86400 + (retained + 254) / 255);

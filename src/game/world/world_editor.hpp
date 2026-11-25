@@ -29,8 +29,9 @@ struct EditRequest {
     EditMode mode = EditMode::Place;
     uint8_t block = 0;  // ignored by Remove
     bool treeGrowth = false;
-    uint64_t rootOwner = 0;  // root growth claims natural substrate
+    uint64_t rootOwner = 0;    // root growth claims natural substrate
     uint8_t previousWood = 0;  // material change requires this living block
+    TileShape shape{};
 };
 
 struct BlockChange {
@@ -38,6 +39,7 @@ struct BlockChange {
     Tile before;
     Tile after;
     bool wasRoot = false;
+    TileShape beforeShape{}, afterShape{};
 };
 
 // The single entry point for gameplay changes to world tiles: the player,
@@ -50,7 +52,7 @@ struct BlockChange {
 // light volumes refresh. Bulk edits coalesce that bookkeeping, so removing
 // thousands of tiles costs one notification per touched chunk and column.
 //
-// Ground cover (Tile::cover) is cleared on every tile whose block changes,
+// Ground cover is cleared on material or shape changes,
 // and on the tile below a placed block. Cover-only changes are saved and
 // remeshed but not reported through blockChanged.
 //
@@ -66,15 +68,15 @@ class WorldEditor {
     WorldEditor(ChunkManager& chunks, SunLightPropagator* sunlight,
                 const DataStorage<Block>& blocks);
 
-    EditStatus placeBlock(TilePos pos, uint8_t block);
+    EditStatus placeBlock(TilePos pos, uint8_t block, TileShape shape = {});
     EditStatus removeBlock(TilePos pos);
-    EditStatus setBlock(TilePos pos, uint8_t block);
+    EditStatus setBlock(TilePos pos, uint8_t block, TileShape shape = {});
     EditStatus apply(const EditRequest& request);
     // Applies requests in order. Later requests see earlier results (placing
     // twice into one tile reports Occupied). Returns one status per request.
     std::vector<EditStatus> apply(std::span<const EditRequest> requests);
 
-    // Emitted after a batch is committed, once per changed tile.
+    // Emitted after commit for each applied request, in request order.
     Signal<const BlockChange&> blockChanged;
 
    private:

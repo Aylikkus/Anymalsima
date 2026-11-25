@@ -23,6 +23,11 @@ class LocationGenerator {
                        const SoilProfile& soil = {},
                        const ChunkColumnInputs* columns = nullptr) const;
 
+    // The generated substrate material at a solid terrain cell.
+    static uint8_t terrainBlock(const Region& region,
+                                const std::vector<RegionLayer>& layers,
+                                const SoilColumn& soil, int surfaceY, int y);
+
     // True when generateChunk would leave every tile of the chunk as air, so
     // callers may skip the worker job. Keep every "is this chunk air?" rule
     // here (future sky islands and underworld layers must extend it).
@@ -30,8 +35,8 @@ class LocationGenerator {
                     const ChunkColumnInputs& columns) const;
 
    private:
-    const RegionLayer* layerAtDepth(const std::vector<RegionLayer>& layers,
-                                    int depth_m) const;
+    static const RegionLayer* layerAtDepth(
+        const std::vector<RegionLayer>& layers, int depth_m);
 
     void generateColumn(Chunk& chunk, int localX, int localZ, int chunkBaseY,
                         const Region& region,

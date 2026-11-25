@@ -28,6 +28,7 @@ struct ColumnEdit {
     std::array<int16_t, Tiles> groundY{};
     // Block id at groundY (0 when groundY is -1).
     std::array<uint8_t, Tiles> groundBlock{};
+    std::array<TileShape, Tiles> groundShape{};
     // Fixed water boundary, or GeneratedWater where the column inherits
     // the generated profile. A positive cap can coexist with fixed water.
     std::array<int16_t, Tiles> waterY{};

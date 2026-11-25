@@ -666,11 +666,10 @@ bool TreeSimulation::severedByConnectivity(Owner& o, TilePos removed) const {
 }
 
 void TreeSimulation::blockChanged(const BlockChange& change) {
-    if (applying || !change.before.block_id ||
-        change.after.block_id == change.before.block_id)
-        return;
-    if (!change.wasRoot) woodRemoved(change);
-    if (change.before.isSolid() && !change.after.isSolid())
+    if (applying || !change.before.isSolid()) return;
+    if (!change.wasRoot && change.before.block_id != change.after.block_id)
+        woodRemoved(change);
+    if (!change.after.isSolid() || change.beforeShape != change.afterShape)
         checkBases(change.pos);
 }
 
@@ -707,10 +706,10 @@ bool TreeSimulation::baseLost(const TreeColumn::Entry& entry) {
     for (int z = -span; z <= span && !ground; ++z)
         for (int x = -span; x <= span && !ground; ++x) {
             if (double(x * x + z * z) > radius * radius && (x || z)) continue;
-            const Tile* t = chunks.tileAt(a.x + x, a.y, a.z + z);
-            if (!t) {
+            const auto cell = chunks.cellAt(a.x + x, a.y, a.z + z);
+            if (!cell) {
                 ground = true;
-            } else if (t->isSolid()) {
+            } else if (cell->tile.isSolid() && !cell->shape.code()) {
                 const auto* root = chunks.rootAt(a.x + x, a.y, a.z + z);
                 ground = !root || root->owner == tree.key;
             }
@@ -993,9 +992,11 @@ bool TreeSimulation::plant(TilePos ground, uint8_t species, double now) {
     const auto* rule = chunks.treeSpecies().find(species);
     if (!rule) return false;
     ground.x = int(chunks.wrap().wrapTile(ground.x));
-    const Tile* base = chunks.tileAt(ground.x, ground.y, ground.z);
+    const auto base = chunks.cellAt(ground.x, ground.y, ground.z);
     const Tile* above = chunks.tileAt(ground.x, ground.y + 1, ground.z);
-    if (!base || !base->isSolid() || !above || !above->isAir()) return false;
+    if (!base || !base->tile.isSolid() || base->shape.code() || !above ||
+        !above->isAir())
+        return false;
     // Headroom: air above the sapling up to a ceiling or the build limit.
     int top = ground.y + 1;
     while (top < WORLD_HEIGHT_Y) {

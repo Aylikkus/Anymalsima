@@ -5,6 +5,7 @@
 #include <bitset>
 #include <climits>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -66,6 +67,20 @@ struct Slab {
     // Full, with full slabs on all six sides: no visible face, so no proxy
     // (kept so the neighbours' border faces stay hidden).
     bool enclosed = false;
+    std::map<uint16_t, TileShape> shapes;  // level zero, noncube cells only
+
+    TileShape shapeAt(uint16_t cell) const {
+        if (shapes.empty() || !bits.test(cell)) return {};
+        const auto it = shapes.find(cell);
+        return it == shapes.end() ? TileShape{} : it->second;
+    }
+    void setShape(uint16_t cell, TileShape shape) {
+        if (shape.code())
+            shapes.insert_or_assign(cell, shape);
+        else if (!shapes.empty())
+            shapes.erase(cell);
+    }
+    bool fullCoverage() const { return shapes.empty() && bits.all(); }
 
     uint8_t blockAt(size_t cell) const {
         return blocks.empty() ? block : blocks[cell];

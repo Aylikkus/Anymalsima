@@ -18,6 +18,8 @@ uint64_t key(const Tile& tile) {
 }
 constexpr int KeyBytes = 5;
 constexpr uint16_t ProjectsWater = uint16_t(1) << 15;
+constexpr uint16_t HasShapes = uint16_t(1) << 14;
+constexpr uint16_t HasRootTerrain = uint16_t(1) << 13;
 
 const Tile* flat(const Chunk& chunk) { return &chunk.tiles[0][0][0]; }
 Tile* flat(Chunk& chunk) { return &chunk.tiles[0][0][0]; }
@@ -48,6 +50,10 @@ Bytes encode(const Chunk& chunk) {
     out.write(Version);
     auto count = uint16_t(palette.size());
     if (chunk.projectsWater) count |= ProjectsWater;
+    if (chunk.hasShapes()) count |= HasShapes;
+    const bool hasRootTerrain =
+        chunk.legacyRootTerrain || chunk.legacyRootShape || chunk.rootTerrain;
+    if (hasRootTerrain) count |= HasRootTerrain;
     out.write(count);
     for (const auto k : palette)
         for (int b = 0; b < KeyBytes; ++b)
@@ -65,7 +71,16 @@ Bytes encode(const Chunk& chunk) {
         out.write(uint8_t(1));
         out.writeBlock(packed);
     }
-    if (chunk.legacyRootTerrain || chunk.legacyRootShape || chunk.rootTerrain) {
+    if (chunk.hasShapes()) {
+        BinaryWriter shapes;
+        shapes.write(uint16_t(chunk.shapeCount()));
+        chunk.forEachShape([&](uint16_t cell, TileShape shape) {
+            shapes.write(cell);
+            shapes.write(shape.code());
+        });
+        out.writeBlock(shapes.bytes());
+    }
+    if (hasRootTerrain) {
         out.write(uint8_t((chunk.legacyRootTerrain ? 1 : 0) |
                           (chunk.legacyRootShape ? 2 : 0)));
         static const RootTerrain empty;
@@ -77,6 +92,7 @@ Bytes encode(const Chunk& chunk) {
             out.write(root.block);
             out.write(root.cover);
             out.write(root.coverState);
+            out.write(root.shape.code());
         }
         out.write(uint16_t(data.edited.size()));
         for (const auto cell : data.edited) out.write(cell);
@@ -84,7 +100,8 @@ Bytes encode(const Chunk& chunk) {
     return out.take();
 }
 
-void decode(ByteView data, Chunk& chunk) {
+void decode(ByteView data, Chunk& output) {
+    Chunk chunk;
     BinaryReader in(data);
     const auto version = in.read<uint8_t>();
     if (version < MinVersion || version > Version)
@@ -92,6 +109,9 @@ void decode(ByteView data, Chunk& chunk) {
     auto count = in.read<uint16_t>();
     chunk.projectsWater = version >= 5 && (count & ProjectsWater);
     if (chunk.projectsWater) count &= ~ProjectsWater;
+    const bool hasShapes = version >= 6 && (count & HasShapes);
+    const bool hasRootTerrain = version >= 6 && (count & HasRootTerrain);
+    if (version >= 6) count &= ~(HasShapes | HasRootTerrain);
     if (count == 0 || count > Volume)
         throw SerializationError("bad chunk palette size");
     std::vector<Tile> palette(count);
@@ -134,11 +154,27 @@ void decode(ByteView data, Chunk& chunk) {
             tiles[i] = palette[index];
         }
     }
+    if (hasShapes) {
+        BinaryReader entries(in.readBlock(2 + 3 * Volume));
+        const auto count = entries.read<uint16_t>();
+        if (!count || count > Volume || entries.remaining() != 3u * count)
+            throw SerializationError("bad chunk shape section length");
+        int previous = -1;
+        for (uint16_t i = 0; i < count; ++i) {
+            const auto cell = entries.read<uint16_t>();
+            const auto shape =
+                TileShape::fromCanonicalCode(entries.read<uint8_t>());
+            if (cell >= Volume || cell <= previous || !shape ||
+                !shape->code() || !tiles[cell].isSolid() ||
+                tiles[cell].isLiquid())
+                throw SerializationError("bad chunk shape entry");
+            chunk.setCell(cell, tiles[cell], *shape);
+            previous = cell;
+        }
+    }
     chunk.legacyRootTerrain = version < 3;
     chunk.legacyRootShape = version == 3;
-    chunk.rootTerrain.reset();
-    if (!in.atEnd()) {
-        if (version < 3) throw SerializationError("trailing chunk data");
+    if (hasRootTerrain || (version >= 3 && version < 6 && !in.atEnd())) {
         const auto flags = in.read<uint8_t>();
         if (flags > (version == 3 ? 1 : 3))
             throw SerializationError("bad chunk root flags");
@@ -152,6 +188,12 @@ void decode(ByteView data, Chunk& chunk) {
             const auto cell = in.read<uint16_t>();
             RootVoxel root{in.read<uint64_t>(), in.read<uint8_t>(),
                            in.read<uint8_t>(), in.read<uint8_t>()};
+            if (version >= 6) {
+                const auto shape =
+                    TileShape::fromCanonicalCode(in.read<uint8_t>());
+                if (!shape) throw SerializationError("bad root shape");
+                root.shape = *shape;
+            }
             if (cell >= Volume || !tiles[cell].isSolid() || !root.owner ||
                 !root.block || (!root.cover && root.coverState) ||
                 !data->roots.emplace(cell, root).second)
@@ -167,9 +209,10 @@ void decode(ByteView data, Chunk& chunk) {
                 !data->edited.insert(cell).second)
                 throw SerializationError("bad root edit cell");
         }
-        if (!in.atEnd()) throw SerializationError("trailing chunk data");
         if (roots || edits) chunk.rootTerrain = std::move(data);
     }
+    if (!in.atEnd()) throw SerializationError("trailing chunk data");
+    output = std::move(chunk);
 }
 
 int highestSolidY(const Chunk& chunk) {

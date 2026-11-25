@@ -40,7 +40,10 @@ class MaskedStructure final : public Source {
                     const auto* cells = edit->removals(uint16_t(y0 + dy));
                     if (!cells) continue;
                     if (!level) {
-                        for (const auto cell : *cells) out->bits.reset(cell);
+                        for (const auto cell : *cells) {
+                            out->bits.reset(cell);
+                            out->setShape(cell, {});
+                        }
                         continue;
                     }
                     adjustCoarse(*out, *cells, level, x0 + dx, y0 + dy, z0 + dz,

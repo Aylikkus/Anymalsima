@@ -17,14 +17,17 @@ WorldEditor::WorldEditor(ChunkManager& chunks, SunLightPropagator* sunlight,
                          const DataStorage<Block>& blocks)
     : chunks(chunks), sunlight(sunlight), blocks(blocks) {}
 
-EditStatus WorldEditor::placeBlock(TilePos pos, uint8_t block) {
-    return apply(EditRequest{pos, EditMode::Place, block});
+EditStatus WorldEditor::placeBlock(TilePos pos, uint8_t block,
+                                   TileShape shape) {
+    return apply(EditRequest{
+        .pos = pos, .mode = EditMode::Place, .block = block, .shape = shape});
 }
 EditStatus WorldEditor::removeBlock(TilePos pos) {
     return apply(EditRequest{pos, EditMode::Remove, 0});
 }
-EditStatus WorldEditor::setBlock(TilePos pos, uint8_t block) {
-    return apply(EditRequest{pos, EditMode::Replace, block});
+EditStatus WorldEditor::setBlock(TilePos pos, uint8_t block, TileShape shape) {
+    return apply(EditRequest{
+        .pos = pos, .mode = EditMode::Replace, .block = block, .shape = shape});
 }
 
 EditStatus WorldEditor::apply(const EditRequest& request) {
@@ -88,10 +91,15 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     if (placing && request.mode == EditMode::Place) {
         bool blocked = false;
         forPlantsNear(x, y, z,
-                      [&](const ChunkCoord&, size_t, const FloraVolume& v,
-                          const FloraSpeciesRule& r) {
-                          blocked = blocked ||
-                                    (r.blocksPlacement && v.contains(x, y, z));
+                      [&](const ChunkCoord& coord, size_t index,
+                          const FloraVolume& v, const FloraSpeciesRule& r) {
+                          if (!r.blocksPlacement || !v.contains(x, y, z))
+                              return;
+                          const auto removed = pending.plants.find(coord);
+                          blocked |= removed == pending.plants.end() ||
+                                     std::find(removed->second.begin(),
+                                               removed->second.end(),
+                                               index) == removed->second.end();
                       });
         if (blocked) return EditStatus::Blocked;
     }
@@ -104,9 +112,10 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     auto status = EditStatus::NotLoaded;
     BlockChange change{pos, {}, {}};
     chunks.withChunkLocked(coord, [&](Chunk& chunk) {
-        Tile& tile = chunk.tiles[lz][ly][lx];
+        Tile tile = chunk.tiles[lz][ly][lx];
         const auto cell = Chunk::cell(lx, ly, lz);
         change.before = tile;
+        change.beforeShape = chunk.shapeAt(cell);
         change.wasRoot = chunk.rootAt(cell) != nullptr;
         switch (request.mode) {
             case EditMode::Place:
@@ -152,7 +161,8 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             status = EditStatus::Blocked;
             return;
         }
-        if (tile.block_id == block &&
+        const TileShape shape = block ? request.shape : TileShape{};
+        if (tile.block_id == block && change.beforeShape == shape &&
             (block == 0 || tile.liquid == LiquidType::None)) {
             if (!request.treeGrowth && tile.isSolid() && !change.wasRoot &&
                 chunk.markRootEdited(cell))
@@ -178,7 +188,9 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             tile.waterOrigin = WaterOrigin::Independent;
         }
         // Light stays until sunlight recomputes, so edits never flash dark.
+        chunk.setCell(cell, tile, shape);
         change.after = tile;
+        change.afterShape = shape;
         status = EditStatus::Applied;
     });
     if (status != EditStatus::Applied) return status;
@@ -188,8 +200,10 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     forPlantsNear(x, y, z,
                   [&](const ChunkCoord& c, size_t i, const FloraVolume& v,
                       const FloraSpeciesRule&) {
-                      if (change.after.block_id ? v.contains(x, y, z)
-                                                : v.supportedBy(x, y, z))
+                      if ((change.after.isSolid() && v.contains(x, y, z)) ||
+                          ((!change.after.isSolid() ||
+                            change.beforeShape != change.afterShape) &&
+                           v.supportedBy(x, y, z)))
                           pending.plants[c].push_back(i);
                   });
     // Face visibility of the six neighbors depends on this tile.
@@ -253,7 +267,9 @@ void WorldEditor::commit(Pending& pending) {
         for (const auto column : pending.columns)
             sunlight->markColumnDirty(unsigned(column >> 32), unsigned(column));
     for (const auto& change : pending.changes) {
-        chunks.waterBlockEdited(change.pos);
+        if (change.before.block_id != change.after.block_id ||
+            change.before.liquid != change.after.liquid)
+            chunks.waterBlockEdited(change.pos);
         blockChanged.emit(change);
     }
 }

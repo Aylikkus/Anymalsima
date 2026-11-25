@@ -17,6 +17,7 @@ add_library(game
     world/terrain_lod.cpp
     world/terrain_lod_manager.cpp
     world/structure_lod.cpp
+    world/tile_shape.cpp
     world/chunk_mesher.cpp
     world/chunk_manager.cpp
     world/sunlight_propagator.cpp

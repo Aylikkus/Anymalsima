@@ -127,14 +127,13 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
     x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
-    // Unchanged tiles keep generated soil and rock materials; a replaced
-    // block at the original height is not shown.
-    if (edit->groundY[i] != result.surfaceY) {
-        result.surfaceY = edit->groundY[i];
-        if (const auto block = edit->groundBlock[i])
-            result.material = result.rockMaterial =
-                assets.getMaterialAlbedoLayer(
-                    assets.getStorage<Block>().get(block).material);
+    const bool heightChanged = edit->groundY[i] != result.surfaceY;
+    result.surfaceY = edit->groundY[i];
+    result.groundShape = edit->groundShape[i];
+    if (const auto block = edit->groundBlock[i]) {
+        result.material = assets.getMaterialAlbedoLayer(
+            assets.getStorage<Block>().get(block).material);
+        if (heightChanged) result.rockMaterial = result.material;
     }
     return result;
 }

@@ -250,11 +250,12 @@ std::vector<TreeWoodChange> filterTreeWood(const Chunk& chunk,
 inline void applyTreeWoodChanges(Chunk& chunk,
                                  const std::vector<TreeWoodChange>& changes) {
     for (const auto& c : changes) {
-        Tile& tile = (&chunk.tiles[0][0][0])[c.index];
+        Tile tile = (&chunk.tiles[0][0][0])[c.index];
         if (c.rootOwner && !c.previousBlock)
             chunk.recordRoot(uint16_t(c.index), c.rootOwner, tile);
         tile.block_id = c.block;
         if (c.block) tile.clearCover();
+        chunk.setCell(uint16_t(c.index), tile);
     }
 }
 

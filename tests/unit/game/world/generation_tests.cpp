@@ -77,6 +77,10 @@ TEST(generation_chunk_seam) {
 TEST(generation_reused_chunk) {
     Chunk chunk;
     test::fill(chunk, 3);
+    chunk.setCell(Chunk::cell(3, 1, 1), chunk.tiles[1][1][3],
+                  TileShape::make(TileShapeProfile::Ramp));
+    CHECK(chunk.hasShapes());
+    chunk.recordRoot(Chunk::cell(3, 1, 1), 18, chunk.tiles[1][1][3]);
     for (auto& plane : chunk.tiles)
         for (auto& row : plane)
             for (auto& tile : row) {
@@ -85,6 +89,7 @@ TEST(generation_reused_chunk) {
             }
     auto region = test::regionAt(SEA_LEVEL_Y + 5);
     LocationGenerator{}.generateChunk(chunk, {0, 24, 0}, {}, region, layers);
+    CHECK(!chunk.hasShapes() && !chunk.rootTerrain);
     expectColumn(chunk, 3, 1, LiquidType::None, 0);
     expectColumn(chunk, 7, 0, LiquidType::None, 0);
 }

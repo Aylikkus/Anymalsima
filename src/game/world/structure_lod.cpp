@@ -257,11 +257,14 @@ void StructureLod::mergeVoxels(const std::vector<ChunkCoord>& changed) {
                       return a->wanted->key < b->wanted->key;
                   });
         auto merged = std::make_shared<VoxelSlabs>();
+        bool hasShapes = false;
         for (const auto* structure : holding)
             for (const auto& [coord, slab] : *structure->slabs) {
+                hasShapes |= !slab.shapes.empty();
                 auto [it, inserted] = merged->try_emplace(coord, slab);
                 if (!inserted) it->second.merge(slab);
             }
+        if (hasShapes) structure_voxels::markEnclosed(*merged, world.wrap());
         voxels = merged->empty() ? nullptr : std::move(merged);
     }
     // Border faces look into the neighbours: they change too.
@@ -510,22 +513,7 @@ void StructureLod::request() {
                         if (w) {
                             if (!it->second)
                                 it->second = std::make_unique<Chunk>();
-                            auto& chunk = *it->second;
-                            for (int z = 0; z < Chunk::SIZE_Z; ++z)
-                                for (int y = 0; y < Chunk::SIZE_Y; ++y)
-                                    for (int x = 0; x < Chunk::SIZE_X; ++x) {
-                                        if (!w->bits.test(
-                                                size_t((z * Chunk::SIZE_Y + y) *
-                                                           Chunk::SIZE_X +
-                                                       x)))
-                                            continue;
-                                        Tile& tile = chunk.tiles[z][y][x];
-                                        if (tile.isAir())
-                                            tile.block_id = w->blockAt(
-                                                size_t((z * Chunk::SIZE_Y + y) *
-                                                           Chunk::SIZE_X +
-                                                       x));
-                                    }
+                            structure_voxels::stamp(*it->second, *w);
                         }
                     }
                     return it->second.get();

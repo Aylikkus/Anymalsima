@@ -66,8 +66,10 @@ StructureSlab structureBaselineFor(std::optional<structure_voxels::Slab> slab,
                                                       column->surface_y)
                                            : WaterSurface::sea(-1).topTile();
                 if (int(coord.y) * Side + y <= ceiling ||
-                    grown.test(slab->blockAt(i)))
+                    grown.test(slab->blockAt(i))) {
                     slab->bits.reset(i);
+                    slab->setShape(uint16_t(i), {});
+                }
             }
     return slab->bits.any() ? std::make_shared<const Slab>(std::move(*slab))
                             : nullptr;
@@ -89,7 +91,60 @@ StructureSlab decodeStructureBaseline(ByteView blob) {
                 result->bits.set(i);
                 result->blocks[i] = block;
             }
+    chunk.forEachShape(
+        [&](uint16_t cell, TileShape shape) { result->setShape(cell, shape); });
     return result->bits.any() ? result : nullptr;
+}
+
+bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
+                           const ChunkColumnInputs& terrain,
+                           const Region& region,
+                           const std::vector<RegionLayer>& layers,
+                           const structure_voxels::Slab* structures,
+                           const GrownBlockSet& grown) {
+    const int baseY = int(coord.y) * Chunk::SIZE_Y;
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            const auto& column = terrain.columns[z * Chunk::SIZE_X + x];
+            for (int y = 0; y < Chunk::SIZE_Y; ++y) {
+                const int worldY = baseY + y;
+                const auto cell = Chunk::cell(x, y, z);
+                const auto actual = chunk.cellAt(x, y, z);
+                const auto* root = chunk.rootAt(cell);
+                const uint8_t block = root ? root->block
+                                      : grown.test(actual.tile.block_id)
+                                          ? 0
+                                          : actual.tile.block_id;
+                const auto shape = root    ? root->shape
+                                   : block ? actual.shape
+                                           : TileShape{};
+                const bool ground = worldY <= column.surface_y;
+                const uint8_t expected = ground
+                                             ? LocationGenerator::terrainBlock(
+                                                   region, layers, column.soil,
+                                                   column.surface_y, worldY)
+                                         : structures ? structures->tileAt(cell)
+                                                      : 0;
+                const auto expectedShape = !ground && structures
+                                               ? structures->shapeAt(cell)
+                                               : TileShape{};
+                if (block != expected || shape != expectedShape) return true;
+
+                const auto liquid =
+                    !expected && column.water.fills(worldY, column.surface_y)
+                        ? column.water.kind()
+                        : LiquidType::None;
+                // Projected water is derived from the separate water ledger.
+                if (actual.tile.waterOrigin != WaterOrigin::Independent)
+                    continue;
+                if (chunk.projectsWater &&
+                    (column.water.body || column.water.reach) &&
+                    !actual.tile.isLiquid())
+                    continue;
+                if (actual.tile.liquid != liquid) return true;
+            }
+        }
+    return false;
 }
 
 template <typename Apply>
@@ -101,25 +156,32 @@ bool reconcileStructure(Chunk& chunk, const structure_voxels::Slab* previous,
     for (int z = 0; z < Side; ++z)
         for (int y = 0; y < Side; ++y)
             for (int x = 0; x < Side; ++x) {
-                const auto i = cellIndex(x, y, z);
+                const auto i = uint16_t(cellIndex(x, y, z));
                 const uint8_t old = previous ? previous->tileAt(i) : 0;
                 const uint8_t next = current ? current->tileAt(i) : 0;
-                if (old == next) continue;
+                const auto oldShape =
+                    previous ? previous->shapeAt(i) : TileShape{};
+                const auto nextShape =
+                    current ? current->shapeAt(i) : TileShape{};
+                if (old == next && oldShape == nextShape) continue;
                 changed = true;
-                auto& tile = chunk.tiles[z][y][x];
-                if (old ? tile.block_id == old : tile.isAir())
-                    apply(x, y, z, tile, next);
+                const auto& tile = chunk.tiles[z][y][x];
+                if (old ? tile.block_id == old && chunk.shapeAt(i) == oldShape
+                        : tile.isAir())
+                    apply(x, y, z, tile, next, nextShape);
             }
     return changed;
 }
 
 bool rebaseStructure(Chunk& chunk, const structure_voxels::Slab* previous,
                      const structure_voxels::Slab* current) {
-    return reconcileStructure(chunk, previous, current,
-                              [](int, int, int, Tile& tile, uint8_t block) {
-                                  tile.block_id = block;
-                                  tile.clearCover();
-                              });
+    return reconcileStructure(
+        chunk, previous, current,
+        [&](int x, int y, int z, Tile tile, uint8_t block, TileShape shape) {
+            tile.block_id = block;
+            tile.clearCover();
+            chunk.setCell(Chunk::cell(x, y, z), tile, shape);
+        });
 }
 
 std::vector<TileBox> changedStructureBoxes(
@@ -289,9 +351,36 @@ bool ChunkManager::isQueued(const ChunkCoord& coord) const {
     return it != chunks.end() && it->second.state == ChunkState::Queued;
 }
 bool ChunkManager::isEdited(const ChunkCoord& coord) const {
-    auto it = chunks.find(coord);
-    return it != chunks.end() && it->second.state == ChunkState::Ready &&
-           it->second.edited;
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready)
+        return false;
+    auto& handle = it->second;
+    if (!handle.edited.has_value()) {
+        const auto& column = columnInputs.at(editKey(coord.x, coord.z)).data;
+        handle.edited =
+            column
+                ? differsFromGeneration(
+                      *handle.data, coord, *column,
+                      terrainWorld
+                          .regions[handle.regionCoord.y * terrainWorld.width +
+                                   handle.regionCoord.x],
+                      regionLayers.at(handle.regionCoord),
+                      handle.structureBaseline.get(), grownBlocks())
+                : handle.data->hasShapes();
+    }
+    return *handle.edited;
+}
+
+uint8_t ChunkManager::generatedGroundBlock(unsigned chunkX, unsigned chunkZ,
+                                           const ColumnGenerationInput& column,
+                                           int y) const {
+    if (y < 0 || y > column.surface_y) return 0;
+    const auto& region =
+        terrainWorld.regions[(chunkZ / CHUNKS_PER_REGION) * terrainWorld.width +
+                             chunkX / CHUNKS_PER_REGION];
+    return LocationGenerator::terrainBlock(region,
+                                           regionLayers.at(region.coord),
+                                           column.soil, column.surface_y, y);
 }
 const structure_voxels::Slab* ChunkManager::structureBaseline(
     const ChunkCoord& coord) const {
@@ -476,6 +565,17 @@ const Tile* ChunkManager::tileAt(int x, int y, int z) {
                                 [x % Chunk::SIZE_X]
                  : nullptr;
 }
+std::optional<ShapedTile> ChunkManager::cellAt(int x, int y, int z) {
+    x = int(wrap().wrapTile(x));
+    if (x < 0 || y < 0 || z < 0) return std::nullopt;
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    const auto* chunk =
+        getChunk({unsigned(x / Chunk::SIZE_X), unsigned(y / Chunk::SIZE_Y),
+                  unsigned(z / Chunk::SIZE_Z)});
+    if (!chunk) return std::nullopt;
+    return chunk->cellAt(x % Chunk::SIZE_X, y % Chunk::SIZE_Y,
+                         z % Chunk::SIZE_Z);
+}
 const RootVoxel* ChunkManager::rootAt(int x, int y, int z) {
     x = int(wrap().wrapTile(x));
     if (x < 0 || y < 0 || z < 0) return nullptr;
@@ -560,6 +660,7 @@ void ChunkManager::markModified(const ChunkCoord& coord) {
     auto it = chunks.find(coord);
     if (it == chunks.end() || it->second.state != ChunkState::Ready) return;
     it->second.persistDirty = true;
+    it->second.edited.reset();
     markDirty(coord, true);
     // Edited cells change opacity, which the light volumes encode.
     lightChanged.emit(coord);
@@ -797,8 +898,8 @@ void ChunkManager::snapshotColumn(unsigned cx, unsigned cz,
             continue;
         it->second.persistDirty = false;
         const auto index = RegionData::localIndex(coord);
-        out.chunks.emplace_back(index,
-                                std::shared_ptr<const Chunk>(it->second.data));
+        out.chunks.emplace_back(
+            index, std::make_shared<const Chunk>(*it->second.data));
         out.flora.emplace_back(index, it->second.flora);
         out.trees.emplace_back(index, it->second.trees);
         out.structureBaselines.emplace_back(index,
@@ -806,7 +907,7 @@ void ChunkManager::snapshotColumn(unsigned cx, unsigned cz,
     }
 }
 
-RegionSnapshot ChunkManager::snapshotRegion(Vec2u region, bool copy) {
+RegionSnapshot ChunkManager::snapshotRegion(Vec2u region) {
     RegionSnapshot snapshot;
     const ChunkCoord origin{region.x * CHUNKS_PER_REGION, 0,
                             region.y * CHUNKS_PER_REGION};
@@ -823,9 +924,7 @@ RegionSnapshot ChunkManager::snapshotRegion(Vec2u region, bool copy) {
                 it->second.persistDirty = false;
                 const auto index = RegionData::localIndex(coord);
                 snapshot.chunks.emplace_back(
-                    index, copy
-                               ? std::make_shared<const Chunk>(*it->second.data)
-                               : std::shared_ptr<const Chunk>(it->second.data));
+                    index, std::make_shared<const Chunk>(*it->second.data));
                 // Layers are immutable: sharing is a snapshot.
                 snapshot.flora.emplace_back(index, it->second.flora);
                 snapshot.trees.emplace_back(index, it->second.trees);
@@ -881,20 +980,26 @@ bool ChunkManager::canMesh(ChunkCoord coord) const {
 
 void ChunkManager::submitMesh(ChunkCoord coord) {
     auto& handle = chunks.at(coord);
-    auto data = std::make_shared<Chunk>(*handle.data);
-    std::unordered_map<ChunkCoord, std::shared_ptr<Chunk>> neighbors;
-    const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                               {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+    std::shared_ptr<const Chunk> data;
+    std::unordered_map<ChunkCoord, std::shared_ptr<const Chunk>> neighbors;
     const auto wrapX = wrap();
-    for (const auto& offset : offsets) {
-        const int64_t x = wrapX.wrapChunk(int64_t{coord.x} + offset[0]);
-        const int64_t y = int64_t{coord.y} + offset[1];
-        const int64_t z = int64_t{coord.z} + offset[2];
-        if (x < 0 || y < 0 || z < 0) continue;
-        ChunkCoord neighbor{static_cast<unsigned>(x), static_cast<unsigned>(y),
-                            static_cast<unsigned>(z)};
-        if (auto* chunk = getChunk(neighbor))
-            neighbors[neighbor] = std::make_shared<Chunk>(*chunk);
+    {
+        // Read center and border tiles with their shape tables under one lock.
+        std::lock_guard<std::mutex> lock(tileAtMutex);
+        data = std::make_shared<const Chunk>(*handle.data);
+        const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                   {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+        for (const auto& offset : offsets) {
+            const int64_t x = wrapX.wrapChunk(int64_t{coord.x} + offset[0]);
+            const int64_t y = int64_t{coord.y} + offset[1];
+            const int64_t z = int64_t{coord.z} + offset[2];
+            if (x < 0 || y < 0 || z < 0) continue;
+            ChunkCoord neighbor{static_cast<unsigned>(x),
+                                static_cast<unsigned>(y),
+                                static_cast<unsigned>(z)};
+            if (auto* chunk = getChunk(neighbor))
+                neighbors[neighbor] = std::make_shared<const Chunk>(*chunk);
+        }
     }
     const auto column = columnInputs.find((uint64_t{coord.x} << 32) | coord.z);
     auto terrain = column == columnInputs.end() ? nullptr : column->second.data;
@@ -1378,9 +1483,6 @@ void ChunkManager::dispatchGeneration() {
                 if (stored) {
                     try {
                         chunk_codec::decode(*stored, *result);
-                        // Terrain retains its solid/air comparison. In
-                        // buildable air the structure's block ID is the
-                        // baseline.
                         const auto& grown = treeRules->grown();
                         const bool reshapeRoots = result->legacyRootShape;
                         if (reshapeRoots) result->restoreRootSubstrate(grown);
@@ -1398,51 +1500,11 @@ void ChunkManager::dispatchGeneration() {
                                 baselineChanged = true;
                             }
                         }
-                        bool edited = false;
-                        if (columns)
-                            for (int z = 0; z < Chunk::SIZE_Z && !edited; ++z)
-                                for (int y = 0; y < Chunk::SIZE_Y && !edited;
-                                     ++y)
-                                    for (int x = 0; x < Chunk::SIZE_X; ++x) {
-                                        const auto& column =
-                                            columns->columns[z * Chunk::SIZE_X +
-                                                             x];
-                                        const int surface = column.surface_y;
-                                        const int worldY =
-                                            int(coord.y) * Chunk::SIZE_Y + y;
-                                        const Tile& tile =
-                                            result->tiles[z][y][x];
-                                        const auto* root = result->rootAt(
-                                            Chunk::cell(x, y, z));
-                                        const auto actual =
-                                            root ? root->block
-                                            : grown.test(tile.block_id)
-                                                ? 0
-                                                : tile.block_id;
-                                        const auto expected =
-                                            baseline
-                                                ? baseline->tileAt(
-                                                      structure_voxels::
-                                                          cellIndex(x, y, z))
-                                                : 0;
-                                        const auto liquid =
-                                            !expected && column.water.fills(
-                                                             worldY, surface)
-                                                ? LiquidType::Water
-                                                : LiquidType::None;
-                                        if ((worldY <= surface
-                                                 ? actual == 0
-                                                 : actual != expected) ||
-                                            tile.liquid !=
-                                                (result->projectsWater &&
-                                                         column.water.body &&
-                                                         !column.water.reach
-                                                     ? LiquidType::None
-                                                     : liquid)) {
-                                            edited = true;
-                                            break;
-                                        }
-                                    }
+                        const bool edited =
+                            columns ? differsFromGeneration(
+                                          *result, coord, *columns, region,
+                                          layers, baseline.get(), grown)
+                                    : result->hasShapes();
                         GeneratedChunk out{result, true, edited, nullptr};
                         out.structuresUsed = structures;
                         out.baselineChanged = baselineChanged;
@@ -1589,7 +1651,8 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
     const Tile* last = first + Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
     if (std::all_of(first, last, [](const Tile& t) { return t.isAir(); }))
         return true;
-    if (!std::all_of(first, last, [](const Tile& t) { return t.isSolid(); }))
+    if (it->second.data->hasShapes() ||
+        !std::all_of(first, last, [](const Tile& t) { return t.isSolid(); }))
         return false;
     // A solid chunk has no visible face only when every face neighbour is
     // loaded and its touching layer is solid too. World edges and missing
@@ -1606,13 +1669,15 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
         if (n == chunks.end() || n->second.state != ChunkState::Ready ||
             !n->second.data)
             return false;
-        const auto& tiles = n->second.data->tiles;
-        for (int a = 0; a < 16; ++a)
-            for (int b = 0; b < 16; ++b) {
-                const Tile& t = o[0]   ? tiles[a][b][o[0] > 0 ? 0 : 15]
-                                : o[1] ? tiles[a][o[1] > 0 ? 0 : 15][b]
-                                       : tiles[o[2] > 0 ? 0 : 15][a][b];
-                if (!t.isSolid()) return false;
+        const auto& neighbor = *n->second.data;
+        for (int a = 0; a < Chunk::SIZE_X; ++a)
+            for (int b = 0; b < Chunk::SIZE_X; ++b) {
+                const int lx = o[0] ? (o[0] > 0 ? 0 : Chunk::SIZE_X - 1) : b;
+                const int ly =
+                    o[1] ? (o[1] > 0 ? 0 : Chunk::SIZE_Y - 1) : (o[0] ? b : a);
+                const int lz = o[2] ? (o[2] > 0 ? 0 : Chunk::SIZE_Z - 1) : a;
+                const auto cell = neighbor.cellAt(lx, ly, lz);
+                if (!cell.tile.isSolid() || cell.shape.code()) return false;
             }
     }
     return true;
@@ -1697,16 +1762,19 @@ void ChunkManager::updateStructureBaselines(WorldEditor* editor) {
         withChunkLocked(job.coord, [&](Chunk& chunk) {
             changed = reconcileStructure(
                 chunk, old.get(), baseline.get(),
-                [&](int x, int y, int z, Tile& tile, uint8_t block) {
+                [&](int x, int y, int z, Tile tile, uint8_t block,
+                    TileShape shape) {
                     if (editor) {
-                        edits.push_back({{int(job.coord.x) * Side + x,
-                                          int(job.coord.y) * Side + y,
-                                          int(job.coord.z) * Side + z},
-                                         EditMode::Replace,
-                                         block});
+                        edits.push_back({.pos = {int(job.coord.x) * Side + x,
+                                                 int(job.coord.y) * Side + y,
+                                                 int(job.coord.z) * Side + z},
+                                         .mode = EditMode::Replace,
+                                         .block = block,
+                                         .shape = shape});
                     } else {
                         tile.block_id = block;
                         tile.clearCover();
+                        chunk.setCell(Chunk::cell(x, y, z), tile, shape);
                     }
                 });
         });

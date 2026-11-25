@@ -4,7 +4,7 @@
 
 namespace structures_codec {
 namespace {
-constexpr uint16_t Version = 1;
+constexpr uint16_t Version = 2;
 constexpr uint32_t MaxKinds = 4096;
 constexpr uint32_t MaxRecords = 1u << 20;
 constexpr uint32_t MaxVoxels = 1u << 22;
@@ -43,9 +43,10 @@ Bytes encode(const TreeOverrideMap& trees,
             out.write(int32_t(record.anchorZ));
             out.write(uint8_t(record.landmark));
             out.write(uint32_t(record.voxels.size()));
-            for (const auto& [pos, block] : record.voxels) {
+            for (const auto& [pos, voxel] : record.voxels) {
                 for (const int axis : pos) out.write(int32_t(axis));
-                out.write(block);
+                out.write(voxel.block);
+                out.write(voxel.shape.code());
             }
         }
     }
@@ -59,7 +60,7 @@ File decode(ByteView bytes) {
     File file{std::move(trees.trees), {}, std::move(trees.extra)};
     const auto* section = file.extra.find("VOXL");
     if (!section) return file;
-    if (section->version != Version)
+    if (section->version < 1 || section->version > Version)
         throw SerializationError("unsupported VOXL version");
     BinaryReader in(section->data);
     const auto kinds = in.read<uint32_t>();
@@ -86,7 +87,14 @@ File decode(ByteView bytes) {
             for (uint32_t c = 0; c < cells; ++c) {
                 const std::array<int, 3> pos{
                     in.read<int32_t>(), in.read<int32_t>(), in.read<int32_t>()};
-                if (!record.voxels.emplace(pos, in.read<uint8_t>()).second)
+                structure_voxels::OverrideVoxel voxel{in.read<uint8_t>()};
+                if (section->version >= 2) {
+                    const auto shape =
+                        TileShape::fromCanonicalCode(in.read<uint8_t>());
+                    if (!shape) throw SerializationError("bad override shape");
+                    voxel.shape = *shape;
+                }
+                if (!record.voxels.emplace(pos, voxel).second)
                     throw SerializationError("duplicate override voxel");
             }
             validate(kind, record);

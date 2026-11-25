@@ -23,6 +23,7 @@ struct SurfaceColumn {
     SoilColumn soil;
     uint16_t material = 0;
     uint16_t rockMaterial = 0;
+    TileShape groundShape{};
 };
 
 // Per-region sampling inputs: captured terrain neighbourhood and rock layers.

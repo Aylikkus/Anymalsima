@@ -351,7 +351,7 @@ TEST(flora_streaming_persists) {
     CHECK(generated && !generated->empty());
     CHECK(f.chunks->isPersistDirty(coord));
     // Saving captures the plants beside the tiles.
-    const auto snapshot = f.chunks->snapshotRegion({2, 2}, true);
+    const auto snapshot = f.chunks->snapshotRegion({2, 2});
     const auto index = RegionData::localIndex(coord);
     const auto data = region_file::decode(
         region_file::encode(region_file::merge(RegionData{}, snapshot)));
@@ -360,7 +360,7 @@ TEST(flora_streaming_persists) {
     auto edited = std::make_shared<FloraLayer>(*generated);
     edited->instances.resize(1);
     f.chunks->setFlora(coord, edited);
-    const auto saved = f.chunks->snapshotRegion({2, 2}, true);
+    const auto saved = f.chunks->snapshotRegion({2, 2});
     const auto edits = region_file::merge(data, saved);
     f.chunks->unregister(coord);
     f.load(17, 18, edits.chunks.at(index), edits.flora.at(index), int(coord.y));

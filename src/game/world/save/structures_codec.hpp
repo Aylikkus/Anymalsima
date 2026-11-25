@@ -8,6 +8,8 @@ namespace structures_codec {
 
 // structures.dat holds TREE, VOXL, and any kind-specific sections the
 // current build does not interpret. All are authoritative world state.
+// VOXL v2 adds a canonical shape byte after each voxel's block ID.
+// v1 records have cube geometry.
 struct File {
     TreeOverrideMap trees;
     structure_voxels::Overrides voxels;
