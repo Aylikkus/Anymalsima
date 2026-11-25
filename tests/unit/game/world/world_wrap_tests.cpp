@@ -126,7 +126,7 @@ TEST(wrap_chunks_tiles_ray_editor) {
     const auto hit = castTileRay(f.chunks, 0.5f, y + .5f, 3.5f, -1, 0, 0, 8);
     CHECK(hit.has_value());
     EQUAL(hit->tx, 127, "hit reported canonically");
-    EQUAL(hit->nx, 1, "hit face");
+    EQUAL(hit->placementOffset.x, 1, "hit face");
     // Placing against that face from the other side lands in chunk 0.
     f.tile(127, local, 3).block_id = 0;
     std::vector<BlockChange> changes;

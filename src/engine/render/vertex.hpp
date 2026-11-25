@@ -90,6 +90,11 @@ struct FoliageVertex {
 };
 
 struct BlockVertex {
+    // Explicit chunk faces pack the local owning cell index + this tag in
+    // tx and the distance below the rim in ty. Other producers use the
+    // original unit tangent. See block.vert.
+    static constexpr int ExplicitCellTag = 2;
+
     float x, y, z;
     float nx, ny, nz;  // face normal
     float tx, ty, tz;  // tangent

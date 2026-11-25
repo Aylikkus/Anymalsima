@@ -533,7 +533,7 @@ void StructureLod::request() {
                 if (!self) return ChunkMesh{};
                 auto mesh = mesher.build(
                     *self, baseOf(coord),
-                    [&](int x, int y, int z) -> const Tile* {
+                    [&](int x, int y, int z) -> ChunkMesher::Neighbour {
                         if (width > 0) x = int(WorldWrap::mod(x, width));
                         if (x < 0 || z < 0 || y < 0 || z >= depth ||
                             y >= height)
@@ -544,10 +544,13 @@ void StructureLod::request() {
                                        unsigned(z / Chunk::SIZE_Z)},
                                       level);
                         if (const auto* chunk = structureChunk(c)) {
-                            const auto& tile = chunk->tiles[z % Chunk::SIZE_Z]
-                                                           [y % Chunk::SIZE_Y]
-                                                           [x % Chunk::SIZE_X];
-                            if (tile.isSolid()) return &tile;
+                            const int lx = x % Chunk::SIZE_X,
+                                      ly = y % Chunk::SIZE_Y,
+                                      lz = z % Chunk::SIZE_Z;
+                            const auto& tile = chunk->tiles[lz][ly][lx];
+                            if (tile.isSolid())
+                                return {&tile, chunk->shapeAt(
+                                                   Chunk::cell(lx, ly, lz))};
                         }
                         // Faces resting on the (possibly edited) ground hide
                         // (a cell by the ground at its centre).

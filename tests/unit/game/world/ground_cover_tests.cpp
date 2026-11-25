@@ -230,6 +230,56 @@ TEST(cover_wraps_seam) {
     }
 }
 
+TEST(cover_shape_surfaces) {
+    test::FloraAssets assets;
+    test::loadMeadow(assets);
+    ChunkMesher mesher(assets);
+    Chunk left, right;
+    Tile air{}, bare{.block_id = 2, .lightLevel = {}}, grassy = bare;
+    grassy.setCover(1, 12);
+    const auto corner = TileShape::make(TileShapeProfile::OuterCorner);
+    const auto ramp = TileShape::make(TileShapeProfile::Ramp);
+    const auto leftCell = Chunk::cell(15, 5, 7);
+    const auto rightCell = Chunk::cell(0, 5, 7);
+    left.setCell(leftCell, grassy, corner);
+    right.setCell(rightCell, bare, ramp);
+    const auto halo = [&](int x, int y, int z) -> ChunkMesher::Neighbour {
+        if (y == 5 && z == 7) {
+            if (x == 15) return {&left.tiles[7][5][15], corner};
+            if (x == 16) return {&right.tiles[7][5][0], ramp};
+        }
+        return &air;
+    };
+    const auto covered = mesher.build(left, {}, halo);
+    const auto exposed = mesher.build(right, {1, 0, 0}, halo);
+    int topVertices = 0, sideVertices = 0;
+    const auto& cover = assets.getStorage<GroundCover>().get(1);
+    for (const auto& v : covered.vertices) {
+        CHECK(v.tx == BlockVertex::ExplicitCellTag + leftCell);
+        if (v.ny < 0) {
+            CHECK(v.u == -1);
+            continue;
+        }
+        CHECK(v.u == test::FloraAssets::CoverLayer);
+        if (v.ny > 0) {
+            ++topVertices;
+            CHECK(v.v == 0 && v.ty == 0);
+        } else {
+            ++sideVertices;
+            CHECK(v.v == ChunkMesher::packFringe(cover.faces.side_fringe_m));
+            const float rim = std::min(v.x - 15, v.z - 7);
+            CHECK(std::abs(v.ty - (rim - (v.y - 5))) < 1e-6f);
+        }
+    }
+    EQUAL(topVertices, 6, "both facets have top cover");
+    CHECK(sideVertices > 0);
+    CHECK(!exposed.vertices.empty());
+    for (const auto& v : exposed.vertices) {
+        CHECK(v.tx == BlockVertex::ExplicitCellTag + rightCell);
+        CHECK(v.u == -1);
+    }
+}
+
 TEST(cover_mesh_faces) {
     test::FloraAssets assets;
     test::loadMeadow(assets);

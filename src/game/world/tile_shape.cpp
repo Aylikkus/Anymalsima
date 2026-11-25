@@ -152,6 +152,20 @@ std::optional<float> supportHeight(TileShape shape, float x, float z) {
     return profile.height(local.x, local.z);
 }
 
+std::optional<float> supportHeight(TileShape shape, Vec2 low, Vec2 high) {
+    const auto a = toCanonical(shape, {low.x, 0, low.y});
+    const auto b = toCanonical(shape, {high.x, 0, high.y});
+    const auto& profile = profiles[uint8_t(shape.profile())];
+    const float x = std::min(1.f, std::max(a.x, b.x));
+    const float z = std::min(1.f, std::max(a.z, b.z));
+    if (x <= std::max(0.f, std::min(a.x, b.x)) ||
+        z <= std::max(profile.zMin, std::min(a.z, b.z)))
+        return std::nullopt;
+    // Every top increases (or stays level) in both canonical axes. This
+    // evaluates the maximum over a box, wedge, or the two junction wedges.
+    return profile.height(x, z);
+}
+
 bool contains(TileShape shape, Vec3 point) {
     const auto height = supportHeight(shape, point.x, point.z);
     return height && point.y >= 0 && point.y <= *height;
@@ -210,17 +224,30 @@ ConvexParts convexParts(TileShape shape) {
     return result;
 }
 
-std::optional<Polygon> boundaryFace(TileShape shape, Face face) {
+namespace {
+
+bool onBoundary(const Polygon& polygon, Face face) {
     const auto normal = faceNormals[uint8_t(face)];
     const float offset = uint8_t(face) % 2 == 0 ? 1 : 0;
+    return dot(polygon.plane.normal, normal) > 0 &&
+           std::all_of(polygon.vertices.begin(),
+                       polygon.vertices.begin() + polygon.count,
+                       [&](Vec3 p) { return dot(normal, p) == offset; });
+}
+
+}  // namespace
+
+std::optional<Face> boundaryFace(const Polygon& polygon) {
+    for (uint8_t i = 0; i < faceNormals.size(); ++i)
+        if (onBoundary(polygon, Face(i))) return Face(i);
+    return std::nullopt;
+}
+
+std::optional<Polygon> boundaryFace(TileShape shape, Face face) {
     const auto geometry = surface(shape);
     for (unsigned i = 0; i < geometry.count; ++i) {
         const auto& polygon = geometry.faces[i];
-        if (dot(polygon.plane.normal, normal) > 0 &&
-            std::all_of(polygon.vertices.begin(),
-                        polygon.vertices.begin() + polygon.count,
-                        [&](Vec3 p) { return dot(normal, p) == offset; }))
-            return polygon;
+        if (onBoundary(polygon, face)) return polygon;
     }
     return std::nullopt;
 }

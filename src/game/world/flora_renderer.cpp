@@ -118,7 +118,11 @@ void FloraRenderer::rebuild(const ChunkCoord& coord, ChunkPlants& cache,
         plant.x = double(coord.x) * Chunk::SIZE_X + p.localX();
         plant.z = double(coord.z) * Chunk::SIZE_Z + p.localZ();
         const int anchorY = int(coord.y) * Chunk::SIZE_Y + p.y;
-        plant.y = anchorY + 1;
+        const auto* rule = chunks.floraSpecies().find(p.species);
+        if (!rule) continue;
+        const auto height = chunks.floraAnchorHeight(coord, p, *rule);
+        if (!height) continue;
+        plant.y = anchorY + *height;
         const int tx = int(std::floor(plant.x)), tz = int(std::floor(plant.z));
         // Light of the air tile the plant stands in.
         const float sun =

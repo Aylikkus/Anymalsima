@@ -177,11 +177,11 @@ TEST(ray_reports_face) {
     auto hit = castTileRay(f.chunks, 5.5f, 9.5f, 5.5f, 0, -1, 0, 16, false);
     CHECK(hit.has_value());
     EQUAL(hit->ty, 5, "solid hit below water");
-    EQUAL(hit->ny, 1, "entered through the top face");
-    EQUAL(hit->nx + hit->nz, 0, "single axis normal");
+    EQUAL(hit->placementOffset.y, 1, "entered through the top face");
+    EQUAL(hit->placementOffset.x + hit->placementOffset.z, 0, "single axis normal");
     hit = castTileRay(f.chunks, 1.5f, 5.5f, 5.5f, 1, 0, 0, 16);
     CHECK(hit.has_value());
-    EQUAL(hit->nx, -1, "entered through the -x face");
+    EQUAL(hit->placementOffset.x, -1, "entered through the -x face");
 }
 
 TEST(editor_relight_keeps_indirect) {

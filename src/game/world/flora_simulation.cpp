@@ -81,6 +81,19 @@ FloraSimulation::FloraSimulation(ChunkManager& chunks, const IAssets& assets,
         if (this->chunks.isEdited(c)) {
             coverPending.insert(c);
             coverSince.try_emplace(c, lastToday);
+            // A saved floor edit may affect a footprint anchored in one
+            // of the neighbouring chunks, including across wrapped X.
+            const auto wrap = this->chunks.wrap();
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (!dx && !dz) continue;
+                    const auto x = wrap.wrapChunk(int64_t(c.x) + dx);
+                    const auto z = int64_t(c.z) + dz;
+                    if (x < 0 || z < 0) continue;
+                    const ChunkCoord neighbor{unsigned(x), c.y, unsigned(z)};
+                    if (this->chunks.flora(neighbor))
+                        loaded.push_back(neighbor);
+                }
         }
     });
     removedConnection =
@@ -131,6 +144,16 @@ void FloraSimulation::update(double today) {
             regenerations >= RegenerationsPerUpdate) {
             deferred.push_back(coord);
             continue;
+        }
+        const auto unsupported = [&](const FloraInstance& plant) {
+            const auto* rule = chunks.floraSpecies().find(plant.species);
+            return rule && !chunks.floraAnchorHeight(coord, plant, *rule);
+        };
+        if (std::any_of(layer->instances.begin(), layer->instances.end(),
+                        unsupported)) {
+            auto kept = std::make_shared<FloraLayer>(*layer);
+            std::erase_if(kept->instances, unsupported);
+            chunks.setFlora(coord, std::move(kept));
         }
         resolve(coord, today);
         --budget;
@@ -216,6 +239,7 @@ void FloraSimulation::regenerate(const ChunkCoord& coord, double today) {
         const int y = int(coord.y) * Chunk::SIZE_Y + p.y + 1;
         const int z = int(coord.z) * Chunk::SIZE_Z + int(p.localZ());
         if (sky.directSky(x, y, z).value_or(0) < 10) return true;
+        if (rule && !chunks.floraAnchorHeight(coord, p, *rule)) return true;
         if (!rule || !rule->large) return false;
         const auto v = floraVolume(p, coord, *rule);
         for (int dz = 0; dz < v.sizeZ; ++dz)
@@ -328,9 +352,13 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
     const int64_t tx = wrap.wrapTile(int64_t(std::floor(x)));
     const int64_t tz = int64_t(std::floor(z));
     if (tx < 0 || tz < 0 || tz >= int64_t(world.height) * 128) return false;
+    // Use the same quantized anchor that will be stored and rendered.
+    const int subX = int((x - std::floor(x)) * 16);
+    const int subZ = int((z - std::floor(z)) * 16);
+    const float anchorX = (subX + .5f) / 16, anchorZ = (subZ + .5f) / 16;
     // The ground near the parent's height: solid with open air above.
     int anchorY = -1;
-    const Tile* ground = nullptr;
+    Tile ground;
     const auto open = [&](int px, int y, int pz) {
         if (const Tile* tile = chunks.tileAt(px, y, pz)) return tile->isAir();
         const auto column = sky.column(px, pz);
@@ -341,10 +369,11 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
         return column->opacityAt(y) == 0;
     };
     for (int y = nearY + 3; y >= std::max(0, nearY - 3); --y) {
-        const Tile* t = chunks.tileAt(int(tx), y, int(tz));
-        if (t && t->isSolid() && open(int(tx), y + 1, int(tz))) {
+        const auto cell = chunks.cellAt(int(tx), y, int(tz));
+        if (cell && floraSupportHeight(rule, *cell, anchorX, anchorZ) &&
+            open(int(tx), y + 1, int(tz))) {
             anchorY = y;
-            ground = t;
+            ground = cell->tile;
             break;
         }
     }
@@ -363,11 +392,11 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
     // elevation filter for spreading in saves with legacy generation.
     site.submerged = !world.hydrology && WaterSurface::sea(anchorY).wet();
     const auto [soil, topsoil] =
-        chunks.floraSpecies().soilOfBlock(ground->block_id);
+        chunks.floraSpecies().soilOfBlock(ground.block_id);
     site.soil = soil;
     site.topsoil = topsoil;
-    site.cover = ground->cover;
-    site.coverDensity = ground->coverDensity();
+    site.cover = ground.cover;
+    site.coverDensity = ground.coverDensity();
     if (const auto columns = chunks.generatedColumns(
             unsigned(tx / Chunk::SIZE_X), unsigned(tz / Chunk::SIZE_Z)))
         site.slope = columns
@@ -392,9 +421,12 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
             if (inFootprint(baseX + dx, anchorY + 1, pz, changed)) return false;
             const bool under = dx >= 0 && dz >= 0 && dx < sizeX && dz < sizeZ;
             if (under) {
-                const auto ground = chunks.cellAt(px, anchorY, pz);
-                if (!ground || !ground->tile.isSolid() || ground->shape.code())
-                    return false;
+                if (rule.large && (px != tx || pz != tz)) {
+                    const auto support = chunks.cellAt(px, anchorY, pz);
+                    if (!support ||
+                        !floraSupportHeight(rule, *support, anchorX, anchorZ))
+                        return false;
+                }
                 for (int h = 1; h <= rule.heightTiles; ++h)
                     if (!open(px, anchorY + h, pz)) return false;
             } else if (dx >= -1 && dx <= sizeX && dz >= -1 && dz <= sizeZ) {
@@ -407,13 +439,11 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
                             unsigned(anchorY / Chunk::SIZE_Y),
                             unsigned(tz / Chunk::SIZE_Z)};
     // Position in the target chunk (tx is the canonical tile of x).
-    const double localX = (x - std::floor(x)) + double(tx % Chunk::SIZE_X);
-    const double localZ = (z - std::floor(z)) + double(tz % Chunk::SIZE_Z);
     FloraInstance child;
     child.species = rule.id;
     child.seed = seed;
-    child.x = uint8_t(std::clamp(int(localX * 16), 0, 255));
-    child.z = uint8_t(std::clamp(int(localZ * 16), 0, 255));
+    child.x = uint8_t((tx % Chunk::SIZE_X) * 16 + subX);
+    child.z = uint8_t((tz % Chunk::SIZE_Z) * 16 + subZ);
     child.y = uint8_t(anchorY - int(target.y) * Chunk::SIZE_Y);
     child.rotation = uint8_t(seed >> 5);
     child.birthDay = birthDay;

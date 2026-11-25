@@ -121,9 +121,14 @@ struct RayHit {
 // All coordinates are cell-local, with Y up.
 Vec3 rotatePoint(Vec3 point, TileFacing facing);
 std::optional<float> supportHeight(TileShape shape, float x, float z);
+// Maximum occupied height over the open X/Z rectangle in cell coordinates.
+// A contact of zero area along its perimeter does not count as overlap.
+std::optional<float> supportHeight(TileShape shape, Vec2 low, Vec2 high);
 bool contains(TileShape shape, Vec3 point);
 Surface surface(TileShape shape);
 ConvexParts convexParts(TileShape shape);
+// Which cell boundary contains this exterior polygon, if any.
+std::optional<Face> boundaryFace(const Polygon& polygon);
 // Occupied polygon on a cell boundary, in the same coordinates as surface().
 std::optional<Polygon> boundaryFace(TileShape shape, Face face);
 // t is in units of the supplied direction vector. Interval endpoints are

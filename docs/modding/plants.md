@@ -257,6 +257,11 @@ grow into a wall. Their canopy (`leaf_clump` parts) is kept within the
 footprint plus a 0.3 m overhang whatever radii you give: pick `tiles` large
 enough for the bush you want.
 
+On shaped tiles, small plants sit at the surface height at their anchor.
+Ramp pitch must fit the species' `max_slope`. A wall's occupied strip must
+fit the species' maximum ground radius on either side of the anchor. Large
+plants and trees require full-height landings.
+
 ### `placement`
 
 | Field | Default | Meaning |

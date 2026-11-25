@@ -1,6 +1,6 @@
 # Tile shapes, terrain ramps, and placement
 
-**Current step: 3 — mesh the occupied surface and attach cover to it.**
+**Current step: 5 — directional light transport and shadows.**
 This handoff covers the terrain foundation for weather. Snowfall,
 melting, temperature simulation, and NPC building generation have their own
 future work.
@@ -11,8 +11,8 @@ future work.
 | --- | --- | --- | --- |
 | 1 | Shape geometry, optional chunk storage, snapshot safety | — | Complete |
 | 2 | Durable edits, save compatibility, generated-terrain comparisons | 1 | Complete |
-| 3 | Near mesh, material shading, grass and plant support | 1–2 | Ready to start |
-| 4 | Accurate picking, debug placement and grounded traversal | 1–3 | Pending |
+| 3 | Near mesh, material shading, grass and plant support | 1–2 | Complete |
+| 4 | Accurate picking, debug placement and grounded traversal | 1–3 | Complete |
 | 5 | Directional light transport and shadows | 1–3 | Pending |
 | 6 | Natural ramps, distant terrain and structure handoff | 1–5 | Pending |
 | 7 | End-to-end validation, performance and documentation | 1–6 | Pending |
@@ -55,6 +55,66 @@ covered uniform and malformed CHNK payloads, old root data, cross-chunk bulk
 edits and region eviction, ground and structure index reconstruction,
 generated baseline restoration, stale border mesh jobs, and a shaped river
 barrier reloaded from a saved slab.
+
+Step 3 clips shared faces in `chunk_mesher.*` against the neighbour's
+boundary polygon, using the shape from the same snapshot as its tile.
+Uncut cube squares still use greedy meshing. Explicit faces use the
+profile's geometry and normals, including both junction facets. The block
+shader uses the owning tile for cover density and measures side fringe down
+from the rim. It samples light in the outward adjacent voxel with the
+existing light volume. Partial-solid light transport is step 5.
+
+`flora_generator.*`, `flora_simulation.cpp`, `flora_renderer.cpp` and
+`world_editor.cpp` share the small-plant anchor rules. Small plants can use
+slabs and suitable ramp pitches. Narrow wall tops must fit the plant's
+ground radius across the strip. Tile-footprint plants and trees use
+full-height landings. Shape edits recheck dependent plants, and reloaded
+flora use the same support rules.
+
+The Release app built and all 370 CTest cases passed. Seven focused cases
+passed under ASan and UBSan with leak detection disabled. The cases cover
+every shape rotation, winding and facet normals, horizontal and vertical
+chunk faces, crossing and matching slopes, wall overlap, water culling,
+cover ownership and plant support. The Vulkan `shapes` smoke scene reached
+a settled frame with the grassy and bare ramps meeting across the chunk
+face. Run `build/tests/lod_render_smoke /tmp/shapes 1200 shapes` to capture
+the scene. The Vulkan `river` smoke scene also passed all four phases,
+including the wrapped crossing and underwater view.
+
+Step 4 uses `tile_raycast.hpp` for grid traversal and intersects the shape
+inside each visited cell. Hits carry the surface normal and a cardinal
+placement offset. Grid ties visit Z, Y, then X. Geometry breaks ties between
+facets in canonical profile order. Tile coordinates wrap on X and the hit
+position stays in the ray's world copy.
+
+`states/gameplay_state.*` adds shape controls to **Place Block**. Pick a shape
+and adjust its rotation, wall thickness, or ramp form, run and piece. Each
+world click places the selected piece. The debug panel shows the hovered
+shape and the current selection. Use **Walk mode** with the orbit target
+above loaded ground. Move with WASD, hold Shift to run, and drag with the
+right mouse button to look around. **Orbit camera** returns to the free view.
+
+`grounded_probe.*` queries the maximum top height under a 0.5 m square
+footprint using `tile_shape.*`. The 1.7 m tall probe follows slopes in
+horizontal substeps of at most 4 cm, falls when support ends, and checks
+head clearance and lateral overlap against the same geometry. The orbit
+camera remains the saved camera mode. Walk mode uses its own near plane
+for close surfaces. The renderer uses glyph fallback per character so
+Japanese labels can display their numbers and cardinal directions.
+
+The Release app and all 377 CTest cases passed. Eleven focused cases passed
+under ASan and UBSan with leak detection disabled. The seven new cases in
+`tests/unit/game/world/tile_interaction_tests.cpp` exercise the open strip
+of a thin wall, top and bottom placement, pick distance and ties, both
+junction facets, all straight runs and facings, both corner approaches,
+head clearance, missing support, and both ordinary and wrapped chunk seams.
+
+A Vulkan gameplay check on a copy of a save cycled the controls, shortened a
+run from three pieces to one, placed and picked a rotated inner corner,
+removed it, moved in Walk mode, and returned to orbit. The controls passed
+at 1280×720 and 80% text scale, then at 1000×600 and 120% text scale in
+English, Russian and Japanese. The ramp and corner traversal matrix ran
+headlessly.
 
 When picking this up, update the current step and its row. Before marking a row
 done, record the affected paths, tests run and outcome in the row or immediately

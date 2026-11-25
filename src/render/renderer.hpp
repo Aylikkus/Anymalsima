@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <queue>
+#include <utility>
 
 #include "audio_system.hpp"
 #include "platform.hpp"
@@ -21,7 +22,6 @@ struct Line {
     std::vector<int32_t> codepoints;
     size_t start;
     size_t end;
-    FontRole font;
     int raw_line_index;
     float minX;
     float maxX;
@@ -65,6 +65,8 @@ class Renderer : public IRenderer {
                                uint32_t size) const;
     float measureTextWidth(const std::vector<int32_t>& codepoints,
                            FontRole font, uint32_t size) const;
+    std::pair<const Glyph*, FontRole> textGlyph(FontRole font, uint32_t size,
+                                                int32_t codepoint) const;
     void drawText(const DrawTextCmd& cmd);
     void drawTextLayout(const DrawTextLayoutCmd& cmd);
     void drawRect(const DrawRectCmd& cmd);

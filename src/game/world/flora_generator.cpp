@@ -102,6 +102,7 @@ FloraSpeciesTable::FloraSpeciesTable(const IAssets& assets) {
         r.seed = GroundCoverGenerator::nameHash(f.name);
         r.large = f.footprint.tiles.has_value();
         r.blocksPlacement = f.footprint.blocks_placement;
+        r.radius = f.footprint.radius_m.max;
         if (r.large) {
             r.footprintX = (*f.footprint.tiles)[0];
             r.footprintZ = (*f.footprint.tiles)[1];
@@ -150,6 +151,34 @@ FloraSpeciesTable::FloraSpeciesTable(const IAssets& assets) {
         }
     verdictTiles = maxFootprint + maxCompanion + 1;
     reachTiles = verdictTiles + maxFootprint + 1;
+}
+
+std::optional<float> floraSupportHeight(const FloraSpeciesRule& rule,
+                                        const ShapedTile& cell, float x,
+                                        float z) {
+    if (!cell.tile.isSolid()) return std::nullopt;
+    if (!cell.shape.code()) return 1.f;
+    if (rule.large) return std::nullopt;
+    const auto height = tile_geometry::supportHeight(cell.shape, x, z);
+    if (!height || *height <= 0) return std::nullopt;
+    const auto profile = cell.shape.profile();
+    if (profile >= TileShapeProfile::Wall10 &&
+        profile <= TileShapeProfile::Wall75) {
+        // Test both sides of the circular footprint along the thin axis.
+        const bool alongX = uint8_t(cell.shape.facing()) % 2 != 0;
+        const float dx = alongX ? rule.radius : 0;
+        const float dz = alongX ? 0 : rule.radius;
+        if (!tile_geometry::supportHeight(cell.shape, x - dx, z - dz) ||
+            !tile_geometry::supportHeight(cell.shape, x + dx, z + dz))
+            return std::nullopt;
+    } else {
+        // A corner's two facets have equal pitch. Slabs have zero pitch.
+        // Check the actual local slope in addition to the site's terrain slope.
+        const auto surface = tile_geometry::surface(cell.shape);
+        const auto n = surface.faces[surface.count - 1].plane.normal;
+        if (std::hypot(n.x, n.z) / n.y > rule.maxSlope) return std::nullopt;
+    }
+    return height;
 }
 
 namespace {
@@ -370,7 +399,9 @@ void Generator::add(FloraLayer& out, const FloraSpeciesRule& r, double x,
             for (int tx = std::max(0, x0);
                  tx < std::min(Chunk::SIZE_X, x0 + sx); ++tx) {
                 const auto ground = in.tiles->cellAt(tx, ly, tz);
-                if (!ground.tile.isSolid() || ground.shape.code()) return;
+                if (!floraSupportHeight(r, ground, (lx16 % 16 + .5f) / 16,
+                                        (lz16 % 16 + .5f) / 16))
+                    return;
                 for (int h = 1; h <= r.heightTiles && ly + h < Chunk::SIZE_Y;
                      ++h)
                     if (!in.tiles->tiles[tz][ly + h][tx].isAir()) return;

@@ -11,7 +11,51 @@
 #include "world/day_night.hpp"
 #include "world/generated_hydrology.hpp"
 
-// How many chunks out from the camera chunk to request and draw.
+namespace {
+
+using Profile = TileShapeProfile;
+constexpr int WallThickness[] = {10, 25, 50, 75};
+constexpr const char* FacingNames[] = {"+Z", "+X", "−Z", "−X"};
+constexpr const char* RampForms[] = {__("Straight"), __("Outer corner"),
+                                     __("Inner corner")};
+// Each row lists run 1, both pieces of run 2, and all three of run 3.
+constexpr Profile RampProfiles[][6] = {
+    {Profile::Ramp, Profile::RampHalfLow, Profile::RampHalfHigh,
+     Profile::RampThirdLow, Profile::RampThirdMiddle, Profile::RampThirdHigh},
+    {Profile::OuterCorner, Profile::OuterHalfLow, Profile::OuterHalfHigh,
+     Profile::OuterThirdLow, Profile::OuterThirdMiddle,
+     Profile::OuterThirdHigh},
+    {Profile::InnerCorner, Profile::InnerHalfLow, Profile::InnerHalfHigh,
+     Profile::InnerThirdLow, Profile::InnerThirdMiddle,
+     Profile::InnerThirdHigh},
+};
+constexpr const char* ShapeNames[] = {__("Cube"), __("Slab"), __("Ramp"),
+                                      __("Wall")};
+
+std::string describeShape(TileShape shape) {
+    const auto profile = shape.profile();
+    const auto facing = FacingNames[unsigned(shape.facing())];
+    if (profile == Profile::Cube) return _(ShapeNames[0]);
+    if (profile == Profile::Slab) return _(ShapeNames[1]);
+    if (profile >= Profile::Wall10 && profile <= Profile::Wall75) {
+        const auto thickness =
+            WallThickness[int(profile) - int(Profile::Wall10)];
+        return fmt::format(fmt::runtime(_("Wall, {0} cm, {1}")), thickness,
+                           facing);
+    }
+    for (unsigned form = 0; form < std::size(RampProfiles); ++form) {
+        unsigned index = 0;
+        for (unsigned run = 1; run <= 3; ++run)
+            for (unsigned segment = 1; segment <= run; ++segment, ++index)
+                if (RampProfiles[form][index] == profile)
+                    return fmt::format(
+                        fmt::runtime(_("{0} ramp, {1} m, piece {2}, {3}")),
+                        _(RampForms[form]), run, segment, facing);
+    }
+    return {};
+}
+
+}  // namespace
 
 GameplayState::GameplayState(Game& game, UIContext& context,
                              std::shared_ptr<World> world, SaveSlot saveSlot,
@@ -85,9 +129,9 @@ GameplayState::GameplayState(Game& game, UIContext& context,
 
     tileDebugText =
         ui_manager->createWidget(std::make_unique<Text>(), tile_debug_panel);
-    tileDebugText->setGridPlacement({0, 0, 6, 8});
+    tileDebugText->setGridPlacement({0, 0, 13, 26});
     tileDebugText->setBackgroundColor({255, 255, 255, 0});
-    tileDebugText->setText("No tile selected");
+    tileDebugText->setText(_("No tile"));
 
     auto makeToolButton = [&](const std::string& label, int column,
                               EditTool value) {
@@ -151,6 +195,43 @@ GameplayState::GameplayState(Game& game, UIContext& context,
             if (clock.speed() == Speeds[i]) next = (i + 1) % std::size(Speeds);
         clock.setSpeed(Speeds[next]);
     });
+
+    auto makeDebugButton = [&](GridPlacement placement, auto action) {
+        auto* button = ui_manager->createWidget(
+            std::make_unique<TextButton>(context, "ui.black.9slice",
+                                         "mouse_click"),
+            root_ptr);
+        button->setTextAlignment(TextAlign::Center, VerticalAlign::Middle);
+        button->setFontRole(FontRole::Bold);
+        button->setGridPlacement(placement);
+        button->onClick.connect([this, action]() {
+            action();
+            updateShapeControls();
+        });
+        return button;
+    };
+    shapeButton = makeDebugButton({0, 14, 6, 1}, [this] {
+        shapeKind =
+            ShapeKind((unsigned(shapeKind) + 1) % std::size(ShapeNames));
+    });
+    facingButton = makeDebugButton({6, 14, 6, 1}, [this] {
+        facing = (facing + 1) % std::size(FacingNames);
+    });
+    thicknessButton = makeDebugButton({12, 14, 6, 1}, [this] {
+        thickness = (thickness + 1) % std::size(WallThickness);
+    });
+    formButton = makeDebugButton({0, 13, 6, 1}, [this] {
+        rampForm = (rampForm + 1) % std::size(RampForms);
+    });
+    runButton = makeDebugButton({6, 13, 6, 1}, [this] {
+        rampRun = rampRun % 3 + 1;
+        rampSegment = std::min(rampSegment, rampRun);
+    });
+    segmentButton = makeDebugButton(
+        {12, 13, 6, 1}, [this] { rampSegment = rampSegment % rampRun + 1; });
+    walkButton = makeDebugButton({18, 14, 6, 1}, [this] { toggleWalk(); });
+    walkButton->setText(_("Walk mode"));
+    updateShapeControls();
 
     generator = std::make_unique<LocationGenerator>();
     mesher = std::make_unique<ChunkMesher>(*context.assets);
@@ -358,8 +439,9 @@ void GameplayState::updatePlantLabel() {
 
 void GameplayState::writeMeta() {
     slot.meta.lastPlayed = WorldMeta::now();
-    slot.meta.camera = WorldMeta::CameraState{camera.position, camera.yaw,
-                                              camera.pitch, camera.distance};
+    slot.meta.camera = WorldMeta::CameraState{
+        probe ? probe->feet() : camera.position, camera.yaw, camera.pitch,
+        probe ? orbitDistance : camera.distance};
     slot.meta.worldDays = clock.days();
     try {
         save_catalog::writeMeta(slot);
@@ -515,6 +597,11 @@ void GameplayState::updateAutosave(float dt) {
 
 void GameplayState::handleInput(Game& game, const InputEvent& e,
                                 UIContext& context, float dt) {
+    if (e.type == InputEvent::MouseMove || e.type == InputEvent::MouseClick)
+        cursor = Vec2i{e.x, e.y};
+    if (e.type == InputEvent::MouseClick &&
+        e.button == InputEvent::RIGHT_BUTTON && !e.pressed)
+        rotating = false;
     if (!ui_manager->handleInput(e, context)) {
         switch (e.type) {
             case InputEvent::KeyPress:
@@ -554,6 +641,7 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
                 break;
 
             case InputEvent::MouseWheel:
+                if (probe) break;
                 if (e.direction == InputEvent::Vertical && e.ctrl) {
                     camera.position.y += e.delta;
                 } else if (e.direction == InputEvent::Vertical) {
@@ -561,39 +649,23 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
                     camera.distance = bx::clamp(camera.distance, 10, 150);
                 }
                 break;
-            // gameplay_state.cpp — handleInput, KeyPress section
             case InputEvent::KeyHold: {
-                float speed = 20.0f * dt;
-
-                if (e.shift) {
-                    speed *= 3;
-                }
-
-                // Flat forward: yaw only, no pitch so we stay on the
-                // horizontal plane
-                float flatFwdX = std::sin(camera.yaw);
-                float flatFwdZ = std::cos(camera.yaw);
-
-                // Right is perpendicular to flat forward (rotate 90° around
-                // Y)
-                float rightX = flatFwdZ;
-                float rightZ = -flatFwdX;
-
-                if (e.key == SDL_SCANCODE_W) {
-                    camera.position.x += flatFwdX * speed;
-                    camera.position.z += flatFwdZ * speed;
-                }
-                if (e.key == SDL_SCANCODE_S) {
-                    camera.position.x -= flatFwdX * speed;
-                    camera.position.z -= flatFwdZ * speed;
-                }
-                if (e.key == SDL_SCANCODE_A) {
-                    camera.position.x -= rightX * speed;
-                    camera.position.z -= rightZ * speed;
-                }
-                if (e.key == SDL_SCANCODE_D) {
-                    camera.position.x += rightX * speed;
-                    camera.position.z += rightZ * speed;
+                Vec2 input{};
+                if (e.key == SDL_SCANCODE_W) input.y = 1;
+                if (e.key == SDL_SCANCODE_S) input.y = -1;
+                if (e.key == SDL_SCANCODE_A) input.x = -1;
+                if (e.key == SDL_SCANCODE_D) input.x = 1;
+                if (probe) {
+                    walkInput = walkInput + input;
+                    walkFast = e.shift;
+                } else {
+                    const float speed = (e.shift ? 60.f : 20.f) * dt;
+                    const float sin = std::sin(camera.yaw);
+                    const float cos = std::cos(camera.yaw);
+                    camera.position.x +=
+                        (input.y * sin + input.x * cos) * speed;
+                    camera.position.z +=
+                        (input.y * cos - input.x * sin) * speed;
                 }
                 break;
             }
@@ -619,17 +691,102 @@ void GameplayState::setTool(EditTool value) {
     plantButton->getButton()->setNormalColor(
         tool == EditTool::PlantTree ? armed : idle);
     updatePlantLabel();
+    updateShapeControls();
 }
 
-std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
-    // Same view and projection as render(): bx::mtxLookAt from the orbit
-    // eye toward camera.position, 60 degree vertical field of view.
+TileShape GameplayState::placementShape() const {
+    const auto rotation = TileFacing(facing);
+    switch (shapeKind) {
+        case ShapeKind::Cube:
+            return {};
+        case ShapeKind::Slab:
+            return TileShape::make(Profile::Slab);
+        case ShapeKind::Ramp: {
+            const auto index = rampRun * (rampRun - 1) / 2 + rampSegment - 1;
+            return TileShape::make(RampProfiles[rampForm][index], rotation);
+        }
+        case ShapeKind::Wall:
+            return TileShape::make(
+                Profile(unsigned(Profile::Wall10) + thickness), rotation);
+    }
+    return {};
+}
+
+void GameplayState::updateShapeControls() {
+    const bool placing = tool == EditTool::Place;
+    const bool ramp = placing && shapeKind == ShapeKind::Ramp;
+    const bool wall = placing && shapeKind == ShapeKind::Wall;
+    shapeButton->setVisible(placing);
+    facingButton->setVisible(ramp || wall);
+    thicknessButton->setVisible(wall);
+    formButton->setVisible(ramp);
+    runButton->setVisible(ramp);
+    segmentButton->setVisible(ramp);
+    if (!placing) return;
+
+    shapeButton->setText(fmt::format(fmt::runtime(_("Shape: {}")),
+                                     _(ShapeNames[unsigned(shapeKind)])));
+    facingButton->setText(
+        fmt::format(fmt::runtime(_("Rotate: {}")), FacingNames[facing]));
+    thicknessButton->setText(fmt::format(fmt::runtime(_("Thickness: {} cm")),
+                                         WallThickness[thickness]));
+    formButton->setText(
+        fmt::format(fmt::runtime(_("Form: {}")), _(RampForms[rampForm])));
+    runButton->setText(fmt::format(fmt::runtime(_("Run: {} m")), rampRun));
+    segmentButton->setText(
+        fmt::format(fmt::runtime(_("Piece: {0}/{1}")), rampSegment, rampRun));
+}
+
+void GameplayState::toggleWalk() {
+    walkInput = {};
+    walkFast = false;
+    if (probe) {
+        camera.position = probe->feet();
+        probe.reset();
+        camera.distance = orbitDistance;
+        camera.nearPlane = 1.f;
+        walkButton->setText(_("Walk mode"));
+    } else {
+        // Look below the orbit target. Allow for the footprint extending
+        // uphill beyond the center of a ramp.
+        probe = GroundedProbe::spawn(*chunkManager,
+                                     camera.position + Vec3{0, .35f, 0});
+        if (!probe) {
+            walkButton->setText(_("No walkable ground"));
+            return;
+        }
+        orbitDistance = camera.distance;
+        camera.distance = 0;
+        camera.nearPlane = .08f;
+        camera.pitch = std::clamp(camera.pitch, -.45f, .45f);
+        camera.position = probe->feet() + Vec3{0, GroundedProbe::EyeHeight, 0};
+        walkButton->setText(_("Orbit camera"));
+    }
+}
+
+void GameplayState::updateWalk(float dt) {
+    const float speed = walkFast ? 7.f : 3.5f;
+    const float scale =
+        speed / std::max(1.f, std::hypot(walkInput.x, walkInput.y));
+    const float sin = std::sin(camera.yaw);
+    const float cos = std::cos(camera.yaw);
+    probe->update(*chunkManager,
+                  {scale * (walkInput.y * sin + walkInput.x * cos),
+                   scale * (walkInput.y * cos - walkInput.x * sin)},
+                  dt);
+    walkInput = {};
+    walkFast = false;
+    camera.position = probe->feet() + Vec3{0, GroundedProbe::EyeHeight, 0};
+}
+
+std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY,
+                                                      bool liquids) {
+    // Same view and 60 degree vertical field of view as render().
     const Vec2 viewport = uiContext->getWindowSize();
     if (viewport.x <= 0 || viewport.y <= 0) return std::nullopt;
     const Vec3 eye = camera.eye();
-    bx::Vec3 forward = bx::normalize(bx::Vec3{camera.position.x - eye.x,
-                                              camera.position.y - eye.y,
-                                              camera.position.z - eye.z});
+    const auto view = camera.direction();
+    const bx::Vec3 forward{view.x, view.y, view.z};
     const bx::Vec3 right = bx::normalize(bx::cross(bx::Vec3{0, 1, 0}, forward));
     const bx::Vec3 up = bx::cross(forward, right);
     const float tanHalf = std::tan(bx::toRad(60.f) * 0.5f);
@@ -640,7 +797,7 @@ std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY) {
         bx::add(forward, bx::add(bx::mul(right, ndcX * aspect * tanHalf),
                                  bx::mul(up, ndcY * tanHalf))));
     return castTileRay(*chunkManager, eye.x, eye.y, eye.z, dir.x, dir.y, dir.z,
-                       camera.distance + 64.f, /*hitLiquids=*/false);
+                       camera.distance + 64.f, liquids);
 }
 
 void GameplayState::useTool(int mouseX, int mouseY) {
@@ -672,26 +829,30 @@ void GameplayState::useTool(int mouseX, int mouseY) {
         return;
     }
     const auto& blocks = uiContext->assets->getStorage<Block>();
-    if (blocks.items.empty() || (!hit->nx && !hit->ny && !hit->nz)) return;
+    if (blocks.items.empty() || hit->placementOffset == TilePos{}) return;
     // Against the face under the cursor: the debug light, or else the first
     // defined block.
     if (tool == EditTool::PlaceLight && !testLightId) return;
     const uint8_t block =
         tool == EditTool::PlaceLight ? *testLightId : blocks.items.front().id;
+    const auto [dx, dy, dz] = hit->placementOffset;
     editor->placeBlock(
-        {hit->tx + hit->nx, hit->ty + hit->ny, hit->tz + hit->nz}, block);
+        {hit->tx + dx, hit->ty + dy, hit->tz + dz}, block,
+        tool == EditTool::Place ? placementShape() : TileShape{});
 }
 
 void GameplayState::update(Game& game, float dt) {
     // Before any region can unload this frame.
     editTracker->update();
     chunkManager->commitWaterEdits();
+    if (probe) updateWalk(dt);
     // X wraps around the world (stored canonically in [0, W)); Z is bounded.
     camera.position.x = float(world->wrap().wrapX(camera.position.x));
     if (camera.position.x >= float(world->wrap().tiles))
         camera.position.x = 0;  // float rounding of a value just below W
-    camera.position.z =
-        std::clamp(camera.position.z, 0.f, float(world->height * 128 - 1));
+    if (!probe)
+        camera.position.z =
+            std::clamp(camera.position.z, 0.f, float(world->height * 128 - 1));
     const Vec2u region{unsigned(camera.position.x) / 128,
                        unsigned(camera.position.z) / 128};
     if (!focusRegion || *focusRegion != region) {
@@ -746,14 +907,18 @@ void GameplayState::update(Game& game, float dt) {
     }
 
     // --- Tile debug raycast -------------------------------------------------
-    float dirX, dirY, dirZ;
-    cameraDirection(camera.yaw, camera.pitch, dirX, dirY, dirZ);
-
-    auto hit = castTileRay(*chunkManager, camera.position.x, camera.position.y,
-                           camera.position.z, dirX, dirY, dirZ,
-                           /*maxDistance=*/64.0f);
-
     if (tileDebugText) {
+        const auto hit =
+            cursor ? pickTile(cursor->x, cursor->y, tool == EditTool::None)
+                   : std::nullopt;
+        std::string controls;
+        if (probe)
+            controls += probe->grounded() ? _("Walking: WASD, Shift to run")
+                                          : _("Falling");
+        if (!controls.empty()) controls += '\n';
+        if (tool == EditTool::Place)
+            controls += fmt::format(fmt::runtime(_("Placing: {}\n")),
+                                    describeShape(placementShape()));
         // Voxel streaming counters: a stuck queue shows here first.
         const std::string streaming =
             "Chunks: " + std::to_string(chunkManager->pendingGeneration()) +
@@ -764,7 +929,7 @@ void GameplayState::update(Game& game, float dt) {
             std::to_string(chunkManager->pendingTreeSets()) + " waiting\n";
         if (!hit) {
             tileDebugText->setText(
-                "No tile\n" + streaming + "LOD: " +
+                controls + _("No tile") + "\n" + streaming + "LOD: " +
                 std::to_string(terrainLod->patchCount()) + " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
                 std::to_string(terrainLod->jobCount()) + " LOD jobs, " +
@@ -779,12 +944,15 @@ void GameplayState::update(Game& game, float dt) {
             const Tile& t = hit->tile;
             std::stringstream ss;
 
-            ss << "Tile [" << hit->tx << ", " << hit->ty << ", " << hit->tz
-               << "]\n";
+            ss << controls << "Tile [" << hit->tx << ", " << hit->ty << ", "
+               << hit->tz << "]\n";
             ss << streaming;
 
             ss << "\n--- Block ---\n";
             ss << "block_id:  " << (int)t.block_id << "\n";
+            if (t.isSolid())
+                ss << fmt::format(fmt::runtime(_("Picked shape: {}\n")),
+                                  describeShape(hit->shape));
 
             ss << "\n--- Liquid ---\n";
             ss << "liquid:      " << (int)t.liquid << "\n";
@@ -799,8 +967,9 @@ void GameplayState::update(Game& game, float dt) {
                << "\n";
             // Sky heightmap at the air tile in front of the face.
             {
-                const int64_t ax = hit->tx + hit->nx, az = hit->tz + hit->nz;
-                const int ay = hit->ty + hit->ny;
+                const auto [dx, dy, dz] = hit->placementOffset;
+                const int64_t ax = hit->tx + dx, az = hit->tz + dz;
+                const int ay = hit->ty + dy;
                 const auto top = skyMap->top(ax, az);
                 const auto direct = skyMap->directSky(ax, ay, az);
                 ss << "sky top: "
@@ -878,12 +1047,12 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     worldEye.setVec4({eye.x, eye.y, eye.z, displayedCamera.viewDistance});
 
     float vp[16], view[16], proj[16];
-    bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
-                  {camera.position.x, camera.position.y, camera.position.z},
+    const auto look = eye + camera.direction();
+    bx::mtxLookAt(view, {eye.x, eye.y, eye.z}, {look.x, look.y, look.z},
                   {0, 1, 0});
     const auto viewport = context.getWindowSize();
-    bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y), 1.f,
-                displayedCamera.viewDistance + 512.f,
+    bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y),
+                camera.nearPlane, displayedCamera.viewDistance + 512.f,
                 bgfx::getCaps()->homogeneousDepth);
     bx::mtxMul(vp, view, proj);
 

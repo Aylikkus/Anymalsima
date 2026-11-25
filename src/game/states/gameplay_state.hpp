@@ -18,6 +18,7 @@
 #include "world/chunk_manager.hpp"
 #include "world/flora_renderer.hpp"
 #include "world/flora_simulation.hpp"
+#include "world/grounded_probe.hpp"
 #include "world/light_renderer.hpp"
 #include "world/light_sources.hpp"
 #include "world/light_volume_manager.hpp"
@@ -157,8 +158,27 @@ class GameplayState : public IGameState {
     std::optional<uint8_t> testLightId;
     void setTool(EditTool value);
     void useTool(int mouseX, int mouseY);
-    // First solid block under the cursor.
-    std::optional<TileRaycastHit> pickTile(int mouseX, int mouseY);
+    std::optional<TileRaycastHit> pickTile(int mouseX, int mouseY,
+                                           bool liquids = false);
+
+    enum class ShapeKind { Cube, Slab, Ramp, Wall };
+    ShapeKind shapeKind = ShapeKind::Cube;
+    unsigned facing = 0, thickness = 0, rampForm = 0;
+    unsigned rampRun = 1, rampSegment = 1;
+    TextButton *shapeButton = nullptr, *facingButton = nullptr,
+               *thicknessButton = nullptr, *formButton = nullptr,
+               *runButton = nullptr, *segmentButton = nullptr;
+    TileShape placementShape() const;
+    void updateShapeControls();
+
+    std::optional<GroundedProbe> probe;
+    Vec2 walkInput{};
+    bool walkFast = false;
+    float orbitDistance = 10;
+    TextButton* walkButton = nullptr;
+    void toggleWalk();
+    void updateWalk(float dt);
+    std::optional<Vec2i> cursor;
 
     Camera camera;
     bool rotating = false;

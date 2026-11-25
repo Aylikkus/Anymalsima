@@ -868,6 +868,33 @@ TreeStamp ChunkManager::treeStamp(const ChunkCoord& coord) const {
                : TreeStamp{};
 }
 
+std::optional<float> ChunkManager::floraAnchorHeight(
+    const ChunkCoord& coord, const FloraInstance& plant,
+    const FloraSpeciesRule& rule) {
+    const int x = int(coord.x) * Chunk::SIZE_X + plant.tileX();
+    const int y = int(coord.y) * Chunk::SIZE_Y + plant.y;
+    const int z = int(coord.z) * Chunk::SIZE_Z + plant.tileZ();
+    const auto anchor = cellAt(x, y, z);
+    if (!anchor) return std::nullopt;
+    const auto height =
+        floraSupportHeight(rule, *anchor, plant.localX() - plant.tileX(),
+                           plant.localZ() - plant.tileZ());
+    if (!height || !rule.large) return height;
+
+    const auto footprint = floraVolume(plant, coord, rule);
+    for (int dz = 0; dz < footprint.sizeZ; ++dz)
+        for (int dx = 0; dx < footprint.sizeX; ++dx) {
+            const int px = int(footprint.minX) + dx;
+            const int pz = int(footprint.minZ) + dz;
+            if (px == x && pz == z) continue;
+            const auto cell = cellAt(px, y, pz);
+            // Unloaded footprint tiles are rechecked once they are ready.
+            if (cell && !floraSupportHeight(rule, *cell, 0, 0))
+                return std::nullopt;
+        }
+    return height;
+}
+
 FloraLayerPtr ChunkManager::flora(const ChunkCoord& coord) const {
     const auto it = chunks.find(coord);
     return it != chunks.end() && it->second.state == ChunkState::Ready
@@ -1030,7 +1057,7 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                     : std::nullopt;
             auto mesh = builder.build(
                 *data, coord,
-                [&](int x, int y, int z) -> const Tile* {
+                [&](int x, int y, int z) -> ChunkMesher::Neighbour {
                     static const Tile outside{};
                     // X wraps; Z and Y end at the world edge.
                     x = int(wrapX.wrapTile(x));
@@ -1042,11 +1069,12 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                                  static_cast<unsigned>(y / Chunk::SIZE_Y),
                                  static_cast<unsigned>(z / Chunk::SIZE_Z)};
                     auto it = neighbors.find(c);
-                    return it == neighbors.end()
-                               ? nullptr
-                               : &it->second->tiles[z % Chunk::SIZE_Z]
-                                                   [y % Chunk::SIZE_Y]
-                                                   [x % Chunk::SIZE_X];
+                    if (it == neighbors.end()) return nullptr;
+                    const int lx = x % Chunk::SIZE_X, ly = y % Chunk::SIZE_Y,
+                              lz = z % Chunk::SIZE_Z;
+                    const auto& chunk = *it->second;
+                    return {&chunk.tiles[lz][ly][lx],
+                            chunk.shapeAt(Chunk::cell(lx, ly, lz))};
                 },
                 climate,
                 [&](int x, int y, int z) -> const Tile* {

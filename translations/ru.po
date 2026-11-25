@@ -90,17 +90,17 @@ msgstr "Особенности"
 msgid "None"
 msgstr "Нет"
 
-#: src/game/states/gameplay_state.cpp:95
+#: src/game/states/gameplay_state.cpp:152
 msgid "PLACE BLOCK"
-msgstr ""
+msgstr "ПОСТАВИТЬ БЛОК"
 
-#: src/game/states/gameplay_state.cpp:96
+#: src/game/states/gameplay_state.cpp:153
 msgid "REMOVE BLOCK"
-msgstr ""
+msgstr "УБРАТЬ БЛОК"
 
-#: src/game/states/gameplay_state.cpp:97
+#: src/game/states/gameplay_state.cpp:154
 msgid "PLACE LIGHT"
-msgstr ""
+msgstr "ПОСТАВИТЬ СВЕТ"
 
 #: src/game/states/load_world_state.cpp:61
 #, c++-format
@@ -431,3 +431,111 @@ msgstr ""
 #, c++-format
 #~ msgid "Text Scale {:.0f}%"
 #~ msgstr "Масштаб текста {:.0f}%"
+
+#: src/game/states/gameplay_state.cpp:19
+msgid "Straight"
+msgstr "Прямой"
+
+#: src/game/states/gameplay_state.cpp:19
+msgid "Outer corner"
+msgstr "Внешний угол"
+
+#: src/game/states/gameplay_state.cpp:20
+msgid "Inner corner"
+msgstr "Внутренний угол"
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Cube"
+msgstr "Куб"
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Slab"
+msgstr "Плита"
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Ramp"
+msgstr "Склон"
+
+#: src/game/states/gameplay_state.cpp:33
+msgid "Wall"
+msgstr "Стена"
+
+#: src/game/states/gameplay_state.cpp:43
+#, c++-format
+msgid "Wall, {0} cm, {1}"
+msgstr "Стена, {0} см, {1}"
+
+#: src/game/states/gameplay_state.cpp:52
+#, c++-format
+msgid "{0} ramp, {1} m, piece {2}, {3}"
+msgstr "Склон ({0}), {1} м, часть {2}, {3}"
+
+#: src/game/states/gameplay_state.cpp:134
+#: src/game/states/gameplay_state.cpp:932
+msgid "No tile"
+msgstr "Нет блока"
+
+#: src/game/states/gameplay_state.cpp:165
+msgid "HARVEST"
+msgstr "СОБРАТЬ"
+
+#: src/game/states/gameplay_state.cpp:233
+#: src/game/states/gameplay_state.cpp:748
+msgid "Walk mode"
+msgstr "Ходьба"
+
+#: src/game/states/gameplay_state.cpp:727
+#, c++-format
+msgid "Shape: {}"
+msgstr "Форма: {}"
+
+#: src/game/states/gameplay_state.cpp:730
+#, c++-format
+msgid "Rotate: {}"
+msgstr "Поворот: {}"
+
+#: src/game/states/gameplay_state.cpp:731
+#, c++-format
+msgid "Thickness: {} cm"
+msgstr "Толщина: {} см"
+
+#: src/game/states/gameplay_state.cpp:734
+#, c++-format
+msgid "Form: {}"
+msgstr "Тип склона: {}"
+
+#: src/game/states/gameplay_state.cpp:735
+#, c++-format
+msgid "Run: {} m"
+msgstr "Длина: {} м"
+
+#: src/game/states/gameplay_state.cpp:737
+#, c++-format
+msgid "Piece: {0}/{1}"
+msgstr "Часть: {0}/{1}"
+
+#: src/game/states/gameplay_state.cpp:755
+msgid "No walkable ground"
+msgstr "Нет опоры для ходьбы"
+
+#: src/game/states/gameplay_state.cpp:763
+msgid "Orbit camera"
+msgstr "Орбитальная камера"
+
+#: src/game/states/gameplay_state.cpp:916
+msgid "Walking: WASD, Shift to run"
+msgstr "Ходьба: WASD, бег: Shift"
+
+#: src/game/states/gameplay_state.cpp:917
+msgid "Falling"
+msgstr "Падение"
+
+#: src/game/states/gameplay_state.cpp:920
+#, c++-format
+msgid "Placing: {}\n"
+msgstr "Установка: {}\n"
+
+#: src/game/states/gameplay_state.cpp:954
+#, c++-format
+msgid "Picked shape: {}\n"
+msgstr "Форма блока: {}\n"

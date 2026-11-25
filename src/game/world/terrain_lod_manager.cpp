@@ -541,8 +541,8 @@ void TerrainLodManager::request() {
 void TerrainLodManager::update(const Camera& camera, Vec2 viewport,
                                std::span<const TileBox> casterDetail) {
     collect();
-    const auto eye = camera.eye();
-    viewForward = {camera.position.x - eye.x, 0, camera.position.z - eye.z};
+    const auto direction = camera.direction();
+    viewForward = {direction.x, 0, direction.z};
     choose(camera, viewport);
     request();
     if (structures) {
@@ -1208,10 +1208,11 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     water.setVec4(
         {flowSeconds, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});
     float view[16], proj[16], vp[16];
-    bx::mtxLookAt(view, {eye.x, eye.y, eye.z},
-                  {camera.position.x, camera.position.y, camera.position.z},
+    const auto look = eye + camera.direction();
+    bx::mtxLookAt(view, {eye.x, eye.y, eye.z}, {look.x, look.y, look.z},
                   {0, 1, 0});
-    bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y), 1.f,
+    bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y),
+                camera.nearPlane,
                 selectionRange + 512, bgfx::getCaps()->homogeneousDepth);
     bx::mtxMul(vp, view, proj);
     const auto frustum = Frustum::fromViewProj(vp);

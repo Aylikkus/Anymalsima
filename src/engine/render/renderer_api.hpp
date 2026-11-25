@@ -39,11 +39,12 @@ struct Camera {
     bool terrainSky = false;
     bool underwater = false;
     SkyState sky{};
-    Vec3 eye() const {
-        return {position.x - std::cos(pitch) * std::sin(yaw) * distance,
-                position.y - std::sin(pitch) * distance,
-                position.z - std::cos(pitch) * std::cos(yaw) * distance};
+    float nearPlane = 1.f;
+    Vec3 direction() const {
+        const float flat = std::cos(pitch);
+        return {flat * std::sin(yaw), std::sin(pitch), flat * std::cos(yaw)};
     }
+    Vec3 eye() const { return position - direction() * distance; }
 };
 
 // The world view (view 0) is camera-relative: its eye sits at the origin.

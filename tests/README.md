@@ -123,6 +123,15 @@ cmake --build build --target lod_render_smoke
 build/tests/lod_render_smoke /tmp/capture 900 lights
 ```
 
+The `shapes` scene sets a grassy corner and ramp run against bare ramps
+across an X chunk face. Check `/tmp/shapes.ppm` for continuous geometry at
+the boundary and grass that follows the incline without spilling onto the
+bare side.
+
+```bash
+build/tests/lod_render_smoke /tmp/shapes 1200 shapes
+```
+
 The river flyover starts at the mouth, crosses the X seam, approaches the
 waterfall during a remesh, and finishes below the landing's water surface.
 Compare the PPM captures for missing or doubled water, submerged banks,

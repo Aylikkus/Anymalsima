@@ -186,6 +186,9 @@ class ChunkManager {
     bool isPersistDirty(const ChunkCoord& coord) const;
     // Plants of a Ready chunk (null when none or not ready).
     FloraLayerPtr flora(const ChunkCoord& coord) const;
+    std::optional<float> floraAnchorHeight(const ChunkCoord& coord,
+                                           const FloraInstance& plant,
+                                           const FloraSpeciesRule& rule);
     // Replaces a Ready chunk's plants and announces it (floraChanged).
     // persist: the change must be saved (false for derived bookkeeping such
     // as FloraLayer::resolvedDay, which is recomputed after a reload).

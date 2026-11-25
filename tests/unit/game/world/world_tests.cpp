@@ -96,12 +96,12 @@ TEST(ray_negative_direction) {
 }
 
 TEST(camera_direction) {
-    float x, y, z;
-    cameraDirection(0, 0, x, y, z);
-    EQUAL(x, 0.0f, "forward x");
-    EQUAL(y, 0.0f, "forward y");
-    EQUAL(z, 1.0f, "forward z");
-    cameraDirection(0.7f, 0.4f, x, y, z);
+    Camera camera;
+    camera.pitch = 0;
+    CHECK((camera.direction() == Vec3{0, 0, 1}));
+    camera.yaw = .7f;
+    camera.pitch = .4f;
+    const auto [x, y, z] = camera.direction();
     CHECK(std::abs(x * x + y * y + z * z - 1) < 1e-6f);
     CHECK(y > 0);
 }

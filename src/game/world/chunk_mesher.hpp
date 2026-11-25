@@ -43,11 +43,19 @@ class ChunkMesher {
    public:
     explicit ChunkMesher(const IAssets& assets);
 
-    using NeighbourFn = std::function<const Tile*(int tx, int ty, int tz)>;
+    struct Neighbour {
+        const Tile* tile;
+        TileShape shape;
+
+        Neighbour(const Tile* tile, TileShape shape = {})
+            : tile(tile), shape(shape) {}
+    };
+    using NeighbourFn = std::function<Neighbour(int tx, int ty, int tz)>;
+    using WaterHaloFn = std::function<const Tile*(int tx, int ty, int tz)>;
 
     using WaterColumnFn = std::function<std::pair<int, WaterSurface>(int, int)>;
 
-    // Every quad grows by this much on all four sides within its plane. The
+    // Greedy solid quads grow by this much on all four sides. The
     // overlap closes sub-pixel cracks where greedy quads meet in T-junctions
     // (and at wall/floor corners); coplanar overlap is invisible.
     // shaders/light_shadow/light_shadow.frag relies on this value.
@@ -66,7 +74,7 @@ class ChunkMesher {
     ChunkMesh build(const Chunk& chunk, const ChunkCoord& coord,
                     const NeighbourFn& neighbour,
                     const CoverClimate& climate = {},
-                    const NeighbourFn& generatedWaterHalo = {},
+                    const WaterHaloFn& generatedWaterHalo = {},
                     const WaterColumnFn& waterColumn = {}) const;
 
     // Packs the side-fringe range for the v attribute (see build).
@@ -118,10 +126,10 @@ class ChunkMesher {
         bool valid() const { return block != nullptr; }
     };
 
-    bool isFaceVisible(const Tile* nbr) const {
-        if (!nbr) return false;     // outside world = invisible
-        return nbr->block_id == 0;  // only air exposes a face
-    }
+    void emitSurface(ChunkGeometry& mesh, const tile_geometry::Polygon& face,
+                     const tile_geometry::Polygon* occluder, Vec3 cell,
+                     TileShape shape, const FaceKey& key,
+                     const CoverClimate& climate) const;
 
     // Emit a single merged quad.
     // origin   – world-space corner of the quad

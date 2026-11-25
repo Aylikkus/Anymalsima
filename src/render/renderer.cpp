@@ -91,24 +91,16 @@ void Renderer::beginFrame() {
         0, (camera.terrainSky ? 0 : BGFX_CLEAR_COLOR) | BGFX_CLEAR_DEPTH,
         0x000000FF, 1.0f, 0);
 
-    Vec3 target = camera.position;
-
-    Vec3 offset;
-    offset.x = std::cos(camera.pitch) * std::sin(camera.yaw);
-    offset.y = std::sin(camera.pitch);
-    offset.z = std::cos(camera.pitch) * std::cos(camera.yaw);
-
-    Vec3 eye = target - offset * camera.distance;
-
+    const Vec3 offset = camera.direction();
     // Camera-relative: the eye is the origin and every world draw supplies
     // relativeTransform(), so large world coordinates never reach the GPU.
-    (void)eye;
     bx::mtxLookAt(view_g, {0.0f, 0.0f, 0.0f}, {offset.x, offset.y, offset.z},
                   {0.0f, 1.0f, 0.0f});
 
     float aspect = float(res.x) / float(res.y);
 
-    bx::mtxProj(proj_g, 60.0f, aspect, 1.0f, camera.viewDistance + 512.f,
+    bx::mtxProj(proj_g, 60.0f, aspect, camera.nearPlane,
+                camera.viewDistance + 512.f,
                 bgfx::getCaps()->homogeneousDepth);
 
     bgfx::setViewTransform(0, view_g, proj_g);
@@ -218,6 +210,14 @@ void Renderer::drawSprite(const DrawSpriteCmd &cmd) {
     bgfx::submit(1, program);
 }
 
+std::pair<const Glyph *, FontRole> Renderer::textGlyph(
+    FontRole font, uint32_t size, int32_t codepoint) const {
+    if (const auto *glyph = resources.getGlyph(font, size, codepoint))
+        return {glyph, font};
+    const auto fallback = FontResolver::fallbackFontFor(codepoint, font);
+    return {resources.getGlyph(fallback, size, codepoint), fallback};
+}
+
 void Renderer::drawText(const DrawTextCmd &cmd) {
     auto codepoints = utf8ToCodepoints(cmd.text);
 
@@ -256,7 +256,7 @@ void Renderer::drawText(const DrawTextCmd &cmd) {
         float x = startX;
 
         for (int32_t cp : line.codepoints) {
-            const Glyph *gPtr = resources.getGlyph(line.font, cmd.size, cp);
+            const auto [gPtr, glyphFont] = textGlyph(cmd.font, cmd.size, cp);
             if (!gPtr) {
                 continue;
             }
@@ -275,7 +275,7 @@ void Renderer::drawText(const DrawTextCmd &cmd) {
             float color[4] = {cmd.color.r / 255.0f, cmd.color.g / 255.0f,
                               cmd.color.b / 255.0f, cmd.color.a / 255.0f};
 
-            FontResource &res = resources.getFontResource(line.font, cmd.size);
+            FontResource &res = resources.getFontResource(glyphFont, cmd.size);
             bgfx::TextureHandle tex = res.atlases[cmd.size][g.atlasIndex].atlas;
 
             bgfx::setVertexBuffer(0, mesh.vbh);
@@ -401,27 +401,21 @@ std::vector<Line> Renderer::wrapText(const std::vector<int32_t> &codepoints,
     auto it = wrapCache.find(key);
     if (it != wrapCache.end()) return it->second;
 
-    // Прогреваем все глифы сразу, включая фолбеки
-    std::vector<int32_t> toWarmBase, toWarmFallback;
-    FontRole fallbackRole = font;
+    // Warm glyphs in the same roles used for measurement and drawing.
+    std::array<std::vector<int32_t>, size_t(FontRole::Count)> toWarm;
     for (int32_t cp : codepoints) {
         if (cp == '\n') continue;
-        if (resources.fontHasGlyph(font, cp))
-            toWarmBase.push_back(cp);
-        else {
-            fallbackRole = FontResolver::fallbackFontFor(cp, font);
-            toWarmFallback.push_back(cp);
-        }
+        const auto glyphFont = resources.fontHasGlyph(font, cp)
+                                   ? font
+                                   : FontResolver::fallbackFontFor(cp, font);
+        toWarm[size_t(glyphFont)].push_back(cp);
     }
-    resources.warmupGlyphs(font, size, toWarmBase);
-    if (!toWarmFallback.empty())
-        resources.warmupGlyphs(fallbackRole, size, toWarmFallback);
+    for (size_t i = 0; i < toWarm.size(); ++i)
+        if (!toWarm[i].empty())
+            resources.warmupGlyphs(FontRole(i), size, toWarm[i]);
 
-    auto getFontFor = [&](int32_t cp) -> FontRole {
-        return resources.fontHasGlyph(font, cp) ? font : fallbackRole;
-    };
-    auto getGlyphFor = [&](int32_t cp) -> const Glyph * {
-        return resources.getGlyph(getFontFor(cp), size, cp);
+    auto getGlyphFor = [&](int32_t cp) {
+        return textGlyph(font, size, cp).first;
     };
 
     int rawLineIndex = 0;
@@ -432,13 +426,6 @@ std::vector<Line> Renderer::wrapText(const std::vector<int32_t> &codepoints,
     float currentWidth = 0.f;
 
     auto flushLine = [&](size_t endIdx) {
-        FontRole lineFont = font;
-        for (int32_t cp : current) {
-            if (!resources.fontHasGlyph(font, cp)) {
-                lineFont = fallbackRole;
-                break;
-            }
-        }
         float pen = 0.f;
         float minX = std::numeric_limits<float>::max();
         float maxX = std::numeric_limits<float>::lowest();
@@ -462,8 +449,8 @@ std::vector<Line> Renderer::wrapText(const std::vector<int32_t> &codepoints,
             maxX = 0.f;
         }
 
-        lines.push_back({current, currentStart, endIdx, lineFont, rawLineIndex,
-                         minX, maxX});
+        lines.push_back(
+            {current, currentStart, endIdx, rawLineIndex, minX, maxX});
         current.clear();
         currentStart = endIdx;
     };
@@ -539,7 +526,7 @@ float Renderer::measureTextWidth(const std::vector<int32_t> &codepoints,
     float width = 0.f;
     for (int32_t cp : codepoints) {
         if (cp == '\n') break;
-        const Glyph *g = resources.getGlyph(font, size, cp);
+        const Glyph *g = textGlyph(font, size, cp).first;
         if (g) width += g->advance;
     }
     return width;

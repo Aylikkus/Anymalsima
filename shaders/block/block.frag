@@ -1,4 +1,4 @@
-$input v_position, v_normal, v_layer, v_light, v_color0, v_cover
+$input v_position, v_normal, v_layer, v_light, v_color0, v_cover, v_owner
 
 #include <bgfx_shader.sh>
 SAMPLER2DARRAY(u_texture_array, 0);
@@ -40,35 +40,45 @@ vec2 sampleLight(vec3 local)
 
 // Paints the ground-cover overlay (docs/handoff/flora.md, world_surface.sh)
 // over a face's soil albedo and normal; side faces get a fringe.
-void applyCover(vec3 position, vec3 lightCell, vec2 cover, vec3 coverTint,
-                vec3 geometric, inout vec3 color, inout vec3 normal)
+void applyCover(vec3 position, vec3 lightCell, vec4 owner, vec2 cover,
+                vec3 coverTint, vec3 geometric, inout vec3 color,
+                inout vec3 normal)
 {
     // Density lives in the covered tile's cell: step back from the lit air
     // cell, and use the cell centre vertically (bilinear across tiles only
     // along the face). The small offset keeps the quads' seam overlap at a
     // side face's top edge in the tile below it.
-    vec3 cell = lightCell - geometric;
-    float tileY = floor(position.y - 0.5 * geometric.y - 0.003);
-    cell.y = floor(cell.y - 0.003) + 0.5;
+    bool explicitOwner = owner.w >= 0.0;
+    vec3 cell = explicitOwner ? owner.xyz : lightCell - geometric;
+    if (!explicitOwner)
+        cell.y = floor(cell.y - 0.003) + 0.5;
     float density = u_light_chunk.w > 0.5
         ? texture3D(u_cover_volume, (clamp(cell, vec3_splat(LIGHT_MIN),
                                            vec3_splat(LIGHT_MAX))
                                      + u_light_slot.xyz) * LIGHT_PAGE_INV).r
         : 0.0;
     float layer = floor(cover.x + 0.5);
-    vec4 overlay = surfaceTexture(position, geometric, layer);
+    // Project the top coat from above so its pattern joins across a
+    // junction crease. The geometric normal still drives its shading.
+    bool top = geometric.y > 0.0;
+    vec4 overlay = surfaceTexture(
+        position, top ? vec3(0.0, 1.0, 0.0) : geometric, layer);
     float coverage;
-    if (geometric.y > 0.5) {
+    if (top) {
         coverage = surfaceCoverTop(density, overlay.a);
     } else {
         float maxFringe = floor(cover.y / 1000.0);
         float minFringe = (cover.y - maxFringe * 1000.0) / 100.0;
         maxFringe /= 100.0;
-        vec3 tile = vec3(floor(position.x - 0.5 * geometric.x), tileY,
-                         floor(position.z - 0.5 * geometric.z));
+        float tileY = floor(position.y - 0.5 * geometric.y - 0.003);
+        vec3 tile = explicitOwner
+            ? owner.xyz - 0.5 + u_light_chunk.xyz
+            : vec3(floor(position.x - 0.5 * geometric.x), tileY,
+                   floor(position.z - 0.5 * geometric.z));
         float fringe = mix(minFringe, maxFringe, surfaceCoverHash(tile));
+        float depth = explicitOwner ? owner.w : tileY + 1.0 - position.y;
         coverage = surfaceCoverSide(density, overlay.a, fringe,
-                                    tileY + 1.0 - position.y);
+                                    depth);
     }
     surfaceApplyCover(position, geometric, layer, overlay, coverage,
                       coverTint, color, normal);
@@ -94,7 +104,7 @@ void main()
         // Without cover the vertex colour is a plain multiplier; with
         // cover it is the cover tint.
         if (v_cover.x > -0.5)
-            applyCover(v_position, v_light, v_cover, v_color0.rgb,
+            applyCover(v_position, v_light, v_owner, v_cover, v_color0.rgb,
                        geometric, color, normal);
         else
             color *= v_color0.rgb;

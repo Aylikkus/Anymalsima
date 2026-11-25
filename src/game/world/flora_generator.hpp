@@ -19,6 +19,7 @@ struct FloraSpeciesRule {
     bool large = false;
     bool blocksPlacement = false;
     int footprintX = 1, footprintZ = 1;
+    float radius = 0;   // maximum ground radius of a small plant
     float spacing = 0;  // extra clearance around a large footprint, tiles
     int priority = 0;
     bool persistentSites = false;  // placed with the epoch-free seed
@@ -125,6 +126,13 @@ inline FloraVolume floraVolume(const FloraInstance& p, const ChunkCoord& c,
             int(c.y) * Chunk::SIZE_Y + p.y,
             r.heightTiles};
 }
+
+// Small plants use the height at their anchor. A wall must fit the plant's
+// ground radius across its occupied strip. Tile footprints require level,
+// full-cell landings, so they use cube support throughout.
+std::optional<float> floraSupportHeight(const FloraSpeciesRule& rule,
+                                        const ShapedTile& cell, float x,
+                                        float z);
 
 // The ground a plant would grow on.
 struct FloraSite {

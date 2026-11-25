@@ -73,7 +73,7 @@ void WorldEditor::forPlantsNear(int64_t x, int y, int64_t z, F&& fn) {
                     auto volume = floraVolume(p, coord, *rule);
                     // Compare in the edited tile's frame across the X seam.
                     volume.minX = x + wrap.deltaTile(volume.minX, x);
-                    fn(coord, i, volume, *rule);
+                    fn(coord, i, p, volume, *rule);
                 }
             }
         }
@@ -90,17 +90,17 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         return EditStatus::InvalidBlock;
     if (placing && request.mode == EditMode::Place) {
         bool blocked = false;
-        forPlantsNear(x, y, z,
-                      [&](const ChunkCoord& coord, size_t index,
-                          const FloraVolume& v, const FloraSpeciesRule& r) {
-                          if (!r.blocksPlacement || !v.contains(x, y, z))
-                              return;
-                          const auto removed = pending.plants.find(coord);
-                          blocked |= removed == pending.plants.end() ||
-                                     std::find(removed->second.begin(),
-                                               removed->second.end(),
-                                               index) == removed->second.end();
-                      });
+        forPlantsNear(
+            x, y, z,
+            [&](const ChunkCoord& coord, size_t index, const FloraInstance&,
+                const FloraVolume& v, const FloraSpeciesRule& r) {
+                if (!r.blocksPlacement || !v.contains(x, y, z)) return;
+                const auto removed = pending.plants.find(coord);
+                blocked |=
+                    removed == pending.plants.end() ||
+                    std::find(removed->second.begin(), removed->second.end(),
+                              index) == removed->second.end();
+            });
         if (blocked) return EditStatus::Blocked;
     }
 
@@ -196,16 +196,19 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     if (status != EditStatus::Applied) return status;
 
     pending.modified.insert(coord);
-    // Plants in the way of a new block, or standing on a removed one.
-    forPlantsNear(x, y, z,
-                  [&](const ChunkCoord& c, size_t i, const FloraVolume& v,
-                      const FloraSpeciesRule&) {
-                      if ((change.after.isSolid() && v.contains(x, y, z)) ||
-                          ((!change.after.isSolid() ||
-                            change.beforeShape != change.afterShape) &&
-                           v.supportedBy(x, y, z)))
-                          pending.plants[c].push_back(i);
-                  });
+    // A shape change can move an anchor without destroying the plant.
+    forPlantsNear(
+        x, y, z,
+        [&](const ChunkCoord& c, size_t i, const FloraInstance& p,
+            const FloraVolume& v, const FloraSpeciesRule& rule) {
+            const bool lostSupport =
+                v.supportedBy(x, y, z) &&
+                !floraSupportHeight(rule, {change.after, change.afterShape},
+                                    p.localX() - p.tileX(),
+                                    p.localZ() - p.tileZ());
+            if (lostSupport || (change.after.isSolid() && v.contains(x, y, z)))
+                pending.plants[c].push_back(i);
+        });
     // Face visibility of the six neighbors depends on this tile.
     auto neighbor = [&](int local, int size, int axis) {
         int delta = local == 0 ? -1 : (local == size - 1 ? 1 : 0);

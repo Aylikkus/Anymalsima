@@ -66,6 +66,7 @@ int main(int argc, char** argv) {
     // glare), then the same lamps from 350 tiles away and high above (far
     // light on distant terrain and glare).
     const bool lights = scenario == "lights";
+    const bool shapes = scenario == "shapes";
     // Allow forest captures (including handover) to exercise sky shading
     // independently of the lamp and shadow phases of the lights scenario.
     const bool forestLighting =
@@ -73,8 +74,8 @@ int main(int argc, char** argv) {
     const bool occlusion = forestLighting && !std::getenv("SMOKE_NO_OCCLUSION");
     const bool handover = scenario == "handover" || walking || structure ||
                           seams || wrapScene || lights || riverScene ||
-                          savedScene;
-    const bool useVolumes = forestLighting || riverScene;
+                          savedScene || shapes;
+    const bool useVolumes = forestLighting || riverScene || shapes;
     const bool travel = scenario == "travel" || walking;
     {
         ResourceManager assets;
@@ -295,6 +296,10 @@ int main(int argc, char** argv) {
                 camera = {{6144, 700, 6144}, .7f, -.55f, 40};
         }
         SurfaceSampler surface(world, assets);
+        // The shape scene straddles the X face of a voxel chunk.
+        constexpr int ShapeX = 6144, ShapeZ = 6148;
+        int shapeY = 0;
+        bool shapesPlaced = false;
         if (seams) {
             // Dry land as far from the origin as the scene allows.
             int x = surface.width() - 1500;
@@ -331,6 +336,14 @@ int main(int argc, char** argv) {
         if (savedCamera)
             camera = {savedCamera->position, savedCamera->yaw,
                       savedCamera->pitch, savedCamera->distance};
+        if (shapes) {
+            for (int dz = -2; dz <= 2; ++dz)
+                for (int dx = -4; dx <= 3; ++dx)
+                    shapeY = std::max(shapeY,
+                                      surface.height(ShapeX + dx, ShapeZ + dz));
+            shapeY += 3;
+            camera = {{ShapeX, float(shapeY) + .5f, ShapeZ}, -.24f, -.49f, 10};
+        }
         // SMOKE_CAMERA="x z yaw pitch distance above": look at (x, z) from
         // `above` tiles over its surface (close-ups of plants and cover).
         if (const char* override = std::getenv("SMOKE_CAMERA")) {
@@ -542,6 +555,37 @@ int main(int argc, char** argv) {
                                      unsigned(y), unsigned(z)});
                     const auto requestEnd = SmokeClock::now();
                     chunks.update();
+                    if (shapes && !shapesPlaced &&
+                        chunks.tileAt(ShapeX - 4, shapeY, ShapeZ) &&
+                        chunks.tileAt(ShapeX + 3, shapeY, ShapeZ)) {
+                        const auto soil = assets.getStorage<Block>()
+                                              .get("blocks.loam_topsoil")
+                                              .id;
+                        const auto grass =
+                            assets.getStorage<GroundCover>()
+                                .get("ground_covers.meadow_grass")
+                                .id;
+                        for (int dx = -4; dx <= 3; ++dx) {
+                            const int x = ShapeX + dx;
+                            const auto profile =
+                                dx == -4 ? TileShapeProfile::OuterCorner
+                                         : TileShapeProfile::Ramp;
+                            if (editor.setBlock({x, shapeY, ShapeZ}, soil,
+                                                TileShape::make(profile)) !=
+                                EditStatus::Applied)
+                                result = 1;
+                            if (dx >= 0) continue;  // bare east of the seam
+                            const ChunkCoord owner{unsigned(x / 16),
+                                                   unsigned(shapeY / 16),
+                                                   unsigned(ShapeZ / 16)};
+                            chunks.withChunkLocked(owner, [&](Chunk& chunk) {
+                                chunk.tiles[ShapeZ % 16][shapeY % 16][x % 16]
+                                    .setCover(grass, 15);
+                            });
+                            chunks.markModified(owner);
+                        }
+                        shapesPlaced = true;
+                    }
                     const auto chunkUpdateEnd = SmokeClock::now();
                     skyMap.setFocus(camera.position);
                     skyMap.update();
@@ -1966,6 +2010,7 @@ int main(int argc, char** argv) {
                 (phase < 3 || settled < 10 || !capturedTransition))
                 result = 1;
             if (lights && (phase < 8 || settled < 10)) result = 1;
+            if (shapes && (!shapesPlaced || settled < 10)) result = 1;
             if (travel && (phase < 2 || settled < 10)) result = 1;
             if (structure &&
                 (phase < 2 || edits.size() == 0 || lod.structureCount() == 0))

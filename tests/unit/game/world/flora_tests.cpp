@@ -438,6 +438,74 @@ TEST(flora_edits) {
     CHECK(removed >= 1);
 }
 
+TEST(flora_shaped_support) {
+    FloraStream f;
+    const auto coord = f.load(17, 18);
+    auto layer = std::make_shared<FloraLayer>();
+    layer->resolvedDay = 20;
+    const auto& table = f.chunks->floraSpecies();
+    const auto small =
+        std::find_if(table.species().begin(), table.species().end(),
+                     [](const auto& rule) { return !rule.large; });
+    CHECK(small != table.species().end());
+    // Quantized anchor at (0.53125, 0.28125) inside this tile.
+    FloraInstance plant{.species = small->id, .x = 120, .z = 116, .y = 7};
+    const TilePos at{int(coord.x) * 16 + plant.tileX(),
+                     int(coord.y) * 16 + plant.y,
+                     int(coord.z) * 16 + plant.tileZ()};
+    const auto slab = TileShape::make(TileShapeProfile::Slab);
+    const auto ramp = TileShape::make(TileShapeProfile::RampThirdLow);
+    const auto wall = TileShape::make(TileShapeProfile::Wall10);
+    const Tile solid{.block_id = 1, .lightLevel = {}};
+    auto rule = *small;
+    rule.maxSlope = .5f;
+    CHECK(floraSupportHeight(rule, {solid, ramp}, .53125f, .28125f) ==
+          .28125f / 3);
+    CHECK(floraSupportHeight(rule, {solid, ramp.rotated(2)}, .53125f,
+                             .28125f) == .71875f / 3);
+    rule.maxSlope = .1f;
+    CHECK(!floraSupportHeight(rule, {solid, ramp}, .53125f, .28125f));
+    rule.radius = .06f;
+    CHECK(!floraSupportHeight(rule, {solid, wall}, .5f, .95f));
+    rule.radius = .04f;
+    CHECK(floraSupportHeight(rule, {solid, wall}, .5f, .95f) == 1);
+    rule.large = true;
+    CHECK(!floraSupportHeight(rule, {solid, slab}, .5f, .5f));
+
+    WorldEditor editor(*f.chunks, nullptr, f.assets.getStorage<Block>());
+    CHECK(editor.setBlock(at, 1, slab) == EditStatus::Applied);
+    layer->instances.push_back(plant);
+    f.chunks->setFlora(coord, layer);
+    CHECK(f.chunks->floraAnchorHeight(coord, plant, *small) == .5f);
+    CHECK(editor.setBlock(at, 1) == EditStatus::Applied);
+    CHECK(f.chunks->floraAnchorHeight(coord, plant, *small) == 1.f);
+    CHECK(f.chunks->flora(coord)->instances == layer->instances);
+    // The wall supports nothing at this anchor after rotation.
+    CHECK(editor.setBlock(at, 1, wall.rotated(1)) == EditStatus::Applied);
+    CHECK(!f.chunks->flora(coord));
+
+    // A saved layer can outlive an edit to its support. Validate even on
+    // the same simulation day, and keep plants with valid shaped anchors.
+    CHECK(editor.setBlock({at.x + 1, at.y, at.z}, 1, slab) ==
+          EditStatus::Applied);
+    auto supported = plant;
+    supported.x += 16;
+    layer->instances.push_back(supported);
+    f.chunks->setFlora(coord, layer);
+    const auto saved =
+        region_file::merge(RegionData{}, f.chunks->snapshotRegion({2, 2}));
+    const auto index = RegionData::localIndex(coord);
+    f.prepareSky({coord});
+    FloraSimulation simulation(*f.chunks, f.assets, f.world, *f.skyMap);
+    f.chunks->unregister(coord);
+    f.load(coord.x, coord.z, saved.chunks.at(index), saved.flora.at(index),
+           int(coord.y));
+    simulation.update(20);
+    const auto live = f.chunks->flora(coord);
+    CHECK(live && live->instances == std::vector{supported});
+    CHECK(f.chunks->floraAnchorHeight(coord, supported, *small) == .5f);
+}
+
 TEST(flora_meshes) {
     test::FloraAssets assets;
     test::loadAllContent(assets);

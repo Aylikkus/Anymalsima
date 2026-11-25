@@ -82,7 +82,7 @@ class WorldEditor {
    private:
     struct Pending;
     EditStatus applyOne(const EditRequest& request, Pending& pending);
-    // Calls fn(coord, index, volume, rule) for plants near a tile.
+    // Calls fn(coord, index, plant, volume, rule) for plants near a tile.
     template <typename F>
     void forPlantsNear(int64_t x, int y, int64_t z, F&& fn);
     void commit(Pending& pending);

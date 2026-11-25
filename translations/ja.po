@@ -89,17 +89,17 @@ msgstr ""
 msgid "None"
 msgstr ""
 
-#: src/game/states/gameplay_state.cpp:95
+#: src/game/states/gameplay_state.cpp:152
 msgid "PLACE BLOCK"
-msgstr ""
+msgstr "ブロックを置く"
 
-#: src/game/states/gameplay_state.cpp:96
+#: src/game/states/gameplay_state.cpp:153
 msgid "REMOVE BLOCK"
-msgstr ""
+msgstr "ブロックを除去"
 
-#: src/game/states/gameplay_state.cpp:97
+#: src/game/states/gameplay_state.cpp:154
 msgid "PLACE LIGHT"
-msgstr ""
+msgstr "照明を置く"
 
 #: src/game/states/load_world_state.cpp:61
 #, c++-format
@@ -430,3 +430,111 @@ msgstr ""
 #, c++-format
 #~ msgid "Text Scale {:.0f}%"
 #~ msgstr "テキストサイズ{:.0f}%"
+
+#: src/game/states/gameplay_state.cpp:19
+msgid "Straight"
+msgstr "直線"
+
+#: src/game/states/gameplay_state.cpp:19
+msgid "Outer corner"
+msgstr "外角"
+
+#: src/game/states/gameplay_state.cpp:20
+msgid "Inner corner"
+msgstr "内角"
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Cube"
+msgstr "立方体"
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Slab"
+msgstr "ハーフブロック"
+
+#: src/game/states/gameplay_state.cpp:32
+msgid "Ramp"
+msgstr "坂"
+
+#: src/game/states/gameplay_state.cpp:33
+msgid "Wall"
+msgstr "壁"
+
+#: src/game/states/gameplay_state.cpp:43
+#, c++-format
+msgid "Wall, {0} cm, {1}"
+msgstr "壁、厚さ{0} cm、{1}"
+
+#: src/game/states/gameplay_state.cpp:52
+#, c++-format
+msgid "{0} ramp, {1} m, piece {2}, {3}"
+msgstr "{0}の坂、{1} m、区間{2}、{3}"
+
+#: src/game/states/gameplay_state.cpp:134
+#: src/game/states/gameplay_state.cpp:932
+msgid "No tile"
+msgstr "ブロックなし"
+
+#: src/game/states/gameplay_state.cpp:165
+msgid "HARVEST"
+msgstr "収穫"
+
+#: src/game/states/gameplay_state.cpp:233
+#: src/game/states/gameplay_state.cpp:748
+msgid "Walk mode"
+msgstr "歩行モード"
+
+#: src/game/states/gameplay_state.cpp:727
+#, c++-format
+msgid "Shape: {}"
+msgstr "形状：{}"
+
+#: src/game/states/gameplay_state.cpp:730
+#, c++-format
+msgid "Rotate: {}"
+msgstr "回転：{}"
+
+#: src/game/states/gameplay_state.cpp:731
+#, c++-format
+msgid "Thickness: {} cm"
+msgstr "厚さ：{} cm"
+
+#: src/game/states/gameplay_state.cpp:734
+#, c++-format
+msgid "Form: {}"
+msgstr "坂の種類：{}"
+
+#: src/game/states/gameplay_state.cpp:735
+#, c++-format
+msgid "Run: {} m"
+msgstr "長さ：{} m"
+
+#: src/game/states/gameplay_state.cpp:737
+#, c++-format
+msgid "Piece: {0}/{1}"
+msgstr "区間：{0}/{1}"
+
+#: src/game/states/gameplay_state.cpp:755
+msgid "No walkable ground"
+msgstr "歩ける足場がありません"
+
+#: src/game/states/gameplay_state.cpp:763
+msgid "Orbit camera"
+msgstr "俯瞰カメラ"
+
+#: src/game/states/gameplay_state.cpp:916
+msgid "Walking: WASD, Shift to run"
+msgstr "移動：WASD、走る：Shift"
+
+#: src/game/states/gameplay_state.cpp:917
+msgid "Falling"
+msgstr "落下中"
+
+#: src/game/states/gameplay_state.cpp:920
+#, c++-format
+msgid "Placing: {}\n"
+msgstr "設置する形状：{}\n"
+
+#: src/game/states/gameplay_state.cpp:954
+#, c++-format
+msgid "Picked shape: {}\n"
+msgstr "選択中の形状：{}\n"

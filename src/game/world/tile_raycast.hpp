@@ -1,114 +1,101 @@
 #pragma once
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 #include <optional>
 
 #include "chunk_manager.hpp"
 
-// ---------------------------------------------------------------------------
-// Result of a tile raycast hit.
-// ---------------------------------------------------------------------------
 struct TileRaycastHit {
-    // World-tile coordinates of the hit tile.
-    int tx, ty, tz;  // tz = height axis (matches tileAt's second param)
-
-    // A copy of the tile data at the hit position.
+    int tx, ty, tz;  // canonical tile coordinates, Y up
     Tile tile;
-
-    // Outward normal of the face the ray entered through; the adjacent
-    // tile (tx + nx, ty + ny, tz + nz) is where a block is placed against
-    // this one. All zero when the ray started inside the hit tile.
-    int nx = 0, ny = 0, nz = 0;
+    TileShape shape;
+    float distance;
+    Vec3 position;  // world-space position in the ray's copy of the world
+    Vec3 normal;    // geometric outward normal, zero for an inside hit
+    TilePos placementOffset;
 };
 
-// ---------------------------------------------------------------------------
-// Cast a ray from (origin) in direction (dir) through the chunk world,
-// stepping tile-by-tile (DDA) up to maxDistance tiles.
-//
-// Coordinate convention matches ChunkManager::tileAt(tx, ty, tz):
-//   tx = world X tile,  ty = world height tile,  tz = world Y tile
-//
-// Returns the first non-air tile hit, or std::nullopt if nothing was found.
-// With hitLiquids = false the ray passes through liquid tiles and stops only
-// at solid blocks (used for block editing).
-// ---------------------------------------------------------------------------
-inline std::optional<TileRaycastHit> castTileRay(
-    ChunkManager& chunks, float originX, float originY,
-    float originZ,                       // world-space position
-    float dirX, float dirY, float dirZ,  // unit direction vector
-    float maxDistance = 64.0f, bool hitLiquids = true) {
-    // Current tile position (integer).
-    int tx = (int)std::floor(originX);
-    int ty = (int)std::floor(originY);  // height
-    int tz = (int)std::floor(originZ);
-
-    // Direction signs.
-    int stepX = dirX >= 0 ? 1 : -1;
-    int stepY = dirY >= 0 ? 1 : -1;
-    int stepZ = dirZ >= 0 ? 1 : -1;
-
-    // tMax: distance along the ray to the first tile boundary in each axis.
-    // tDelta: distance to cross one full tile in each axis.
-    auto calcTMax = [](float origin, float dir, int step) -> float {
-        if (std::abs(dir) < 1e-9f) return 1e30f;
-        float boundary = (float)(step > 0 ? (int)std::floor(origin) + 1
-                                          : (int)std::floor(origin));
-        return (boundary - origin) / dir;
-    };
-    auto calcTDelta = [](float dir) -> float {
-        return std::abs(dir) < 1e-9f ? 1e30f : std::abs(1.0f / dir);
-    };
-
-    float tMaxX = calcTMax(originX, dirX, stepX);
-    float tMaxY = calcTMax(originY, dirY, stepY);
-    float tMaxZ = calcTMax(originZ, dirZ, stepZ);
-    float tDeltaX = calcTDelta(dirX);
-    float tDeltaY = calcTDelta(dirY);
-    float tDeltaZ = calcTDelta(dirZ);
-
-    float tCurrent = 0.0f;
-    int nx = 0, ny = 0, nz = 0;
-
-    while (tCurrent < maxDistance) {
-        // Check current tile.
-        const Tile* tile = chunks.tileAt(tx, ty, tz);
-        if (tile && (hitLiquids ? !tile->isAir() : tile->isSolid())) {
-            // Report canonical X: the ray may have crossed the seam.
-            return TileRaycastHit{
-                int(chunks.wrap().wrapTile(tx)), ty, tz, *tile, nx, ny, nz};
-        }
-
-        // Advance to the nearest tile boundary.
-        nx = ny = nz = 0;
-        if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-            tCurrent = tMaxX;
-            tMaxX += tDeltaX;
-            tx += stepX;
-            nx = -stepX;
-        } else if (tMaxY < tMaxZ) {
-            tCurrent = tMaxY;
-            tMaxY += tDeltaY;
-            ty += stepY;
-            ny = -stepY;
-        } else {
-            tCurrent = tMaxZ;
-            tMaxZ += tDeltaZ;
-            tz += stepZ;
-            nz = -stepZ;
-        }
+// The direction is unit length. Liquid-only cells retain whole-cell picking.
+// Grid ties visit Z, Y, then X, as in the original traversal. Within a shaped
+// cell the geometry's canonical plane order breaks ties.
+inline std::optional<TileRaycastHit> castTileRay(ChunkManager& chunks,
+                                                 float originX, float originY,
+                                                 float originZ, float dirX,
+                                                 float dirY, float dirZ,
+                                                 float maxDistance = 64.0f,
+                                                 bool hitLiquids = true) {
+    const std::array<double, 3> origin{originX, originY, originZ};
+    const std::array<double, 3> dir{dirX, dirY, dirZ};
+    const Vec3 direction{dirX, dirY, dirZ};
+    std::array<int, 3> tile{};
+    std::array<int, 3> step{};
+    std::array<double, 3> next{}, stride{};
+    for (size_t axis = 0; axis < tile.size(); ++axis) {
+        tile[axis] = static_cast<int>(std::floor(origin[axis]));
+        step[axis] = dir[axis] >= 0 ? 1 : -1;
+        const int boundary = tile[axis] + (step[axis] > 0);
+        const double infinity = std::numeric_limits<double>::infinity();
+        next[axis] =
+            dir[axis] == 0 ? infinity : (boundary - origin[axis]) / dir[axis];
+        stride[axis] = dir[axis] == 0 ? infinity : std::abs(1 / dir[axis]);
     }
 
-    return std::nullopt;
-}
+    double entry = 0;
+    std::array<float, 3> enteredFace{};
+    bool first = true;
+    while (entry < maxDistance) {
+        size_t axis = 2;
+        if (next[1] < next[axis]) axis = 1;
+        if (next[0] < next[axis]) axis = 0;
+        const auto cell = chunks.cellAt(tile[0], tile[1], tile[2]);
+        if (cell &&
+            (cell->tile.isSolid() || (hitLiquids && !cell->tile.isAir()))) {
+            const Vec3 gridNormal{enteredFace[0], enteredFace[1],
+                                  enteredFace[2]};
+            std::optional<tile_geometry::RayHit> hit{
+                tile_geometry::RayHit{0, gridNormal}};
+            if (cell->shape != TileShape{}) {
+                auto local = [&](size_t i) {
+                    return static_cast<float>(std::clamp(
+                        origin[i] - tile[i] + dir[i] * entry, 0.0, 1.0));
+                };
+                const Vec3 start{local(0), local(1), local(2)};
+                if (!first || !tile_geometry::contains(cell->shape, start)) {
+                    hit = tile_geometry::intersectRay(
+                        cell->shape, start, direction, 0,
+                        static_cast<float>(
+                            std::min(next[axis], double(maxDistance)) - entry));
+                    if (hit && hit->normal == Vec3{}) hit->normal = gridNormal;
+                }
+            }
+            if (hit && entry + hit->t < maxDistance) {
+                const double t = entry + hit->t;
+                const auto n = hit->normal;
+                const TilePos offset = n.y != 0
+                                           ? TilePos{0, n.y > 0 ? 1 : -1, 0}
+                                           : TilePos{int(n.x), 0, int(n.z)};
+                return TileRaycastHit{int(chunks.wrap().wrapTile(tile[0])),
+                                      tile[1],
+                                      tile[2],
+                                      cell->tile,
+                                      cell->shape,
+                                      static_cast<float>(t),
+                                      {float(origin[0] + dir[0] * t),
+                                       float(origin[1] + dir[1] * t),
+                                       float(origin[2] + dir[2] * t)},
+                                      n,
+                                      offset};
+            }
+        }
 
-// ---------------------------------------------------------------------------
-// Build a direction vector from camera yaw and pitch.
-// Matches the movement math already in gameplay_state.cpp:
-//   flatFwdX = sin(yaw),  flatFwdZ = cos(yaw),  vertical = pitch
-// ---------------------------------------------------------------------------
-inline void cameraDirection(float yaw, float pitch, float& outX, float& outY,
-                            float& outZ) {
-    float cosPitch = std::cos(pitch);
-    outX = std::sin(yaw) * cosPitch;
-    outY = std::sin(pitch);
-    outZ = std::cos(yaw) * cosPitch;
+        first = false;
+        entry = next[axis];
+        next[axis] += stride[axis];
+        tile[axis] += step[axis];
+        enteredFace = {};
+        enteredFace[axis] = static_cast<float>(-step[axis]);
+    }
+    return std::nullopt;
 }

@@ -10,6 +10,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_shape.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/grounded_probe.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
@@ -65,6 +66,7 @@ target_link_libraries(world_logic_cpu PUBLIC
 add_executable(world_logic_tests
     support/test_main.cpp
     unit/game/world/tile_shape_tests.cpp
+    unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
     unit/game/world/hydrology_tests.cpp
     unit/game/world/soil_tests.cpp
@@ -138,6 +140,13 @@ set(world_cases
     ray_liquid_hit
     ray_chunk_seam
     ray_negative_direction
+    ray_shape_volume
+    ray_shape_placement
+    ray_shape_junction_facets
+    probe_ramp_runs
+    probe_corner_approaches
+    probe_obstacles_and_gap
+    probe_and_ray_chunk_seams
     camera_direction
     mesh_empty
     mesh_isolated_block
@@ -146,6 +155,8 @@ set(world_cases
     mesh_material_light
     mesh_merges_across_light
     mesh_winding
+    mesh_shape_surfaces
+    mesh_shape_chunk_interfaces
     mesh_skips_hidden_chunks
     mesh_local_positions_overlap
     mesh_river_step_edges
@@ -374,6 +385,7 @@ foreach(case tree_skeleton_deterministic tree_sizes_follow_species
         LABELS "unit;gameplay;world;flora;trees" TIMEOUT 30)
 endforeach()
 foreach(case cover_generation_surface_only cover_wraps_seam cover_mesh_faces
+             cover_shape_surfaces
              cover_volume_dilation cover_cleared_by_edits
              cover_lod_matches_detail cover_tint_packing)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
@@ -381,7 +393,8 @@ foreach(case cover_generation_surface_only cover_wraps_seam cover_mesh_faces
         LABELS "unit;gameplay;world;flora" TIMEOUT 15)
 endforeach()
 foreach(case flora_growth_stages flora_generation_borders
-             flora_generation_wraps_seam flora_edits flora_meshes
+             flora_generation_wraps_seam flora_edits flora_shaped_support
+             flora_meshes
              flora_world_clock flora_life_cycle
              flora_catchup_uses_direct_sky flora_simulation_spread_harvest_regrow
              flora_rare_species
