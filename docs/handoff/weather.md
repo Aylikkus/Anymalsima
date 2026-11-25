@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–05 complete · Step 06 pending.**
+**Steps 01–06 complete · Step 07 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -17,7 +17,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 03 | Sparse compound storage and immutable snapshots | Complete | |
 | 04 | Durable piece edits and save migration | Complete | |
 | 05 | Build, pick, walk on and render compound tiles | Complete | A · Construction |
-| 06 | Gravity settlement at slopes and ledges | Pending | |
+| 06 | Gravity settlement at slopes and ledges | Complete | |
 | 07 | Visible dusting, toe fill and snow collision | Pending | B · Five-centimetre ramp |
 | 08 | Calendar and seasonal ambient temperature | Pending | |
 | 09 | Regional weather, presentation and inspection | Pending | C · Weather and seasons |
@@ -557,3 +557,65 @@ snow geometry with construction materials, place a straight 1 m ramp, select
 5 cm** and **Height 0 cm**. Only a short wedge at the toe should fill. Its top
 is horizontal and the higher ramp stays exposed. In step 06 the landing's
 snow level sets this cap automatically.
+
+### Step 06 · 2026-11-26
+
+[SnowSettlement](../../src/game/world/snow_settlement.hpp) owns volume in
+cubic centimetres per one-square-metre footprint column. A column fills the
+surface-connected free space above its support; the capacity curve comes from
+the actual convex facets through the new
+[CellGeometry](../../src/game/world/tile_piece.hpp) queries
+(`freeVolumeBelow`, `lowestUpwardSupport`, `lowestOpening`). Deposited volume
+enters the column under its lowest upward support. Adjacent columns exchange
+volume over the lowest shared boundary opening: when the combined volume
+exceeds the capacity at that sill the basins merge into one horizontal level;
+otherwise the basin above the sill spills into the receivers below. Equal
+sills split the excess evenly, and the remainder goes to the first footprint
+in discovery order. This produces the exact clipped ramp toe from the landing
+level, drains a steep face to a lower floor, closes a walled toe, fills a
+trough, splits a ridge, and stacks ledges.
+
+`CellGeometry::freeVolumeBelow` clips each convex part with a horizontal plane
+and integrates the closed surface. The 5 cm example on a 45° ramp gives
+0.00125 m³; the adjoining 1 m² landing gives 0.05 m³, so 0.05125 m³ reaches the
+5 cm line. The state carries each column's base cell and volume, pending
+deposits, accepted input and accounted sink volume. It is encoded with the
+engine binary stream (`SNOW` v1) so an over-budget transfer survives an
+eviction or save hand-off. A bounded solve never commits partial results: the
+deposit stays in the pending queue and counts as in transit.
+
+Fixtures are headless one-cell geometry scenes; no seed or save is required.
+The wedge landing is at (0, 10, −1), the ramp at (0, 10, 0), with full stone at
+y=9. The cross-region case uses a two-tile wrap with the ridge at (1, 10, 0)
+and the lower floor at (0, 9, 0). The diagonal-facet case has its low corner
+adjacent to lower floors at (−1, 9, 0) and (0, 9, −1). The pending corridor is
+100 footprints at z=0 with a ten-visit budget. All tests use `Volume` in cm³
+and compare the stored, pending and sink ledger.
+
+```bash
+cmake --build build --target world_logic_tests app --parallel 6
+ctest --test-dir build -R 'snow_settlement|tile_piece_free_volume' \
+  --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang \
+  -R 'snow_settlement|tile_piece_free_volume' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The Release app and logic tests built. All 15 focused cases and all 419
+gameplay cases passed. The same 15 focused cases passed with ASan and UBSan.
+Acceptance ran headlessly; no playcheck is scheduled for this step.
+
+V1 resolves communicating columns at one horizontal level and uses the lowest
+shared opening as the spill sill. The explicit 45° friction threshold is not a
+separate term yet: a steep face is shallow in free volume, so it drains to the
+lowest opening, while a gentler face builds a cell-sized pocket that spills at
+the next sill. This is the tuning choice reserved for playcheck B. Enclosed
+cavities under an overhang stay outside the surface-connected model until
+steps 10 and 15. Z edges are closed; volume above the world top is an
+accounted sink. The settlement has no world save section or debug controls
+yet; step 07 supplies rendering and interaction, and steps 10–11 supply dated
+weather input and unloaded history.

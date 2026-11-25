@@ -165,6 +165,27 @@ void subtractFrom(std::vector<Vertices>& polygons,
     polygons = std::move(result);
 }
 
+// Volume of the convex intersection of outward half-spaces. Each face is
+// oriented away from the interior, so the closed-surface integral gives the
+// enclosed volume independently of the origin.
+double convexVolume(std::span<const Plane> bounds) {
+    if (!hasInterior(bounds)) return 0;
+    std::vector<Vertices> faces;
+    for (auto plane : bounds) {
+        auto polygon = facet(plane, bounds);
+        if (!hasArea(polygon)) continue;
+        if (dot(areaVector(polygon), plane.normal) < 0)
+            std::reverse(polygon.begin(), polygon.end());
+        faces.push_back(std::move(polygon));
+    }
+    double sixTimesVolume = 0;
+    for (const auto& polygon : faces)
+        for (size_t i = 1; i + 1 < polygon.size(); ++i)
+            sixTimesVolume +=
+                dot(polygon[0], cross(polygon[i], polygon[i + 1]));
+    return std::abs(sixTimesVolume) / 6;
+}
+
 bool insideCell(Vec2 xz) {
     return xz.x >= 0 && xz.x <= 1 && xz.y >= 0 && xz.y <= 1;
 }
@@ -430,6 +451,40 @@ std::optional<float> CellGeometry::supportHeight(Vec2 low, Vec2 high,
         }
     }
     return highest;
+}
+
+double CellGeometry::freeVolumeBelow(float level) const {
+    if (!(level > 0)) return 0;
+    level = std::min(level, 1.f);
+    double solid = 0;
+    for (const auto& solidEntry : solids_) {
+        for (const auto& part : solidEntry.parts) {
+            auto clipped = part;
+            addPlane(clipped, {{0, 1, 0}, level});
+            solid += convexVolume(clipped);
+        }
+    }
+    return std::max(0.0, double(level) - solid);
+}
+
+bool CellGeometry::isFull() const { return freeVolumeBelow(1) <= 1e-7; }
+
+std::optional<float> CellGeometry::lowestUpwardSupport() const {
+    std::optional<float> lowest;
+    for (const auto& face : exteriorFaces()) {
+        if (face.plane.normal.y <= Tolerance) continue;
+        for (auto point : face.vertices)
+            if (!lowest || point.y < *lowest) lowest = point.y;
+    }
+    return lowest;
+}
+
+std::optional<float> CellGeometry::lowestOpening(Face face) const {
+    std::optional<float> lowest;
+    for (const auto& polygon : boundaryOpenings(face))
+        for (auto point : polygon)
+            if (!lowest || point.y < *lowest) lowest = point.y;
+    return lowest;
 }
 
 std::optional<PieceRayHit> CellGeometry::intersectRay(Vec3 origin,

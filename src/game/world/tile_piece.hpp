@@ -84,6 +84,15 @@ class CellGeometry {
     // of positive area. Vec2 represents X/Z.
     std::optional<float> supportHeight(Vec2 low, Vec2 high,
                                        float maxHeight = 1) const;
+    // Exact free volume (m3) below a horizontal plane at local height. This
+    // includes enclosed space; callers combine it with vertical connectivity.
+    double freeVolumeBelow(float level) const;
+    // True when the solids cover the cell volume (within floating tolerance).
+    bool isFull() const;
+    // Lowest point of any upward-facing exterior facet, if one exists.
+    std::optional<float> lowestUpwardSupport() const;
+    // Lowest point of any open area on a cell boundary face, if any.
+    std::optional<float> lowestOpening(Face face) const;
     // The first exterior entry, or a zero normal when starting in the solid.
     // Ties between pieces go to the lower ID.
     std::optional<PieceRayHit> intersectRay(

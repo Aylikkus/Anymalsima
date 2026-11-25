@@ -112,6 +112,70 @@ TEST(tile_piece_layers) {
     CHECK((underside->hit.normal == Vec3{0, -1, 0}));
 }
 
+TEST(tile_piece_free_volume) {
+    const auto volumesNear = [](double actual, double expected,
+                                double tolerance) {
+        CHECK(std::abs(actual - expected) <= tolerance);
+    };
+    const CellGeometry empty;
+    volumesNear(empty.freeVolumeBelow(.25f), .25, 1e-9);
+    CHECK(!empty.isFull());
+    CHECK(!empty.lowestUpwardSupport());
+
+    CellGeometry cube;
+    CHECK(cube.tryAdd(TilePiece{1, 2, {}, {}, PieceFill::BelowProfile, 1}) ==
+          PiecePlacement::Added);
+    CHECK(cube.isFull());
+    volumesNear(cube.freeVolumeBelow(1), 0, 1e-9);
+    near(cube.lowestUpwardSupport().value(), 1);
+
+    CellGeometry layer;
+    CHECK(layer.tryAdd(TilePiece::layer(1, 2, LayerThickness::Cm5)) ==
+          PiecePlacement::Added);
+    volumesNear(layer.freeVolumeBelow(.05f), 0, 1e-7);
+    volumesNear(layer.freeVolumeBelow(.1f), .05, 1e-7);
+    near(layer.lowestUpwardSupport().value(), .05f);
+    near(layer.lowestOpening(Face::NegX).value(), .05f);
+
+    CellGeometry ramp;
+    CHECK(ramp.tryAdd(TilePiece{
+              1,
+              2,
+              TileShape::make(TileShapeProfile::Ramp, TileFacing::PosZ),
+              {},
+              PieceFill::BelowProfile,
+              1}) == PiecePlacement::Added);
+    // A 45-degree ramp one metre wide over one metre of run: the 5 cm level
+    // clips a 5 cm long triangular pocket.
+    volumesNear(ramp.freeVolumeBelow(.05f), .00125, 1e-7);
+    volumesNear(ramp.freeVolumeBelow(1.f), .5, 1e-7);
+    near(ramp.lowestUpwardSupport().value(), 0);
+    near(ramp.lowestOpening(Face::NegZ).value(), 0);
+
+    CellGeometry bridge;
+    CHECK(bridge.tryAdd(
+              TilePiece::layer(1, 2, LayerThickness::Cm50, {0, .25f, 0})) ==
+          PiecePlacement::Added);
+    volumesNear(bridge.freeVolumeBelow(.5f), .25, 1e-7);
+    near(bridge.lowestUpwardSupport().value(), .75f);
+    near(bridge.lowestOpening(Face::NegX).value(), 0);
+
+    // The ramp infill used by the builder fills the inverse wedge above the
+    // rock profile up to its cap. Below 5 cm the cell is solid; above it the
+    // free space is the same shape a rising landing level would leave.
+    const auto rampShape =
+        TileShape::make(TileShapeProfile::Ramp, TileFacing::PosZ);
+    CellGeometry infill;
+    CHECK(infill.tryAdd(
+              TilePiece{1, 2, rampShape, {}, PieceFill::BelowProfile, 1}) ==
+          PiecePlacement::Added);
+    CHECK(infill.tryAdd(
+              TilePiece{2, 2, rampShape, {}, PieceFill::AboveProfile, .05f}) ==
+          PiecePlacement::Added);
+    volumesNear(infill.freeVolumeBelow(.05f), 0, 1e-7);
+    volumesNear(infill.freeVolumeBelow(.1f), .00375, 1e-7);
+}
+
 TEST(tile_piece_complementary_profiles) {
     // Exercise low/high and fractional junctions as well as the full ramps.
     for (unsigned profile = 2; profile <= 24; ++profile) {

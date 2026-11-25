@@ -12,6 +12,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_lod.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_shape.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_piece.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/snow_settlement.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/grounded_probe.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
@@ -71,6 +72,7 @@ add_executable(world_logic_tests
     support/test_main.cpp
     unit/game/world/tile_shape_tests.cpp
     unit/game/world/tile_piece_tests.cpp
+    unit/game/world/snow_settlement_tests.cpp
     unit/game/world/chunk_piece_tests.cpp
     unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
@@ -132,6 +134,21 @@ set(world_cases
     tile_piece_complementary_profiles
     tile_piece_wall_and_layer
     tile_piece_clipping_and_rejection
+    tile_piece_free_volume
+    snow_settlement_ramp_wedge
+    snow_settlement_ramp_wedge_incremental
+    snow_settlement_draining_ramp
+    snow_settlement_blocked_toe
+    snow_settlement_equal_outlets
+    snow_settlement_diagonal_ramp_split
+    snow_settlement_opposed_slopes
+    snow_settlement_stacked_ledges
+    snow_settlement_cross_region
+    snow_settlement_bounded_pending
+    snow_settlement_closed_map_edge
+    snow_settlement_top_sink
+    snow_settlement_gentle_slope_pocket
+    snow_settlement_serialization
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision
