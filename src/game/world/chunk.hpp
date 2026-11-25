@@ -7,9 +7,11 @@
 #include <set>
 #include <span>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "chunk_coord.hpp"
 #include "tile.hpp"
 #include "tile_piece.hpp"
 
@@ -38,11 +40,20 @@ struct CellPiece {
     bool operator==(const CellPiece&) const = default;
 };
 
+// Environmental solids projected over a cell (deposited snow and, later,
+// ice). They are owned by their simulation, never by the chunk save, and are
+// combined with the chunk's own pieces for queries and rendering.
+using EnvironmentCell = std::shared_ptr<const tile_geometry::CellGeometry>;
+using ChunkEnvironment = std::map<uint16_t, EnvironmentCell>;
+using EnvironmentMap =
+    std::unordered_map<ChunkCoord, std::shared_ptr<const ChunkEnvironment>>;
+
 // Owns the solid revision even after the live chunk changes or unloads.
 struct SolidCellSnapshot {
     ShapedTile base;
     std::optional<CellPiece> simple{};
     std::shared_ptr<const std::vector<CellPiece>> compound{};
+    EnvironmentCell environment{};
 
     std::span<const CellPiece> pieces() const& {
         if (compound) return *compound;
@@ -51,9 +62,16 @@ struct SolidCellSnapshot {
     }
     std::span<const CellPiece> pieces() const&& = delete;
 
+    bool hasEnvironment() const { return bool(environment); }
+    bool hasSolid() const { return base.tile.isSolid() || environment; }
+    bool usesGeometry() const {
+        return bool(compound) || bool(environment) || base.shape != TileShape{};
+    }
+
     tile_geometry::CellGeometry geometry() const {
         tile_geometry::CellGeometry result;
         for (const auto& piece : pieces()) result.tryAdd(piece.geometry);
+        if (environment) result.append(*environment);
         return result;
     }
 };

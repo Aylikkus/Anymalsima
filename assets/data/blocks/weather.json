@@ -1,0 +1,12 @@
+[
+    {
+        "name": "blocks.snow",
+        "material": "materials.snow",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 0,
+            "flammable": false,
+            "opacity": 15
+        }
+    }
+]

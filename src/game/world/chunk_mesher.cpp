@@ -23,17 +23,30 @@ SolidCellSnapshot ChunkMeshSnapshot::solidCellAt(uint16_t index) const {
     const auto base = chunk->cellAt(index % Chunk::SIZE_X,
                                     (index / Chunk::SIZE_X) % Chunk::SIZE_Y,
                                     index / (Chunk::SIZE_X * Chunk::SIZE_Y));
-    return chunk->solidCellAt(
+    auto result = chunk->solidCellAt(
         index, legacyOrigin(index, base, structures.get(), grown));
+    if (environment) {
+        const auto found = environment->find(index);
+        if (found != environment->end()) result.environment = found->second;
+    }
+    return result;
 }
 
 std::optional<SolidCellSnapshot> ChunkMesher::Neighbour::solidCell() const {
     if (snapshot) return snapshot->solidCellAt(index);
-    if (chunk) return chunk->solidCellAt(index);
+    if (chunk) {
+        auto result = chunk->solidCellAt(index);
+        result.environment = environment;
+        return result;
+    }
     if (!tile) return std::nullopt;
-    if (!tile->isSolid()) return SolidCellSnapshot{{*tile, shape}};
-    return SolidCellSnapshot{{*tile, shape},
-                             CellPiece{{0, tile->block_id, shape}, {}}};
+    if (!tile->isSolid() && !environment)
+        return SolidCellSnapshot{{*tile, shape}};
+    SolidCellSnapshot result{{*tile, shape}};
+    result.environment = environment;
+    if (tile->isSolid())
+        result.simple = CellPiece{{0, tile->block_id, shape}, {}};
+    return result;
 }
 
 namespace {
@@ -314,7 +327,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                              const NeighbourFn& neighbour,
                              const CoverClimate& climate,
                              const WaterHaloFn& generatedWaterHalo,
-                             const WaterColumnFn& waterColumn) const {
+                             const WaterColumnFn& waterColumn,
+                             const ChunkEnvironment* environment) const {
     ChunkMesh mesh;
 
     // World-space origin of this chunk (tile units).
@@ -352,11 +366,18 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
     const auto localShape = [&](int x, int y, int z) {
         return hasShapes ? shapeGrid[Chunk::cell(x, y, z)] : TileShape{};
     };
+    const auto localEnvironment = [&](uint16_t index) -> EnvironmentCell {
+        if (!environment) return {};
+        const auto found = environment->find(index);
+        return found == environment->end() ? EnvironmentCell{} : found->second;
+    };
     const auto getNeighbour = [&](int x, int y, int z) -> Neighbour {
         // inside current chunk
         if ((unsigned)x < W && (unsigned)y < H && (unsigned)z < D) {
-            if (hasCompounds && chunk.hasCompoundAt(Chunk::cell(x, y, z)))
-                return {chunk, x, y, z};
+            const auto index = Chunk::cell(x, y, z);
+            const auto env = localEnvironment(index);
+            if (env || (hasCompounds && chunk.hasCompoundAt(index)))
+                return {chunk, x, y, z, env};
             return {&chunk.tiles[z][y][x], localShape(x, y, z)};
         }
 
@@ -389,7 +410,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                                   TileShape shape, const FaceKey& key) {
         if (!neighbour.tile) return;
         const auto normal = tile_geometry::boundaryFace({}, face)->plane.normal;
-        if (!neighbour.tile->isSolid()) {
+        if (!neighbour.hasSolid()) {
             emitPolygon(mesh, polygon, normal, false, cell, shape, key,
                         climate);
             return;
@@ -410,39 +431,53 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         climate);
         }
     };
+    std::vector<uint16_t> compoundCells;
     if (hasCompounds)
-        chunk.forEachPieceCell([&](uint16_t index,
-                                   const SolidCellSnapshot& solid) {
-            if (!solid.compound) return;
-            const int x = index % W, y = (index / W) % H;
-            const int z = index / (W * H);
-            const Vec3 cell{float(x), float(y), float(z)};
-            const auto& first = solid.pieces().front().geometry;
-            const auto legacy = first.legacyShape();
-            for (const auto& polygon : solid.geometry().exteriorFaces()) {
-                const auto normal = polygon.plane.normal;
-                const auto& block = blocks.get(polygon.blockId);
-                const bool covered = legacy && polygon.id == first.id;
-                const auto key =
-                    keyFor(covered ? solid.base.tile : Tile{}, block, normal.y);
-                const auto shape = covered ? *legacy : TileShape{};
-                if (const auto face =
-                        tile_geometry::boundaryFace(polygon.plane))
-                    emitBoundary(
-                        polygon.vertices, *face,
-                        getNeighbour(x + int(normal.x), y + int(normal.y),
-                                     z + int(normal.z)),
-                        cell, shape, key);
-                else
-                    emitPolygon(mesh, polygon.vertices, normal, true, cell,
-                                shape, key, climate);
-            }
-        });
+        chunk.forEachPieceCell(
+            [&](uint16_t index, const SolidCellSnapshot& solid) {
+                if (solid.compound) compoundCells.push_back(index);
+            });
+    if (environment)
+        for (const auto& [index, geometry] : *environment) {
+            (void)geometry;
+            compoundCells.push_back(index);
+        }
+    std::sort(compoundCells.begin(), compoundCells.end());
+    compoundCells.erase(std::unique(compoundCells.begin(), compoundCells.end()),
+                        compoundCells.end());
+    for (const uint16_t index : compoundCells) {
+        const int x = index % W, y = (index / W) % H;
+        const int z = index / (W * H);
+        auto solid = chunk.solidCellAt(index);
+        solid.environment = localEnvironment(index);
+        if (solid.pieces().empty() && !solid.hasEnvironment()) continue;
+        const Vec3 cell{float(x), float(y), float(z)};
+        const tile_geometry::TilePiece* first =
+            solid.pieces().empty() ? nullptr : &solid.pieces().front().geometry;
+        const auto legacy = first ? first->legacyShape() : std::nullopt;
+        for (const auto& polygon : solid.geometry().exteriorFaces()) {
+            const auto normal = polygon.plane.normal;
+            const auto& block = blocks.get(polygon.blockId);
+            const bool covered = first && legacy && polygon.id == first->id;
+            const auto key =
+                keyFor(covered ? solid.base.tile : Tile{}, block, normal.y);
+            const auto shape = covered ? *legacy : TileShape{};
+            if (const auto face = tile_geometry::boundaryFace(polygon.plane))
+                emitBoundary(polygon.vertices, *face,
+                             getNeighbour(x + int(normal.x), y + int(normal.y),
+                                          z + int(normal.z)),
+                             cell, shape, key);
+            else
+                emitPolygon(mesh, polygon.vertices, normal, true, cell, shape,
+                            key, climate);
+        }
+    }
 
     // Emit each shaped cell once. Inset surfaces have no shared boundary;
     // boundary surfaces are clipped by the occupied part of the neighbour.
     chunk.forEachShape([&](uint16_t index, TileShape shape) {
         if (hasCompounds && chunk.hasCompoundAt(index)) return;
+        if (localEnvironment(index)) return;
         const int x = index % W, y = (index / W) % H;
         const int z = index / (W * H);
         const auto& tile = chunk.tiles[z][y][x];
@@ -528,7 +563,9 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         (hasCompounds && chunk.hasCompoundAt(Chunk::cell(
                                              local[0], local[1], local[2]))) ||
                         (hasShapes &&
-                         localShape(local[0], local[1], local[2]).code()))
+                         localShape(local[0], local[1], local[2]).code()) ||
+                        localEnvironment(
+                            Chunk::cell(local[0], local[1], local[2])))
                         continue;
 
                     const Block& block = blocks.get(tile->block_id);
@@ -555,7 +592,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         const auto nbr =
                             getNeighbour(nlocal[0], nlocal[1], nlocal[2]);
                         if (!nbr.tile) return {};
-                        if (!nbr.tile->isSolid()) return covered(posDir);
+                        if (!nbr.hasSolid()) return covered(posDir);
                         const auto face = Face(d * 2 + (posDir ? 0 : 1));
                         if (nbr.isCompound()) {
                             const auto square =
@@ -566,7 +603,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                                          {}, covered(posDir));
                             return {};
                         }
-                        if (!nbr.shape.code()) return {};
+                        if (!nbr.tile->isSolid() || !nbr.shape.code())
+                            return {};
                         auto occluder = tile_geometry::boundaryFace(
                             nbr.shape, opposite(face));
                         if (!occluder) return covered(posDir);

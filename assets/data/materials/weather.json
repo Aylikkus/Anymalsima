@@ -1,0 +1,7 @@
+[
+    {
+        "name": "materials.snow",
+        "texture_albedo": "weather.snow",
+        "texture_normal": "weather.snow_normal"
+    }
+]

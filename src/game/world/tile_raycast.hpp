@@ -52,9 +52,9 @@ inline std::optional<TileRaycastHit> castTileRay(ChunkManager& chunks,
         if (next[1] < next[axis]) axis = 1;
         if (next[0] < next[axis]) axis = 0;
         const auto selected = chunks.solidCellAt({tile[0], tile[1], tile[2]});
-        const auto* cell = selected ? &selected->cell.base : nullptr;
-        if (cell &&
-            (cell->tile.isSolid() || (hitLiquids && !cell->tile.isAir()))) {
+        if (selected && (selected->cell.hasSolid() ||
+                         (hitLiquids && !selected->cell.base.tile.isAir()))) {
+            const auto* cell = &selected->cell.base;
             const Vec3 gridNormal{enteredFace[0], enteredFace[1],
                                   enteredFace[2]};
             std::optional<tile_geometry::RayHit> hit{
@@ -63,7 +63,7 @@ inline std::optional<TileRaycastHit> castTileRay(ChunkManager& chunks,
             auto hitShape = cell->shape;
             tile_geometry::PieceId pieceId =
                 selected->cell.simple ? selected->cell.simple->geometry.id : 0;
-            if (selected->cell.compound || cell->shape != TileShape{}) {
+            if (selected->cell.usesGeometry()) {
                 auto local = [&](size_t i) {
                     return static_cast<float>(std::clamp(
                         origin[i] - tile[i] + dir[i] * entry, 0.0, 1.0));
@@ -71,7 +71,7 @@ inline std::optional<TileRaycastHit> castTileRay(ChunkManager& chunks,
                 const Vec3 start{local(0), local(1), local(2)};
                 const float limit =
                     float(std::min(next[axis], double(maxDistance)) - entry);
-                if (selected->cell.compound) {
+                if (selected->cell.compound || selected->cell.environment) {
                     const auto piece = selected->cell.geometry().intersectRay(
                         start, direction, 0, limit);
                     if (piece) {

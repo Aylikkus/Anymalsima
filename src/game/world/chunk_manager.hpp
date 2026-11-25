@@ -186,6 +186,14 @@ class ChunkManager {
     std::optional<ShapedTile> cellAt(int tx, int ty, int tz);
     // Owner-thread read. The returned value may outlive the loaded slab.
     std::optional<VersionedSolidCell> solidCellAt(TilePos pos);
+    // The chunk's own solids without the environmental projection. Used by
+    // the snow simulation as its terrain.
+    std::optional<tile_geometry::CellGeometry> rawCellGeometryAt(TilePos pos);
+    // Environmental solids projected over the world (deposited snow). They
+    // participate in meshing and queries but never in saves or edit history.
+    void setEnvironment(std::shared_ptr<const EnvironmentMap> environment);
+    std::shared_ptr<const ChunkEnvironment> environmentFor(
+        const ChunkCoord& coord) const;
     // In-memory storage edit for the owner thread. This invalidates mesh
     // snapshots. Gameplay edits go through WorldEditor for persistence
     // and notifications.
@@ -522,6 +530,8 @@ class ChunkManager {
                           GeneratedChunk data);
     void collect();
 
+    std::shared_ptr<const EnvironmentMap> environment =
+        std::make_shared<const EnvironmentMap>();
     bool reconcileWater(Chunk& chunk, ChunkCoord coord,
                         const ChunkColumnInputs* columns,
                         bool refreshLocal = false,

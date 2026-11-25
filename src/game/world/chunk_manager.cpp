@@ -664,10 +664,67 @@ std::optional<VersionedSolidCell> ChunkManager::solidCellAt(TilePos pos) {
         return std::nullopt;
     const auto& handle = it->second;
     const ChunkMeshSnapshot view{handle.data, handle.structureBaseline,
-                                 grownBlocks()};
+                                 grownBlocks(), environmentFor(coord)};
     return VersionedSolidCell{
         view.solidCellAt(index),
         {handle.identity, handle.meshTopologyRevision, index}};
+}
+
+std::optional<tile_geometry::CellGeometry> ChunkManager::rawCellGeometryAt(
+    TilePos pos) {
+    const auto x = wrap().wrapTile(pos.x);
+    const int y = pos.y, z = pos.z;
+    if (x < 0 || y < 0 || z < 0) return std::nullopt;
+    const ChunkCoord coord{unsigned(x / Chunk::SIZE_X),
+                           unsigned(y / Chunk::SIZE_Y),
+                           unsigned(z / Chunk::SIZE_Z)};
+    const auto index =
+        Chunk::cell(x % Chunk::SIZE_X, y % Chunk::SIZE_Y, z % Chunk::SIZE_Z);
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready)
+        return std::nullopt;
+    return it->second.data->solidCellAt(index).geometry();
+}
+
+void ChunkManager::setEnvironment(std::shared_ptr<const EnvironmentMap> value) {
+    if (!value) value = std::make_shared<const EnvironmentMap>();
+    if (value == environment) return;
+    auto previous = std::move(environment);
+    environment = std::move(value);
+    std::unordered_set<ChunkCoord> affected;
+    for (const auto& [coord, chunk] : *previous) {
+        (void)chunk;
+        if (!environment->contains(coord)) affected.insert(coord);
+    }
+    for (const auto& [coord, chunk] : *environment) {
+        (void)chunk;
+        if (!previous->contains(coord))
+            affected.insert(coord);
+        else if (previous->at(coord) != chunk)
+            affected.insert(coord);
+    }
+    const auto wrapX = wrap();
+    for (const auto& coord : affected) {
+        markDirty(coord, true);
+        // Border faces are clipped against the neighbouring environment.
+        const int64_t offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                       {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+        for (const auto& offset : offsets) {
+            const int64_t x = wrapX.wrapChunk(int64_t{coord.x} + offset[0]);
+            const int64_t y = int64_t{coord.y} + offset[1];
+            const int64_t z = int64_t{coord.z} + offset[2];
+            if (x < 0 || y < 0 || z < 0) continue;
+            markDirty({unsigned(x), unsigned(y), unsigned(z)}, true);
+        }
+    }
+}
+
+std::shared_ptr<const ChunkEnvironment> ChunkManager::environmentFor(
+    const ChunkCoord& coord) const {
+    if (!environment) return {};
+    const auto found = environment->find(coord);
+    return found == environment->end() ? nullptr : found->second;
 }
 
 CellPieceEdit ChunkManager::setCellPieces(
@@ -1189,12 +1246,13 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
         // Copy center and borders together. Sparse tables and structure
         // baselines are immutable while any snapshot owns them.
         std::lock_guard<std::mutex> lock(tileAtMutex);
-        const auto capture = [&](const ChunkHandle& source) {
+        const auto capture = [&](const ChunkCoord& at,
+                                 const ChunkHandle& source) {
             return ChunkMeshSnapshot{
                 std::make_shared<const Chunk>(*source.data),
-                source.structureBaseline, grownBlocks()};
+                source.structureBaseline, grownBlocks(), environmentFor(at)};
         };
-        data = capture(handle);
+        data = capture(coord, handle);
         const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
                                    {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
         for (const auto& offset : offsets) {
@@ -1207,7 +1265,7 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                                 static_cast<unsigned>(z)};
             if (const auto it = chunks.find(neighbor);
                 it != chunks.end() && it->second.state == ChunkState::Ready)
-                neighbors.emplace(neighbor, capture(it->second));
+                neighbors.emplace(neighbor, capture(neighbor, it->second));
         }
     }
     const auto column = columnInputs.find((uint64_t{coord.x} << 32) | coord.z);
@@ -1304,7 +1362,8 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                         hydrology->sampleColumn(x, z);
                     return {ground, water->project(hydrology.get(), x, z,
                                                    ground, baseline)};
-                });
+                },
+                data.environment.get());
             return FinishedMesh{coord, std::move(mesh), identity, revision};
         },
         priority);
@@ -1855,6 +1914,8 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
     if (it == chunks.end() || it->second.state != ChunkState::Ready ||
         !it->second.data)
         return false;
+    if (const auto env = environmentFor(coord); env && !env->empty())
+        return false;
     const Tile* first = &it->second.data->tiles[0][0][0];
     const Tile* last = first + Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
     if (std::all_of(first, last, [](const Tile& t) { return t.isAir(); }))
@@ -1876,6 +1937,10 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
         const auto n = chunks.find({unsigned(x), unsigned(y), unsigned(z)});
         if (n == chunks.end() || n->second.state != ChunkState::Ready ||
             !n->second.data)
+            return false;
+        if (const auto env =
+                environmentFor({unsigned(x), unsigned(y), unsigned(z)});
+            env && !env->empty())
             return false;
         const auto& neighbor = *n->second.data;
         for (int a = 0; a < Chunk::SIZE_X; ++a)

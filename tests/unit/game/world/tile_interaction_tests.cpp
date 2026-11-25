@@ -310,6 +310,63 @@ TEST(probe_and_ray_chunk_seams) {
     }
 }
 
+// Environmental solids share the chunk query path: the same projection is
+// pickable, walkable and meshed, and removing it reveals the original tile.
+TEST(environment_snow_pick_walk_mesh) {
+    ShapeFixture f;
+    f.load({0, 0, 0});
+    f.set(6, 4, 7);
+    f.set(15, 4, 7);
+    auto snow = tile_geometry::CellGeometry{}.freeSpaceBetween(0, .05f, 1, 1);
+    auto borderSnow =
+        tile_geometry::CellGeometry{}.freeSpaceBetween(0, .05f, 1, 2);
+    auto chunkEnvironment = std::make_shared<ChunkEnvironment>();
+    chunkEnvironment->emplace(
+        Chunk::cell(6, 5, 7),
+        std::make_shared<const tile_geometry::CellGeometry>(std::move(snow)));
+    chunkEnvironment->emplace(
+        Chunk::cell(15, 5, 7),
+        std::make_shared<const tile_geometry::CellGeometry>(
+            std::move(borderSnow)));
+    auto environment = std::make_shared<EnvironmentMap>();
+    environment->emplace(ChunkCoord{0, 0, 0}, chunkEnvironment);
+    f.chunks.setEnvironment(environment);
+
+    const auto hit = castTileRay(f.chunks, 6.5f, 7.f, 7.5f, 0, -1, 0);
+    CHECK(hit);
+    EQUAL(hit->ty, 5, "snow tops the cell above the ground");
+    near(hit->position.y, 5.05f);
+    CHECK(hit->tile.block_id == 1);
+
+    auto probe = f.spawn(6.5f, 6.f, 7.5f);
+    near(probe.feet().y, 5.05f);
+    walk(f, probe, {2, 0}, 1);
+    near(probe.feet().y, 5.05f);
+
+    const Tile air;
+    auto* chunk = f.chunks.getChunk({0, 0, 0});
+    CHECK(chunk);
+    const auto mesh = f.mesher.build(
+        *chunk, {0, 0, 0}, [&](int, int, int) { return &air; }, {}, {}, {},
+        chunkEnvironment.get());
+    bool sawSnowTop = false, sawBorderSide = false;
+    for (const auto& vertex : mesh.vertices) {
+        if (vertex.ny > .9f && std::abs(vertex.y - 5.05f) < 1e-4f)
+            sawSnowTop = true;
+        if (std::abs(vertex.x - 16.f) < 1e-4f && vertex.nx > .9f &&
+            vertex.y > 5.f && vertex.y < 5.05f)
+            sawBorderSide = true;
+    }
+    CHECK(sawSnowTop);
+    CHECK(sawBorderSide);
+
+    f.chunks.setEnvironment({});
+    const auto ground = castTileRay(f.chunks, 6.5f, 7.f, 7.5f, 0, -1, 0);
+    CHECK(ground);
+    EQUAL(ground->ty, 4, "cleared snow exposes the support");
+    near(ground->position.y, 5.f);
+}
+
 TEST(compound_build_pick_walk) {
     using tile_geometry::LayerThickness;
     using tile_geometry::TilePiece;

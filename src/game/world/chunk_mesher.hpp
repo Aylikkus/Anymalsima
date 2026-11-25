@@ -19,6 +19,8 @@ struct ChunkMeshSnapshot {
     std::shared_ptr<const Chunk> chunk;
     std::shared_ptr<const structure_voxels::Slab> structures;
     GrownBlockSet grown;
+    // Environmental solids projected over this chunk (snow). Never saved.
+    std::shared_ptr<const ChunkEnvironment> environment;
 
     static PieceProvenance legacyOrigin(
         uint16_t index, ShapedTile cell,
@@ -65,6 +67,7 @@ class ChunkMesher {
         const ChunkMeshSnapshot* snapshot = nullptr;
         const Chunk* chunk = nullptr;
         uint16_t index = 0;
+        EnvironmentCell environment{};
 
         Neighbour(const Tile* tile, TileShape shape = {})
             : tile(tile), shape(shape) {}
@@ -72,13 +75,30 @@ class ChunkMesher {
             : tile(&snapshot.chunk->tiles[z][y][x]),
               shape(snapshot.chunk->shapeAt(Chunk::cell(x, y, z))),
               snapshot(&snapshot),
-              index(Chunk::cell(x, y, z)) {}
+              index(Chunk::cell(x, y, z)),
+              environment(snapshot.environment ? [&] {
+                  const auto found =
+                      snapshot.environment->find(Chunk::cell(x, y, z));
+                  return found == snapshot.environment->end()
+                             ? EnvironmentCell{}
+                             : found->second;
+              }()
+                                               : EnvironmentCell{}) {}
         Neighbour(const Chunk& chunk, int x, int y, int z)
             : tile(&chunk.tiles[z][y][x]),
               shape(chunk.shapeAt(Chunk::cell(x, y, z))),
               chunk(&chunk),
               index(Chunk::cell(x, y, z)) {}
+        Neighbour(const Chunk& chunk, int x, int y, int z,
+                  EnvironmentCell environment)
+            : Neighbour(chunk, x, y, z) {
+            this->environment = std::move(environment);
+        }
+        bool hasSolid() const {
+            return (tile && tile->isSolid()) || environment;
+        }
         bool isCompound() const {
+            if (environment) return true;
             const Chunk* owner = snapshot ? snapshot->chunk.get() : chunk;
             return owner && owner->hasCompoundAt(index);
         }
@@ -109,7 +129,8 @@ class ChunkMesher {
                     const NeighbourFn& neighbour,
                     const CoverClimate& climate = {},
                     const WaterHaloFn& generatedWaterHalo = {},
-                    const WaterColumnFn& waterColumn = {}) const;
+                    const WaterColumnFn& waterColumn = {},
+                    const ChunkEnvironment* environment = nullptr) const;
 
     // Packs the side-fringe range for the v attribute (see build).
     static float packFringe(const ValueRange& metres);

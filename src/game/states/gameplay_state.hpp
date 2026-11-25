@@ -27,6 +27,7 @@
 #include "world/save/region_store.hpp"
 #include "world/save/save_catalog.hpp"
 #include "world/sky_height_map.hpp"
+#include "world/snow_cover.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
@@ -70,6 +71,17 @@ class GameplayState : public IGameState {
 
     std::unique_ptr<LocationGenerator> generator;
     std::unique_ptr<ChunkManager> chunkManager;
+    // Snow simulation and its non-persistent environmental projection.
+    // snowTerrain reads raw chunk solids, so settlement never sees its own
+    // projection. Declared before the settlement that references it.
+    std::unique_ptr<snow::SnowTerrain> snowTerrain;
+    std::unique_ptr<snow::SnowSettlement> snowSettlement;
+    std::unique_ptr<snow::SnowCover> snowCover;
+    uint8_t snowId = 0;
+    // cm3: the step 06 fixture amount for a 5 cm landing plus a 5 cm toe.
+    int64_t snowAddVolume = 51250;
+    void rebuildSnow();
+    void addSnow(const TileRaycastHit& hit);
     std::unique_ptr<LocationManager> locationMgr;
     std::unique_ptr<ChunkMesher> mesher;
     // Edits shown at distance (terrain_edits.dat). Declared before the LOD
@@ -148,10 +160,23 @@ class GameplayState : public IGameState {
     Text* tileDebugText = nullptr;
 
     // HUD block editing: a tool is armed by its button and applied with LMB.
-    enum class EditTool { None, Place, Remove, PlaceLight, Harvest, PlantTree };
+    enum class EditTool {
+        None,
+        Place,
+        Remove,
+        PlaceLight,
+        Harvest,
+        PlantTree,
+        SnowAdd,
+        SnowClear
+    };
     EditTool tool = EditTool::None;
     TextButton* placeButton = nullptr;
     TextButton* removeButton = nullptr;
+    TextButton* snow5Button = nullptr;
+    TextButton* snow50Button = nullptr;
+    TextButton* snow5mButton = nullptr;
+    TextButton* snowClearButton = nullptr;
     // Debug light source (assets/data/blocks/test_light.json).
     TextButton* lightButton = nullptr;
     static constexpr const char* TestLightBlock = "blocks.test_light";
@@ -189,6 +214,9 @@ class GameplayState : public IGameState {
     void renderPlacementPreview(RenderTarget& target, IRenderer& renderer);
     std::optional<TilePos> constructionSite;
     void setupConstructionFixture();
+    std::optional<TilePos> snowFixtureSite;
+    std::optional<TilePos> snowDropSite;
+    void setupSnowFixture();
     void updateShapeControls();
 
     std::optional<GroundedProbe> probe;

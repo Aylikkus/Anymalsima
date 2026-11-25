@@ -71,6 +71,9 @@ class SnowSettlement {
     // still counts against the supplied volume until settle() applies it.
     DepositOutcome deposit(int x, int z, int fromY, Volume volume,
                            size_t budget = DefaultWorkBudget);
+    // Removes every deposit and pending transfer. Debug and fixture use;
+    // regular weather removal goes through melt and excavation steps.
+    void clear();
 
     // Retries pending deposits in deterministic footprint order. Returns the
     // number applied. A budget of zero only reports the queue.

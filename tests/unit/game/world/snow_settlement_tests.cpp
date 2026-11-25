@@ -4,6 +4,7 @@
 #include <tuple>
 
 #include "test.hpp"
+#include "world/snow_cover.hpp"
 #include "world/snow_settlement.hpp"
 #include "world/tile_piece.hpp"
 #include "world/world_wrap.hpp"
@@ -408,6 +409,53 @@ TEST(snow_settlement_gentle_slope_pocket) {
     EQUAL(settlement.volumeAt(0, 0), snow::Volume{2500}, "shallow pocket");
     nearLevel(settlement, 0, -1, 10.05);
     conserved(settlement);
+}
+
+// The rendered/queryable projection comes from the same column volumes. The
+// landing becomes a 5 cm layer, the ramp toe a clipped wedge, and a shallower
+// deposit becomes a visible dusting skin.
+TEST(snow_cover_projects_settlement) {
+    Fixture fixture;
+    fixture.z0 = 0;
+    fixture.z1 = 2;
+    solid(fixture, 0, 9, 0);
+    solid(fixture, 0, 9, 1);
+    rampCell(fixture, 0, 10, 1, TileFacing::PosZ);
+
+    snow::SnowSettlement settlement(fixture);
+    CHECK(settlement.deposit(0, 0, 12, 51250) == snow::DepositOutcome::Settled);
+    snow::SnowCover cover;
+    cover.rebuild(settlement, fixture, 42);
+
+    const auto landing = cover.cellAt({0, 10, 0});
+    CHECK(landing);
+    CHECK(landing->contains({.5f, .02f, .5f}));
+    const auto landingTop = landing->supportHeight({.2f, .2f}, {.8f, .8f});
+    CHECK(landingTop.has_value());
+    nearLevel(settlement, 0, 0, 10.05);
+    CHECK(std::abs(*landingTop - .05f) < 1e-4f);
+
+    const auto toe = cover.cellAt({0, 10, 1});
+    CHECK(toe);
+    CHECK(toe->contains({.5f, .025f, .025f}));
+    CHECK(!toe->contains({.5f, .03f, .2f}));
+    CHECK(landing->contains({.5f, .01f, .5f}));
+    CHECK(!cover.cellAt({0, 9, 0}));  // support stays a chunk solid
+
+    Fixture dustFixture;
+    dustFixture.z0 = 0;
+    dustFixture.z1 = 1;
+    solid(dustFixture, 0, 9, 0);
+    snow::SnowSettlement dust(dustFixture);
+    CHECK(dust.deposit(0, 0, 12, 1000) == snow::DepositOutcome::Settled);
+    snow::SnowCover dustCover;
+    dustCover.rebuild(dust, dustFixture, 42);
+    const auto skin = dustCover.cellAt({0, 10, 0});
+    CHECK(skin);
+    const auto skinTop = skin->supportHeight({.2f, .2f}, {.8f, .8f});
+    CHECK(skinTop.has_value());
+    CHECK(*skinTop >= snow::SnowCover::MinimumVisibleDepth - 1e-5f);
+    CHECK(*skinTop <= snow::SnowCover::DustingDepth + 1e-5f);
 }
 
 TEST(snow_settlement_serialization) {

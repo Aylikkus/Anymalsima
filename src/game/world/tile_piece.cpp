@@ -254,6 +254,84 @@ std::optional<TileShape> TilePiece::legacyShape() const {
     return height && ceiling >= *height ? std::optional{shape} : std::nullopt;
 }
 
+PiecePlacement CellGeometry::tryAddConvex(PieceId id, uint8_t blockId,
+                                          std::span<const Plane> bounds) {
+    if (blockId == 0) return PiecePlacement::Invalid;
+    const auto insertion =
+        std::ranges::lower_bound(solids_, id, {}, &Solid::id);
+    if (insertion != solids_.end() && insertion->id == id)
+        return PiecePlacement::DuplicateId;
+
+    std::vector<Plane> part;
+    for (auto plane : bounds) {
+        if (!std::isfinite(plane.normal.x) || !std::isfinite(plane.normal.y) ||
+            !std::isfinite(plane.normal.z) || !std::isfinite(plane.offset))
+            return PiecePlacement::Invalid;
+        addPlane(part, plane);
+    }
+    for (auto plane : cellPlanes) addPlane(part, plane);
+    if (!hasInterior(part)) return PiecePlacement::Empty;
+
+    Solid solid{id, blockId, {std::move(part)}};
+    for (const auto& other : solids_)
+        for (const auto& otherPart : other.parts) {
+            auto intersection = solid.parts.front();
+            for (auto plane : otherPart) addPlane(intersection, plane);
+            if (hasInterior(intersection)) return PiecePlacement::Overlap;
+        }
+
+    solids_.insert(insertion, std::move(solid));
+    return PiecePlacement::Added;
+}
+
+void CellGeometry::append(const CellGeometry& other) {
+    solids_.insert(solids_.end(), other.solids_.begin(), other.solids_.end());
+}
+
+CellGeometry CellGeometry::freeSpaceBetween(float low, float high,
+                                            uint8_t blockId, PieceId id,
+                                            size_t maxParts) const {
+    CellGeometry result;
+    if (blockId == 0 || !(high > low)) return result;
+    low = std::clamp(low, 0.f, 1.f);
+    high = std::clamp(high, 0.f, 1.f);
+    if (!(high > low)) return result;
+
+    std::vector<Plane> box;
+    for (auto plane : cellPlanes) addPlane(box, plane);
+    addPlane(box, {{0, -1, 0}, -low});
+    addPlane(box, {{0, 1, 0}, high});
+
+    // Subtract each convex terrain part by partitioning the candidate space
+    // along that part's planes. Every fragment is convex, and the fragments
+    // have disjoint interiors.
+    std::vector<std::vector<Plane>> fragments{std::move(box)};
+    for (const auto& solid : solids_) {
+        for (const auto& part : solid.parts) {
+            std::vector<std::vector<Plane>> next;
+            for (auto& fragment : fragments) {
+                auto prefix = fragment;
+                for (auto plane : part) {
+                    auto outside = prefix;
+                    addPlane(outside, {plane.normal * -1.f, -plane.offset});
+                    if (hasInterior(outside)) {
+                        if (next.size() >= maxParts) return {};
+                        next.push_back(std::move(outside));
+                    }
+                    addPlane(prefix, plane);
+                    if (!hasInterior(prefix)) break;
+                }
+            }
+            fragments = std::move(next);
+            if (fragments.empty()) break;
+        }
+        if (fragments.empty()) break;
+    }
+    if (fragments.empty()) return result;
+    result.solids_.push_back({id, blockId, std::move(fragments)});
+    return result;
+}
+
 PiecePlacement CellGeometry::tryAdd(TilePiece piece) {
     if (piece.blockId == 0 || !std::isfinite(piece.offset.x) ||
         !std::isfinite(piece.offset.y) || !std::isfinite(piece.offset.z) ||

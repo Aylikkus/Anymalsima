@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–06 complete · Step 07 pending.**
+**Steps 01–07 complete · Step 08 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -18,7 +18,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 04 | Durable piece edits and save migration | Complete | |
 | 05 | Build, pick, walk on and render compound tiles | Complete | A · Construction |
 | 06 | Gravity settlement at slopes and ledges | Complete | |
-| 07 | Visible dusting, toe fill and snow collision | Pending | B · Five-centimetre ramp |
+| 07 | Visible dusting, toe fill and snow collision | Complete | B · Five-centimetre ramp |
 | 08 | Calendar and seasonal ambient temperature | Pending | |
 | 09 | Regional weather, presentation and inspection | Pending | C · Weather and seasons |
 | 10 | Exposure, snowfall and outdoor melt | Pending | |
@@ -619,3 +619,104 @@ steps 10 and 15. Z edges are closed; volume above the world top is an
 accounted sink. The settlement has no world save section or debug controls
 yet; step 07 supplies rendering and interaction, and steps 10–11 supply dated
 weather input and unloaded history.
+
+### Step 07 · 2026-11-26
+
+[SnowCover](../../src/game/world/snow_cover.hpp) projects the settled
+columns onto the actual free space of each cell. It subtracts the cell's
+convex solids from the horizontal interval between the column's support and
+its measured level, producing one environmental solid with disjoint convex
+parts. The landing becomes a 5 cm layer, the ramp toe the exact 1,250 cm³
+wedge, and a diagonal or multi-facet support keeps its clipped pockets.
+Deposits below **1 cm** are treated as dusting; anything thinner than **2 mm**
+is lifted to a 2 mm visible skin so the first accumulation is visible without
+z-fighting. At and above 1 cm the geometry is the measured deposit.
+
+`ChunkManager` carries the projection as an immutable environment map. The
+chunk mesher, picking, ground probe, sunlight opening and block queries
+combine it with chunk pieces for the same cell revision. It is never written
+into a chunk save, never marks a chunk as player-edited, and clearing it
+remeshes the affected chunk and its six neighbours, revealing the original
+rock, soil or grass. The new `blocks.snow` definition uses the dedicated
+`weather.snow` albedo and normal textures; assets were regenerated and the
+block file was appended after the existing files, preserving numeric block
+IDs. Snow state is still in memory only in this step; the world save format
+is unchanged and dated accumulation plus persistence arrive with steps 10–11.
+
+#### Debug controls and fixture
+
+Start the app from the repository root with `ANYM_SNOW_FIXTURE=1
+./build/src/app/app`, open or create a world, and click **Snow site**. The
+fixture is centred at
+
+```text
+x = startRegion.x * 128 + 64
+z = startRegion.y * 128 + 64
+y = highest sampled terrain top + 2
+```
+
+where the HUD prints the absolute `Snow fixture landing [x, y, z]`. The
+landing is one square metre, so **SNOW 5 cm fixture** adds the step 06 amount
+of 51,250 cm³ and reaches the 5 cm line exactly. The buttons arm a tool;
+click the receiving surface to apply it. **SNOW +50 cm**, **SNOW +5 m** and
+**CLEAR SNOW** cover faster burial and removal. Hovering a footprint shows
+its column volume, level and depth under **Snow** in the tile panel.
+
+| Feature | Position relative to the HUD landing |
+|---|---|
+| Numeric landing / straight ramp / bare upper rock | (0, 0, 0) / (0, 0, +1) / +2 through +3 |
+| Chunk-seam landing and ramps | (−1 through 0, 0, −3) and (−1 through 0, 0, −2) |
+| Diagonal basin and low floors | lower floors (+4, 0, 0), (+4, 0, +1), (+5, 0, 0); ramp (+5, 0, +1) |
+| Draining ramp and lower floor | ramp (0, 0, +6), lower floor (0, −1, +5) |
+
+The seam landing is two square metres; use the fixture amount twice, or
+**SNOW +50 cm**, and read the HUD depth. **Snow drop** moves the camera to the
+open ramp. **Walk mode** then crosses the landing and uses the same projected
+surface as the ray.
+
+#### Execution checks
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build \
+  -R 'game.world.(tile_piece_free_space_between|snow_settlement_|snow_cover_projects_settlement|environment_snow_pick_walk_mesh)' \
+  --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang \
+  -R 'game.world.(tile_piece_free_space_between|snow_settlement_|snow_cover_projects_settlement|environment_snow_pick_walk_mesh)' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The Release app and logic tests built. All 17 focused cases and all 422
+gameplay cases passed. The same 17 focused cases passed with ASan and UBSan.
+The new `tile_piece_free_space_between` case checks the exact 0.00125 m³ wedge
+and its contact faces; `snow_cover_projects_settlement` checks landing, toe,
+dusting and that the support remains a chunk solid;
+`environment_snow_pick_walk_mesh` checks the same projection through the chunk
+ray, probe and mesher, then clears it and picks the underlying block again.
+The maintainer accepted Playcheck B on 2026-11-26 and replaced the temporary
+chalk material with the dedicated snow albedo and normal textures.
+
+#### Playcheck B · Five-centimetre ramp
+
+1. At **Snow site**, apply **SNOW 5 cm fixture** to the numeric landing.
+   From the side, the upper ramp and rock stay bare, the landing top is a
+   continuous level about 5 cm above the stone, and a short white wedge fills
+   the toe. Hover the landing and toe: the tile panel reports about 5 cm depth
+   at both. Walk from the landing into the wedge; the feet follow the snow
+   surface, not the underlying ramp.
+2. Repeat on the two-cell **chunk-seam** landing and on the **diagonal**
+   basin. The seam must not break the level or the wedge, and the diagonal
+   must split according to its low corner. Record the accepted gentler-slope
+   behaviour; the 1 cm dusting transition and the wedge profile are the
+   tuning points.
+3. Click **Snow drop**, apply snow on the open ramp, and inspect the floor one
+   metre below. The ramp face should remain essentially bare and the lower
+   floor should receive the volume.
+4. Apply **SNOW +5 m** to the numeric landing until it buries the ramp, then
+   **CLEAR SNOW**. Inspect the restored grass/rock, the absent white geometry
+   and the walking height. Capture the side view before and after clearing.

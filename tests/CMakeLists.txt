@@ -13,6 +13,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_shape.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_piece.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/snow_settlement.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/snow_cover.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/grounded_probe.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
@@ -135,6 +136,7 @@ set(world_cases
     tile_piece_wall_and_layer
     tile_piece_clipping_and_rejection
     tile_piece_free_volume
+    tile_piece_free_space_between
     snow_settlement_ramp_wedge
     snow_settlement_ramp_wedge_incremental
     snow_settlement_draining_ramp
@@ -148,12 +150,14 @@ set(world_cases
     snow_settlement_closed_map_edge
     snow_settlement_top_sink
     snow_settlement_gentle_slope_pocket
+    snow_cover_projects_settlement
     snow_settlement_serialization
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision
     compound_mesh_materials_and_seam
     compound_build_pick_walk
+    environment_snow_pick_walk_mesh
     compound_sky_and_save
     tile_classification
     generation_surface_layers

@@ -173,7 +173,9 @@
     "foliage.palm_frond": "assets/materials/foliage/palm_frond.png",
     "foliage.palm_frond_normal": "assets/materials/foliage/palm_frond_normal.png",
     "foliage.petal": "assets/materials/foliage/petal.png",
-    "foliage.petal_normal": "assets/materials/foliage/petal_normal.png"
+    "foliage.petal_normal": "assets/materials/foliage/petal_normal.png",
+    "weather.snow": "assets/materials/weather/snow.png",
+    "weather.snow_normal": "assets/materials/weather/snow_normal.png"
   },
   "music": {
     "reflection": "assets/audio/music/reflection.flac"
@@ -202,6 +204,7 @@
         "assets/data/materials/rocks.json",
         "assets/data/materials/soils.json",
         "assets/data/materials/vegetation.json",
+        "assets/data/materials/weather.json",
         "assets/data/materials/wood.json"
       ]
     },
@@ -233,7 +236,8 @@
         "assets/data/blocks/soils.json",
         "assets/data/blocks/test_light.json",
         "assets/data/blocks/trees.json",
-        "assets/data/blocks/timber.json"
+        "assets/data/blocks/timber.json",
+        "assets/data/blocks/weather.json"
       ]
     },
     {

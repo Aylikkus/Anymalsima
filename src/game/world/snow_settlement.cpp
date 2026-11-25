@@ -576,6 +576,13 @@ std::optional<double> SnowSettlement::levelAt(int x, int z) const {
     return levelForVolume(single, info, double(column.volume), cache);
 }
 
+void SnowSettlement::clear() {
+    columns_.clear();
+    pending_.clear();
+    deposited_ = 0;
+    sink_ = 0;
+}
+
 void SnowSettlement::queue(const PendingDeposit& deposit) {
     const Footprint key{deposit.x, deposit.z};
     const auto found = pending_.find(key);

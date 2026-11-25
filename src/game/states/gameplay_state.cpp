@@ -58,6 +58,31 @@ std::string pieceEditLabel(CellPieceEdit status) {
     return "";
 }
 
+// Settlement reads the chunk's own solids, never the environmental snow
+// projection that is derived from it.
+class ChunkSnowTerrain final : public snow::SnowTerrain {
+   public:
+    ChunkSnowTerrain(ChunkManager& chunks, const World& world)
+        : chunks(chunks), world(world) {}
+
+    std::optional<tile_geometry::CellGeometry> cell(
+        TilePos pos) const override {
+        return chunks.rawCellGeometryAt(pos);
+    }
+    int wrapX(int x) const override { return int(chunks.wrap().wrapTile(x)); }
+    bool inBounds(int x, int z) const override {
+        if (world.width <= 0 || world.height <= 0) return x >= 0 && z >= 0;
+        return x >= 0 && x < chunks.wrap().tiles && z >= 0 &&
+               z < world.height * CHUNKS_PER_REGION * Chunk::SIZE_Z;
+    }
+    int minY() const override { return 0; }
+    int maxY() const override { return WORLD_HEIGHT_Y; }
+
+   private:
+    ChunkManager& chunks;
+    const World& world;
+};
+
 std::string describeShape(TileShape shape) {
     const auto profile = shape.profile();
     const auto facing = FacingNames[unsigned(shape.facing())];
@@ -191,6 +216,10 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         stoneId = id("blocks.slate",
                      blocks.items.empty() ? 0 : blocks.items.front().id);
         timberId = id("blocks.oak_timber", 0);
+        snowId = id("blocks.snow", 0);
+        if (!snowId)
+            std::cerr
+                << "blocks.snow is not defined; snow rendering is disabled\n";
         const auto it = blocks.indexByName.find(TestLightBlock);
         if (it != blocks.indexByName.end())
             testLightId = blocks.items[it->second].id;
@@ -247,6 +276,27 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         });
         return button;
     };
+    snow5Button = makeDebugButton({0, 11, 6, 1}, [this] {
+        snowAddVolume = 51250;
+        setTool(EditTool::SnowAdd);
+    });
+    snow5Button->setText(_("SNOW 5 cm fixture"));
+    snow50Button = makeDebugButton({6, 11, 6, 1}, [this] {
+        snowAddVolume = 512500;
+        setTool(EditTool::SnowAdd);
+    });
+    snow50Button->setText(_("SNOW +50 cm"));
+    snow5mButton = makeDebugButton({12, 11, 6, 1}, [this] {
+        snowAddVolume = 5125000;
+        setTool(EditTool::SnowAdd);
+    });
+    snow5mButton->setText(_("SNOW +5 m"));
+    snowClearButton = makeDebugButton({18, 11, 6, 1}, [this] {
+        snowSettlement->clear();
+        rebuildSnow();
+        lastBuildAction = _("Snow cleared");
+    });
+    snowClearButton->setText(_("CLEAR SNOW"));
     shapeButton = makeDebugButton({0, 14, 6, 1}, [this] {
         shapeKind =
             ShapeKind((unsigned(shapeKind) + 1) % std::size(ShapeNames));
@@ -287,7 +337,12 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     chunkManager = std::make_unique<ChunkManager>(
         *generator, context.threadPool, mesher.get(), *this->world.get(),
         context.assets, std::move(landmarks));
+    snowTerrain =
+        std::make_unique<ChunkSnowTerrain>(*chunkManager, *this->world);
+    snowSettlement = std::make_unique<snow::SnowSettlement>(*snowTerrain);
+    snowCover = std::make_unique<snow::SnowCover>();
     setupConstructionFixture();
+    setupSnowFixture();
     if (constructionSite) {
         auto* button = makeDebugButton({18, 13, 6, 1}, [this] {
             if (probe) toggleWalk();
@@ -298,6 +353,28 @@ GameplayState::GameplayState(Game& game, UIContext& context,
             camera.distance = 12.f;
         });
         button->setText(_("Construction site"));
+    }
+    if (snowFixtureSite) {
+        auto* button = makeDebugButton({18, 10, 6, 1}, [this] {
+            if (probe) toggleWalk();
+            const auto [x, y, z] = *snowFixtureSite;
+            camera.position = {x + .5f, y + 3.f, z - 3.5f};
+            camera.yaw = 0;
+            camera.pitch = -.35f;
+            camera.distance = 10.f;
+        });
+        button->setText(_("Snow site"));
+    }
+    if (snowDropSite) {
+        auto* button = makeDebugButton({12, 10, 6, 1}, [this] {
+            if (probe) toggleWalk();
+            const auto [x, y, z] = *snowDropSite;
+            camera.position = {x + .5f, y + 3.f, z + 2.5f};
+            camera.yaw = bx::kPi;
+            camera.pitch = -.35f;
+            camera.distance = 9.f;
+        });
+        button->setText(_("Snow drop"));
     }
     // World-wide sources must be installed before any chunk is requested.
     try {
@@ -490,6 +567,136 @@ void GameplayState::setupConstructionFixture() {
     constructionSite = TilePos{x, y, z};
     chunkManager->setGeneratedStructureKinds(applyOverrides(
         {}, {{"construction_fixture", {{Key, std::move(layout)}}}}));
+}
+
+// A reproducible playcheck scene for step 07: a one-square-metre level
+// landing with a one-metre 45-degree ramp, a second pair straddling a chunk
+// boundary, and a diagonal ramp with two low approaches. Snow is added by the
+// debug buttons; the scene itself is generated content, like the construction
+// deck.
+void GameplayState::setupSnowFixture() {
+    const char* enabled = std::getenv("ANYM_SNOW_FIXTURE");
+    if (!enabled || std::string_view(enabled) != "1" || !stoneId) return;
+    const int x = int(slot.meta.startRegion.x) * 128 + 64;
+    const int z = int(slot.meta.startRegion.y) * 128 + 64;
+    int maxTop = 0;
+    for (int dz = -4; dz <= 8; ++dz)
+        for (int dx = -4; dx <= 8; ++dx)
+            maxTop = std::max(maxTop,
+                              chunkManager->generatedSurfaceY(x + dx, z + dz));
+    const int groundY = maxTop + 1;
+    if (groundY + 6 >= WORLD_HEIGHT_Y) return;
+
+    using namespace structure_voxels;
+    constexpr uint64_t Key = 0xf000000000000007ULL;
+    Override layout;
+    layout.mode = OverrideMode::Replace;
+    layout.anchorX = x;
+    layout.anchorZ = z;
+    layout.landmark = true;
+    const auto support = [&](int px, int pz) {
+        const int top = chunkManager->generatedSurfaceY(px, pz);
+        for (int y = top + 1; y <= groundY; ++y)
+            layout.voxels[{px, y, pz}] = OverrideVoxel(stoneId);
+    };
+    const auto cube = [&](int px, int py, int pz) {
+        layout.voxels[{px, py, pz}] = OverrideVoxel(stoneId);
+    };
+
+    const auto ramp = [&](int px, int pz, TileShapeProfile profile) {
+        support(px, pz);
+        cube(px, groundY, pz);
+        layout.voxels[{px, groundY + 1, pz}] =
+            OverrideVoxel(stoneId, TileShape::make(profile));
+    };
+    const auto rock = [&](int px, int pz) {
+        support(px, pz);
+        cube(px, groundY, pz);
+        cube(px, groundY + 1, pz);
+    };
+
+    // One-square-metre numeric landing: 5 cm is 50,000 cm3 above it and the
+    // 45-degree toe adds 1,250 cm3 at the step 06 line. Walls close its other
+    // sides so the amount reaches a level instead of draining.
+    support(x, z);
+    cube(x, groundY, z);
+    rock(x - 1, z);
+    rock(x + 1, z);
+    ramp(x, z + 1, TileShapeProfile::Ramp);
+    rock(x, z + 2);
+    rock(x, z + 3);
+
+    // The same ramp repeated across the chunk face at x (a chunk boundary).
+    for (int dx = -1; dx <= 0; ++dx) {
+        support(x + dx, z - 3);
+        cube(x + dx, groundY, z - 3);
+        ramp(x + dx, z - 2, TileShapeProfile::Ramp);
+        rock(x + dx, z - 1);
+        rock(x + dx, z - 4);
+    }
+    rock(x - 2, z - 3);
+    rock(x + 1, z - 3);
+
+    // Diagonal ramp with two lower approaches at its low corner.
+    support(x + 4, z);
+    cube(x + 4, groundY, z);
+    support(x + 4, z + 1);
+    cube(x + 4, groundY, z + 1);
+    support(x + 5, z);
+    cube(x + 5, groundY, z);
+    ramp(x + 5, z + 1, TileShapeProfile::DiagonalRamp);
+    rock(x + 4, z - 1);
+    rock(x + 5, z - 1);
+    rock(x + 3, z);
+    rock(x + 3, z + 1);
+    rock(x + 4, z + 2);
+    rock(x + 5, z + 2);
+    rock(x + 6, z);
+    rock(x + 6, z + 1);
+
+    // A ramp whose low toe opens over a floor one metre below. Snow deposited
+    // on the face drains to that floor instead of coating the ramp.
+    support(x, z + 6);
+    cube(x, groundY, z + 6);
+    layout.voxels[{x, groundY + 1, z + 6}] = OverrideVoxel(
+        stoneId, TileShape::make(TileShapeProfile::Ramp, TileFacing::PosZ));
+    const int floorY = groundY - 1;
+    const int floorTop = chunkManager->generatedSurfaceY(x, z + 5);
+    for (int y = floorTop + 1; y <= floorY; ++y)
+        layout.voxels[{x, y, z + 5}] = OverrideVoxel(stoneId);
+    cube(x, floorY, z + 5);
+    rock(x - 1, z + 5);
+    rock(x + 1, z + 5);
+    rock(x, z + 4);
+
+    snowFixtureSite = TilePos{x, groundY + 1, z};
+    snowDropSite = TilePos{x, groundY + 1, z + 6};
+    chunkManager->setGeneratedStructureKinds(
+        applyOverrides({}, {{"snow_fixture", {{Key, std::move(layout)}}}}));
+}
+
+void GameplayState::rebuildSnow() {
+    if (!snowCover || !snowSettlement || !snowTerrain || !snowId) return;
+    snowCover->rebuild(*snowSettlement, *snowTerrain, snowId);
+    chunkManager->setEnvironment(snowCover->environment());
+}
+
+void GameplayState::addSnow(const TileRaycastHit& hit) {
+    auto outcome =
+        snowSettlement->deposit(hit.tx, hit.tz, hit.ty + 1, snowAddVolume);
+    if (outcome == snow::DepositOutcome::Pending) {
+        snowSettlement->settle();
+        outcome = snowSettlement->pendingCount()
+                      ? snow::DepositOutcome::Pending
+                      : snow::DepositOutcome::Settled;
+    }
+    rebuildSnow();
+    lastBuildAction = fmt::format(
+        fmt::runtime(_("Snow +{} cm3 at [{}, {}, {}]: {}")), snowAddVolume,
+        hit.tx, hit.ty, hit.tz,
+        outcome == snow::DepositOutcome::Settled ? _("settled")
+        : outcome == snow::DepositOutcome::Sink  ? _("accounted sink")
+                                                 : _("pending"));
 }
 
 GameplayState::~GameplayState() {
@@ -815,6 +1022,19 @@ void GameplayState::setTool(EditTool value) {
         tool == EditTool::Harvest ? armed : idle);
     plantButton->getButton()->setNormalColor(
         tool == EditTool::PlantTree ? armed : idle);
+    if (snow5Button) {
+        const auto snowArmed = [&](int64_t volume) {
+            return tool == EditTool::SnowAdd && snowAddVolume == volume;
+        };
+        snow5Button->getButton()->setNormalColor(snowArmed(51250) ? armed
+                                                                  : idle);
+        snow50Button->getButton()->setNormalColor(snowArmed(512500) ? armed
+                                                                    : idle);
+        snow5mButton->getButton()->setNormalColor(snowArmed(5125000) ? armed
+                                                                     : idle);
+        snowClearButton->getButton()->setNormalColor(
+            tool == EditTool::SnowClear ? armed : idle);
+    }
     updatePlantLabel();
     updateShapeControls();
 }
@@ -1025,6 +1245,16 @@ void GameplayState::renderPlacementPreview(RenderTarget& target,
 void GameplayState::useTool(int mouseX, int mouseY) {
     const auto hit = pickTile(mouseX, mouseY);
     if (!hit) return;
+    if (tool == EditTool::SnowAdd) {
+        addSnow(*hit);
+        return;
+    }
+    if (tool == EditTool::SnowClear) {
+        snowSettlement->clear();
+        rebuildSnow();
+        lastBuildAction = _("Snow cleared");
+        return;
+    }
     if (tool == EditTool::Harvest) {
         // Plants standing on (or growing into) the tile under the cursor.
         // Items do not exist yet: the yield is shown in the debug panel.
@@ -1153,6 +1383,17 @@ void GameplayState::update(Game& game, float dt) {
             const auto [x, y, z] = *constructionSite;
             controls +=
                 fmt::format("Construction deck [{}, {}, {}]\n", x, y, z);
+        }
+        if (snowFixtureSite) {
+            const auto [x, y, z] = *snowFixtureSite;
+            controls +=
+                fmt::format("Snow fixture landing [{}, {}, {}]\n", x, y, z);
+        }
+        if (snowDropSite) {
+            const auto [x, y, z] = *snowDropSite;
+            controls += fmt::format("Snow drop ramp [{}, {}, {}]\n", x, y, z);
+        }
+        if (constructionSite || snowFixtureSite || snowDropSite) {
             const auto& at = camera.position;
             controls += fmt::format("Camera [{:.1f}, {:.1f}, {:.1f}]\n", at.x,
                                     at.y, at.z);
@@ -1202,6 +1443,25 @@ void GameplayState::update(Game& game, float dt) {
                 ss << block.name << " · " << hit->pieceId << "\n";
                 ss << fmt::format(fmt::runtime(_("Picked shape: {}\n")),
                                   describeShape(hit->shape));
+            }
+
+            ss << "\n--- Snow ---\n";
+            {
+                const auto volume = snowSettlement->volumeAt(hit->tx, hit->tz);
+                const auto level = snowSettlement->levelAt(hit->tx, hit->tz);
+                ss << "volume: " << volume << " cm3";
+                if (level) {
+                    const auto key = std::pair{
+                        int(chunkManager->wrap().wrapTile(hit->tx)), hit->tz};
+                    const auto found = snowSettlement->columns().find(key);
+                    const double base = found == snowSettlement->columns().end()
+                                            ? 0
+                                            : double(found->second.baseY) +
+                                                  found->second.baseLocal;
+                    ss << fmt::format(", level {:.3f} m, depth {:.3f} m",
+                                      *level, *level - base);
+                }
+                ss << "\n";
             }
 
             ss << "\n--- Liquid ---\n";

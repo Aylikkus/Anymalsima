@@ -306,6 +306,37 @@ TEST(tile_piece_wall_and_layer) {
     }
 }
 
+// A snow deposit projects the free space above the ramp up to its measured
+// level. At the 5 cm landing line the toe holds exactly the 0.00125 m3 wedge.
+TEST(tile_piece_free_space_between) {
+    CellGeometry empty;
+    auto flat = empty.freeSpaceBetween(0, .05f, 42, 7);
+    near(1 - float(flat.freeVolumeBelow(1)), .05f);
+    CHECK(flat.contains({.5f, .02f, .5f}));
+    CHECK(!flat.contains({.5f, .06f, .5f}));
+
+    CellGeometry rampCell;
+    CHECK(rampCell.tryAdd({1, 1, TileShape::make(TileShapeProfile::Ramp)}) ==
+          PiecePlacement::Added);
+    auto wedge = rampCell.freeSpaceBetween(0, .05f, 42, 8);
+    near(1 - float(wedge.freeVolumeBelow(1)), .00125f);
+    CHECK(wedge.contains({.5f, .025f, .025f}));
+    CHECK(!wedge.contains({.5f, .03f, .1f}));
+    CHECK(!wedge.contains({.5f, .06f, .01f}));
+    const auto top = wedge.supportHeight({0, 0}, {1, .04f});
+    CHECK(top.has_value());
+    near(*top, .05f);
+    for (const auto& face : wedge.exteriorFaces())
+        CHECK(face.blockId == 42 && face.id == 8);
+
+    CellGeometry combined;
+    combined.append(rampCell);
+    combined.append(wedge);
+    const auto hit = combined.intersectRay({.5f, 2, .025f}, {0, -1, 0});
+    CHECK(hit && hit->id == 8 && hit->blockId == 42);
+    near(hit->hit.t, 1.95f);
+}
+
 TEST(tile_piece_clipping_and_rejection) {
     CellGeometry cell;
     const auto ramp = TileShape::make(TileShapeProfile::DiagonalRamp);

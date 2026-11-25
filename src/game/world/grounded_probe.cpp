@@ -31,14 +31,14 @@ struct Footprint {
 
     std::optional<float> top(const SolidCellSnapshot& cell, int cx, int cy,
                              int cz, float high) const {
-        if (!cell.base.tile.isSolid()) return std::nullopt;
+        if (!cell.hasSolid()) return std::nullopt;
         const float localX = float(x - cx);
         const float localZ = float(z - cz);
         constexpr float r = GroundedProbe::Radius;
         const Vec2 low{localX - r, localZ - r};
         const Vec2 upper{localX + r, localZ + r};
         const auto height =
-            cell.compound
+            cell.usesGeometry()
                 ? cell.geometry().supportHeight(low, upper, high - cy)
                 : tile_geometry::supportHeight(cell.base.shape, low, upper);
         return height ? std::optional(float(cy) + *height) : std::nullopt;
@@ -75,7 +75,7 @@ bool clear(ChunkManager& chunks, Footprint footprint, float feet) {
             if (!cell) return false;
             // Open sky above the highest registered slab.
             if (y >= WORLD_HEIGHT_Y) return true;
-            if (cell->cell.compound) {
+            if (cell->cell.usesGeometry()) {
                 constexpr float r = GroundedProbe::Radius;
                 const float lx = float(footprint.x - x);
                 const float lz = float(footprint.z - z);

@@ -21,6 +21,7 @@ add_library(game
     world/tile_shape.cpp
     world/tile_piece.cpp
     world/snow_settlement.cpp
+    world/snow_cover.cpp
     world/chunk.cpp
     world/grounded_probe.cpp
     world/chunk_mesher.cpp

@@ -70,6 +70,19 @@ class CellGeometry {
     // Face, edge and point contact are allowed. A rejected candidate leaves
     // the cell unchanged.
     PiecePlacement tryAdd(TilePiece piece);
+    // Adds an arbitrary convex solid bounded by outward half-spaces. Used for
+    // environmental deposits and other geometry that is not a tile profile.
+    PiecePlacement tryAddConvex(PieceId id, uint8_t blockId,
+                                std::span<const Plane> bounds);
+    // Copies the solids of another geometry. The caller guarantees that their
+    // interiors do not overlap (as with terrain solids and a deposit).
+    void append(const CellGeometry& other);
+    bool empty() const { return solids_.empty(); }
+    // The free space in the horizontal interval [low, high] (metres in the
+    // cell) as one solid with disjoint convex parts. Used to project a snow
+    // deposit onto the actual supporting facets.
+    CellGeometry freeSpaceBetween(float low, float high, uint8_t blockId,
+                                  PieceId id, size_t maxParts = 256) const;
     bool contains(Vec3 point) const;
     bool intersectsBox(Vec3 low, Vec3 high) const;
     std::vector<std::vector<Vec3>> overheadOpenings() const;
