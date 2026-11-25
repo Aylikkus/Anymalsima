@@ -68,7 +68,7 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
                                       const std::vector<RegionLayer>& layers,
                                       const SoilProfile& soil,
                                       const ChunkColumnInputs* columns) const {
-    chunk.clearShapes();
+    chunk.clearSolidStorage();
     chunk.rootTerrain.reset();
     chunk.legacyRootTerrain = false;
     chunk.legacyRootShape = false;

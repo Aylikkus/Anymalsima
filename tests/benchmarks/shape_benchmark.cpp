@@ -5,6 +5,7 @@
 //
 //   build/tests/shape_benchmark
 //   build/tests/shape_benchmark --legacy
+//   build/tests/shape_benchmark --compound
 //
 // The scene matches tests/support/lod_scene.hpp (seed 1234/5678,
 // 32x32 regions, mountains, mixed coastlines and cliffs).
@@ -35,9 +36,55 @@ double millis(Clock::time_point start) {
         .count();
 }
 
+int compoundWall() {
+    using tile_geometry::LayerThickness;
+    using tile_geometry::TilePiece;
+    const std::array pieces{
+        CellPiece{TilePiece::layer(0, 1, LayerThickness::Cm50),
+                  {PieceOrigin::Terrain}},
+        CellPiece{TilePiece::layer(1, 2, LayerThickness::Cm50, {0, .5f, 0}),
+                  {PieceOrigin::Player}}};
+
+    Chunk wall;
+    const auto start = Clock::now();
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int y = 0; y < Chunk::SIZE_Y; ++y)
+            if (wall.setPieces(Chunk::cell(8, y, z), pieces) !=
+                CellPieceEdit::Applied)
+                return 1;
+    const double buildMs = millis(start);
+    const auto snapshotStart = Clock::now();
+    const auto snapshot = std::make_shared<const Chunk>(wall);
+    const double snapshotMs = millis(snapshotStart);
+    const auto editStart = Clock::now();
+    if (wall.setPieces(Chunk::cell(8, 0, 0), std::span(pieces).first(1)) !=
+        CellPieceEdit::Applied)
+        return 1;
+    const double editMs = millis(editStart);
+    const auto scanStart = Clock::now();
+    size_t pieceReads = 0;
+    constexpr int scans = 256;
+    for (int scan = 0; scan < scans; ++scan)
+        for (uint16_t index = 0; index < Chunk::CellCount; ++index) {
+            const auto cell = snapshot->solidCellAt(index);
+            pieceReads += cell.pieces().size();
+        }
+    std::printf(
+        "compound_wall_cells=%zu piece_storage_bytes=%zu "
+        "legacy_shape_bytes=%zu build_ms=%.4f snapshot_ms=%.4f "
+        "edit_while_shared_ms=%.4f snapshot_scan_ms=%.4f "
+        "pieces_read=%zu\n",
+        snapshot->compoundCount(), snapshot->pieceStorageBytes(),
+        snapshot->shapeStorageBytes(), buildMs, snapshotMs, editMs,
+        millis(scanStart) / scans, pieceReads);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--compound")
+        return compoundWall();
     const bool natural = !(argc > 1 && std::string_view(argv[1]) == "--legacy");
     test::Assets assets;
     auto world = lodScene(32);
@@ -287,6 +334,7 @@ int main(int argc, char** argv) {
         return ChunkMesher::Neighbour(&air);
     };
     size_t vertices = 0, triangles = 0, shapeBytes = 0, encodedBytes = 0;
+    size_t pieceBytes = 0;
     double generateMs = 0, meshMs = 0;
     const auto chunkStart = Clock::now();
     for (int cz = 0; cz < 8; ++cz)
@@ -303,6 +351,7 @@ int main(int argc, char** argv) {
                 region, layers, {}, &inputs);
             generateMs += millis(start);
             shapeBytes += chunk.shapeStorageBytes();
+            pieceBytes += chunk.pieceStorageBytes();
             encodedBytes += chunk_codec::encode(chunk).size();
             start = Clock::now();
             const auto mesh = mesher.build(
@@ -346,11 +395,12 @@ int main(int argc, char** argv) {
         100.0 * double(shapeCells) / double(chunkCells), columnMs, generateMs,
         meshMs, shapeBytes, encodedBytes, vertices, triangles,
         columnMs + chunkMs);
-    std::printf("chunk_tile_bytes=%zu chunk_object_bytes=%zu "
-                "mean_encoded_chunk_bytes=%.2f mean_mesh_ms=%.4f\n",
-                sizeof(Chunk::tiles), sizeof(Chunk),
-                double(encodedBytes) / columns.size(),
-                meshMs / columns.size());
+    std::printf(
+        "chunk_tile_bytes=%zu chunk_object_bytes=%zu "
+        "piece_storage_bytes=%zu mean_encoded_chunk_bytes=%.2f "
+        "mean_mesh_ms=%.4f\n",
+        sizeof(Chunk::tiles), sizeof(Chunk), pieceBytes,
+        double(encodedBytes) / columns.size(), meshMs / columns.size());
     std::printf(
         "dense shapes=%zu shape_bytes=%zu encoded_bytes=%zu "
         "encode_ms=%.1f mesh_ms=%.1f vertices=%zu triangles=%zu\n",

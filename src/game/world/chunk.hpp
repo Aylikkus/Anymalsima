@@ -5,9 +5,12 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "tile.hpp"
+#include "tile_piece.hpp"
 
 struct RootVoxel {
     uint64_t owner;
@@ -20,10 +23,48 @@ struct RootTerrain {
     std::set<uint16_t> edited;
 };
 
+enum class PieceOrigin : uint8_t { Terrain, Structure, Player, Environment };
+
+struct PieceProvenance {
+    PieceOrigin kind = PieceOrigin::Terrain;
+    uint64_t owner = 0;  // source identifier when known
+    bool operator==(const PieceProvenance&) const = default;
+};
+
+struct CellPiece {
+    tile_geometry::TilePiece geometry;
+    PieceProvenance origin;
+};
+
+// Owns the solid revision even after the live chunk changes or unloads.
+struct SolidCellSnapshot {
+    ShapedTile base;
+    std::optional<CellPiece> simple{};
+    std::shared_ptr<const std::vector<CellPiece>> compound{};
+
+    std::span<const CellPiece> pieces() const& {
+        if (compound) return *compound;
+        if (simple) return {&*simple, 1};
+        return {};
+    }
+    std::span<const CellPiece> pieces() const&& = delete;
+};
+
+enum class CellPieceEdit {
+    Applied,
+    Invalid,
+    TooMany,
+    Overlap,
+    Stale,
+    NotLoaded
+};
+
 struct Chunk {
     static constexpr int SIZE_X = 16;
     static constexpr int SIZE_Y = 16;
     static constexpr int SIZE_Z = 16;
+    static constexpr int CellCount = SIZE_X * SIZE_Y * SIZE_Z;
+    static constexpr size_t MaxPiecesPerCell = 32;
     Tile tiles[SIZE_Z][SIZE_Y][SIZE_X];  // [z][y][x]
     // v1–v4 slabs keep ambiguous water and dry edits as saved.
     bool projectsWater = false;
@@ -61,15 +102,35 @@ struct Chunk {
     ShapedTile cellAt(int x, int y, int z) const {
         return {tiles[z][y][x], shapeAt(cell(x, y, z))};
     }
+    bool hasCompoundAt(uint16_t index) const {
+        if (!pieces) return false;
+        const auto* entry = pieceEntry(index);
+        return entry && entry->compound;
+    }
+    bool hasCompounds() const { return pieces && compoundCount() != 0; }
+    size_t compoundCount() const;
+    size_t pieceStorageBytes() const;
+    SolidCellSnapshot solidCellAt(uint16_t index,
+                                  PieceProvenance fallback = {}) const;
+    // Replaces the cell atomically. Pass the retained pieces to remove one
+    // piece without changing the others' IDs or provenance.
+    CellPieceEdit setPieces(uint16_t index,
+                            std::span<const CellPiece> replacement,
+                            PieceProvenance fallback = {});  // for new geometry
     // For live chunks, call under the same lock used for tile edits.
+    // A whole-cell replacement discards any explicit pieces.
     void setCell(uint16_t index, Tile tile, TileShape shape = {}) {
-        assert(index < SIZE_X * SIZE_Y * SIZE_Z);
+        assert(index < CellCount);
+        auto update = pieces ? preparePieceUpdate(index, false) : nullptr;
         updateShape(index, tile.isSolid() ? shape : TileShape{});
-        tiles[index / (SIZE_X * SIZE_Y)][(index / SIZE_X) % SIZE_Y]
-             [index % SIZE_X] = tile;
+        tileAt(index) = tile;
+        if (update) commitPieceUpdate(std::move(update), index, nullptr);
     }
     // Bulk generation replaces the entire slab with cube-only terrain.
-    void clearShapes() { shapes.reset(); }
+    void clearSolidStorage() {
+        shapes.reset();
+        pieces.reset();
+    }
     const RootVoxel* rootAt(uint16_t cell) const {
         if (!rootTerrain) return nullptr;
         const auto it = rootTerrain->roots.find(cell);
@@ -108,6 +169,35 @@ struct Chunk {
     }
 
    private:
+    Tile& tileAt(uint16_t index) {
+        assert(index < CellCount);
+        return tiles[index / (SIZE_X * SIZE_Y)][(index / SIZE_X) % SIZE_Y]
+                    [index % SIZE_X];
+    }
+    const Tile& tileAt(uint16_t index) const {
+        assert(index < CellCount);
+        return tiles[index / (SIZE_X * SIZE_Y)][(index / SIZE_X) % SIZE_Y]
+                    [index % SIZE_X];
+    }
+
+    using PieceList = std::vector<CellPiece>;
+    struct PieceEntry {
+        uint16_t cell;
+        tile_geometry::PieceId id = 0;
+        PieceProvenance origin{};
+        std::shared_ptr<const PieceList> compound{};
+    };
+    using PieceTable = std::vector<PieceEntry>;
+    std::shared_ptr<const PieceTable> pieces;
+
+    const PieceEntry* pieceEntry(uint16_t index) const;
+    PieceProvenance implicitPieceOrigin(uint16_t index,
+                                        PieceProvenance fallback) const;
+    std::shared_ptr<PieceTable> preparePieceUpdate(uint16_t index,
+                                                   bool store) const;
+    void commitPieceUpdate(std::shared_ptr<PieceTable> updated, uint16_t index,
+                           PieceEntry* replacement);
+
     struct ShapeTable {
         std::vector<uint16_t> cells;
         std::vector<TileShape> codes;
@@ -128,7 +218,7 @@ struct Chunk {
             if ((found && shapes->codes[offset] == shape) || (!found && cube))
                 return;
             if (cube && shapes->cells.size() == 1) {
-                clearShapes();
+                shapes.reset();
                 return;
             }
         }

@@ -33,6 +33,7 @@ struct TilePiece {
 
     static TilePiece layer(PieceId id, uint8_t blockId,
                            LayerThickness thickness, Vec3 offset = {});
+    std::optional<TileShape> legacyShape() const;
 };
 
 struct PieceFace {

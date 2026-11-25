@@ -201,6 +201,17 @@ TilePiece TilePiece::layer(PieceId id, uint8_t blockId,
         slab ? 1.f : float(uint8_t(thickness)) / 100};
 }
 
+std::optional<TileShape> TilePiece::legacyShape() const {
+    // Drop a redundant cap and use the existing slab for a half-height cube.
+    if (offset != Vec3{} || fill != PieceFill::BelowProfile)
+        return std::nullopt;
+    if (ceiling == 1) return shape;
+    if (shape.profile() == TileShapeProfile::Cube && ceiling == .5f)
+        return TileShape::make(TileShapeProfile::Slab);
+    const auto height = tile_geometry::supportHeight(shape, Vec2{}, Vec2{1, 1});
+    return height && ceiling >= *height ? std::optional{shape} : std::nullopt;
+}
+
 PiecePlacement CellGeometry::tryAdd(TilePiece piece) {
     if (piece.blockId == 0 || !std::isfinite(piece.offset.x) ||
         !std::isfinite(piece.offset.y) || !std::isfinite(piece.offset.z) ||

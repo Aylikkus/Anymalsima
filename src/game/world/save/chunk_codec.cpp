@@ -136,13 +136,12 @@ void decode(ByteView data, Chunk& output) {
         const auto codec = in.read<uint8_t>();
         const bool wide = count > 256;
         const size_t rawSize = Volume * (wide ? 2 : 1);
-        const auto stored = in.readBlock();
-        Bytes raw;
-        if (codec == 0) {
-            raw.assign(stored.begin(), stored.end());
-        } else if (codec == 1) {
-            raw = compression::decompress(stored, rawSize);
-        } else {
+        auto raw = in.readBlock();
+        Bytes unpacked;
+        if (codec == 1) {
+            unpacked = compression::decompress(raw, rawSize);
+            raw = unpacked;
+        } else if (codec != 0) {
             throw SerializationError("unknown chunk codec");
         }
         if (raw.size() != rawSize) throw SerializationError("bad chunk size");

@@ -5,6 +5,34 @@
 
 #include "items/block.hpp"
 #include "items/material.hpp"
+#include "structure_voxels.hpp"
+
+PieceProvenance ChunkMeshSnapshot::legacyOrigin(
+    uint16_t index, ShapedTile cell, const structure_voxels::Slab* structures,
+    const GrownBlockSet& grown) {
+    if (cell.tile.isSolid() &&
+        (grown.test(cell.tile.block_id) ||
+         (structures && structures->tileAt(index) == cell.tile.block_id &&
+          structures->shapeAt(index) == cell.shape)))
+        return {PieceOrigin::Structure};
+    return {};
+}
+
+SolidCellSnapshot ChunkMeshSnapshot::solidCellAt(uint16_t index) const {
+    const auto base = chunk->cellAt(index % Chunk::SIZE_X,
+                                    (index / Chunk::SIZE_X) % Chunk::SIZE_Y,
+                                    index / (Chunk::SIZE_X * Chunk::SIZE_Y));
+    return chunk->solidCellAt(
+        index, legacyOrigin(index, base, structures.get(), grown));
+}
+
+std::optional<SolidCellSnapshot> ChunkMesher::Neighbour::solidCell() const {
+    if (snapshot) return snapshot->solidCellAt(index);
+    if (!tile) return std::nullopt;
+    if (!tile->isSolid()) return SolidCellSnapshot{{*tile, shape}};
+    return SolidCellSnapshot{{*tile, shape},
+                             CellPiece{{0, tile->block_id, shape}, {}}};
+}
 
 namespace {
 

@@ -578,6 +578,87 @@ std::optional<ShapedTile> ChunkManager::cellAt(int x, int y, int z) {
     return chunk->cellAt(x % Chunk::SIZE_X, y % Chunk::SIZE_Y,
                          z % Chunk::SIZE_Z);
 }
+std::optional<VersionedSolidCell> ChunkManager::solidCellAt(TilePos pos) {
+    const auto x = wrap().wrapTile(pos.x);
+    const int y = pos.y, z = pos.z;
+    if (x < 0 || y < 0 || z < 0) return std::nullopt;
+    const ChunkCoord coord{unsigned(x / Chunk::SIZE_X),
+                           unsigned(y / Chunk::SIZE_Y),
+                           unsigned(z / Chunk::SIZE_Z)};
+    const auto index =
+        Chunk::cell(x % Chunk::SIZE_X, y % Chunk::SIZE_Y, z % Chunk::SIZE_Z);
+    std::lock_guard<std::mutex> lock(tileAtMutex);
+    const auto it = chunks.find(coord);
+    if (it == chunks.end() || it->second.state != ChunkState::Ready)
+        return std::nullopt;
+    const auto& handle = it->second;
+    const ChunkMeshSnapshot view{handle.data, handle.structureBaseline,
+                                 grownBlocks()};
+    return VersionedSolidCell{
+        view.solidCellAt(index),
+        {handle.identity, handle.meshTopologyRevision, index}};
+}
+
+CellPieceEdit ChunkManager::setCellPieces(
+    TilePos pos, SolidCellRevision expected,
+    std::span<const CellPiece> replacement) {
+    const auto wrapping = wrap();
+    const auto x = wrapping.wrapTile(pos.x);
+    const int y = pos.y, z = pos.z;
+    if (x < 0 || y < 0 || z < 0) return CellPieceEdit::NotLoaded;
+    const ChunkCoord coord{unsigned(x / Chunk::SIZE_X),
+                           unsigned(y / Chunk::SIZE_Y),
+                           unsigned(z / Chunk::SIZE_Z)};
+    const int lx = x % Chunk::SIZE_X, ly = y % Chunk::SIZE_Y,
+              lz = z % Chunk::SIZE_Z;
+    const auto index = Chunk::cell(lx, ly, lz);
+    {
+        std::lock_guard<std::mutex> lock(tileAtMutex);
+        const auto it = chunks.find(coord);
+        if (it == chunks.end() || it->second.state != ChunkState::Ready)
+            return CellPieceEdit::NotLoaded;
+        auto& handle = it->second;
+        if (expected != SolidCellRevision{handle.identity,
+                                          handle.meshTopologyRevision, index})
+            return CellPieceEdit::Stale;
+        if (replacement.size() > Chunk::MaxPiecesPerCell)
+            return CellPieceEdit::TooMany;
+        if (soilAssets) {
+            const auto blockCount =
+                soilAssets->getStorage<Block>().items.size();
+            if (std::ranges::any_of(replacement, [&](const CellPiece& piece) {
+                    return piece.geometry.blockId > blockCount;
+                }))
+                return CellPieceEdit::Invalid;
+        }
+        PieceProvenance origin;
+        if (replacement.size() == 1) {
+            const auto& piece = replacement.front().geometry;
+            if (const auto shape = piece.legacyShape())
+                origin = ChunkMeshSnapshot::legacyOrigin(
+                    index,
+                    {Tile{.block_id = piece.blockId, .lightLevel = {}}, *shape},
+                    handle.structureBaseline.get(), grownBlocks());
+        }
+        const auto result = handle.data->setPieces(index, replacement, origin);
+        if (result != CellPieceEdit::Applied) return result;
+    }
+    markDirty(coord, true);
+    for (const auto [axis, local, size] :
+         {std::array{0, lx, Chunk::SIZE_X}, std::array{1, ly, Chunk::SIZE_Y},
+          std::array{2, lz, Chunk::SIZE_Z}}) {
+        if (local != 0 && local != size - 1) continue;
+        int64_t adjacent[] = {coord.x, coord.y, coord.z};
+        adjacent[axis] += local == 0 ? -1 : 1;
+        adjacent[0] = wrapping.wrapChunk(adjacent[0]);
+        if (adjacent[0] >= 0 && adjacent[1] >= 0 && adjacent[2] >= 0)
+            markDirty({unsigned(adjacent[0]), unsigned(adjacent[1]),
+                       unsigned(adjacent[2])},
+                      true);
+    }
+    return CellPieceEdit::Applied;
+}
+
 const RootVoxel* ChunkManager::rootAt(int x, int y, int z) {
     x = int(wrap().wrapTile(x));
     if (x < 0 || y < 0 || z < 0) return nullptr;
@@ -1009,13 +1090,19 @@ bool ChunkManager::canMesh(ChunkCoord coord) const {
 
 void ChunkManager::submitMesh(ChunkCoord coord) {
     auto& handle = chunks.at(coord);
-    std::shared_ptr<const Chunk> data;
-    std::unordered_map<ChunkCoord, std::shared_ptr<const Chunk>> neighbors;
+    ChunkMeshSnapshot data;
+    std::unordered_map<ChunkCoord, ChunkMeshSnapshot> neighbors;
     const auto wrapX = wrap();
     {
-        // Read center and border tiles with their shape tables under one lock.
+        // Copy center and borders together. Sparse tables and structure
+        // baselines are immutable while any snapshot owns them.
         std::lock_guard<std::mutex> lock(tileAtMutex);
-        data = std::make_shared<const Chunk>(*handle.data);
+        const auto capture = [&](const ChunkHandle& source) {
+            return ChunkMeshSnapshot{
+                std::make_shared<const Chunk>(*source.data),
+                source.structureBaseline, grownBlocks()};
+        };
+        data = capture(handle);
         const int offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
                                    {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
         for (const auto& offset : offsets) {
@@ -1026,8 +1113,9 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
             ChunkCoord neighbor{static_cast<unsigned>(x),
                                 static_cast<unsigned>(y),
                                 static_cast<unsigned>(z)};
-            if (auto* chunk = getChunk(neighbor))
-                neighbors[neighbor] = std::make_shared<const Chunk>(*chunk);
+            if (const auto it = chunks.find(neighbor);
+                it != chunks.end() && it->second.state == ChunkState::Ready)
+                neighbors.emplace(neighbor, capture(it->second));
         }
     }
     const auto column = columnInputs.find((uint64_t{coord.x} << 32) | coord.z);
@@ -1058,7 +1146,7 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                     ? structures->rasterize(aboveY)
                     : std::nullopt;
             auto mesh = builder.build(
-                *data, coord,
+                *data.chunk, coord,
                 [&](int x, int y, int z) -> ChunkMesher::Neighbour {
                     static const Tile outside{};
                     // X wraps; Z and Y end at the world edge.
@@ -1074,9 +1162,7 @@ void ChunkManager::submitMesh(ChunkCoord coord) {
                     if (it == neighbors.end()) return nullptr;
                     const int lx = x % Chunk::SIZE_X, ly = y % Chunk::SIZE_Y,
                               lz = z % Chunk::SIZE_Z;
-                    const auto& chunk = *it->second;
-                    return {&chunk.tiles[lz][ly][lx],
-                            chunk.shapeAt(Chunk::cell(lx, ly, lz))};
+                    return {it->second, lx, ly, lz};
                 },
                 climate,
                 [&](int x, int y, int z) -> const Tile* {
@@ -1681,7 +1767,7 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
     const Tile* last = first + Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z;
     if (std::all_of(first, last, [](const Tile& t) { return t.isAir(); }))
         return true;
-    if (it->second.data->hasShapes() ||
+    if (it->second.data->hasShapes() || it->second.data->hasCompounds() ||
         !std::all_of(first, last, [](const Tile& t) { return t.isSolid(); }))
         return false;
     // A solid chunk has no visible face only when every face neighbour is
@@ -1707,7 +1793,9 @@ bool ChunkManager::hasNoGeometry(ChunkCoord coord) const {
                     o[1] ? (o[1] > 0 ? 0 : Chunk::SIZE_Y - 1) : (o[0] ? b : a);
                 const int lz = o[2] ? (o[2] > 0 ? 0 : Chunk::SIZE_Z - 1) : a;
                 const auto cell = neighbor.cellAt(lx, ly, lz);
-                if (!cell.tile.isSolid() || cell.shape.code()) return false;
+                if (!cell.tile.isSolid() || cell.shape.code() ||
+                    neighbor.hasCompoundAt(Chunk::cell(lx, ly, lz)))
+                    return false;
             }
     }
     return true;

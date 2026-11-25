@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–02 complete · Step 03 pending · First maintainer playcheck after step 05.**
+**Steps 01–03 complete · Step 04 pending · First maintainer playcheck after step 05.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -14,7 +14,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 |---|---|---|---|
 | 01 | Reproducible terrain, water and performance baseline | Complete | |
 | 02 | Geometry for positioned pieces and horizontal layers | Complete | |
-| 03 | Sparse compound storage and immutable snapshots | Pending | |
+| 03 | Sparse compound storage and immutable snapshots | Complete | |
 | 04 | Durable piece edits and save migration | Pending | |
 | 05 | Build, pick, walk on and render compound tiles | Pending | A · Construction |
 | 06 | Gravity settlement at slopes and ledges | Pending | |
@@ -311,3 +311,69 @@ The Release app and logic tests built. All 9 focused CTest cases and all
 and UBSan with LeakSanitizer disabled for sandbox execution. This step's
 acceptance checks ran headlessly. The first device playcheck remains
 scheduled after step 05.
+
+### Step 03 · 2026-11-25
+
+[Chunks](../../src/game/world/chunk.hpp) keep the six-byte tile and existing
+shape table. The optional piece table stores cells with several pieces or
+positioned geometry. A single piece that fits an existing profile goes back
+to that profile. If it has an explicit ID or provenance that the old tile
+cannot supply, a metadata-only entry preserves it. Clearing the final entry
+releases the table. Compound cells project the lowest-ID piece into the
+legacy tile path until step 05.
+
+Cell reads own the base tile, shape and piece data. Mesh jobs copy the center
+and loaded neighbors under one lock and share their immutable sparse tables
+and structure baselines. A loaded cell selection is checked against its cell
+index, chunk identity and topology revision. Editing a border invalidates the
+neighbor's mesh revision, including across wrapped X. Chunk reuse invalidates
+selections from its previous residency.
+
+The storage entry point accepts up to 32 pieces per cell and the table has
+at most 4,096 cell keys per chunk. It checks the count before allocating and
+rejects invalid or overlapping pieces before replacing the cell. The legacy
+chunk decoder now reads uncompressed indices from the input directly and
+checks their expected size. Compound save records and editor integration are
+scheduled for step 04.
+
+The [headless fixtures](../../tests/unit/game/world/chunk_piece_tests.cpp) use
+two half-metre pieces in one cell and a synthetic one-region-wide world.
+The seam edit is at `(-1, 72, 72)`, canonical `(127, 72, 72)`, with the
+neighboring mesh in chunk `(0, 4, 4)`. A worker gate holds the mesh job
+through the edit. No save or world seed is required for the fixture.
+
+```bash
+cmake --build build --target app world_logic_tests shape_benchmark --parallel 4
+focused='game.world.(chunk_piece|tile_(piece|shape)|mesh_skips_hidden_chunks)|chunk_codec_rejects_corrupt'
+ctest --test-dir build -R "$focused" --output-on-failure --no-tests=error
+ctest --test-dir build -L gameplay -j 4 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 3
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R "$focused" --output-on-failure --no-tests=error
+
+build/tests/shape_benchmark --legacy
+build/tests/shape_benchmark
+build/tests/shape_benchmark --compound
+```
+
+The Release app and logic tests built with Tracy disabled. All 398 gameplay
+cases passed. The 14 focused cases also passed with ASan and UBSan.
+The initial sanitizer build hit a Clang frontend failure while reading a
+system header. The build and tests passed on retry with the same compiler
+and flags. Acceptance ran headlessly.
+
+The ordinary benchmark uses the step 01 seed pair and 64 surface slabs per
+run. The slab's tile array is still 24,576 bytes, and the chunk object is
+24,632 bytes, up from 24,616. Cube-only and natural terrain allocated zero
+piece-table bytes. Across three runs, the median of the mean CPU mesh time
+was 0.1919 ms per cube-only slab and 0.2998 ms per natural-shape slab.
+Mean encoded sizes were 132.19 and 282.75 bytes respectively.
+
+The dense benchmark fills a 16 × 16 wall with two pieces per cell. It used
+40,984 bytes of piece storage and 816 bytes of legacy shape storage,
+excluding allocator and shared-pointer control-block overhead. Median
+times across three runs were 0.9371 ms to insert the wall, 0.0105 ms to
+capture one chunk snapshot, 0.0072 ms to edit one cell while a snapshot
+held the old table, and 0.0653 ms to scan the snapshot's 4,096 cells.
+This measures storage and reads. Compound mesh timings start in step 05.

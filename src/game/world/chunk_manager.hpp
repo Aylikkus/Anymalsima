@@ -80,6 +80,18 @@ struct FinishedMesh {
     uint64_t revision;
 };
 
+struct SolidCellRevision {
+    uint64_t chunkIdentity;
+    uint64_t topology;
+    uint16_t index;
+    bool operator==(const SolidCellRevision&) const = default;
+};
+
+struct VersionedSolidCell {
+    SolidCellSnapshot cell;
+    SolidCellRevision revision;
+};
+
 // Main-thread requests/dispatch/publication, with bounded immutable worker
 // jobs.
 class ChunkManager {
@@ -172,6 +184,13 @@ class ChunkManager {
     std::shared_ptr<Chunk> getChunkShared(const ChunkCoord& coord);
     const Tile* tileAt(int tx, int ty, int tz);
     std::optional<ShapedTile> cellAt(int tx, int ty, int tz);
+    // Owner-thread read. The returned value may outlive the loaded slab.
+    std::optional<VersionedSolidCell> solidCellAt(TilePos pos);
+    // In-memory storage edit for the owner thread. This invalidates mesh
+    // snapshots. Durable edits and their other side effects go through the
+    // editor once it supports pieces.
+    CellPieceEdit setCellPieces(TilePos pos, SolidCellRevision expected,
+                                std::span<const CellPiece> replacement);
     // Main-thread view of the substrate under a living root.
     const RootVoxel* rootAt(int x, int y, int z);
     void unregister(const ChunkCoord& coord);

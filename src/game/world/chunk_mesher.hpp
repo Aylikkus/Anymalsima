@@ -10,6 +10,22 @@
 #include "render/vertex.hpp"
 #include "water_surface.hpp"
 
+namespace structure_voxels {
+struct Slab;
+}
+
+// The center and each loaded face neighbour own these inputs for the job.
+struct ChunkMeshSnapshot {
+    std::shared_ptr<const Chunk> chunk;
+    std::shared_ptr<const structure_voxels::Slab> structures;
+    GrownBlockSet grown;
+
+    static PieceProvenance legacyOrigin(
+        uint16_t index, ShapedTile cell,
+        const structure_voxels::Slab* structures, const GrownBlockSet& grown);
+    SolidCellSnapshot solidCellAt(uint16_t index) const;
+};
+
 struct ChunkGeometry {
     std::vector<BlockVertex> vertices;
     std::vector<uint32_t> indices;
@@ -46,9 +62,17 @@ class ChunkMesher {
     struct Neighbour {
         const Tile* tile;
         TileShape shape;
+        const ChunkMeshSnapshot* snapshot = nullptr;
+        uint16_t index = 0;
 
         Neighbour(const Tile* tile, TileShape shape = {})
             : tile(tile), shape(shape) {}
+        Neighbour(const ChunkMeshSnapshot& snapshot, int x, int y, int z)
+            : tile(&snapshot.chunk->tiles[z][y][x]),
+              shape(snapshot.chunk->shapeAt(Chunk::cell(x, y, z))),
+              snapshot(&snapshot),
+              index(Chunk::cell(x, y, z)) {}
+        std::optional<SolidCellSnapshot> solidCell() const;
     };
     using NeighbourFn = std::function<Neighbour(int tx, int ty, int tz)>;
     using WaterHaloFn = std::function<const Tile*(int tx, int ty, int tz)>;

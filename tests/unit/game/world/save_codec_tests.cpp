@@ -229,6 +229,17 @@ TEST(chunk_codec_rejects_corrupt) {
     auto badLiquid = encoded;
     badLiquid[4] = std::byte{9};  // first palette entry's liquid byte
     CHECK(throwsSerialization([&] { chunk_codec::decode(badLiquid, out); }));
+
+    BinaryWriter raw;
+    raw.write(chunk_codec::Version);
+    raw.write(uint16_t{2});
+    for (auto entry : {0, 1}) {
+        raw.write(uint8_t(entry));
+        for (int field = 0; field < 4; ++field) raw.write(uint8_t{0});
+    }
+    raw.write(uint8_t{0});  // uncompressed indices
+    raw.writeBlock(Bytes(Chunk::CellCount + 1));
+    CHECK(throwsSerialization([&] { chunk_codec::decode(raw.bytes(), out); }));
 }
 
 TEST(region_file_roundtrip) {
