@@ -161,7 +161,8 @@ Known limits:
   recalculate affected coarse voxel cells. Tree proxies omit coarse cells
   containing a wound so narrow excavations remain visible. The streamed and
   far sky projections look for the next intact occluder below a suppressed top.
-- `terrain_edits.dat` stores ground shapes and shaped additions in EDIT v4.
+- `terrain_edits.dat` stores ground shapes and positive edit slabs in EDIT v4.
+  The slab payload includes compound geometry and provenance where present.
   EDIT v2 introduced suppression masks. EDIT v1 loads with additions only.
   Region CHNK data supplies the actual tiles for reconciliation.
 
@@ -173,8 +174,9 @@ Known limits:
   `trees.dat` when `structures.dat` is absent. It leaves the legacy file
   intact and prefers the new file after the first successful write. Unknown
   sections survive migration and subsequent saves.
-- `VOXL` v2 groups records by stable kind ID and source key, with a shape
-  code per voxel. VOXL v1 records imply cubes. A record can
+- `VOXL` v3 groups records by stable kind ID and source key. Each voxel
+  carries a shape code and can include positioned pieces with stable IDs.
+  VOXL v2 supports the shape code, and v1 records imply cubes. A record can
   remove a source, patch its voxels (block ID zero clears a cell), or supply
   all voxels of a rebuilt or newly planted source. Patch records apply
   after their kind registers the generated source. Replacement records can
@@ -184,10 +186,11 @@ Known limits:
   the main thread to publish the new records.
 - Region `STRB` v1 stores the previous generated structure baseline with
   each saved slab. An empty payload records a known empty baseline.
-  Reconciliation compares the material and shape of old generated voxels,
-  actual tiles, and new generated voxels. An unchanged tile follows the
-  source revision. Player damage, replacements and occupied cells survive
-  where they differ from the old baseline. Legacy chunks without `STRB` keep
+  Reconciliation compares old generated cells, actual cells and the new
+  source. A generated piece follows its source revision while player pieces
+  retain their placement. Explicit removals are keyed by cell, source owner
+  and piece ID, so later revisions preserve them. A conflicting generated
+  piece yields to occupied space. Legacy chunks without `STRB` keep
   their saved tiles on first load. Tree wood still uses `TreeStamp` for
   growth and cuts.
 - A revised source updates the landmark and shade without streaming the

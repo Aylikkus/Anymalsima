@@ -40,6 +40,7 @@ struct BlockChange {
     Tile after;
     bool wasRoot = false;
     TileShape beforeShape{}, afterShape{};
+    bool piecesChanged = false;
 };
 
 // The single entry point for gameplay changes to world tiles: the player,
@@ -72,6 +73,10 @@ class WorldEditor {
     EditStatus removeBlock(TilePos pos);
     EditStatus setBlock(TilePos pos, uint8_t block, TileShape shape = {});
     EditStatus apply(const EditRequest& request);
+    CellPieceEdit placePiece(TilePos pos, SolidCellRevision expected,
+                             tile_geometry::TilePiece piece);
+    CellPieceEdit removePiece(TilePos pos, SolidCellRevision expected,
+                              tile_geometry::PieceId id);
     // Applies requests in order. Later requests see earlier results (placing
     // twice into one tile reports Occupied). Returns one status per request.
     std::vector<EditStatus> apply(std::span<const EditRequest> requests);
@@ -80,7 +85,13 @@ class WorldEditor {
     Signal<const BlockChange&> blockChanged;
 
    private:
+    friend class ChunkManager;
     struct Pending;
+    CellPieceEdit editPiece(TilePos pos, SolidCellRevision expected,
+                            tile_geometry::PieceId id,
+                            const tile_geometry::TilePiece* placement);
+    void recordChange(const BlockChange& change, Pending& pending);
+    void publishStructureChanges(std::span<const BlockChange> changes);
     EditStatus applyOne(const EditRequest& request, Pending& pending);
     // Calls fn(coord, index, plant, volume, rule) for plants near a tile.
     template <typename F>

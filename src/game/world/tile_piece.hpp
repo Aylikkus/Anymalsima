@@ -31,6 +31,8 @@ struct TilePiece {
     // Horizontal clip in the profile's coordinates, before translation.
     float ceiling = 1;
 
+    bool operator==(const TilePiece&) const = default;
+
     static TilePiece layer(PieceId id, uint8_t blockId,
                            LayerThickness thickness, Vec3 offset = {});
     std::optional<TileShape> legacyShape() const;

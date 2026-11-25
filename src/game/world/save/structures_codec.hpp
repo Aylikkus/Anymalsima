@@ -8,6 +8,7 @@ namespace structures_codec {
 
 // structures.dat holds TREE, VOXL, and any kind-specific sections the
 // current build does not interpret. All are authoritative world state.
+// VOXL v3 adds a bounded list of positioned pieces after each voxel.
 // VOXL v2 adds a canonical shape byte after each voxel's block ID.
 // v1 records have cube geometry.
 struct File {

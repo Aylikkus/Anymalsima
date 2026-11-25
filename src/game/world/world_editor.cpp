@@ -79,6 +79,62 @@ void WorldEditor::forPlantsNear(int64_t x, int y, int64_t z, F&& fn) {
         }
 }
 
+CellPieceEdit WorldEditor::placePiece(TilePos pos, SolidCellRevision expected,
+                                      tile_geometry::TilePiece piece) {
+    return editPiece(pos, expected, piece.id, &piece);
+}
+
+CellPieceEdit WorldEditor::removePiece(TilePos pos, SolidCellRevision expected,
+                                       tile_geometry::PieceId id) {
+    return editPiece(pos, expected, id, nullptr);
+}
+
+CellPieceEdit WorldEditor::editPiece(
+    TilePos pos, SolidCellRevision expected, tile_geometry::PieceId id,
+    const tile_geometry::TilePiece* placement) {
+    pos.x = int(chunks.wrap().wrapTile(pos.x));
+    const auto before = chunks.solidCellAt(pos);
+    if (!before) return CellPieceEdit::NotLoaded;
+    if (before->revision != expected) return CellPieceEdit::Stale;
+    const auto pieces = before->cell.pieces();
+    std::vector<CellPiece> replacement(pieces.begin(), pieces.end());
+    if (placement) {
+        if (!placement->blockId || placement->blockId > blocks.items.size())
+            return CellPieceEdit::Invalid;
+        bool blocked = false;
+        forPlantsNear(
+            pos.x, pos.y, pos.z,
+            [&](const ChunkCoord&, size_t, const FloraInstance&,
+                const FloraVolume& volume, const FloraSpeciesRule& rule) {
+                blocked |= rule.blocksPlacement &&
+                           volume.contains(pos.x, pos.y, pos.z);
+            });
+        if (blocked) return CellPieceEdit::Blocked;
+        replacement.push_back({*placement, {PieceOrigin::Player}});
+    } else if (!std::erase_if(replacement, [&](const CellPiece& piece) {
+                   return piece.geometry.id == id;
+               })) {
+        return CellPieceEdit::Invalid;
+    }
+    const bool wasRoot = chunks.rootAt(pos.x, pos.y, pos.z) != nullptr;
+    const auto result = chunks.setCellPieces(pos, expected, replacement, true);
+    if (result != CellPieceEdit::Applied) return result;
+    const auto after = chunks.cellAt(pos.x, pos.y, pos.z).value();
+    Pending pending;
+    recordChange({pos, before->cell.base.tile, after.tile, wasRoot,
+                  before->cell.base.shape, after.shape, true},
+                 pending);
+    commit(pending);
+    return result;
+}
+
+void WorldEditor::publishStructureChanges(
+    std::span<const BlockChange> changes) {
+    Pending pending;
+    for (const auto& change : changes) recordChange(change, pending);
+    commit(pending);
+}
+
 EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     // X wraps: a position just past the seam edits the canonical tile.
     auto pos = request.pos;
@@ -117,6 +173,11 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         change.before = tile;
         change.beforeShape = chunk.shapeAt(cell);
         change.wasRoot = chunk.rootAt(cell) != nullptr;
+        if (request.treeGrowth && chunk.hasPieceEntry(cell)) {
+            status = EditStatus::Blocked;
+            return;
+        }
+        change.piecesChanged = chunk.hasPieceEntry(cell);
         switch (request.mode) {
             case EditMode::Place:
                 if (tile.isSolid()) {
@@ -162,7 +223,8 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
             return;
         }
         const TileShape shape = block ? request.shape : TileShape{};
-        if (tile.block_id == block && change.beforeShape == shape &&
+        if (!chunk.hasCompoundAt(cell) && tile.block_id == block &&
+            change.beforeShape == shape &&
             (block == 0 || tile.liquid == LiquidType::None)) {
             if (!request.treeGrowth && tile.isSolid() && !change.wasRoot &&
                 chunk.markRootEdited(cell))
@@ -173,6 +235,19 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         if (block && tile.waterOrigin == WaterOrigin::Local) {
             status = EditStatus::Blocked;
             return;
+        }
+        if (!request.treeGrowth) {
+            const auto* baseline = chunks.structureBaseline(coord);
+            if (baseline && baseline->pieces.contains(cell)) {
+                const auto removed = chunk.structurePieceRemovals(
+                    cell, baseline->solidCellAt(cell), {});
+                if (chunk.removedStructurePieces().size() + removed.size() >
+                    Chunk::MaxPieceRemovals) {
+                    status = EditStatus::Blocked;
+                    return;
+                }
+                chunk.addPieceRemovals(removed);
+            }
         }
         if (request.rootOwner && !request.previousWood)
             chunk.recordRoot(cell, request.rootOwner, tile);
@@ -193,8 +268,17 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
         change.afterShape = shape;
         status = EditStatus::Applied;
     });
-    if (status != EditStatus::Applied) return status;
+    if (status == EditStatus::Applied) recordChange(change, pending);
+    return status;
+}
 
+void WorldEditor::recordChange(const BlockChange& change, Pending& pending) {
+    const auto [x, y, z] = change.pos;
+    const ChunkCoord coord{unsigned(x / Chunk::SIZE_X),
+                           unsigned(y / Chunk::SIZE_Y),
+                           unsigned(z / Chunk::SIZE_Z)};
+    const int lx = x % Chunk::SIZE_X, ly = y % Chunk::SIZE_Y,
+              lz = z % Chunk::SIZE_Z;
     pending.modified.insert(coord);
     // A shape change can move an anchor without destroying the plant.
     forPlantsNear(
@@ -241,7 +325,6 @@ EditStatus WorldEditor::applyOne(const EditRequest& request, Pending& pending) {
     }
     pending.columns.insert((uint64_t{coord.x} << 32) | coord.z);
     pending.changes.push_back(change);
-    return status;
 }
 
 void WorldEditor::commit(Pending& pending) {

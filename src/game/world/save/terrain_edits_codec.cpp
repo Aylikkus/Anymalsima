@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "chunk_codec.hpp"
 #include "world/consts.hpp"
 
 namespace terrain_edits_codec {
@@ -95,7 +96,7 @@ File decode(ByteView bytes) {
                 const auto slabY = in.read<uint16_t>();
                 if (slabY >= Y_CHUNKS)
                     throw SerializationError("structure slab out of range");
-                const auto blob = in.readBlock(1u << 20);
+                const auto blob = in.readBlock(chunk_codec::MaxBlobSize);
                 edit->structure.emplace_back(
                     slabY,
                     std::make_shared<const Bytes>(blob.begin(), blob.end()));
@@ -126,6 +127,11 @@ File decode(ByteView bytes) {
             }
             // Decodes every blob, so corrupt payloads are rejected here.
             edit->finish();
+            if (std::ranges::adjacent_find(edit->structure, {},
+                                           [](const auto& slab) {
+                                               return slab.first;
+                                           }) != edit->structure.end())
+                throw SerializationError("duplicate structure slab");
             if (!file.columns.emplace(editKey(chunkX, chunkZ), std::move(edit))
                      .second)
                 throw SerializationError("duplicate edited column");

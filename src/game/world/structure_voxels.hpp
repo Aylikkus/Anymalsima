@@ -69,6 +69,12 @@ struct Slab {
     bool enclosed = false;
     std::map<uint16_t, TileShape> shapes;  // level zero, noncube cells only
 
+    std::map<uint16_t, std::shared_ptr<const std::vector<CellPiece>>> pieces;
+
+    SolidCellSnapshot solidCellAt(uint16_t cell) const;
+    void setPieces(uint16_t cell, std::span<const CellPiece> replacement);
+    void erase(uint16_t cell);
+
     TileShape shapeAt(uint16_t cell) const {
         if (shapes.empty() || !bits.test(cell)) return {};
         const auto it = shapes.find(cell);
@@ -80,7 +86,9 @@ struct Slab {
         else if (!shapes.empty())
             shapes.erase(cell);
     }
-    bool fullCoverage() const { return shapes.empty() && bits.all(); }
+    bool fullCoverage() const {
+        return shapes.empty() && pieces.empty() && bits.all();
+    }
 
     uint8_t blockAt(size_t cell) const {
         return blocks.empty() ? block : blocks[cell];

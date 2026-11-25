@@ -115,9 +115,11 @@ def scan_assets():
     return textures, music, sounds, shaders, materials
 
 
-def scan_data_assets():
+def scan_data_assets(previous):
     data_root = os.path.join(ASSETS_DIR, "data")
     result = []
+    block_files = next((entry["files"] for entry in previous
+                        if entry["type"] == "blocks"), [])
 
     if not os.path.exists(data_root):
         return result
@@ -142,10 +144,13 @@ def scan_data_assets():
                 files.append(f"assets/{rel_path}")
 
         if files:
-            result.append({
-                "type": data_type,
-                "files": sorted(files)
-            })
+            files = sorted(files)
+            if data_type == "blocks":
+                # Block IDs are positions in the concatenated definitions.
+                # Keep existing files in load order and append new files.
+                files = ([file for file in block_files if file in files] +
+                         [file for file in files if file not in block_files])
+            result.append({"type": data_type, "files": files})
 
     return result
 
@@ -155,7 +160,7 @@ def main():
     old_def = load_definitions()
 
     textures, music, sounds, shaders, materials = scan_assets()
-    data = scan_data_assets()
+    data = scan_data_assets(old_def.get("data", []))
 
     new_def = {}
 

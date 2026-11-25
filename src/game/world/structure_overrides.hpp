@@ -16,6 +16,7 @@ enum class OverrideMode : uint8_t { Removed, Patch, Replace };
 struct OverrideVoxel {
     uint8_t block = 0;
     TileShape shape{};
+    std::vector<CellPiece> pieces;
 
     OverrideVoxel() = default;
     OverrideVoxel(uint8_t block, TileShape shape = {})

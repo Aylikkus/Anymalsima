@@ -5,6 +5,10 @@
 
 // Compact per-chunk encoding for save files.
 //
+// v7: length-prefixed sparse piece table after root terrain. A u16 cell
+//     count precedes sorted {u16 cell, u8 count, pieces...} entries. Then a
+//     u32 removal count and sorted {u16 cell, u64 owner, u32 piece ID} keys.
+//     Chunks without either table keep the v6 encoding.
 // v6: paletteCount bit 14 marks a shape section following the palette and
 //     any indices: u32 byte length, u16 count, then sorted
 //     {u16 cell, u8 canonical noncube code} entries. Bit 13 marks a root
@@ -29,8 +33,9 @@
 // and decoded tiles have zeroed light.
 namespace chunk_codec {
 
-inline constexpr uint8_t Version = 6;
+inline constexpr uint8_t Version = 7;
 inline constexpr uint8_t MinVersion = 1;
+inline constexpr size_t MaxBlobSize = 8u << 20;
 
 Bytes encode(const Chunk& chunk);
 // Throws SerializationError on malformed input.

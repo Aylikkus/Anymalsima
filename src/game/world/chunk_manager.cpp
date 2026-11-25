@@ -66,9 +66,9 @@ StructureSlab structureBaselineFor(std::optional<structure_voxels::Slab> slab,
                                                       column->surface_y)
                                            : WaterSurface::sea(-1).topTile();
                 if (int(coord.y) * Side + y <= ceiling ||
-                    grown.test(slab->blockAt(i))) {
-                    slab->bits.reset(i);
-                    slab->setShape(uint16_t(i), {});
+                    (grown.test(slab->blockAt(i)) &&
+                     !slab->pieces.contains(i))) {
+                    slab->erase(uint16_t(i));
                 }
             }
     return slab->bits.any() ? std::make_shared<const Slab>(std::move(*slab))
@@ -93,6 +93,9 @@ StructureSlab decodeStructureBaseline(ByteView blob) {
             }
     chunk.forEachShape(
         [&](uint16_t cell, TileShape shape) { result->setShape(cell, shape); });
+    chunk.forEachPieceCell([&](uint16_t cell, const auto& snapshot) {
+        result->setPieces(cell, snapshot.pieces());
+    });
     return result->bits.any() ? result : nullptr;
 }
 
@@ -111,10 +114,12 @@ bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
                 const auto cell = Chunk::cell(x, y, z);
                 const auto actual = chunk.cellAt(x, y, z);
                 const auto* root = chunk.rootAt(cell);
-                const uint8_t block = root ? root->block
-                                      : grown.test(actual.tile.block_id)
-                                          ? 0
-                                          : actual.tile.block_id;
+                const bool explicitPieces = chunk.hasPieceEntry(cell);
+                const uint8_t block =
+                    root ? root->block
+                    : !explicitPieces && grown.test(actual.tile.block_id)
+                        ? 0
+                        : actual.tile.block_id;
                 const auto shape = root    ? root->shape
                                    : block ? actual.shape
                                            : TileShape{};
@@ -131,6 +136,15 @@ bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
                     : structures ? structures->shapeAt(cell)
                                  : TileShape{};
                 if (block != expected || shape != expectedShape) return true;
+                if (explicitPieces || (!ground && structures &&
+                                       structures->pieces.contains(cell))) {
+                    const auto solid = chunk.solidCellAt(cell);
+                    const auto baseline = !ground && structures
+                                              ? structures->solidCellAt(cell)
+                                              : SolidCellSnapshot{};
+                    if (!std::ranges::equal(solid.pieces(), baseline.pieces()))
+                        return true;
+                }
 
                 const auto liquid =
                     !expected && column.water.fills(worldY, column.surface_y)
@@ -149,41 +163,98 @@ bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
     return false;
 }
 
-template <typename Apply>
 bool reconcileStructure(Chunk& chunk, const structure_voxels::Slab* previous,
-                        const structure_voxels::Slab* current, Apply apply) {
+                        const structure_voxels::Slab* current,
+                        ChunkCoord coord = {},
+                        std::vector<BlockChange>* changes = nullptr) {
     if (!previous && !current) return false;
     using namespace structure_voxels;
+    const auto occupied = (previous ? previous->bits : std::bitset<Cells>{}) |
+                          (current ? current->bits : std::bitset<Cells>{});
     bool changed = false;
-    for (int z = 0; z < Side; ++z)
-        for (int y = 0; y < Side; ++y)
-            for (int x = 0; x < Side; ++x) {
-                const auto i = uint16_t(cellIndex(x, y, z));
-                const uint8_t old = previous ? previous->tileAt(i) : 0;
-                const uint8_t next = current ? current->tileAt(i) : 0;
-                const auto oldShape =
-                    previous ? previous->shapeAt(i) : TileShape{};
-                const auto nextShape =
-                    current ? current->shapeAt(i) : TileShape{};
-                if (old == next && oldShape == nextShape) continue;
-                changed = true;
-                const auto& tile = chunk.tiles[z][y][x];
-                if (old ? tile.block_id == old && chunk.shapeAt(i) == oldShape
-                        : tile.isAir())
-                    apply(x, y, z, tile, next, nextShape);
-            }
-    return changed;
-}
+    for (uint16_t cell = 0; cell < Cells; ++cell) {
+        if (!occupied.test(cell)) continue;
+        const auto old =
+            previous ? previous->solidCellAt(cell) : SolidCellSnapshot{};
+        const auto next =
+            current ? current->solidCellAt(cell) : SolidCellSnapshot{};
+        if (std::ranges::equal(old.pieces(), next.pieces())) continue;
+        changed = true;  // save the new baseline even if an edit masks it
+        const auto actual = chunk.solidCellAt(
+            cell,
+            old.base.tile.isSolid() &&
+                    old.base.tile.block_id == chunk.tileAt(cell).block_id &&
+                    old.base.shape == chunk.shapeAt(cell)
+                ? PieceProvenance{PieceOrigin::Structure}
+                : PieceProvenance{});
+        if (actual.base.tile.isLiquid() || chunk.rootAt(cell)) continue;
 
-bool rebaseStructure(Chunk& chunk, const structure_voxels::Slab* previous,
-                     const structure_voxels::Slab* current) {
-    return reconcileStructure(
-        chunk, previous, current,
-        [&](int x, int y, int z, Tile tile, uint8_t block, TileShape shape) {
-            tile.block_id = block;
+        if (!chunk.hasPieceEntry(cell) && !old.compound && !next.compound) {
+            if (chunk.rootEdited(cell) ||
+                chunk.removedStructurePieces().contains({cell, 0, 0}) ||
+                !std::ranges::equal(actual.pieces(), old.pieces()))
+                continue;
+            auto tile = actual.base.tile;
+            tile.block_id = next.base.tile.block_id;
             tile.clearCover();
-            chunk.setCell(Chunk::cell(x, y, z), tile, shape);
-        });
+            chunk.setCell(cell, tile, next.base.shape);
+        } else {
+            const auto sameIdentity = [](const CellPiece& a,
+                                         const CellPiece& b) {
+                return a.origin == b.origin && a.geometry.id == b.geometry.id;
+            };
+            std::vector<CellPiece> replacement;
+            tile_geometry::CellGeometry geometry;
+            for (const auto& piece : actual.pieces()) {
+                if (std::ranges::find(old.pieces(), piece) !=
+                        old.pieces().end() &&
+                    std::ranges::find(next.pieces(), piece) ==
+                        next.pieces().end())
+                    continue;
+                replacement.push_back(piece);
+                geometry.tryAdd(piece.geometry);
+            }
+            for (const auto& piece : next.pieces()) {
+                const auto matched = [&](const CellPiece& p) {
+                    return sameIdentity(p, piece);
+                };
+                if ((piece.origin.kind == PieceOrigin::Structure &&
+                     chunk.removedStructurePieces().contains(
+                         {cell, piece.origin.owner, piece.geometry.id})) ||
+                    std::ranges::any_of(replacement, matched) ||
+                    (!old.compound && chunk.rootEdited(cell) &&
+                     std::ranges::any_of(old.pieces(), matched) &&
+                     !std::ranges::any_of(actual.pieces(), matched)) ||
+                    replacement.size() == Chunk::MaxPiecesPerCell)
+                    continue;
+                if (geometry.tryAdd(piece.geometry) ==
+                    tile_geometry::PiecePlacement::Added)
+                    replacement.push_back(piece);
+            }
+            std::ranges::sort(replacement, {}, [](const CellPiece& piece) {
+                return piece.geometry.id;
+            });
+            if (std::ranges::equal(actual.pieces(), replacement)) continue;
+            const bool explicitNext =
+                next.compound &&
+                std::ranges::any_of(replacement, [](const auto& p) {
+                    return p.origin.kind == PieceOrigin::Structure;
+                });
+            if (chunk.setPieces(cell, replacement, {PieceOrigin::Structure},
+                                explicitNext) != CellPieceEdit::Applied)
+                continue;
+        }
+        if (changes) {
+            const TilePos pos{int(coord.x) * Side + cell % Side,
+                              int(coord.y) * Side + cell / Side % Side,
+                              int(coord.z) * Side + cell / (Side * Side)};
+            changes->push_back(
+                {pos, actual.base.tile, chunk.tileAt(cell), false,
+                 actual.base.shape, chunk.shapeAt(cell),
+                 bool(old.compound || next.compound || actual.compound)});
+        }
+    }
+    return changed;
 }
 
 std::vector<TileBox> changedStructureBoxes(
@@ -601,7 +672,7 @@ std::optional<VersionedSolidCell> ChunkManager::solidCellAt(TilePos pos) {
 
 CellPieceEdit ChunkManager::setCellPieces(
     TilePos pos, SolidCellRevision expected,
-    std::span<const CellPiece> replacement) {
+    std::span<const CellPiece> replacement, bool playerEdit) {
     const auto wrapping = wrap();
     const auto x = wrapping.wrapTile(pos.x);
     const int y = pos.y, z = pos.z;
@@ -631,6 +702,15 @@ CellPieceEdit ChunkManager::setCellPieces(
                 }))
                 return CellPieceEdit::Invalid;
         }
+        std::vector<Chunk::PieceRemoval> removals;
+        if (playerEdit && handle.structureBaseline) {
+            removals = handle.data->structurePieceRemovals(
+                index, handle.structureBaseline->solidCellAt(index),
+                replacement);
+            if (handle.data->removedStructurePieces().size() + removals.size() >
+                Chunk::MaxPieceRemovals)
+                return CellPieceEdit::TooMany;
+        }
         PieceProvenance origin;
         if (replacement.size() == 1) {
             const auto& piece = replacement.front().geometry;
@@ -640,9 +720,21 @@ CellPieceEdit ChunkManager::setCellPieces(
                     {Tile{.block_id = piece.blockId, .lightLevel = {}}, *shape},
                     handle.structureBaseline.get(), grownBlocks());
         }
-        const auto result = handle.data->setPieces(index, replacement, origin);
+        const auto result = handle.data->setPieces(
+            index, replacement, origin,
+            playerEdit && replacement.size() == 1 &&
+                replacement.front().origin.kind != PieceOrigin::Player);
         if (result != CellPieceEdit::Applied) return result;
+        handle.data->addPieceRemovals(removals);
+        const auto* root = handle.data->rootAt(index);
+        if (playerEdit &&
+            (!root || std::ranges::none_of(replacement, [&](const auto& p) {
+                return p.origin ==
+                       PieceProvenance{PieceOrigin::Structure, root->owner};
+            })))
+            handle.data->markRootEdited(index);
     }
+    if (playerEdit) return CellPieceEdit::Applied;
     markDirty(coord, true);
     for (const auto [axis, local, size] :
          {std::array{0, lx, Chunk::SIZE_X}, std::array{1, ly, Chunk::SIZE_Y},
@@ -1607,7 +1699,7 @@ void ChunkManager::dispatchGeneration() {
                             try {
                                 const auto previous =
                                     decodeStructureBaseline(*savedBaseline);
-                                baselineChanged = rebaseStructure(
+                                baselineChanged = reconcileStructure(
                                     *result, previous.get(), baseline.get());
                             } catch (const SerializationError& e) {
                                 std::cerr << "Ignoring unreadable structure "
@@ -1875,31 +1967,19 @@ void ChunkManager::updateStructureBaselines(WorldEditor* editor) {
         }
         const auto& old = found->second.structureBaseline;
         if (!old && !baseline) continue;
-        std::vector<EditRequest> edits;
+        std::vector<BlockChange> changes;
         bool changed = false;
         withChunkLocked(job.coord, [&](Chunk& chunk) {
-            changed = reconcileStructure(
-                chunk, old.get(), baseline.get(),
-                [&](int x, int y, int z, Tile tile, uint8_t block,
-                    TileShape shape) {
-                    if (editor) {
-                        edits.push_back({.pos = {int(job.coord.x) * Side + x,
-                                                 int(job.coord.y) * Side + y,
-                                                 int(job.coord.z) * Side + z},
-                                         .mode = EditMode::Replace,
-                                         .block = block,
-                                         .shape = shape});
-                    } else {
-                        tile.block_id = block;
-                        tile.clearCover();
-                        chunk.setCell(Chunk::cell(x, y, z), tile, shape);
-                    }
-                });
+            changed =
+                reconcileStructure(chunk, old.get(), baseline.get(), job.coord,
+                                   editor ? &changes : nullptr);
         });
         if (!changed) continue;
         found->second.structureBaseline = std::move(baseline);
-        markModified(job.coord);
-        if (editor && !edits.empty()) editor->apply(edits);
+        if (editor && !changes.empty())
+            editor->publishStructureChanges(changes);
+        else
+            markModified(job.coord);
         structureRebased.emit(job.coord);
     }
 

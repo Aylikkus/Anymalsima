@@ -1,10 +1,11 @@
 #include "structures_codec.hpp"
 
+#include "piece_codec.hpp"
 #include "trees_codec.hpp"
 
 namespace structures_codec {
 namespace {
-constexpr uint16_t Version = 2;
+constexpr uint16_t Version = 3;
 constexpr uint32_t MaxKinds = 4096;
 constexpr uint32_t MaxRecords = 1u << 20;
 constexpr uint32_t MaxVoxels = 1u << 22;
@@ -47,6 +48,9 @@ Bytes encode(const TreeOverrideMap& trees,
                 for (const int axis : pos) out.write(int32_t(axis));
                 out.write(voxel.block);
                 out.write(voxel.shape.code());
+                out.write(uint8_t(voxel.pieces.size()));
+                for (const auto& piece : voxel.pieces)
+                    piece_codec::write(out, piece);
             }
         }
     }
@@ -94,7 +98,9 @@ File decode(ByteView bytes) {
                     if (!shape) throw SerializationError("bad override shape");
                     voxel.shape = *shape;
                 }
-                if (!record.voxels.emplace(pos, voxel).second)
+                if (section->version >= 3)
+                    voxel.pieces = piece_codec::read(in, in.read<uint8_t>());
+                if (!record.voxels.emplace(pos, std::move(voxel)).second)
                     throw SerializationError("duplicate override voxel");
             }
             validate(kind, record);

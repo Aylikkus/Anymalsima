@@ -34,8 +34,9 @@ struct ColumnEdit {
     std::array<int16_t, Tiles> waterY{};
     std::array<int16_t, Tiles> reservoirCeiling{};
     WaterSurface waterAt(int index, WaterSurface generated) const;
-    // Added or replacement solid tiles above the generated surface. Each
-    // blob contains only the positive differences.
+    // Added or replacement solids above the generated surface and sparse
+    // piece geometry inside the terrain. Blobs carry complete edited cells
+    // for any generated structure cell in the suppression list.
     std::vector<std::pair<uint16_t, ChunkBlob>> structure;
     // Generated structure cells suppressed by an edit. Sorted by slab Y
     // and by structure_voxels::cellIndex within a slab.

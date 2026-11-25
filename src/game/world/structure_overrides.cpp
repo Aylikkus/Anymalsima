@@ -114,6 +114,11 @@ class OverrideSource final : public Source {
         if (!result) result.emplace();
         if (result->blocks.empty()) result->blocks.assign(Cells, result->block);
         for (const auto& [cell, voxel] : at->second) {
+            if (!voxel.pieces.empty()) {
+                result->setPieces(cell, voxel.pieces);
+                continue;
+            }
+            result->erase(cell);
             result->bits.set(cell, voxel.block != 0);
             result->blocks[cell] = voxel.block;
             result->setShape(cell, voxel.shape);
@@ -148,6 +153,24 @@ void validateOverride(std::string_view kind, const Override& record) {
             (!voxel.block && voxel.shape.code()) ||
             (record.mode == OverrideMode::Replace && !voxel.block))
             throw std::invalid_argument("invalid structure override voxel");
+        if (voxel.pieces.empty()) continue;
+        if (voxel.pieces.size() > Chunk::MaxPiecesPerCell)
+            throw std::invalid_argument("too many structure override pieces");
+        const auto& first = voxel.pieces.front().geometry;
+        if (voxel.block != first.blockId ||
+            voxel.shape != first.legacyShape().value_or(TileShape{}))
+            throw std::invalid_argument(
+                "invalid structure override projection");
+        tile_geometry::CellGeometry geometry;
+        std::optional<tile_geometry::PieceId> previous;
+        for (const auto& piece : voxel.pieces) {
+            if ((previous && piece.geometry.id <= *previous) ||
+                piece.origin.kind > PieceOrigin::Environment ||
+                geometry.tryAdd(piece.geometry) !=
+                    tile_geometry::PiecePlacement::Added)
+                throw std::invalid_argument("invalid structure override piece");
+            previous = piece.geometry.id;
+        }
     }
 }
 

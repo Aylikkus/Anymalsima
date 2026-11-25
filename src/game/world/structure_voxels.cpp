@@ -9,11 +9,48 @@
 
 namespace structure_voxels {
 
+SolidCellSnapshot Slab::solidCellAt(uint16_t cell) const {
+    const auto id = tileAt(cell);
+    const auto shape = shapeAt(cell);
+    const ShapedTile base{Tile{.block_id = id, .lightLevel = {}}, shape};
+    if (const auto it = pieces.find(cell); it != pieces.end())
+        return {base, {}, it->second};
+    if (id) return {base, CellPiece{{0, id, shape}, {PieceOrigin::Structure}}};
+    return {base};
+}
+
+void Slab::setPieces(uint16_t cell, std::span<const CellPiece> replacement) {
+    if (replacement.empty()) {
+        erase(cell);
+        return;
+    }
+    auto sorted = std::make_shared<std::vector<CellPiece>>(replacement.begin(),
+                                                           replacement.end());
+    std::ranges::sort(*sorted, {},
+                      [](const CellPiece& piece) { return piece.geometry.id; });
+    auto& first = sorted->front().geometry;
+    const auto shape = first.legacyShape();
+    if (sorted->size() == 1 && shape) first = {first.id, first.blockId, *shape};
+    if (blocks.empty()) blocks.assign(Cells, block);
+    blocks[cell] = first.blockId;
+    bits.set(cell);
+    setShape(cell, shape.value_or(TileShape{}));
+    pieces.insert_or_assign(cell, std::move(sorted));
+}
+
+void Slab::erase(uint16_t cell) {
+    bits.reset(cell);
+    setShape(cell, {});
+    pieces.erase(cell);
+}
+
 void Slab::merge(const Slab& other) {
     enclosed |= other.enclosed;
     const auto added = other.bits & ~bits;
     for (const auto& [cell, shape] : other.shapes)
         if (added.test(cell)) setShape(cell, shape);
+    for (const auto& [cell, data] : other.pieces)
+        if (added.test(cell)) pieces.emplace(cell, data);
     if (blocks.empty() && other.blocks.empty() && block == other.block) {
         bits |= other.bits;
         return;
@@ -257,8 +294,16 @@ int stamp(Chunk& chunk, const Slab& slab) {
                 const size_t i = cellIndex(x, y, z);
                 auto tile = chunk.tiles[z][y][x];
                 if (!slab.bits.test(i) || !tile.isAir()) continue;
-                tile.block_id = slab.blockAt(i);
-                chunk.setCell(uint16_t(i), tile, slab.shapeAt(uint16_t(i)));
+                if (const auto entry = slab.pieces.find(uint16_t(i));
+                    entry != slab.pieces.end()) {
+                    if (chunk.setPieces(uint16_t(i), *entry->second,
+                                        {PieceOrigin::Structure},
+                                        true) != CellPieceEdit::Applied)
+                        throw std::invalid_argument("invalid structure pieces");
+                } else {
+                    tile.block_id = slab.blockAt(i);
+                    chunk.setCell(uint16_t(i), tile, slab.shapeAt(uint16_t(i)));
+                }
                 ++placed;
             }
     return placed;

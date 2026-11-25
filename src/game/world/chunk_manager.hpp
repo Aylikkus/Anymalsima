@@ -187,10 +187,11 @@ class ChunkManager {
     // Owner-thread read. The returned value may outlive the loaded slab.
     std::optional<VersionedSolidCell> solidCellAt(TilePos pos);
     // In-memory storage edit for the owner thread. This invalidates mesh
-    // snapshots. Durable edits and their other side effects go through the
-    // editor once it supports pieces.
+    // snapshots. Gameplay edits go through WorldEditor for persistence
+    // and notifications.
     CellPieceEdit setCellPieces(TilePos pos, SolidCellRevision expected,
-                                std::span<const CellPiece> replacement);
+                                std::span<const CellPiece> replacement,
+                                bool playerEdit = false);
     // Main-thread view of the substrate under a living root.
     const RootVoxel* rootAt(int x, int y, int z);
     void unregister(const ChunkCoord& coord);

@@ -9,6 +9,8 @@
 #include "world/location_manager.hpp"
 #include "world/save/chunk_codec.hpp"
 #include "world/save/region_store.hpp"
+#include "world/save/structures_codec.hpp"
+#include "world/save/terrain_edits_codec.hpp"
 #include "world/terrain_edit_tracker.hpp"
 
 namespace {
@@ -332,4 +334,138 @@ TEST(region_unload_while_opening) {
     for (unsigned z = 0; z < 2; ++z)
         for (unsigned x = 0; x < 2; ++x)
             CHECK(!s.chunks.isRegistered({x * 8, 0, z * 8}));
+}
+
+TEST(region_pieces_persist_across_wrapped_seam_and_rebase) {
+    using namespace structure_voxels;
+    using namespace tile_geometry;
+    const auto world = flatWorld();
+    const auto dir = scratch("compound_wrapped_rebase");
+    constexpr int x = 383, y = 480, z = 66;
+    constexpr TilePos seam{-1, y, z};
+    constexpr ChunkCoord west{23, 30, 4}, east{0, 30, 4};
+    constexpr uint64_t source = 42;
+    constexpr auto cell = Chunk::cell(15, 0, 2);
+    const auto base = TilePiece::layer(1, 1, LayerThickness::Cm25);
+    const auto removed =
+        TilePiece::layer(2, 1, LayerThickness::Cm25, {0, .25f, 0});
+    const auto player =
+        TilePiece::layer(5, 2, LayerThickness::Cm50, {0, .5f, 0});
+    const auto generate = [&](Session& s, uint64_t revision, bool present) {
+        Overrides overrides;
+        auto& record = overrides["tower"][source];
+        record.mode = present ? OverrideMode::Replace : OverrideMode::Removed;
+        record.anchorX = x;
+        record.anchorZ = z;
+        record.revision = revision;
+        if (present) {
+            auto first = base;
+            if (revision == 3) first.ceiling = .1f;
+            auto& voxel = record.voxels[{x, y, z}];
+            voxel.block = first.blockId;
+            voxel.pieces = {{first, {PieceOrigin::Structure, source}},
+                            {removed, {PieceOrigin::Structure, source}}};
+        }
+        const auto restored =
+            structures_codec::decode(structures_codec::encode({}, overrides));
+        CHECK(restored.voxels == overrides);
+        s.chunks.setStructureOverrides(restored.voxels);
+    };
+    const auto open = [&](Session& s) {
+        s.locations.loadRegion({2, 0}, 0);
+        s.locations.loadRegion({0, 0}, 0);
+        s.ready(west);
+        s.ready(east);
+    };
+    const auto unload = [&](Session& s) {
+        s.locations.unloadDistant({1, 1}, 0);
+        CHECK(!s.chunks.isRegistered(west) && !s.chunks.isRegistered(east));
+    };
+    {
+        Session s(world, dir);
+        generate(s, 1, true);
+        open(s);
+        int changes = 0;
+        WorldEditor editor(s.chunks, nullptr, s.assets.getStorage<Block>());
+        editor.blockChanged.connect([&](const BlockChange& change) {
+            CHECK(change.pos.x == x && change.piecesChanged);
+            ++changes;
+        });
+        const auto initial = s.chunks.solidCellAt(seam);
+        CHECK(initial && initial->cell.pieces().size() == 2);
+        const auto border = s.chunks.solidCellAt({0, y, z});
+        CHECK(border);
+        auto overlap = base;
+        overlap.id = 10;
+        CHECK(editor.placePiece(seam, initial->revision, overlap) ==
+              CellPieceEdit::Overlap);
+        CHECK(changes == 0);
+        CHECK(editor.placePiece(seam, initial->revision, player) ==
+              CellPieceEdit::Applied);
+        const auto borderAfter = s.chunks.solidCellAt({0, y, z});
+        CHECK(borderAfter && borderAfter->revision != border->revision);
+        CHECK(editor.removePiece(seam, initial->revision, removed.id) ==
+              CellPieceEdit::Stale);
+        const auto mixed = s.chunks.solidCellAt(seam);
+        CHECK(mixed && mixed->cell.pieces().size() == 3);
+        CHECK(editor.removePiece(seam, mixed->revision, removed.id) ==
+              CellPieceEdit::Applied);
+        CHECK(changes == 2 && s.chunks.isPersistDirty(west));
+        CHECK(s.chunks.getChunk(west)->removedStructurePieces().contains(
+            {cell, source, removed.id}));
+        unload(s);
+        // Reacquire the same region while its eviction write is pending.
+        open(s);
+        const auto reopened = s.chunks.solidCellAt(seam);
+        CHECK(reopened && reopened->cell.pieces().size() == 2);
+        CHECK(reopened->cell.pieces().back().geometry == player);
+        s.store.flush();
+        CHECK(s.store.failedWrites() == 0);
+    }
+    {
+        Session s(world, dir);
+        generate(s, 2, false);
+        open(s);
+        const auto rebased = s.chunks.solidCellAt(seam);
+        CHECK(rebased && rebased->cell.pieces().size() == 1);
+        CHECK(rebased->cell.pieces().front().geometry == player);
+        CHECK(s.chunks.isPersistDirty(west));
+        unload(s);
+        s.store.flush();
+        CHECK(s.store.failedWrites() == 0);
+    }
+    {
+        Session s(world, dir);
+        generate(s, 2, false);
+        TerrainEdits edits;
+        WorldEditor editor(s.chunks, nullptr, s.assets.getStorage<Block>());
+        TerrainEditTracker tracker(s.chunks, edits);
+        tracker.watch(editor);
+        open(s);
+        // Reintroduce the source while the slab is resident.
+        generate(s, 3, true);
+        for (int pass = 0; s.chunks.hasStructureWork(); ++pass) {
+            CHECK(pass < 100);
+            s.chunks.update(&editor);
+            CHECK(s.pool.wait_for(std::chrono::seconds(3)));
+        }
+        const auto near = s.chunks.solidCellAt(seam);
+        CHECK(near && near->cell.pieces().size() == 2);
+        CHECK(near->cell.pieces().front().geometry.ceiling == .1f);
+        CHECK(near->cell.pieces().back().geometry == player);
+        tracker.update();
+        const auto index = terrain_edits_codec::decode(
+            terrain_edits_codec::encode(*edits.snapshot()));
+        const auto col = index.columns.at(editKey(west.x, west.z));
+        CHECK(col->suppresses(15, y, 2));
+        const auto* saved = col->slab(west.y);
+        CHECK(saved);
+        Chunk distant;
+        chunk_codec::decode(**saved, distant);
+        const auto exact = distant.solidCellAt(cell);
+        CHECK(std::ranges::equal(near->cell.pieces(), exact.pieces()));
+        unload(s);
+        s.store.flush();
+        CHECK(s.store.failedWrites() == 0);
+    }
 }

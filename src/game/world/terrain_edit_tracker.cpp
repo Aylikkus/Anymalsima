@@ -8,7 +8,7 @@
 
 namespace {
 bool hasTileEdits(const Chunk& chunk) {
-    return chunk.legacyRootTerrain ||
+    return chunk.legacyRootTerrain || !chunk.removedStructurePieces().empty() ||
            (chunk.rootTerrain && !chunk.rootTerrain->edited.empty());
 }
 
@@ -146,7 +146,8 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 const auto cell = Chunk::cell(lx, y % Chunk::SIZE_Y, lz);
                 const auto* root = chunk->rootAt(cell);
                 if (y <= surface && tile.isSolid() &&
-                    (root || !grown.test(tile.block_id))) {
+                    (root || !grown.test(tile.block_id) ||
+                     chunk->hasPieceEntry(cell))) {
                     ground = y;
                     block = root ? root->block : tile.block_id;
                     shape = root ? root->shape : chunk->shapeAt(cell);
@@ -199,12 +200,13 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             top = std::max(top, int(old->removed.back().first) * Chunk::SIZE_Y);
     }
     top = std::min(top, WORLD_HEIGHT_Y - 1);
-    for (int slab = std::max(0, lowestSurface / Chunk::SIZE_Y); slab < Y_CHUNKS;
-         ++slab) {
+    const int firstSurfaceSlab = std::max(0, lowestSurface / Chunk::SIZE_Y);
+    for (int slab = 0; slab < Y_CHUNKS; ++slab) {
         const ChunkCoord coord{cx, unsigned(slab), cz};
         const auto* chunk = chunks.getChunk(coord);
         if (!chunk) {
-            if (slab > top / Chunk::SIZE_Y) continue;
+            if (slab > top / Chunk::SIZE_Y || (slab < firstSurfaceSlab && !old))
+                continue;
             if (old) {
                 if (const auto* blob = old->slab(uint16_t(slab)))
                     next->structure.emplace_back(uint16_t(slab), *blob);
@@ -215,6 +217,7 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             }
             continue;
         }
+        if (slab < firstSurfaceSlab && !chunk->pieceCellCount()) continue;
         Chunk part;
         std::vector<uint16_t> removed;
         const auto* baseline = chunks.structureBaseline(coord);
@@ -254,14 +257,23 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                     const int worldY = slab * Chunk::SIZE_Y + y;
                     const auto& column =
                         inputs->columns[ColumnEdit::index(x, z)];
-                    if (worldY <= column.surface_y) continue;
-                    const bool aboveWater = worldY >= column.water.surfaceY;
                     const auto cell = structure_voxels::cellIndex(x, y, z);
+                    if (worldY <= column.surface_y) {
+                        if (chunk->hasPieceEntry(cell)) {
+                            const auto actual = chunk->solidCellAt(cell);
+                            part.setPieces(cell, actual.pieces(), {}, true);
+                            any = true;
+                        }
+                        continue;
+                    }
+                    const bool aboveWater = worldY >= column.water.surfaceY;
                     const auto expected =
                         baseline && aboveWater ? baseline->tileAt(cell) : 0;
                     const auto expectedShape =
                         expected ? baseline->shapeAt(cell) : TileShape{};
-                    const bool livingWood = grown.test(tile.block_id);
+                    const bool explicitPieces = chunk->hasPieceEntry(cell);
+                    const bool livingWood =
+                        !explicitPieces && grown.test(tile.block_id);
                     const auto actual = livingWood ? 0 : tile.block_id;
                     const bool wound =
                         aboveWater && !livingWood && landmarkWood.test(cell) &&
@@ -272,13 +284,28 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                                              uint16_t(cell))));
                     const auto shape =
                         actual ? chunk->shapeAt(cell) : TileShape{};
+                    const bool detailed =
+                        explicitPieces ||
+                        (baseline && baseline->pieces.contains(cell));
+                    const auto actualCell = detailed ? chunk->solidCellAt(cell)
+                                                     : SolidCellSnapshot{};
+                    const auto baselineCell = detailed && expected
+                                                  ? baseline->solidCellAt(cell)
+                                                  : SolidCellSnapshot{};
                     const bool changed =
-                        actual != expected || shape != expectedShape;
+                        actual != expected || shape != expectedShape ||
+                        (detailed &&
+                         !std::ranges::equal(actualCell.pieces(),
+                                             baselineCell.pieces()));
                     if (wound || (expected && changed)) removed.push_back(cell);
                     if (changed && actual) {
-                        Tile added;
-                        added.block_id = actual;
-                        part.setCell(cell, added, shape);
+                        if (detailed) {
+                            part.setPieces(cell, actualCell.pieces(), {}, true);
+                        } else {
+                            Tile added;
+                            added.block_id = actual;
+                            part.setCell(cell, added, shape);
+                        }
                         any = true;
                     }
                 }

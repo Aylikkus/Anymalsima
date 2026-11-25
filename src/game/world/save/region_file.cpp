@@ -43,8 +43,8 @@ void writeBlobs(SectionContainer& container, const char* tag, uint16_t version,
 }
 
 void readBlobs(const SectionContainer& container, const char* tag,
-               uint16_t version,
-               std::unordered_map<uint16_t, ChunkBlob>& blobs) {
+               uint16_t version, std::unordered_map<uint16_t, ChunkBlob>& blobs,
+               size_t maxBlob = 1u << 20) {
     const auto* section = container.find(tag);
     if (!section) return;
     if (section->version != version)
@@ -58,7 +58,7 @@ void readBlobs(const SectionContainer& container, const char* tag,
         const auto index = in.read<uint16_t>();
         if (index >= RegionData::ChunkCount)
             throw SerializationError("chunk index out of range");
-        const auto blob = in.readBlock(1u << 20);
+        const auto blob = in.readBlock(maxBlob);
         blobs[index] = std::make_shared<const Bytes>(blob.begin(), blob.end());
     }
 }
@@ -89,9 +89,11 @@ RegionData decode(ByteView bytes) {
     RegionData data;
     data.extra = SectionContainer::decode(bytes);
 
-    readBlobs(data.extra, "CHNK", ChunkSectionVersion, data.chunks);
+    readBlobs(data.extra, "CHNK", ChunkSectionVersion, data.chunks,
+              chunk_codec::MaxBlobSize);
     readBlobs(data.extra, "FLOR", FloraSectionVersion, data.flora);
-    readBlobs(data.extra, "STRB", 1, data.structureBaselines);
+    readBlobs(data.extra, "STRB", 1, data.structureBaselines,
+              chunk_codec::MaxBlobSize);
     if (const auto* section = data.extra.find("TOPS")) {
         if (section->version != TopsSectionVersion)
             throw SerializationError("unsupported TOPS version");

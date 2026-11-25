@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–03 complete · Step 04 pending · First maintainer playcheck after step 05.**
+**Steps 01–03 complete · Step 04 complete · First maintainer playcheck after step 05.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -15,7 +15,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 01 | Reproducible terrain, water and performance baseline | Complete | |
 | 02 | Geometry for positioned pieces and horizontal layers | Complete | |
 | 03 | Sparse compound storage and immutable snapshots | Complete | |
-| 04 | Durable piece edits and save migration | Pending | |
+| 04 | Durable piece edits and save migration | Complete | |
 | 05 | Build, pick, walk on and render compound tiles | Pending | A · Construction |
 | 06 | Gravity settlement at slopes and ledges | Pending | |
 | 07 | Visible dusting, toe fill and snow collision | Pending | B · Five-centimetre ramp |
@@ -377,3 +377,47 @@ times across three runs were 0.9371 ms to insert the wall, 0.0105 ms to
 capture one chunk snapshot, 0.0072 ms to edit one cell while a snapshot
 held the old table, and 0.0653 ms to scan the snapshot's 4,096 cells.
 This measures storage and reads. Compound mesh timings start in step 05.
+
+### Step 04 · 2026-11-25
+
+Chunk v7 saves positioned pieces and their provenance, plus explicit
+generated-piece removals keyed by cell, source owner and piece ID. Ordinary
+chunks still write v6. Region structure baselines and the distant edit index
+carry the same piece payload. A partially edited generated cell is suppressed
+in the distant index, which stores the exact surviving cell in its edit slab.
+VOXL v3 saves compound structure overrides and reads v1 and v2. Asset
+regeneration appends new block files to the existing manifest order, keeping
+the IDs already written in saves.
+
+The seed-2024 [region fixture](../../tests/integration/region_persistence_tests.cpp)
+edits `(-1, 480, 66)`, canonical `(383, 480, 66)`, on a wrapped seam in a
+three-region-wide synthetic world. It rejects overlap and stale selections,
+checks invalidation across the seam, and reopens the region during its eviction
+write. The source disappears in one revision and returns in another. The
+player piece and the generated-piece removal both survive. The test rebuilds
+the distant edit index from the saved region and compares it piece for piece
+with the loaded cell. The scratch region saves are under
+`build/tests/scratch/compound_wrapped_rebase/`.
+
+A read-only codec probe checked the two pre-feature slots from step 01. All
+10,199 chunk payloads across 36 region files round-tripped byte-for-byte.
+Both slots' world maps and terrain edit indexes also round-tripped byte-for-byte,
+and structure records survived migration. The region fixture covers a nonempty
+compound baseline. A separate asset scan added temporary snow and ice filenames
+that sort before the original files and confirmed the original load order.
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 5
+focused='chunk_codec_pieces|structure_override_codec_versions|region_pieces_persist|structure_revision_rebases'
+ctest --test-dir build -R "$focused" --output-on-failure --no-tests=error
+ctest --test-dir build -L gameplay -j 5 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 2
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R "$focused" --output-on-failure --no-tests=error
+```
+
+The Release app built and all 401 gameplay cases passed. All four focused
+cases passed with ASan and UBSan after correcting the fixture's editor and
+tracker destruction order. Acceptance ran headlessly. Interactive
+construction is covered by the step 05 playcheck.

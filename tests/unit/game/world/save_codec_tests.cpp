@@ -154,7 +154,7 @@ TEST(chunk_codec_shapes) {
                 entries.write(index);
                 entries.write(code);
             }
-            payload.write(chunk_codec::Version);
+            payload.write(uint8_t(6));
             payload.write(uint16_t(0x4001));
             payload.write(material);
             payload.write(uint32_t(0));
@@ -231,7 +231,7 @@ TEST(chunk_codec_rejects_corrupt) {
     CHECK(throwsSerialization([&] { chunk_codec::decode(badLiquid, out); }));
 
     BinaryWriter raw;
-    raw.write(chunk_codec::Version);
+    raw.write(uint8_t(6));
     raw.write(uint16_t{2});
     for (auto entry : {0, 1}) {
         raw.write(uint8_t(entry));
@@ -629,4 +629,92 @@ TEST(light_sources_versions) {
     badContainer.put("LITE", 2, bad.take());
     const auto encoded = badContainer.encode();
     CHECK(throwsSerialization([&] { light_sources_codec::decode(encoded); }));
+}
+
+TEST(chunk_codec_pieces) {
+    using namespace tile_geometry;
+    constexpr auto cell = Chunk::cell(15, 1, 15);
+    const std::array pieces{
+        CellPiece{TilePiece::layer(4, 5, LayerThickness::Cm25),
+                  {PieceOrigin::Structure, 42}},
+        CellPiece{TilePiece::layer(9, 7, LayerThickness::Cm25, {0, .5f, 0}),
+                  {PieceOrigin::Player}},
+    };
+    Chunk original;
+    CHECK(original.setPieces(cell, pieces) == CellPieceEdit::Applied);
+    const std::array removals{Chunk::PieceRemoval{cell, 42, 6}};
+    original.addPieceRemovals(removals);
+    const auto encoded = chunk_codec::encode(original);
+    Chunk decoded;
+    chunk_codec::decode(encoded, decoded);
+    const auto snapshot = decoded.solidCellAt(cell);
+    CHECK(std::ranges::equal(snapshot.pieces(), pieces));
+    CHECK(decoded.removedStructurePieces() ==
+          original.removedStructurePieces());
+    CHECK(chunk_codec::encode(decoded) == encoded);
+
+    // An ordinary v6 chunk upgrades only when a sparse record is needed.
+    Chunk legacy{};
+    legacy.setCell(cell, Tile{.block_id = 5, .lightLevel = {}},
+                   TileShape::make(TileShapeProfile::Slab));
+    const auto v6 = chunk_codec::encode(legacy);
+    CHECK(v6.front() == std::byte{6});
+    Chunk migrated;
+    chunk_codec::decode(v6, migrated);
+    CHECK(chunk_codec::encode(migrated) == v6);
+    const auto implicit = migrated.solidCellAt(cell);
+    CHECK(implicit.pieces().size() == 1);
+    CHECK(implicit.pieces().front().geometry.blockId == 5);
+
+    // Locate the sparse tail and corrupt its counts before decoding.
+    constexpr size_t TailSize = 4 + 2 + 3 + 2 * 32 + 4 + 14;
+    const auto tail = encoded.size() - TailSize;
+    const auto reject = [&](size_t offset, std::byte value) {
+        auto malformed = encoded;
+        malformed[tail + offset] = value;
+        CHECK(throwsSerialization(
+            [&] { chunk_codec::decode(malformed, decoded); }));
+        CHECK(chunk_codec::encode(decoded) == encoded);
+    };
+    reject(5, std::byte{255});           // too many cells
+    reject(8, std::byte{33});            // too many pieces in one cell
+    reject(9 + 32, std::byte{4});        // duplicate piece identity
+    reject(9 + 2 * 32, std::byte{255});  // removal count exceeds payload
+}
+
+TEST(structure_override_codec_versions) {
+    const auto ramp = TileShape::make(TileShapeProfile::Ramp, TileFacing::NegZ);
+    const auto payload = [&](uint16_t version) {
+        BinaryWriter out;
+        out.write(uint32_t(1));  // kinds
+        out.writeString("castle");
+        out.write(uint32_t(1));  // records
+        out.write(uint64_t(5));  // source key
+        out.write(uint64_t(4));  // revision
+        out.write(uint8_t(structure_voxels::OverrideMode::Replace));
+        out.write(int32_t(0));
+        out.write(int32_t(0));
+        out.write(uint8_t(0));   // landmark
+        out.write(uint32_t(1));  // cells
+        out.write(int32_t(0));
+        out.write(int32_t(480));
+        out.write(int32_t(0));
+        out.write(uint8_t(7));
+        if (version >= 2) out.write(ramp.code());
+        if (version >= 3) out.write(uint8_t(255));
+        SectionContainer container;
+        container.put("VOXL", version, out.take());
+        return container.encode();
+    };
+    for (const uint16_t version : {1, 2}) {
+        const auto old = structures_codec::decode(payload(version));
+        const auto& voxel =
+            old.voxels.at("castle").at(5).voxels.at({0, 480, 0});
+        CHECK(voxel.block == 7 && voxel.pieces.empty());
+        CHECK(voxel.shape == (version == 1 ? TileShape{} : ramp));
+        const auto migrated =
+            structures_codec::decode(structures_codec::encode({}, old.voxels));
+        CHECK(migrated.voxels == old.voxels);
+    }
+    CHECK(throwsSerialization([&] { structures_codec::decode(payload(3)); }));
 }

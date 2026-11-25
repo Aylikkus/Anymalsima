@@ -284,13 +284,13 @@ foreach(case binary_stream_roundtrip binary_stream_truncation
     set_tests_properties(engine.serialization.${case} PROPERTIES
         LABELS "unit;engine;save" TIMEOUT 10)
 endforeach()
-foreach(case chunk_codec_uniform chunk_codec_shapes chunk_codec_mixed_strips_light
+foreach(case chunk_codec_uniform chunk_codec_shapes chunk_codec_pieces chunk_codec_mixed_strips_light
              chunk_codec_wide_palette chunk_codec_rejects_corrupt
              region_file_roundtrip world_seed_derivation world_map_roundtrip
              save_generator_version_gate save_catalog_slots
              region_index_covers_world_height
              terrain_edits_roundtrip terrain_edits_rejects_corrupt
-             structure_save_migrates_trees
+             structure_save_migrates_trees structure_override_codec_versions
              light_sources_roundtrip light_sources_rejects_corrupt
              light_sources_versions)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
@@ -300,7 +300,8 @@ endforeach()
 foreach(case region_save_and_reload region_edit_persists region_shapes_persist
              region_reload_while_writing region_corrupt_file_regenerates
              region_unload_while_opening region_gradual_unload
-             region_reload_while_unloading)
+             region_reload_while_unloading
+             region_pieces_persist_across_wrapped_seam_and_rebase)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "integration;gameplay;save;threading" TIMEOUT 30)

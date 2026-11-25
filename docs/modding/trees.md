@@ -47,14 +47,15 @@ mesh. A thin tree disappears if it loses its last ground support.
 | You want | You write | Where |
 | --- | --- | --- |
 | A tree species | a tree definition | `assets/data/trees/` |
-| Its living wood | a block with `"natural_growth": true` | `assets/data/blocks/` (a new file sorting after `trees.json`, or the end of it) |
+| Its living wood | a block with `"natural_growth": true` | `assets/data/blocks/` (a new file, or the end of the final block file) |
 | The wood's texture | a terrain material + 2 textures (128x128, coloured) | `assets/data/materials/`, `assets/materials/blocks/wood/` |
 | Leaves, needles, fronds, twig bark | foliage materials | `assets/data/foliage_materials/` (see the plants guide) |
 
 The same rules as for plants apply: unknown fields are errors, numbers may
 be ranges, and **order matters for saves** (tree species and blocks are
-saved by load position: add new definitions at the end or in files that
-sort later). After changes, run `python3 generate_assets.py` and rebuild.
+saved by load position). Add block definitions in a new file or append them
+to the final file in the manifest. The asset generator appends new block files
+to the existing load order. After changes, run `python3 generate_assets.py` and rebuild.
 
 ### Living wood blocks
 

@@ -2,6 +2,7 @@
 
 #include <unordered_map>
 
+#include "piece_codec.hpp"
 #include "serialization/compression.hpp"
 
 namespace chunk_codec {
@@ -47,7 +48,9 @@ Bytes encode(const Chunk& chunk) {
     }
 
     BinaryWriter out;
-    out.write(Version);
+    const auto& removed = chunk.removedStructurePieces();
+    const bool hasPieces = chunk.pieceCellCount() || !removed.empty();
+    out.write(hasPieces ? Version : uint8_t(6));
     auto count = uint16_t(palette.size());
     if (chunk.projectsWater) count |= ProjectsWater;
     if (chunk.hasShapes()) count |= HasShapes;
@@ -96,6 +99,23 @@ Bytes encode(const Chunk& chunk) {
         }
         out.write(uint16_t(data.edited.size()));
         for (const auto cell : data.edited) out.write(cell);
+    }
+    if (hasPieces) {
+        BinaryWriter entries;
+        entries.write(uint16_t(chunk.pieceCellCount()));
+        chunk.forEachPieceCell([&](uint16_t cell, const auto& snapshot) {
+            entries.write(cell);
+            entries.write(uint8_t(snapshot.pieces().size()));
+            for (const auto& piece : snapshot.pieces())
+                piece_codec::write(entries, piece);
+        });
+        entries.write(uint32_t(removed.size()));
+        for (const auto& [cell, owner, id] : removed) {
+            entries.write(cell);
+            entries.write(owner);
+            entries.write(id);
+        }
+        out.writeBlock(entries.bytes());
     }
     return out.take();
 }
@@ -209,6 +229,47 @@ void decode(ByteView data, Chunk& output) {
                 throw SerializationError("bad root edit cell");
         }
         if (roots || edits) chunk.rootTerrain = std::move(data);
+    }
+    if (version >= 7) {
+        BinaryReader entries(in.readBlock(MaxBlobSize));
+        const auto count = entries.read<uint16_t>();
+        if (count > Volume)
+            throw SerializationError("bad chunk piece cell count");
+        int previous = -1;
+        for (uint16_t i = 0; i < count; ++i) {
+            const auto cell = entries.read<uint16_t>();
+            const auto size = entries.read<uint8_t>();
+            if (cell >= Volume || cell <= previous || !size ||
+                !tiles[cell].isSolid() || tiles[cell].isLiquid())
+                throw SerializationError("bad chunk piece cell");
+            const auto tile = tiles[cell];
+            const auto shape = chunk.shapeAt(cell);
+            const auto pieces = piece_codec::read(entries, size);
+            if (chunk.setPieces(cell, pieces, {}, true) !=
+                    CellPieceEdit::Applied ||
+                chunk.tileAt(cell).block_id != tile.block_id ||
+                chunk.shapeAt(cell) != shape)
+                throw SerializationError("bad chunk piece geometry");
+            chunk.tileAt(cell) = tile;  // retain palette cover and its state
+            previous = cell;
+        }
+        const auto removals = entries.read<uint32_t>();
+        constexpr size_t RemovalBytes = 14;
+        if ((!count && !removals) || removals > Chunk::MaxPieceRemovals ||
+            entries.remaining() != removals * RemovalBytes)
+            throw SerializationError("bad chunk piece removal count");
+        std::vector<Chunk::PieceRemoval> keys;
+        keys.reserve(removals);
+        for (uint32_t i = 0; i < removals; ++i) {
+            Chunk::PieceRemoval key{entries.read<uint16_t>(),
+                                    entries.read<uint64_t>(),
+                                    entries.read<tile_geometry::PieceId>()};
+            if (std::get<0>(key) >= Volume ||
+                (!keys.empty() && key <= keys.back()))
+                throw SerializationError("bad chunk piece removal key");
+            keys.push_back(key);
+        }
+        chunk.addPieceRemovals(keys);
     }
     if (!in.atEnd()) throw SerializationError("trailing chunk data");
     output = std::move(chunk);

@@ -7,6 +7,39 @@ const Chunk::PieceEntry* Chunk::pieceEntry(uint16_t index) const {
     return it != pieces->end() && it->cell == index ? &*it : nullptr;
 }
 
+void Chunk::addPieceRemovals(std::span<const PieceRemoval> removals) {
+    if (removals.empty()) return;
+    auto updated = !pieceRemovals ? std::make_shared<PieceRemovals>()
+                   : pieceRemovals.unique()
+                       ? std::const_pointer_cast<PieceRemovals>(pieceRemovals)
+                       : std::make_shared<PieceRemovals>(*pieceRemovals);
+    updated->insert(removals.begin(), removals.end());
+    pieceRemovals = std::move(updated);
+}
+
+std::vector<Chunk::PieceRemoval> Chunk::structurePieceRemovals(
+    uint16_t cell, const SolidCellSnapshot& generated,
+    std::span<const CellPiece> retained) const {
+    const auto fallback =
+        generated.base.tile.isSolid() &&
+                generated.base.tile.block_id == tileAt(cell).block_id &&
+                generated.base.shape == shapeAt(cell)
+            ? PieceProvenance{PieceOrigin::Structure}
+            : PieceProvenance{};
+    const auto before = solidCellAt(cell, fallback);
+    std::vector<PieceRemoval> keys;
+    for (const auto& piece : before.pieces()) {
+        if (piece.origin.kind != PieceOrigin::Structure ||
+            std::ranges::find(generated.pieces(), piece) ==
+                generated.pieces().end() ||
+            std::ranges::find(retained, piece) != retained.end())
+            continue;
+        const PieceRemoval key{cell, piece.origin.owner, piece.geometry.id};
+        if (!removedStructurePieces().contains(key)) keys.push_back(key);
+    }
+    return keys;
+}
+
 size_t Chunk::compoundCount() const {
     return pieces ? std::ranges::count_if(*pieces,
                                           [](const PieceEntry& entry) {
@@ -50,7 +83,7 @@ PieceProvenance Chunk::implicitPieceOrigin(uint16_t index,
 
 CellPieceEdit Chunk::setPieces(uint16_t index,
                                std::span<const CellPiece> replacement,
-                               PieceProvenance fallback) {
+                               PieceProvenance fallback, bool preserveEntry) {
     if (index >= CellCount) return CellPieceEdit::Invalid;
     if (replacement.size() > MaxPiecesPerCell) return CellPieceEdit::TooMany;
     if (!replacement.empty() && tileAt(index).isLiquid() &&
@@ -106,8 +139,8 @@ CellPieceEdit Chunk::setPieces(uint16_t index,
         tile.waterOrigin = WaterOrigin::Independent;
     }
     const auto implicit = implicitPieceOrigin(index, fallback);
-    const bool store =
-        entry.compound || entry.id != 0 || entry.origin != implicit;
+    const bool store = preserveEntry || entry.compound || entry.id != 0 ||
+                       entry.origin != implicit;
     auto update = preparePieceUpdate(index, !replacement.empty() && store);
     updateShape(index, shape);
     tileAt(index) = tile;

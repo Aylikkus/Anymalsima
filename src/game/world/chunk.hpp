@@ -6,6 +6,7 @@
 #include <memory>
 #include <set>
 #include <span>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,7 @@ struct PieceProvenance {
 struct CellPiece {
     tile_geometry::TilePiece geometry;
     PieceProvenance origin;
+    bool operator==(const CellPiece&) const = default;
 };
 
 // Owns the solid revision even after the live chunk changes or unloads.
@@ -56,7 +58,8 @@ enum class CellPieceEdit {
     TooMany,
     Overlap,
     Stale,
-    NotLoaded
+    NotLoaded,
+    Blocked
 };
 
 struct Chunk {
@@ -65,6 +68,10 @@ struct Chunk {
     static constexpr int SIZE_Z = 16;
     static constexpr int CellCount = SIZE_X * SIZE_Y * SIZE_Z;
     static constexpr size_t MaxPiecesPerCell = 32;
+    static constexpr size_t MaxPieceRemovals = CellCount * MaxPiecesPerCell;
+    using PieceRemoval = std::tuple<uint16_t, uint64_t, tile_geometry::PieceId>;
+    using PieceRemovals = std::set<PieceRemoval>;
+
     Tile tiles[SIZE_Z][SIZE_Y][SIZE_X];  // [z][y][x]
     // v1–v4 slabs keep ambiguous water and dry edits as saved.
     bool projectsWater = false;
@@ -108,6 +115,22 @@ struct Chunk {
         return entry && entry->compound;
     }
     bool hasCompounds() const { return pieces && compoundCount() != 0; }
+    const PieceRemovals& removedStructurePieces() const {
+        static const PieceRemovals empty;
+        return pieceRemovals ? *pieceRemovals : empty;
+    }
+    void addPieceRemovals(std::span<const PieceRemoval> removals);
+    std::vector<PieceRemoval> structurePieceRemovals(
+        uint16_t cell, const SolidCellSnapshot& generated,
+        std::span<const CellPiece> retained) const;
+    size_t pieceCellCount() const { return pieces ? pieces->size() : 0; }
+    bool hasPieceEntry(uint16_t index) const { return pieceEntry(index); }
+    template <typename F>
+    void forEachPieceCell(F&& visit) const {
+        if (pieces)
+            for (const auto& entry : *pieces)
+                visit(entry.cell, solidCellAt(entry.cell));
+    }
     size_t compoundCount() const;
     size_t pieceStorageBytes() const;
     SolidCellSnapshot solidCellAt(uint16_t index,
@@ -116,7 +139,8 @@ struct Chunk {
     // piece without changing the others' IDs or provenance.
     CellPieceEdit setPieces(uint16_t index,
                             std::span<const CellPiece> replacement,
-                            PieceProvenance fallback = {});  // for new geometry
+                            PieceProvenance fallback = {},
+                            bool preserveEntry = false);
     // For live chunks, call under the same lock used for tile edits.
     // A whole-cell replacement discards any explicit pieces.
     void setCell(uint16_t index, Tile tile, TileShape shape = {}) {
@@ -130,6 +154,7 @@ struct Chunk {
     void clearSolidStorage() {
         shapes.reset();
         pieces.reset();
+        pieceRemovals.reset();
     }
     const RootVoxel* rootAt(uint16_t cell) const {
         if (!rootTerrain) return nullptr;
@@ -168,7 +193,6 @@ struct Chunk {
         legacyRootShape = false;
     }
 
-   private:
     Tile& tileAt(uint16_t index) {
         assert(index < CellCount);
         return tiles[index / (SIZE_X * SIZE_Y)][(index / SIZE_X) % SIZE_Y]
@@ -180,6 +204,7 @@ struct Chunk {
                     [index % SIZE_X];
     }
 
+   private:
     using PieceList = std::vector<CellPiece>;
     struct PieceEntry {
         uint16_t cell;
@@ -189,6 +214,7 @@ struct Chunk {
     };
     using PieceTable = std::vector<PieceEntry>;
     std::shared_ptr<const PieceTable> pieces;
+    std::shared_ptr<const PieceRemovals> pieceRemovals;
 
     const PieceEntry* pieceEntry(uint16_t index) const;
     PieceProvenance implicitPieceOrigin(uint16_t index,
