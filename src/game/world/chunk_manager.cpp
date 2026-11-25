@@ -1049,11 +1049,11 @@ std::optional<float> ChunkManager::floraAnchorHeight(
     const int x = int(coord.x) * Chunk::SIZE_X + plant.tileX();
     const int y = int(coord.y) * Chunk::SIZE_Y + plant.y;
     const int z = int(coord.z) * Chunk::SIZE_Z + plant.tileZ();
-    const auto anchor = cellAt(x, y, z);
+    const auto anchor = solidCellAt({x, y, z});
     if (!anchor) return std::nullopt;
-    const auto height =
-        floraSupportHeight(rule, *anchor, plant.localX() - plant.tileX(),
-                           plant.localZ() - plant.tileZ());
+    const auto height = floraCellSupportHeight(rule, anchor->cell,
+                                               plant.localX() - plant.tileX(),
+                                               plant.localZ() - plant.tileZ());
     if (!height || !rule.large) return height;
 
     const auto footprint = floraVolume(plant, coord, rule);
@@ -1062,9 +1062,9 @@ std::optional<float> ChunkManager::floraAnchorHeight(
             const int px = int(footprint.minX) + dx;
             const int pz = int(footprint.minZ) + dz;
             if (px == x && pz == z) continue;
-            const auto cell = cellAt(px, y, pz);
+            const auto cell = solidCellAt({px, y, pz});
             // Unloaded footprint tiles are rechecked once they are ready.
-            if (cell && !floraSupportHeight(rule, *cell, 0, 0))
+            if (cell && !floraCellSupportHeight(rule, cell->cell, 0, 0))
                 return std::nullopt;
         }
     return height;

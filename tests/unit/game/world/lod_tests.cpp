@@ -622,6 +622,16 @@ TEST(lod_detail_survives_refresh) {
     current = drawable = true;
     coverage.update({8, 28, 7}, bands, latest, uploaded);
     CHECK(coverage.contains(7, 7));
+
+    // A resampled surface can extend lower after an edit. Keep the visible
+    // band while waiting for the lower slab's mesh, then adopt the new band.
+    const std::array lowered{TerrainLod::SurfaceBand{7, 7, 25, 28}};
+    current = false;
+    coverage.update({8, 28, 7}, lowered, latest, uploaded, 0, true);
+    CHECK(coverage.columns().at({7, 7}) == bands.front());
+    current = true;
+    coverage.update({8, 28, 7}, lowered, latest, uploaded, 0, true);
+    CHECK(coverage.columns().at({7, 7}) == lowered.front());
 }
 TEST(lod_detail_hysteresis) {
     constexpr std::array radii{4, 6, 8};

@@ -1,0 +1,12 @@
+[
+    {
+        "name": "blocks.oak_timber",
+        "material": "materials.oak_wood",
+        "render_category": "Vegetation",
+        "properties": {
+            "hardness": 3,
+            "flammable": true,
+            "opacity": 15
+        }
+    }
+]

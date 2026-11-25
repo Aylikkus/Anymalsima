@@ -74,7 +74,7 @@ class SunLightPropagator {
         Light material{};
         voxel_light::Shapes shapes;
         voxel_light::Cell at(int i) const {
-            return {material[i], shapes.at(i)};
+            return shapes.cell(i, material[i]);
         }
     };
 

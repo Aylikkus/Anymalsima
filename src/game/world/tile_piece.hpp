@@ -1,5 +1,6 @@
 #pragma once
 
+#include <span>
 #include <vector>
 
 #include "tile_shape.hpp"
@@ -45,6 +46,11 @@ struct PieceFace {
     std::vector<Vec3> vertices;  // convex, CCW from outside
 };
 
+std::optional<Face> boundaryFace(Plane plane);
+// Both polygons lie on the same plane. The clip polygon winds around normal.
+std::vector<Vec3> clipToFace(std::span<const Vec3> polygon,
+                             std::span<const Vec3> boundary, Vec3 normal);
+
 struct PieceRayHit {
     PieceId id;
     uint8_t blockId;
@@ -65,6 +71,8 @@ class CellGeometry {
     // the cell unchanged.
     PiecePlacement tryAdd(TilePiece piece);
     bool contains(Vec3 point) const;
+    bool intersectsBox(Vec3 low, Vec3 high) const;
+    std::vector<std::vector<Vec3>> overheadOpenings() const;
     std::vector<PieceFace> exteriorFaces() const;
     // Convex polygons covering the unoccupied area of a cell face. Vertices
     // lie in cell coordinates and wind CCW when viewed from outside.

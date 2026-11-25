@@ -181,6 +181,39 @@ std::optional<float> floraSupportHeight(const FloraSpeciesRule& rule,
     return height;
 }
 
+std::optional<float> floraCellSupportHeight(const FloraSpeciesRule& rule,
+                                            const SolidCellSnapshot& cell,
+                                            float x, float z) {
+    if (!cell.compound) return floraSupportHeight(rule, cell.base, x, z);
+    const auto geometry = cell.geometry();
+    if (rule.large) {
+        return geometry.boundaryOpenings(Face::PosY).empty()
+                   ? std::optional(1.f)
+                   : std::nullopt;
+    }
+
+    const auto supportAt = [&](float px, float pz) {
+        if (px < 0 || px > 1 || pz < 0 || pz > 1)
+            return std::optional<tile_geometry::PieceRayHit>{};
+        return geometry.intersectRay({px, 1.001f, pz}, {0, -1, 0});
+    };
+    const auto center = supportAt(x, z);
+    if (!center || center->hit.normal.y <= 0) return std::nullopt;
+    const auto n = center->hit.normal;
+    if (std::hypot(n.x, n.z) / n.y > rule.maxSlope) return std::nullopt;
+    for (const auto d : {Vec2{1, 0}, Vec2{-1, 0}, Vec2{0, 1}, Vec2{0, -1}}) {
+        const float px = x + d.x * rule.radius, pz = z + d.y * rule.radius;
+        // Footprint that crosses a tile edge is checked by the plant layer.
+        const auto edge =
+            supportAt(std::clamp(px, 0.f, 1.f), std::clamp(pz, 0.f, 1.f));
+        if (!edge || edge->hit.normal.y <= 0 ||
+            std::abs(edge->hit.t - center->hit.t) >
+                rule.radius * rule.maxSlope + 1e-5f)
+            return std::nullopt;
+    }
+    return 1.001f - center->hit.t;
+}
+
 namespace {
 
 struct Env {

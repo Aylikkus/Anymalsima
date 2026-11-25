@@ -1,8 +1,36 @@
 #include "sky_occlusion_map.hpp"
 
-#include <bx/math.h>
-
 #include <algorithm>
+#include <bit>
+
+namespace {
+
+// Binary16 with the same normal-value rounding as the previous atlas
+// conversion. Select the range before shifting the significand.
+constexpr uint16_t packHeight(float height) {
+    const auto bits = std::bit_cast<uint32_t>(height);
+    const uint32_t sign = (bits >> 16) & 0x8000;
+    const int exponent = int((bits >> 23) & 0xff) - 127;
+    const uint32_t mantissa = bits & 0x7fffff;
+    if (exponent > 15) {
+        const uint32_t nan = exponent == 128 && mantissa ? 0x200 : 0;
+        return uint16_t(sign | 0x7c00 | nan);
+    }
+    if (exponent >= -14) {
+        const uint32_t base = uint32_t(exponent + 15) << 10;
+        return uint16_t(sign | (base + ((mantissa + 0x1000) >> 13)));
+    }
+    if (exponent < -25) return uint16_t(sign);
+    const int shift = -exponent - 1;
+    const uint32_t significand = mantissa | 0x800000;
+    return uint16_t(sign | ((significand + (1u << (shift - 1))) >> shift));
+}
+
+static_assert(packHeight(SkyOcclusionMap::Open) == 0xf753);
+static_assert(packHeight(1024.0f) == 0x6400);
+static_assert(packHeight(0x1p-24f) == 1);
+
+}  // namespace
 
 float SkyOcclusionMap::skyAtDistance(int k) {
     if (k <= 0) return 1.f;
@@ -32,7 +60,7 @@ void SkyOcclusionMap::build(double eyeX, double eyeZ, const Raster& raster) {
         }
     if (bx1 < 0) {
         // No occluders in view: keep the upload image sized like data().
-        halves.assign(data.size(), bx::halfFromFloat(Open));
+        halves.assign(data.size(), packHeight(Open));
         return;
     }
     // Threshold k: the lowest top within k texels (4-neighbour), by k
@@ -64,8 +92,7 @@ void SkyOcclusionMap::build(double eyeX, double eyeZ, const Raster& raster) {
             }
     }
     halves.resize(data.size());
-    for (size_t i = 0; i < data.size(); ++i)
-        halves[i] = bx::halfFromFloat(data[i]);
+    for (size_t i = 0; i < data.size(); ++i) halves[i] = packHeight(data[i]);
 }
 
 std::array<float, SkyOcclusionMap::Thresholds> SkyOcclusionMap::at(

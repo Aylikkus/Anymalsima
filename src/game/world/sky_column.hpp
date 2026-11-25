@@ -16,6 +16,10 @@
 // sunlight at any height follows from its highest opaque tile and the
 // translucent tiles above it, without the chunks in between. Pure; builds
 // run on the pool.
+namespace structure_voxels {
+class Column;
+}
+
 namespace sky {
 
 // No tile (a column without any opaque tile, or an unset top).
@@ -31,8 +35,15 @@ struct Span {
     int16_t top = 0, bottom = 0;
     uint8_t opacity = 0;
     TileShape shape{};
-    voxel_light::Cell cell() const { return {opacity, shape}; }
-    bool operator==(const Span&) const = default;
+    std::shared_ptr<const voxel_light::PieceCoverage> compound{};
+    voxel_light::Cell cell() const {
+        return compound ? voxel_light::Cell(compound)
+                        : voxel_light::Cell(opacity, shape);
+    }
+    bool operator==(const Span& other) const {
+        return top == other.top && bottom == other.bottom &&
+               cell() == other.cell();
+    }
 };
 
 // One tile column seen from the sky.
@@ -41,6 +52,7 @@ struct Column {
     // none).
     int16_t opaque = None;
     TileShape opaqueShape{};
+    std::shared_ptr<const voxel_light::PieceCoverage> opaqueCompound;
     // Translucent runs above `opaque`, top-down.
     std::vector<Span> spans;
     // More runs than MaxSpans: treat the first discarded run as opaque.
@@ -57,7 +69,11 @@ struct Column {
     // top and in gaps between runs, 15 at and below `opaque`.
     voxel_light::Cell cellAt(int y) const;
     uint8_t opacityAt(int y) const { return cellAt(y).opacity; }
-    bool operator==(const Column&) const = default;
+    bool operator==(const Column& other) const {
+        return opaque == other.opaque && overflow == other.overflow &&
+               cellAt(opaque) == other.cellAt(other.opaque) &&
+               spans == other.spans;
+    }
 };
 
 // Scan profiles from `fromY` downward until the first tile that blocks
@@ -72,6 +88,7 @@ Column scanColumn(int fromY, int toY, Opacity&& opacity) {
         if (o >= Opaque) {
             column.opaque = int16_t(y);
             column.opaqueShape = cell.shape;
+            column.opaqueCompound = cell.compound;
             break;
         }
         if (!column.spans.empty() && column.spans.back().cell() == cell &&
@@ -85,7 +102,7 @@ Column scanColumn(int fromY, int toY, Opacity&& opacity) {
             break;
         }
         column.spans.push_back(
-            {int16_t(y), int16_t(y), cell.opacity, cell.shape});
+            {int16_t(y), int16_t(y), cell.opacity, cell.shape, cell.compound});
     }
     return column;
 }
@@ -111,12 +128,14 @@ class Tile {
     int highest() const;
     // Replaces one column (overrides).
     void set(int i, const Column& column);
-    bool operator==(const Tile&) const = default;
+    bool operator==(const Tile& other) const;
 
    private:
     static constexpr uint8_t OverflowFlag = 1;
     std::array<int16_t, Size> opaque;
     std::vector<TileShape> opaqueShapes;
+    std::map<int, std::shared_ptr<const voxel_light::PieceCoverage>>
+        opaqueCompounds;
     std::array<uint16_t, Size> spanBegin{};
     std::array<uint8_t, Size> spanCount{};
     std::array<uint8_t, Size> flags{};
@@ -125,10 +144,11 @@ class Tile {
 using TilePtr = std::shared_ptr<const Tile>;
 
 // Opacity by block id (Block::properties.opacity).
-using OpacityTable = std::array<uint8_t, 256>;
+using OpacityTable = voxel_light::OpacityTable;
 
 // What a chunk column's sky columns are built from.
 struct TileInputs {
+    const structure_voxels::Column* structures = nullptr;
     // Generated solid and water bounds, both sampled during generation.
     std::array<int, Tile::Size> surface{};
     std::array<WaterSurface, Tile::Size> water{};

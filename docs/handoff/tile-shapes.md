@@ -88,10 +88,10 @@ placement offset. Grid ties visit Z, Y, then X. Geometry breaks ties between
 facets in canonical profile order. Tile coordinates wrap on X and the hit
 position stays in the ray's world copy.
 
-`states/gameplay_state.*` adds shape controls to **Place Block**. Pick a shape
-and adjust its rotation, wall thickness, or ramp form, run and piece. Each
-world click places the selected piece. The debug panel shows the hovered
-shape and the current selection. Use **Walk mode** with the orbit target
+Use **Place Piece** to pick a shape and adjust its rotation, wall
+thickness, or ramp form, run and segment. The debug panel shows the hovered
+piece and the placement result. See [Playcheck A](weather.md#playcheck-a)
+for material, height and same-tile controls. Use **Walk mode** with the orbit target
 above loaded ground. Move with WASD, hold Shift to run, and drag with the
 right mouse button to look around. **Orbit camera** returns to the free view.
 

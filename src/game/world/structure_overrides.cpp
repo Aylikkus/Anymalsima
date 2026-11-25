@@ -27,6 +27,9 @@ class OverrideSource final : public Source {
             const auto [x, y, z] = pos;
             patches[packSlab(x >> 4, y >> 4, z >> 4)].emplace_back(
                 uint16_t(cellIndex(x & 15, y & 15, z & 15)), voxel);
+            if (!voxel.pieces.empty())
+                pieceBounds =
+                    united(pieceBounds, {x, y, z, x + 1, y + 1, z + 1});
             patchBounds = united(patchBounds, {x, y, z, x + 1, y + 1, z + 1});
         }
         bounds = united(bounds, patchBounds);
@@ -34,6 +37,11 @@ class OverrideSource final : public Source {
         for (const auto& [pos, voxel] : record.voxels)
             occupied->add(pos[0] >> 4, pos[1] >> 4, pos[2] >> 4);
         patchOccupancy = std::move(occupied);
+    }
+
+    TileBox exactSkyBounds() const override {
+        return original ? united(pieceBounds, original->exactSkyBounds())
+                        : pieceBounds;
     }
 
     OccupancyPtr occupancy() const override {
@@ -128,6 +136,7 @@ class OverrideSource final : public Source {
 
     SourcePtr original;
     uint64_t recordRevision;
+    TileBox pieceBounds;
     TileBox patchBounds;
     std::unordered_map<uint64_t,
                        std::vector<std::pair<uint16_t, OverrideVoxel>>>

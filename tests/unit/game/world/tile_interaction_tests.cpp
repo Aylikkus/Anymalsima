@@ -309,3 +309,59 @@ TEST(probe_and_ray_chunk_seams) {
         near(probe.feet().y, 5);
     }
 }
+
+TEST(compound_build_pick_walk) {
+    using tile_geometry::LayerThickness;
+    using tile_geometry::TilePiece;
+    ShapeFixture f;
+    f.load({0, 0, 0});
+    for (int x = 4; x <= 9; ++x) f.set(x, 4, 7);
+    WorldEditor editor{f.chunks, &f.sunlight, f.assets.getStorage<Block>()};
+    constexpr TilePos pos{6, 5, 7};
+    const auto base = TilePiece::layer(1, 1, LayerThickness::Cm5);
+    const TilePiece wall{2, 2, TileShape::make(Profile::Wall25), {0, .05f, 0}};
+    const auto place = [&](TilePos at, TilePiece piece) {
+        const auto cell = f.chunks.solidCellAt(at);
+        CHECK(cell);
+        return editor.placePiece(at, cell->revision, piece);
+    };
+    CHECK(place(pos, base) == CellPieceEdit::Applied);
+    CHECK(place(pos, wall) == CellPieceEdit::Applied);
+    CHECK(place(pos, TilePiece::layer(3, 2, LayerThickness::Cm10)) ==
+          CellPieceEdit::Overlap);
+    FloraSpeciesRule small;
+    small.radius = .12f;
+    small.maxSlope = .05f;
+    const auto mixed = f.chunks.solidCellAt(pos);
+    CHECK(mixed);
+    const auto exposedBase =
+        floraCellSupportHeight(small, mixed->cell, .5f, .4f);
+    CHECK(exposedBase);
+    near(*exposedBase, .05f);
+    CHECK(!floraCellSupportHeight(small, mixed->cell, .5f, .75f));
+    const auto stone = castTileRay(f.chunks, 6.5f, 7, 7.4f, 0, -1, 0);
+    const auto timber = castTileRay(f.chunks, 6.5f, 7, 7.9f, 0, -1, 0);
+    CHECK(stone && stone->pieceId == 1 && stone->tile.block_id == 1);
+    CHECK(timber && timber->pieceId == 2 && timber->tile.block_id == 2);
+    near(stone->position.y, 5.05f);
+    CHECK(editor.removePiece(pos, timber->revision, timber->pieceId) ==
+          CellPieceEdit::Applied);
+    CHECK(editor.removePiece(pos, stone->revision, stone->pieceId) ==
+          CellPieceEdit::Stale);
+    CHECK(place({7, 6, 7},
+                TilePiece::layer(4, 2, LayerThickness::Cm25, {0, .75f, 0})) ==
+          CellPieceEdit::Applied);
+    const auto underside = castTileRay(f.chunks, 7.5f, 5.8f, 7.5f, 0, 1, 0);
+    CHECK(underside && underside->pieceId == 4);
+    CHECK((underside->normal == Vec3{0, -1, 0}));
+    near(underside->position.y, 6.75f);
+
+    auto probe = f.spawn(5.5f, 5.f, 7.5f);
+    walk(f, probe, {2, 0}, 10);
+    CHECK(probe.grounded());
+    near(probe.feet().y, 5.05f);
+    walk(f, probe, {2, 0}, 10);
+    CHECK(probe.grounded());
+    near(probe.feet().x, 7.5f);
+    near(probe.feet().y, 5.f);
+}

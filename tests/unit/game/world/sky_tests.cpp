@@ -5,6 +5,7 @@
 #include "world/save/chunk_codec.hpp"
 #include "world/save/sky_codec.hpp"
 #include "world/sky_column.hpp"
+#include "world/structure_overrides.hpp"
 
 // Sky heightmap columns (docs/handoff/sky-light.md).
 
@@ -276,4 +277,66 @@ TEST(sky_shape_transmission_and_overrides) {
         sky_codec::decode(container.encode()).overrides.at(1).at(0);
     CHECK(!old.cellAt(500).shape.code() && !old.cellAt(600).shape.code());
     EQUAL(int(old.direct(599)), 12, "legacy cube opacity");
+}
+
+TEST(compound_sky_and_save) {
+    using namespace structure_voxels;
+    using tile_geometry::LayerThickness;
+    using tile_geometry::TilePiece;
+    constexpr uint64_t Key = 19;
+    Override layout;
+    layout.mode = OverrideMode::Replace;
+    layout.anchorX = 8;
+    layout.anchorZ = 8;
+    layout.landmark = true;
+    const auto wall = TileShape::make(TileShapeProfile::Wall25);
+    OverrideVoxel roof(Stone);
+    roof.pieces.push_back({{1,
+                            Stone,
+                            wall,
+                            {0, .75f, 0},
+                            tile_geometry::PieceFill::BelowProfile,
+                            .25f},
+                           {PieceOrigin::Structure, Key}});
+    layout.voxels[{8, 443, 8}] = roof;
+    const auto generated =
+        applyOverrides({}, {{"compound_test", {{Key, layout}}}});
+    Column sources(0, 0);
+    generated[0].addTo(sources, {});
+    sources.orderByKey();
+    auto inputs = flat(420);
+    const auto table = opacities();
+    inputs.opacity = &table;
+    inputs.structures = &sources;
+    inputs.structureTop = sources.skyTops();
+    const auto sky = sky::build(inputs);
+    const auto column = sky.column(sky::Tile::index(8, 8));
+    EQUAL(column.top(), 443, "generated roof top");
+    EQUAL(int(column.direct(442)), 11, "sun through the 75% open footprint");
+    const auto roofCell = column.cellAt(443);
+    EQUAL(int(voxel_light::faceLoss({}, roofCell, Face::PosY)), 0,
+          "opening below raised timber");
+    EQUAL(int(voxel_light::faceLoss({}, roofCell, Face::NegY)), 4,
+          "roof at the upper boundary");
+    const auto loaded =
+        sky_codec::decode(sky_codec::encode({{3, {{10, column}}}}));
+    CHECK(loaded.overrides.at(3).at(10) == column);
+
+    Chunk exact;
+    const auto slab = sources.rasterize(443 / 16);
+    CHECK(slab && stamp(exact, *slab) == 1);
+    const auto stamped = exact.solidCellAt(Chunk::cell(8, 443 % 16, 8));
+    const auto exactCell =
+        voxel_light::Cell(voxel_light::coverPieces(stamped, table));
+    CHECK(exactCell == roofCell);
+
+    const auto full =
+        TilePiece::layer(1, 15, LayerThickness::Cm25, {0, .75f, 0});
+    const auto overlappingFootprint =
+        TilePiece::layer(2, 15, LayerThickness::Cm25, {0, .25f, 0});
+    const auto layers = std::array{full, overlappingFootprint};
+    const auto closed = voxel_light::Cell(voxel_light::coverPieces(layers));
+    EQUAL(int(voxel_light::verticalLoss(closed)), 15,
+          "projected union counts once");
+    CHECK(!closed.solidOpaque());
 }

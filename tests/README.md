@@ -202,7 +202,8 @@ records the fixture coordinates and reference measurements.
 resident sparse shape-table bytes, encoded chunk size and the dense
 worst case (every cell shaped). It uses the scene in
 `tests/support/lod_scene.hpp`; compare `--legacy` for the cube-only
-baseline. A `--stats` pass explains why cells stay whole blocks, and
+baseline. The `--compound` run measures snapshot, edit and mesh costs for a
+16 × 16 wall with two materials per tile. A `--stats` pass explains why cells stay whole blocks, and
 `--map out.ppm` writes a shape map (red straight ramps, blue outer corners,
 green inner corners, yellow diagonal corner ramps).
 
@@ -210,6 +211,7 @@ green inner corners, yellow diagonal corner ramps).
 cmake --build build --target shape_benchmark
 build/tests/shape_benchmark
 build/tests/shape_benchmark --legacy
+build/tests/shape_benchmark --compound
 build/tests/shape_benchmark --stats
 build/tests/shape_benchmark --map /tmp/shape-map.ppm
 ```

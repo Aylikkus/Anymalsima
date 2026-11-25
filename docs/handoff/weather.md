@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–03 complete · Step 04 complete · First maintainer playcheck after step 05.**
+**Steps 01–05 complete · Step 06 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -16,7 +16,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 02 | Geometry for positioned pieces and horizontal layers | Complete | |
 | 03 | Sparse compound storage and immutable snapshots | Complete | |
 | 04 | Durable piece edits and save migration | Complete | |
-| 05 | Build, pick, walk on and render compound tiles | Pending | A · Construction |
+| 05 | Build, pick, walk on and render compound tiles | Complete | A · Construction |
 | 06 | Gravity settlement at slopes and ledges | Pending | |
 | 07 | Visible dusting, toe fill and snow collision | Pending | B · Five-centimetre ramp |
 | 08 | Calendar and seasonal ambient temperature | Pending | |
@@ -80,7 +80,7 @@ Give the debug builder piece placement, rotation, preview and per-piece removal.
 
 ### 06. Settle snow under gravity
 
-Use deposited volume per horizontal footprint and world gravity. Compute downhill exits from the actual upward-facing facets. A 45° or steeper facet sheds loose snowfall to the lowest reachable support. A ledge with an open drop delivers it to the support below. A wall closes an exit. At a receiving landing, fill available space from the bottom to a horizontal level, clipped against the underlying rock and neighbouring pieces. Rising snow on the landing backs into the toe of the ramp. This also produces an inverse wedge when enough snow has accumulated. For gentler and multi-facet slopes, start with shallow pockets building from their lowest supported points and spilling at their rims. Treat the gentler-slope response as a tuning choice at playcheck B.
+Use deposited volume per horizontal footprint and world gravity. Compute downhill exits from the actual upward-facing facets. A 45° or steeper facet sheds loose snowfall to the lowest reachable support. A ledge with an open drop delivers it to the support below. A wall closes an exit. At a receiving landing, fill available space from the bottom to a horizontal level, clipped against the underlying rock and neighbouring pieces. Rising snow on the landing backs into the toe of the ramp. The landing level caps the inverse wedge above the rock profile. On a 45° ramp, a 5 cm level fills only the first 5 cm uphill from the toe. For gentler and multi-facet slopes, start with shallow pockets building from their lowest supported points and spilling at their rims. Treat the gentler-slope response as a tuning choice at playcheck B.
 
 **Numerical fixture.** On a one-metre-wide ramp rising one metre over one horizontal metre, let the base be at zero and the landing snowline be 0.05 m. The clipped triangular pocket extends 0.05 m uphill. Its volume is 0.00125 m³. With an adjoining 1 m² flat landing bounded on its other sides, supply 0.05125 m³ to reach that line. “5 cm on the landing” specifies a level; the input required depends on the receiving area. This case catches both a parallel coating and accidental creation of snow.
 
@@ -421,3 +421,139 @@ The Release app built and all 401 gameplay cases passed. All four focused
 cases passed with ASan and UBSan after correcting the fixture's editor and
 tracker destruction order. Acceptance ran headlessly. Interactive
 construction is covered by the step 05 playcheck.
+
+
+### Step 05 · 2026-11-25
+
+The builder previews the requested piece in green for a valid placement and
+red for a rejected placement. The tile readout identifies the picked block
+and piece ID. Chunk meshes and level-zero structure proxies use the same
+exterior faces and clip them at neighbouring cells. Those meshes also cast
+shadows. The voxel sunlight sweep and sky heightmap use projected piece
+coverage, and the sky override codec retains it on reload. Plant support and
+the grounded probe query the actual solid surfaces and clearances.
+
+Distant structure levels 1 and 2 still simplify to coarse voxels. The coarse
+GPU sky map uses opaque heights on its existing four-metre grid. The exact
+heightmap and level-zero handover are used to check the one-metre beam
+opening. Per-piece water capacity is deferred to step 16.
+
+#### Execution checks
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests shape_benchmark --parallel 5
+ctest --test-dir build -L gameplay -j 5 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 2
+focused='compound_|chunk_piece_|region_pieces_persist|structure_revision_rebases'
+focused="$focused|structure_voxels_plan_chunk_handover|probe_|ray_shape_|sky_"
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R "$focused" -j 4 \
+  --output-on-failure --no-tests=error
+
+build/tests/shape_benchmark --legacy
+build/tests/shape_benchmark
+build/tests/shape_benchmark --compound
+```
+
+The Release app built and all 404 gameplay cases passed. All 30 selected
+cases passed with ASan and UBSan. The first sanitizer run exposed a
+negative shift in the vendored half-float conversion used by the coarse
+sky texture. The game now packs those heights directly and checks the
+open-sky sentinel, the world top and a subnormal value at compile time.
+The timber asset was appended to the block manifest and the previous load
+order was verified.
+
+The mesh benchmark uses the Step 01 terrain seeds and the Step 03 dense
+wall. The median of three Release runs was 0.213 ms per ordinary cube slab,
+0.335 ms per natural-shape slab, and 5.94 ms for the 256-cell compound wall
+with 2,240 triangles. Cube and natural terrain still allocated zero
+piece-table bytes.
+
+The seed-2024 scratch copy came from the Step 01 walk save. A read-only
+probe confirmed the deck height, empty cells at the construction site, and
+known-empty saved structure baselines for the four affected slabs. The
+automated checks run headlessly. Interactive rendering, the three-region
+trip and reload in the app are part of the maintainer playcheck.
+
+#### Playcheck A
+
+From the repository root, launch the disposable seed-2024 copy at Low terrain
+detail. Use the same environment variable when reloading this fixture. The
+fixture regenerates around the save's start region without modifying the
+baseline slot. If the scratch folder is missing, copy the Step 01 slot
+into it from the repository root.
+
+```bash
+mkdir -p build/construction-playcheck/saves
+cp -a build/weather-baseline/weather-walk_saves/2024_2026-11-25_22-28-13 \
+    build/construction-playcheck/saves/
+ln -s ../src/app/assets build/construction-playcheck/assets
+```
+
+```bash
+cd build/construction-playcheck
+ANYM_CONSTRUCTION_FIXTURE=1 ../src/app/app
+```
+
+In **Load World**, select seed 2024 dated 2026-11-25 22:28:13. Click
+**Construction site** and wait for streaming to settle. The HUD shows the
+deck and camera coordinates. If using another disposable save, apply the
+same offsets from the deck reported there.
+
+| Feature | Coordinates in the seed-2024 copy |
+|---|---|
+| Deck centre | (6208, 457, 6208) |
+| Generated mixed stone and timber | (6207, 458, 6207) |
+| Player construction tile | (6210, 458, 6207) |
+| Raised timber soffit | X 6206–6209, Y 460, Z 6209, +Z strip |
+| Travel point in region (48, 51) | X 6208, Z 6592 |
+
+1. Arm **Place Piece**, choose **Layer**, leave thickness at **5 cm** and
+   material at **Stone**. With **Next tile** and **Height 0 cm**, click the
+   top of the deck tile at (6210, 457, 6207). The preview should be green.
+2. Choose **Wall**, **25 cm**, **+Z**, **Oak timber**, **This tile** and
+   **Height 5 cm**. Click the visible stone layer. Try the same placement
+   again. The first timber fits, and the second attempt reports an overlap.
+   Hover the exposed stone and then the timber. Their names and IDs should
+   differ while the tile coordinates stay the same.
+3. Arm **Remove Piece** and click the timber. Confirm the 5 cm stone layer
+   remains. In **Walk mode**, cross it from neighbouring deck tiles and
+   walk under the raised beam. Drag with the right mouse button to look up.
+   The timber underside should be visible and pickable. Hover a downward
+   beam face and inspect the adjacent sky readout once lighting settles.
+   The exact heightmap gives **11** direct light below the opaque strip,
+   whose footprint covers one quarter of its cell.
+4. Return to **Orbit camera** and use **Construction site** to restore yaw.
+   Hold S to decrease Z until the camera is about 70–90 m from the deck,
+   then return. Watch the deck and beam across the Low-detail handover.
+   The surviving stone layer and beam opening should match the nearer
+   geometry. If the camera leaves mouse picking range, use the silhouette
+   until returning to range.
+5. With the orbit camera's reset yaw, use Shift+W to travel to Z 6592.
+   Raise the orbit camera with Ctrl+wheel if the terrain obscures the route.
+   Let streaming settle, click **Construction site**, and check both views
+   again. Exit with Escape, load the same slot, and confirm the stone layer,
+   untouched generated mixed cell and beam opening after reload.
+
+
+#### Playcheck A follow-up · 2026-11-26
+
+The maintainer confirmed that placement worked after the seed-2024 fixture
+settled and in a newly generated world. Early fixture edits briefly showed
+their shading without visible pieces. Above-ground chunk drawing now keeps
+the last surface band while the edited band rebuilds. Retest placement soon
+after entering the fixture and as a chunk hands over between views. The
+Release app rebuilt, all 404 gameplay cases passed, and the coverage
+refresh, complementary profiles, and build/pick/walk cases passed under
+ASan and UBSan. The maintainer confirmed the visual retest and approved
+Playcheck A on 2026-11-26.
+
+**Ramp infill** fills the open space above the matching ramp profile up to
+**Fill to**. The default **100 cm** fills the full complement. To preview the
+snow geometry with construction materials, place a straight 1 m ramp, select
+**Ramp infill** with the same facing, select **This tile**, and set **Fill to
+5 cm** and **Height 0 cm**. Only a short wedge at the toe should fill. Its top
+is horizontal and the higher ramp stays exposed. In step 06 the landing's
+snow level sets this cap automatically.

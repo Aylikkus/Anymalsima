@@ -63,6 +63,7 @@ class ChunkMesher {
         const Tile* tile;
         TileShape shape;
         const ChunkMeshSnapshot* snapshot = nullptr;
+        const Chunk* chunk = nullptr;
         uint16_t index = 0;
 
         Neighbour(const Tile* tile, TileShape shape = {})
@@ -72,6 +73,15 @@ class ChunkMesher {
               shape(snapshot.chunk->shapeAt(Chunk::cell(x, y, z))),
               snapshot(&snapshot),
               index(Chunk::cell(x, y, z)) {}
+        Neighbour(const Chunk& chunk, int x, int y, int z)
+            : tile(&chunk.tiles[z][y][x]),
+              shape(chunk.shapeAt(Chunk::cell(x, y, z))),
+              chunk(&chunk),
+              index(Chunk::cell(x, y, z)) {}
+        bool isCompound() const {
+            const Chunk* owner = snapshot ? snapshot->chunk.get() : chunk;
+            return owner && owner->hasCompoundAt(index);
+        }
         std::optional<SolidCellSnapshot> solidCell() const;
     };
     using NeighbourFn = std::function<Neighbour(int tx, int ty, int tz)>;
@@ -154,6 +164,10 @@ class ChunkMesher {
                      const tile_geometry::Polygon* occluder, Vec3 cell,
                      TileShape shape, const FaceKey& key,
                      const CoverClimate& climate) const;
+
+    void emitPolygon(ChunkGeometry& mesh, std::span<const Vec3> polygon,
+                     Vec3 normal, bool inset, Vec3 cell, TileShape shape,
+                     const FaceKey& key, const CoverClimate& climate) const;
 
     // Emit a single merged quad.
     // origin   – world-space corner of the quad

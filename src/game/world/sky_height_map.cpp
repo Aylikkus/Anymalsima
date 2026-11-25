@@ -23,6 +23,7 @@ struct BuildInputs {
 sky::Tile buildTile(const BuildInputs& in) {
     sky::TileInputs tile;
     tile.edit = in.edit;
+    tile.structures = in.structures.get();
     tile.opacity = in.opacity.get();
     for (size_t i = 0; i < sky::Tile::Size; ++i) {
         tile.surface[i] = in.terrain->columns[i].surface_y;
@@ -32,6 +33,54 @@ sky::Tile buildTile(const BuildInputs& in) {
         in.edit ? in.structures->skyTops(*in.edit) : in.structures->skyTops();
     return sky::build(tile);
 }
+
+void keepOpaqueStructureTops(const structure_voxels::Source& source,
+                             const TileBox& columns,
+                             const sky::OpacityTable& opacity,
+                             std::vector<int>& tops) {
+    using namespace structure_voxels;
+    const auto exact = columns.intersect(source.exactSkyBounds());
+    if (exact.empty()) return;
+    std::unordered_map<ChunkCoord, std::optional<Slab>> slabs;
+    for (int z = exact.z0; z < exact.z1; ++z)
+        for (int x = exact.x0; x < exact.x1; ++x) {
+            auto& top = tops[size_t(z - columns.z0) * columns.sizeX() +
+                             size_t(x - columns.x0)];
+            if (top < exact.y0 || top >= exact.y1) continue;
+            const int sx = (x - int(WorldWrap::mod(x, Side))) / Side;
+            const int highest = top;
+            top = INT_MIN;
+            for (int y = highest; y >= exact.y0; --y) {
+                const ChunkCoord key{unsigned(sx), unsigned(y / Side),
+                                     unsigned(z / Side)};
+                auto [found, inserted] = slabs.try_emplace(key);
+                if (inserted)
+                    found->second = source.rasterize(0, sx, y / Side, z / Side);
+                const auto& slab = found->second;
+                if (!slab) continue;
+                const auto cell = uint16_t(cellIndex(
+                    int(WorldWrap::mod(x, Side)), y % Side, z % Side));
+                if (!slab->bits.test(cell)) continue;
+                const auto coverage =
+                    slab->pieces.contains(cell)
+                        ? voxel_light::Cell(voxel_light::coverPieces(
+                              slab->solidCellAt(cell), opacity))
+                        : voxel_light::Cell(opacity[slab->tileAt(cell)],
+                                            slab->shapeAt(cell));
+                if (voxel_light::verticalLoss(coverage) == sky::Opaque) {
+                    top = y;
+                    break;
+                }
+            }
+            if (top == INT_MIN && exact.y0 > columns.y0) {
+                std::vector<int> lower;
+                source.skyTops({x, columns.y0, z, x + 1, exact.y0, z + 1},
+                               lower);
+                if (!lower.empty()) top = lower.front();
+            }
+        }
+}
+
 }  // namespace
 
 SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
@@ -313,10 +362,18 @@ sky::Column SkyHeightMap::scanLoaded(unsigned cx, unsigned cz, int lx, int lz,
             cachedSlab = s;
             loaded = chunks.withChunkLocked(
                 {cx, unsigned(s), cz}, [&](const Chunk& chunk) {
-                    for (int ly = 0; ly < Chunk::SIZE_Y; ++ly)
+                    for (int ly = 0; ly < Chunk::SIZE_Y; ++ly) {
+                        const auto cell = Chunk::cell(lx, ly, lz);
+                        if (chunk.hasCompoundAt(cell)) {
+                            slab[size_t(ly)] =
+                                voxel_light::Cell(voxel_light::coverPieces(
+                                    chunk.solidCellAt(cell), *opacity));
+                            continue;
+                        }
                         slab[size_t(ly)] = {
                             tileOpacity(chunk.tiles[lz][ly][lx], blocks),
-                            chunk.shapeAt(Chunk::cell(lx, ly, lz))};
+                            chunk.shapeAt(cell)};
+                    }
                 });
         }
         return loaded ? slab[size_t(y % Chunk::SIZE_Y)] : known.cellAt(y);
@@ -592,6 +649,8 @@ SkyHeightMap::OcclusionResult SkyHeightMap::buildOcclusion(
         projection->box.y1 = std::min(WORLD_HEIGHT_Y, projection->box.y1);
         if (projection->box.empty()) continue;
         source->skyTops(projection->box, projection->tops);
+        keepOpaqueStructureTops(*source, projection->box, *opacity,
+                                projection->tops);
         next.push_back(std::move(projection));
     }
     auto map = std::make_shared<SkyOcclusionMap>();

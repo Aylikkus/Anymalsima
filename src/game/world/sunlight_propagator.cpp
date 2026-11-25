@@ -167,7 +167,10 @@ SunLightPropagator::snapshotColumn(uint64_t column) {
         }
         auto opacities = std::make_shared<Opacity>();
         chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
-            opacities->shapes.capture(chunk);
+            voxel_light::OpacityTable byBlock{};
+            for (const auto& block : blocks.items)
+                byBlock[block.id] = block.properties.opacity;
+            opacities->shapes.capture(chunk, byBlock);
             for (int z = 0; z < Z; ++z)
                 for (int y = 0; y < Y; ++y)
                     for (int x = 0; x < X; ++x) {

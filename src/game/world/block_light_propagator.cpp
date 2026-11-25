@@ -98,7 +98,10 @@ std::shared_ptr<const BlockLightPropagator::Inputs> BlockLightPropagator::scan(
     std::vector<uint8_t> opacity(Cells);
     bool uniform = true;
     const bool found = chunks.withChunkLocked(coord, [&](const Chunk& chunk) {
-        inputs->shapes.capture(chunk);
+        voxel_light::OpacityTable byBlock{};
+        for (const auto& block : blocks.items)
+            byBlock[block.id] = block.properties.opacity;
+        inputs->shapes.capture(chunk, byBlock);
         for (int z = 0; z < Chunk::SIZE_Z; ++z)
             for (int y = 0; y < Chunk::SIZE_Y; ++y)
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {
@@ -370,13 +373,9 @@ bool lineOfSight(int ex, int ey, int ez, int dx, int dy, int dz, uint8_t exits,
     const Vec3 ray{float(dx), float(dy), float(dz)};
     const auto rayOpacity = [&](const int (&at)[3], float enter, float leave) {
         const auto material = opacity(at[0], at[1], at[2]);
-        if (material.opacity && material.shape.code() &&
-            !tile_geometry::intersectRay(
-                material.shape,
-                {ex + .5f - at[0], ey + .5f - at[1], ez + .5f - at[2]}, ray,
-                enter, leave))
-            return uint8_t(0);
-        return material.opacity;
+        return voxel_light::rayOpacity(
+            material, {ex + .5f - at[0], ey + .5f - at[1], ez + .5f - at[2]},
+            ray, enter, leave);
     };
     int step[3];
     double tMax[3], tDelta[3];

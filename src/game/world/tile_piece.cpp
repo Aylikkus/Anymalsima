@@ -189,6 +189,27 @@ bool onFace(const PieceFace& face, Vec3 point) {
 
 }  // namespace
 
+std::optional<Face> boundaryFace(Plane plane) {
+    for (size_t i = 0; i < cellPlanes.size(); ++i)
+        if (coincides(cellPlanes[i], plane)) return Face(i);
+    return std::nullopt;
+}
+
+std::vector<Vec3> clipToFace(std::span<const Vec3> polygon,
+                             std::span<const Vec3> boundary, Vec3 normal) {
+    Vertices result(polygon.begin(), polygon.end());
+    for (size_t i = 0; i < boundary.size() && !result.empty(); ++i) {
+        const auto start = boundary[i];
+        const auto edge = boundary[(i + 1) % boundary.size()] - start;
+        const auto tangent = cross(edge, normal);
+        const float size = length(tangent);
+        if (size <= Tolerance) continue;
+        const auto outward = tangent * (1 / size);
+        result = clip(result, {outward, dot(outward, start)});
+    }
+    return result;
+}
+
 TilePiece TilePiece::layer(PieceId id, uint8_t blockId,
                            LayerThickness thickness, Vec3 offset) {
     const bool slab = thickness == LayerThickness::Cm50;
@@ -265,6 +286,49 @@ bool CellGeometry::contains(Vec3 point) const {
         for (const auto& part : solid.parts)
             if (containsPoint(part, point)) return true;
     return false;
+}
+
+bool CellGeometry::intersectsBox(Vec3 low, Vec3 high) const {
+    const std::array<Plane, 6> bounds{{
+        {{1, 0, 0}, high.x},
+        {{-1, 0, 0}, -low.x},
+        {{0, 1, 0}, high.y},
+        {{0, -1, 0}, -low.y},
+        {{0, 0, 1}, high.z},
+        {{0, 0, -1}, -low.z},
+    }};
+    for (const auto& solid : solids_)
+        for (const auto& part : solid.parts) {
+            auto intersection = part;
+            for (auto plane : bounds) addPlane(intersection, plane);
+            if (hasInterior(intersection)) return true;
+        }
+    return false;
+}
+
+std::vector<std::vector<Vec3>> CellGeometry::overheadOpenings() const {
+    std::vector<Vertices> openings{
+        {{0, 0, 0}, {0, 0, 1}, {1, 0, 1}, {1, 0, 0}}};
+    for (const auto& solid : solids_)
+        for (const auto& part : solid.parts)
+            for (auto plane : part) {
+                if (plane.normal.y <= 0) continue;
+                const auto polygon = facet(plane, part);
+                if (areaVector(polygon).y <= 2 * Tolerance * Tolerance)
+                    continue;
+                std::vector<Plane> bounds;
+                for (size_t i = 0; i < polygon.size(); ++i) {
+                    const auto point = polygon[i];
+                    auto edge = polygon[(i + 1) % polygon.size()] - point;
+                    edge.y = 0;
+                    const float size = length(edge);
+                    if (size <= Tolerance) continue;
+                    const auto normal = cross(edge, {0, 1, 0}) * (1 / size);
+                    bounds.push_back({normal, dot(normal, point)});
+                }
+                subtractFrom(openings, bounds);
+            }
+    return openings;
 }
 
 std::vector<PieceFace> CellGeometry::exteriorFaces() const {

@@ -260,7 +260,7 @@ void StructureLod::mergeVoxels(const std::vector<ChunkCoord>& changed) {
         bool hasShapes = false;
         for (const auto* structure : holding)
             for (const auto& [coord, slab] : *structure->slabs) {
-                hasShapes |= !slab.shapes.empty();
+                hasShapes |= !slab.shapes.empty() || !slab.pieces.empty();
                 auto [it, inserted] = merged->try_emplace(coord, slab);
                 if (!inserted) it->second.merge(slab);
             }
@@ -548,9 +548,7 @@ void StructureLod::request() {
                                       ly = y % Chunk::SIZE_Y,
                                       lz = z % Chunk::SIZE_Z;
                             const auto& tile = chunk->tiles[lz][ly][lx];
-                            if (tile.isSolid())
-                                return {&tile, chunk->shapeAt(
-                                                   Chunk::cell(lx, ly, lz))};
+                            if (tile.isSolid()) return {*chunk, lx, ly, lz};
                         }
                         // Faces resting on the (possibly edited) ground hide
                         // (a cell by the ground at its centre). Carry the

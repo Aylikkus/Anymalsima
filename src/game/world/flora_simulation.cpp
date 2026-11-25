@@ -369,11 +369,12 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
         return column->opacityAt(y) == 0;
     };
     for (int y = nearY + 3; y >= std::max(0, nearY - 3); --y) {
-        const auto cell = chunks.cellAt(int(tx), y, int(tz));
-        if (cell && floraSupportHeight(rule, *cell, anchorX, anchorZ) &&
+        const auto cell = chunks.solidCellAt({int(tx), y, int(tz)});
+        if (cell &&
+            floraCellSupportHeight(rule, cell->cell, anchorX, anchorZ) &&
             open(int(tx), y + 1, int(tz))) {
             anchorY = y;
-            ground = cell->tile;
+            ground = cell->cell.base.tile;
             break;
         }
     }
@@ -422,9 +423,9 @@ bool FloraSimulation::plant(const FloraSpeciesRule& rule, double x, double z,
             const bool under = dx >= 0 && dz >= 0 && dx < sizeX && dz < sizeZ;
             if (under) {
                 if (rule.large && (px != tx || pz != tz)) {
-                    const auto support = chunks.cellAt(px, anchorY, pz);
-                    if (!support ||
-                        !floraSupportHeight(rule, *support, anchorX, anchorZ))
+                    const auto support = chunks.solidCellAt({px, anchorY, pz});
+                    if (!support || !floraCellSupportHeight(rule, support->cell,
+                                                            anchorX, anchorZ))
                         return false;
                 }
                 for (int h = 1; h <= rule.heightTiles; ++h)

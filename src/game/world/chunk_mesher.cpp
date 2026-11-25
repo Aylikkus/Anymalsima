@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <span>
+#include <unordered_map>
 
 #include "items/block.hpp"
 #include "items/material.hpp"
@@ -28,6 +29,7 @@ SolidCellSnapshot ChunkMeshSnapshot::solidCellAt(uint16_t index) const {
 
 std::optional<SolidCellSnapshot> ChunkMesher::Neighbour::solidCell() const {
     if (snapshot) return snapshot->solidCellAt(index);
+    if (chunk) return chunk->solidCellAt(index);
     if (!tile) return std::nullopt;
     if (!tile->isSolid()) return SolidCellSnapshot{{*tile, shape}};
     return SolidCellSnapshot{{*tile, shape},
@@ -231,51 +233,58 @@ void ChunkMesher::emitSurface(ChunkGeometry& mesh,
                               const tile_geometry::Polygon* occluder, Vec3 cell,
                               TileShape shape, const FaceKey& key,
                               const CoverClimate& climate) const {
-    const auto normal = face.plane.normal;
-    const bool inset = !tile_geometry::boundaryFace(face);
+    subtractCoverage(face, occluder, [&](std::span<const Vec3> polygon) {
+        emitPolygon(mesh, polygon, face.plane.normal,
+                    !tile_geometry::boundaryFace(face), cell, shape, key,
+                    climate);
+    });
+}
+
+void ChunkMesher::emitPolygon(ChunkGeometry& mesh,
+                              std::span<const Vec3> polygon, Vec3 normal,
+                              bool inset, Vec3 cell, TileShape shape,
+                              const FaceKey& key,
+                              const CoverClimate& climate) const {
     const auto* cover = coverInfo(key.cover);
     static_assert(Chunk::SIZE_X == 16 && Chunk::SIZE_Y == 16 &&
                   Chunk::SIZE_Z == 16);  // block.vert decodes the owner index
-    subtractCoverage(face, occluder, [&](std::span<const Vec3> polygon) {
-        if (polygon.size() < 3) return;
-        const auto base = uint32_t(mesh.vertices.size());
-        const auto firstIndex = mesh.indices.size();
-        for (unsigned i = 1; i + 1 < polygon.size(); ++i) {
-            const auto area =
-                cross(polygon[i] - polygon[0], polygon[i + 1] - polygon[0]);
-            if (dot(area, normal) > 1e-7f)
-                mesh.indices.insert(mesh.indices.end(),
-                                    {base, base + i, base + i + 1});
-        }
-        if (mesh.indices.size() == firstIndex) return;
-        for (const auto point : polygon) {
-            const auto pos = cell + point;
-            BlockVertex vertex{pos.x,    pos.y,    pos.z, normal.x,
-                               normal.y, normal.z, 0,     0,
-                               0,        -1,       0,     float(key.texLayer),
-                               key.tint};
-            // The block shader uses a tagged tangent slot for the owner
-            // index and sloping side's rim depth, with no extra vertex bytes.
-            vertex.tx =
-                float(BlockVertex::ExplicitCellTag +
-                      Chunk::cell(int(cell.x), int(cell.y), int(cell.z)));
-            vertex.tz = inset ? 1.f : 0.f;
-            if (cover) {
-                vertex.u = cover->layer;
-                if (normal.y == 0) {
-                    const auto top = tile_geometry::supportHeight(
-                        shape, std::clamp(point.x, 0.f, 1.f),
-                        std::clamp(point.z, 0.f, 1.f));
-                    vertex.ty = std::max(0.f, top.value_or(1.f) - point.y);
-                    vertex.v = cover->fringe;
-                }
-                const auto [humidity, temperature] =
-                    climate.at(pos.x / Chunk::SIZE_X, pos.z / Chunk::SIZE_Z);
-                vertex.tint = cover->tint.at(humidity, temperature).packed();
+    if (polygon.size() < 3) return;
+    const auto base = uint32_t(mesh.vertices.size());
+    const auto firstIndex = mesh.indices.size();
+    for (unsigned i = 1; i + 1 < polygon.size(); ++i) {
+        const auto area =
+            cross(polygon[i] - polygon[0], polygon[i + 1] - polygon[0]);
+        if (dot(area, normal) > 1e-7f)
+            mesh.indices.insert(mesh.indices.end(),
+                                {base, base + i, base + i + 1});
+    }
+    if (mesh.indices.size() == firstIndex) return;
+    for (const auto point : polygon) {
+        const auto pos = cell + point;
+        BlockVertex vertex{pos.x,    pos.y,    pos.z, normal.x,
+                           normal.y, normal.z, 0,     0,
+                           0,        -1,       0,     float(key.texLayer),
+                           key.tint};
+        // The block shader uses a tagged tangent slot for the owner
+        // index and sloping side's rim depth, with no extra vertex bytes.
+        vertex.tx = float(BlockVertex::ExplicitCellTag +
+                          Chunk::cell(int(cell.x), int(cell.y), int(cell.z)));
+        vertex.tz = inset ? 1.f : 0.f;
+        if (cover) {
+            vertex.u = cover->layer;
+            if (normal.y == 0) {
+                const auto top = tile_geometry::supportHeight(
+                    shape, std::clamp(point.x, 0.f, 1.f),
+                    std::clamp(point.z, 0.f, 1.f));
+                vertex.ty = std::max(0.f, top.value_or(1.f) - point.y);
+                vertex.v = cover->fringe;
             }
-            mesh.vertices.push_back(vertex);
+            const auto [humidity, temperature] =
+                climate.at(pos.x / Chunk::SIZE_X, pos.z / Chunk::SIZE_Z);
+            vertex.tint = cover->tint.at(humidity, temperature).packed();
         }
-    });
+        mesh.vertices.push_back(vertex);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +340,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
     const int dims[3] = {W, H, D};
 
     const bool hasShapes = chunk.hasShapes();
+    const bool hasCompounds = chunk.hasCompounds();
     // A dense cell lookup keeps the greedy sweep and border clipping from
     // binary-searching the sorted sparse table for every visited cell. Only
     // chunks that actually carry shapes pay for it.
@@ -345,6 +355,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
     const auto getNeighbour = [&](int x, int y, int z) -> Neighbour {
         // inside current chunk
         if ((unsigned)x < W && (unsigned)y < H && (unsigned)z < D) {
+            if (hasCompounds && chunk.hasCompoundAt(Chunk::cell(x, y, z)))
+                return {chunk, x, y, z};
             return {&chunk.tiles[z][y][x], localShape(x, y, z)};
         }
 
@@ -361,9 +373,76 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
         return key;
     };
 
+    // The same compound geometry supplies its own faces and the border
+    // clipping of every adjacent tile in this build.
+    std::unordered_map<const Tile*, tile_geometry::CellGeometry>
+        compoundGeometry;
+    const auto geometryOf = [&](const Tile* tile, auto solid) -> const auto& {
+        auto [it, inserted] = compoundGeometry.try_emplace(tile);
+        if (inserted) it->second = solid().geometry();
+        return it->second;
+    };
+
+    // Clip a boundary against the actual open polygons of its neighbour.
+    const auto emitBoundary = [&](std::span<const Vec3> polygon, Face face,
+                                  Neighbour neighbour, Vec3 cell,
+                                  TileShape shape, const FaceKey& key) {
+        if (!neighbour.tile) return;
+        const auto normal = tile_geometry::boundaryFace({}, face)->plane.normal;
+        if (!neighbour.tile->isSolid()) {
+            emitPolygon(mesh, polygon, normal, false, cell, shape, key,
+                        climate);
+            return;
+        }
+        if (!neighbour.isCompound() && !neighbour.shape.code()) return;
+        const auto openings =
+            neighbour.isCompound()
+                ? geometryOf(neighbour.tile,
+                             [&] { return *neighbour.solidCell(); })
+                      .boundaryOpenings(opposite(face))
+                : neighbour.solidCell()->geometry().boundaryOpenings(
+                      opposite(face));
+        for (auto opening : openings) {
+            for (auto& point : opening) point = point + normal;
+            const auto visible =
+                tile_geometry::clipToFace(polygon, opening, normal * -1);
+            emitPolygon(mesh, visible, normal, false, cell, shape, key,
+                        climate);
+        }
+    };
+    if (hasCompounds)
+        chunk.forEachPieceCell([&](uint16_t index,
+                                   const SolidCellSnapshot& solid) {
+            if (!solid.compound) return;
+            const int x = index % W, y = (index / W) % H;
+            const int z = index / (W * H);
+            const Vec3 cell{float(x), float(y), float(z)};
+            const auto& first = solid.pieces().front().geometry;
+            const auto legacy = first.legacyShape();
+            for (const auto& polygon : solid.geometry().exteriorFaces()) {
+                const auto normal = polygon.plane.normal;
+                const auto& block = blocks.get(polygon.blockId);
+                const bool covered = legacy && polygon.id == first.id;
+                const auto key =
+                    keyFor(covered ? solid.base.tile : Tile{}, block, normal.y);
+                const auto shape = covered ? *legacy : TileShape{};
+                if (const auto face =
+                        tile_geometry::boundaryFace(polygon.plane))
+                    emitBoundary(
+                        polygon.vertices, *face,
+                        getNeighbour(x + int(normal.x), y + int(normal.y),
+                                     z + int(normal.z)),
+                        cell, shape, key);
+                else
+                    emitPolygon(mesh, polygon.vertices, normal, true, cell,
+                                shape, key, climate);
+            }
+        });
+
     // Emit each shaped cell once. Inset surfaces have no shared boundary;
     // boundary surfaces are clipped by the occupied part of the neighbour.
     chunk.forEachShape([&](uint16_t index, TileShape shape) {
+        if (hasCompounds && chunk.hasCompoundAt(index)) return;
         const int x = index % W, y = (index / W) % H;
         const int z = index / (W * H);
         const auto& tile = chunk.tiles[z][y][x];
@@ -382,6 +461,12 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                 const auto nbr =
                     getNeighbour(adjacent[0], adjacent[1], adjacent[2]);
                 if (!nbr.tile) continue;
+                if (nbr.isCompound()) {
+                    emitBoundary(
+                        std::span(polygon.vertices).first(polygon.count), *face,
+                        nbr, cell, shape, keyFor(tile, block, normal.y));
+                    continue;
+                }
                 if (nbr.tile->isSolid()) {
                     if (!nbr.shape.code()) continue;
                     occluder =
@@ -440,6 +525,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     // Retrieve the tile at this world position via neighbour()
                     const Tile* tile = localTile(local[0], local[1], local[2]);
                     if (!tile || tile->block_id == 0 ||
+                        (hasCompounds && chunk.hasCompoundAt(Chunk::cell(
+                                             local[0], local[1], local[2]))) ||
                         (hasShapes &&
                          localShape(local[0], local[1], local[2]).code()))
                         continue;
@@ -469,8 +556,17 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                             getNeighbour(nlocal[0], nlocal[1], nlocal[2]);
                         if (!nbr.tile) return {};
                         if (!nbr.tile->isSolid()) return covered(posDir);
-                        if (!nbr.shape.code()) return {};
                         const auto face = Face(d * 2 + (posDir ? 0 : 1));
+                        if (nbr.isCompound()) {
+                            const auto square =
+                                tile_geometry::boundaryFace({}, face);
+                            emitBoundary(square->vertices, face, nbr,
+                                         {float(local[0]), float(local[1]),
+                                          float(local[2])},
+                                         {}, covered(posDir));
+                            return {};
+                        }
+                        if (!nbr.shape.code()) return {};
                         auto occluder = tile_geometry::boundaryFace(
                             nbr.shape, opposite(face));
                         if (!occluder) return covered(posDir);

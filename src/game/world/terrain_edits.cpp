@@ -24,6 +24,8 @@ class MaskedStructure final : public Source {
                    ((editRevision + 1) * 0x9e3779b97f4a7c15ULL);
     }
 
+    TileBox exactSkyBounds() const override { return source->exactSkyBounds(); }
+
     OccupancyPtr occupancy() const override { return source->occupancy(); }
 
     std::optional<Slab> rasterize(int level, int sx, int sy,

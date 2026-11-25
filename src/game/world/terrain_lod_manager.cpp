@@ -788,8 +788,11 @@ void TerrainLodManager::editChanged(uint64_t column) {
             const TerrainLod::DetailCoverage::Key nearby{
                 int(wrap.wrapChunk(key.first + dx)), key.second + dz};
             if (nearby.first < 0 || nearby.second < 0) continue;
-            // Keep the last drawable voxel water until the new band is ready.
-            surfaceBands.erase(nearby);
+            // Above-ground chunks still use the previous ground band for
+            // drawing until its replacement arrives.
+            if (auto band = surfaceBands.find(nearby);
+                band != surfaceBands.end())
+                band->second.stale = true;
         }
     joinedCoverageVersion = UINT64_MAX;
 }
@@ -873,16 +876,12 @@ void TerrainLodManager::reservoirsChanged(const ReservoirChange& change) {
                               periodX))
             job.stale = true;
     }
-    for (auto it = surfaceBands.begin(); it != surfaceBands.end();) {
-        const auto key = it->first;
+    for (auto& [key, cached] : surfaceBands) {
         const int x = key.first * Chunk::SIZE_X, z = key.second * Chunk::SIZE_Z;
-        if (!projected.affects(world.hydrology.get(), x - 1, z - 1,
-                               x + Chunk::SIZE_X + 1, z + Chunk::SIZE_Z + 1,
-                               periodX)) {
-            ++it;
-            continue;
-        }
-        it = surfaceBands.erase(it);
+        if (projected.affects(world.hydrology.get(), x - 1, z - 1,
+                              x + Chunk::SIZE_X + 1, z + Chunk::SIZE_Z + 1,
+                              periodX))
+            cached.stale = true;
     }
 }
 
@@ -913,7 +912,8 @@ bool TerrainLodManager::drawsChunk(const ChunkCoord& c) const {
     // while its ground is out of the detail range: the wood of a massive
     // tree seen from high above.
     const auto band = surfaceBands.find({int(c.x), int(c.z)});
-    return band != surfaceBands.end() && int(c.y) > band->second.ground.maxY;
+    return band != surfaceBands.end() &&
+           int(c.y) > band->second.bands.ground.maxY;
 }
 
 bool TerrainLodManager::drawsWater(const ChunkCoord& c) const {
@@ -936,7 +936,7 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
             auto bands = job.future.get();
             if (!job.stale && chunks.isMeshUploaded(job.chunk))
                 surfaceBands[{int(job.chunk.x), int(job.chunk.z)}] =
-                    std::move(bands);
+                    CachedBands{std::move(bands)};
         } catch (const std::exception& e) {
             std::cerr << "LOD band generation failed: " << e.what() << '\n';
         }
@@ -965,17 +965,25 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
             continue;
         for (const auto& bands : it->second->bands) {
             const auto& band = bands.ground;
-            if (distX(band.x) <= keep + 1 && std::abs(band.z - cz) <= keep + 1)
-                surfaceBands.try_emplace({band.x, band.z}, bands);
+            if (distX(band.x) > keep + 1 || std::abs(band.z - cz) > keep + 1)
+                continue;
+            auto [cached, inserted] =
+                surfaceBands.try_emplace({band.x, band.z}, CachedBands{bands});
+            if (!inserted && cached->second.stale)
+                cached->second = CachedBands{bands};
         }
     }
     int newBands = 0;
     chunks.forEachMeshed([&](const ChunkCoord& coord) {
         const int x = int(coord.x), z = int(coord.z);
-        if (newBands >= 4 || bandJobs.size() >= 4 ||
-            distX(x) > detailCoverage.enterRadius() ||
-            std::abs(z - cz) > detailCoverage.enterRadius() ||
-            surfaceBands.contains({x, z}) || !chunks.isMeshUploaded(coord))
+        const auto cached = surfaceBands.find({x, z});
+        const int radius = cached == surfaceBands.end()
+                               ? detailCoverage.enterRadius()
+                               : keep + 1;
+        if (newBands >= 4 || bandJobs.size() >= 4 || distX(x) > radius ||
+            std::abs(z - cz) > radius ||
+            (cached != surfaceBands.end() && !cached->second.stale) ||
+            !chunks.isMeshUploaded(coord))
             return;
         if (std::any_of(bandJobs.begin(), bandJobs.end(),
                         [&](const BandJob& j) {
@@ -998,16 +1006,18 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
     });
     std::vector<TerrainLod::SurfaceBand> candidates, waterCandidates;
     TerrainLod::DetailCoverage::Columns waterBands;
-    for (const auto& [key, bands] : surfaceBands) {
-        candidates.push_back(bands.ground);
-        if (bands.water) waterBands.emplace(key, *bands.water);
+    for (const auto& [key, cached] : surfaceBands) {
+        if (cached.stale) continue;
+        candidates.push_back(cached.bands.ground);
+        if (cached.bands.water) waterBands.emplace(key, *cached.bands.water);
     }
     // A canal can contain water below the proxy's surface band, or where the
     // proxy has no water at all. Cover both ranges before hiding the proxy.
     chunks.forEachMeshed([&](ChunkCoord c) {
         const auto key = TerrainLod::DetailCoverage::Key{int(c.x), int(c.z)};
-        if (std::abs(int(c.y) - cy) > keep || !surfaceBands.contains(key) ||
-            !chunks.getWaterMesh(c))
+        const auto cached = surfaceBands.find(key);
+        if (std::abs(int(c.y) - cy) > keep || cached == surfaceBands.end() ||
+            cached->second.stale || !chunks.getWaterMesh(c))
             return;
         TerrainLod::DetailCoverage::includeSlab(waterBands, c);
     });
@@ -1037,7 +1047,7 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         [&](ChunkCoord coord) {
             return chunks.hasUploadedMesh(coord) && lit(coord);
         },
-        wrap.chunks());
+        wrap.chunks(), true);
 
     const auto waterDrawable = [&](ChunkCoord coord) {
         return chunks.hasUploadedMesh(coord) && lit(coord);

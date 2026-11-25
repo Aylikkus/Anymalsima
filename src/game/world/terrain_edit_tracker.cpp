@@ -145,7 +145,10 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                 const Tile& tile = chunk->tiles[lz][y % Chunk::SIZE_Y][lx];
                 const auto cell = Chunk::cell(lx, y % Chunk::SIZE_Y, lz);
                 const auto* root = chunk->rootAt(cell);
+                // Positioned solids are emitted by the exact structure
+                // proxy. Start the terrain mesh at the substrate below them.
                 if (y <= surface && tile.isSolid() &&
+                    !chunk->hasCompoundAt(cell) &&
                     (root || !grown.test(tile.block_id) ||
                      chunk->hasPieceEntry(cell))) {
                     ground = y;
@@ -259,7 +262,7 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                         inputs->columns[ColumnEdit::index(x, z)];
                     const auto cell = structure_voxels::cellIndex(x, y, z);
                     if (worldY <= column.surface_y) {
-                        if (chunk->hasPieceEntry(cell)) {
+                        if (chunk->hasCompoundAt(cell)) {
                             const auto actual = chunk->solidCellAt(cell);
                             part.setPieces(cell, actual.pieces(), {}, true);
                             any = true;

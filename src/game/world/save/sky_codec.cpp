@@ -2,20 +2,52 @@
 
 #include <algorithm>
 
+#include "piece_codec.hpp"
 #include "world/consts.hpp"
 
 namespace sky_codec {
 namespace {
-constexpr uint16_t Version = 2;
+constexpr uint16_t Version = 3;
 constexpr uint32_t MaxColumns = 1u << 24;
 
 bool validY(int y) { return y >= 0 && y < WORLD_HEIGHT_Y; }
+void writeCoverage(
+    BinaryWriter& out,
+    const std::shared_ptr<const voxel_light::PieceCoverage>& cell) {
+    out.write(uint8_t(cell ? cell->pieces.size() : 0));
+    if (cell)
+        for (const auto& piece : cell->pieces)
+            piece_codec::write(out, {piece, {}});
+}
+
+std::shared_ptr<const voxel_light::PieceCoverage> readCoverage(
+    BinaryReader& in) {
+    const auto entries = piece_codec::read(in, in.read<uint8_t>());
+    if (entries.empty()) return {};
+    std::vector<tile_geometry::TilePiece> pieces;
+    tile_geometry::CellGeometry geometry;
+    for (const auto& entry : entries) {
+        const auto& piece = entry.geometry;
+        if (piece.blockId > sky::Opaque || !piece.blockId ||
+            geometry.tryAdd(piece) != tile_geometry::PiecePlacement::Added)
+            throw SerializationError("bad sky piece geometry");
+        pieces.push_back(piece);
+    }
+    return voxel_light::coverPieces(pieces);
+}
 }  // namespace
 
 Bytes encode(const sky::Overrides& overrides, const SectionContainer& extra) {
     std::vector<uint64_t> keys;
-    for (const auto& [key, columns] : overrides)
+    bool compounds = false;
+    for (const auto& [key, columns] : overrides) {
         if (!columns.empty()) keys.push_back(key);
+        for (const auto& [index, column] : columns) {
+            compounds |= bool(column.opaqueCompound);
+            for (const auto& span : column.spans)
+                compounds |= bool(span.compound);
+        }
+    }
     std::sort(keys.begin(), keys.end());  // stable, diff-friendly output
     BinaryWriter out;
     out.write(uint32_t(keys.size()));
@@ -32,6 +64,7 @@ Bytes encode(const sky::Overrides& overrides, const SectionContainer& extra) {
             out.write(uint8_t(index));
             out.write(column.opaque);
             out.write(column.opaqueShape.code());
+            if (compounds) writeCoverage(out, column.opaqueCompound);
             out.write(uint8_t(column.overflow));
             out.write(uint8_t(column.spans.size()));
             for (const auto& span : column.spans) {
@@ -39,11 +72,12 @@ Bytes encode(const sky::Overrides& overrides, const SectionContainer& extra) {
                 out.write(span.bottom);
                 out.write(span.opacity);
                 out.write(span.shape.code());
+                if (compounds) writeCoverage(out, span.compound);
             }
         }
     }
     SectionContainer container = extra;
-    container.put("SKYO", Version, out.take());
+    container.put("SKYO", compounds ? Version : 2, out.take());
     return container.encode();
 }
 
@@ -51,7 +85,7 @@ File decode(ByteView bytes) {
     File file;
     file.extra = SectionContainer::decode(bytes);
     if (const auto* section = file.extra.find("SKYO")) {
-        if (section->version != 1 && section->version != Version)
+        if (section->version < 1 || section->version > Version)
             throw SerializationError("unsupported SKYO version");
         BinaryReader in(section->data);
         const auto readShape = [&] {
@@ -80,6 +114,12 @@ File decode(ByteView bytes) {
                 if (column.opaque != sky::None && !validY(column.opaque))
                     throw SerializationError("sky top out of range");
                 column.opaqueShape = readShape();
+                if (section->version >= 3)
+                    column.opaqueCompound = readCoverage(in);
+                if (column.opaqueCompound &&
+                    (column.opaque == sky::None || column.opaqueShape.code() ||
+                     column.opaqueCompound->vertical != sky::Opaque))
+                    throw SerializationError("bad opaque sky pieces");
                 if (column.opaqueShape.code() &&
                     (column.opaque == sky::None ||
                      voxel_light::verticalLoss(
@@ -98,6 +138,11 @@ File decode(ByteView bytes) {
                     span.bottom = in.read<int16_t>();
                     span.opacity = in.read<uint8_t>();
                     span.shape = readShape();
+                    if (section->version >= 3) span.compound = readCoverage(in);
+                    if (span.compound &&
+                        (span.shape.code() ||
+                         span.opacity != span.compound->maximum))
+                        throw SerializationError("bad sky piece span");
                     if (!validY(span.top) || !validY(span.bottom) ||
                         span.bottom > span.top || span.top >= below ||
                         span.opacity == 0 || span.opacity > sky::Opaque ||

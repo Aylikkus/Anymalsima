@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "chunk.hpp"
 #include "core/assets_api.hpp"
 #include "flora.hpp"
 #include "terrain_sampler.hpp"
@@ -133,6 +134,10 @@ inline FloraVolume floraVolume(const FloraInstance& p, const ChunkCoord& c,
 std::optional<float> floraSupportHeight(const FloraSpeciesRule& rule,
                                         const ShapedTile& cell, float x,
                                         float z);
+
+std::optional<float> floraCellSupportHeight(const FloraSpeciesRule& rule,
+                                            const SolidCellSnapshot& cell,
+                                            float x, float z);
 
 // The ground a plant would grow on.
 struct FloraSite {

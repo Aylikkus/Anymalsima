@@ -160,6 +160,9 @@ class Source {
     // The default rasterizes level-0 slabs from the top down, which is
     // slow for tall structures: kinds should answer directly (trees project
     // their skeleton). Thread-safe like rasterize.
+    // Bounds of geometry that needs the exact piece opacity path. Ordinary
+    // structures retain their inexpensive opaque height projection.
+    virtual TileBox exactSkyBounds() const { return {}; }
     virtual void skyTops(const TileBox& columns, std::vector<int>& tops) const;
 };
 using SourcePtr = std::shared_ptr<const Source>;
@@ -207,6 +210,7 @@ class Column {
     using Tops = std::array<int, Side * Side>;
     const Tops& skyTops() const;
     Tops skyTops(const ColumnEdit& edit) const;
+    std::bitset<Y_CHUNKS> exactSkySlabs() const;
     // The projection is published by a worker. Empty columns are known
     // without a projection.
     std::optional<int> projectedTop() const;

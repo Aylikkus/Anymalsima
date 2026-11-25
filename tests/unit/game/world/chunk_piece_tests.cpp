@@ -187,3 +187,64 @@ TEST(chunk_piece_mesh_revision) {
     CHECK(raised->cell.pieces().size() == 1 &&
           mixed->cell.pieces().size() == 2);
 }
+
+TEST(compound_mesh_materials_and_seam) {
+    test::Assets assets;
+    ChunkMesher mesher(assets);
+    Chunk left, right;
+    const Tile air{};
+    const auto base = TilePiece::layer(1, 1, LayerThickness::Cm5);
+    const TilePiece hood{2,
+                         2,
+                         TileShape::make(TileShapeProfile::Wall25),
+                         {0, .75f, 0},
+                         tile_geometry::PieceFill::BelowProfile,
+                         .25f};
+    const std::array parts{CellPiece{base, {}}, CellPiece{hood, {}}};
+    CHECK(left.setPieces(Chunk::cell(15, 8, 8), parts) ==
+          CellPieceEdit::Applied);
+    right.setCell(Chunk::cell(0, 8, 8), Tile{.block_id = 1, .lightLevel = {}});
+    const auto meshes = std::array{
+        mesher.build(left, {0, 0, 0},
+                     [&](int x, int y, int z) -> ChunkMesher::Neighbour {
+                         if (x == 16 && y == 8 && z == 8)
+                             return {right, 0, y, z};
+                         return &air;
+                     }),
+        mesher.build(right, {1, 0, 0},
+                     [&](int x, int y, int z) -> ChunkMesher::Neighbour {
+                         if (x == 15 && y == 8 && z == 8)
+                             return {left, 15, y, z};
+                         return &air;
+                     })};
+    float exposed = 0;
+    bool underside = false, stone = false;
+    for (const auto& v : meshes[0].vertices) {
+        CHECK(v.nx != 1);
+        underside |= v.ny == -1 && v.layer == 9 && v.y == 8.75f;
+        stone |= v.ny == 1 && v.layer == 7 && std::abs(v.y - 8.05f) < .0001f;
+    }
+    CHECK(underside && stone);
+    const auto& mesh = meshes[1];
+    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
+        const auto a = mesh.vertices[mesh.indices[i]];
+        const auto b = mesh.vertices[mesh.indices[i + 1]];
+        const auto c = mesh.vertices[mesh.indices[i + 2]];
+        if (a.nx != -1) continue;
+        exposed +=
+            std::abs((b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y)) / 2;
+    }
+    CHECK(std::abs(exposed - (1 - .05f - .25f * .25f)) < .0001f);
+
+    Chunk touching;
+    const std::array stack{
+        CellPiece{base, {}},
+        CellPiece{TilePiece::layer(2, 2, LayerThickness::Cm25, {0, .05f, 0}),
+                  {}}};
+    CHECK(touching.setPieces(Chunk::cell(7, 7, 7), stack) ==
+          CellPieceEdit::Applied);
+    const auto clipped =
+        mesher.build(touching, {0, 0, 0}, [&](int, int, int) { return &air; });
+    for (const auto& v : clipped.vertices)
+        CHECK(v.ny == 0 || std::abs(v.y - 7.05f) > .0001f);
+}

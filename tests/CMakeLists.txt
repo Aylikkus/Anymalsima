@@ -135,6 +135,9 @@ set(world_cases
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision
+    compound_mesh_materials_and_seam
+    compound_build_pick_walk
+    compound_sky_and_save
     tile_classification
     generation_surface_layers
     generation_sea_level

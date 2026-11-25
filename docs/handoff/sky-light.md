@@ -110,16 +110,22 @@ Columns are packed per chunk column (`sky::Tile`, 16x16) and built by
   `ChunkManager::columnSources`. Ground is opaque and water attenuates
   according to its fill. No chunk is generated for it.
 - **Structures:** `structure_voxels::Column` shares its exact voxel tops with
-  chunk generation. The highest structure voxel of each tile column counts
-  as opaque. The default `Source::skyTops` rasterizes occupied level-zero
+  chunk generation. Ordinary structures use their highest voxel as the opaque
+  top. Sources with positioned pieces report their exact bounds. Within those
+  bounds the sky map uses level-zero piece coverage, so a raised beam shades
+  only its projected footprint. The default `Source::skyTops` rasterizes occupied level-zero
   slabs from the top down. Trees override it with `treeWoodTops`, which
   projects the skeleton at `ChunkManager::woodDay` and checks each top with
   `markTreeWood`'s voxel test.
 - **Edits:** `TerrainEdits` already records every edited column world-wide
-  and saves it (`terrain_edits.dat`): the ground override (topmost solid
-  tile at or below the generated surface), water above it, and every solid
-  tile above the generated surface. Block IDs preserve material opacity,
-  and tile profiles supply the overhead footprint and boundary coverage. This answers "a top block removed above unloaded slabs": the
+  and saves it (`terrain_edits.dat`): the ground override, water above it,
+  and the exact cells drawn by structure proxies. When the ground surface
+  contains positioned pieces, the terrain proxy ends at the substrate and
+  the structure proxy draws the pieces. Block IDs preserve material opacity.
+  The voxel sweep uses the strongest opacity at each point of the projected
+  footprint, then quantizes the average to a light level. Indirect light
+  applies the same rule across shared face polygons. To find the new top
+  after removing a block above unloaded slabs, the
   tracker recomputes the column, and the map rebuilds from it. A
   translucent ground block counts the tile under it as opaque.
 - **Overrides:** what none of the above records, chiefly holes dug into
@@ -134,10 +140,10 @@ Columns are packed per chunk column (`sky::Tile`, 16x16) and built by
 Storage (decided 2026-11-19): only overrides are saved, in `sky.dat`
 (`save/sky_codec.hpp`, section `SKYO`), written with the autosave cycle and
 on exit. Version 2 includes the profile at the opaque cutoff and the
-profile for each span. Version 1 columns decode as cubes. Everything else
-is rebuilt on load from the sources, which are
-saved already (seed, `terrain_edits.dat`, `trees.dat`). There is no region
-file change. Holes dug into wood before `sky.dat` existed are not known
+profile for each span. Version 3 includes positioned-piece coverage. Columns
+without piece coverage still write version 2, and version 1 columns decode
+as cubes. Other columns are rebuilt on load from the saved world, terrain
+edits and structures. Holes dug into wood before `sky.dat` existed are not known
 until that column is edited again.
 
 Consistency: the map must agree with the loaded tiles. Tests check that it

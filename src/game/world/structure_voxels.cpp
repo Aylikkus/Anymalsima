@@ -286,6 +286,20 @@ Column::Tops Column::skyTops(const ColumnEdit& edit) const {
     return result;
 }
 
+std::bitset<Y_CHUNKS> Column::exactSkySlabs() const {
+    std::bitset<Y_CHUNKS> result;
+    for (const auto& entry : entries) {
+        auto image = box;
+        image.x0 = entry.sx * Side;
+        image.x1 = image.x0 + Side;
+        const auto exact = image.intersect(entry.source->exactSkyBounds());
+        if (exact.empty()) continue;
+        for (int y = exact.y0 / Side; y <= (exact.y1 - 1) / Side; ++y)
+            result.set(y);
+    }
+    return result;
+}
+
 int stamp(Chunk& chunk, const Slab& slab) {
     int placed = 0;
     for (int z = 0; z < Side; ++z)

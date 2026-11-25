@@ -50,6 +50,12 @@ struct SolidCellSnapshot {
         return {};
     }
     std::span<const CellPiece> pieces() const&& = delete;
+
+    tile_geometry::CellGeometry geometry() const {
+        tile_geometry::CellGeometry result;
+        for (const auto& piece : pieces()) result.tryAdd(piece.geometry);
+        return result;
+    }
 };
 
 enum class CellPieceEdit {

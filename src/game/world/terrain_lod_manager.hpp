@@ -208,8 +208,11 @@ class TerrainLodManager {
     std::unique_ptr<StructureLod> structures;
     ChunkCoord detailCentre{};
     TerrainLod::DetailCoverage detailCoverage, waterCoverage;
-    std::map<TerrainLod::DetailCoverage::Key, TerrainLod::ColumnBands>
-        surfaceBands;
+    struct CachedBands {
+        TerrainLod::ColumnBands bands;
+        bool stale = false;
+    };
+    std::map<TerrainLod::DetailCoverage::Key, CachedBands> surfaceBands;
     std::vector<TerrainLod::Patch> joinedLayout;
     uint64_t joinedCoverageVersion = UINT64_MAX;
     static constexpr size_t JoinBudget = TerrainLod::UploadBudget;

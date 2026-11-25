@@ -78,7 +78,7 @@ class BlockLightPropagator {
         std::vector<uint8_t> opacity;  // Cells entries, or empty
         voxel_light::Shapes shapes;
         voxel_light::Cell at(int i) const {
-            return {opacity.empty() ? uniform : opacity[i], shapes.at(i)};
+            return shapes.cell(i, opacity.empty() ? uniform : opacity[i]);
         }
         std::vector<LocalEmitter> emitters;
     };

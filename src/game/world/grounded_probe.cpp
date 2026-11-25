@@ -29,13 +29,18 @@ struct Footprint {
         return true;
     }
 
-    std::optional<float> top(ShapedTile cell, int cx, int cy, int cz) const {
-        if (!cell.tile.isSolid()) return std::nullopt;
+    std::optional<float> top(const SolidCellSnapshot& cell, int cx, int cy,
+                             int cz, float high) const {
+        if (!cell.base.tile.isSolid()) return std::nullopt;
         const float localX = float(x - cx);
         const float localZ = float(z - cz);
         constexpr float r = GroundedProbe::Radius;
-        const auto height = tile_geometry::supportHeight(
-            cell.shape, {localX - r, localZ - r}, {localX + r, localZ + r});
+        const Vec2 low{localX - r, localZ - r};
+        const Vec2 upper{localX + r, localZ + r};
+        const auto height =
+            cell.compound
+                ? cell.geometry().supportHeight(low, upper, high - cy)
+                : tile_geometry::supportHeight(cell.base.shape, low, upper);
         return height ? std::optional(float(cy) + *height) : std::nullopt;
     }
 };
@@ -46,9 +51,10 @@ std::optional<float> highestSupport(ChunkManager& chunks, Footprint footprint,
     // A tile reaching its top boundary can support feet in the cell above.
     footprint.visit(std::max(0, int(std::ceil(low)) - 1), int(std::floor(high)),
                     [&](int x, int y, int z) {
-                        const auto cell = chunks.cellAt(x, y, z);
+                        const auto cell = chunks.solidCellAt({x, y, z});
                         if (!cell) return true;
-                        const auto top = footprint.top(*cell, x, y, z);
+                        const auto top =
+                            footprint.top(cell->cell, x, y, z, high);
                         if (top && *top >= low && *top <= high &&
                             (!highest || *top > *highest))
                             highest = top;
@@ -63,13 +69,21 @@ bool clear(ChunkManager& chunks, Footprint footprint, float feet) {
         int(std::floor(feet + ContactTolerance)),
         int(std::ceil(head - ContactTolerance)) - 1, [&](int x, int y, int z) {
             const auto cell =
-                chunks.cellAt(x, std::min(y, WORLD_HEIGHT_Y - 1), z);
+                chunks.solidCellAt({x, std::min(y, WORLD_HEIGHT_Y - 1), z});
             // Unknown cells, including the bounded world
             // edges, block travel.
             if (!cell) return false;
             // Open sky above the highest registered slab.
             if (y >= WORLD_HEIGHT_Y) return true;
-            const auto top = footprint.top(*cell, x, y, z);
+            if (cell->cell.compound) {
+                constexpr float r = GroundedProbe::Radius;
+                const float lx = float(footprint.x - x);
+                const float lz = float(footprint.z - z);
+                return !cell->cell.geometry().intersectsBox(
+                    {lx - r, feet - y + ContactTolerance, lz - r},
+                    {lx + r, head - y - ContactTolerance, lz + r});
+            }
+            const auto top = footprint.top(cell->cell, x, y, z, head);
             return !top || *top <= feet + ContactTolerance;
         });
 }

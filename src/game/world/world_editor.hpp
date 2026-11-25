@@ -73,6 +73,9 @@ class WorldEditor {
     EditStatus removeBlock(TilePos pos);
     EditStatus setBlock(TilePos pos, uint8_t block, TileShape shape = {});
     EditStatus apply(const EditRequest& request);
+    CellPieceEdit checkPiecePlacement(TilePos pos,
+                                      const SolidCellSnapshot& before,
+                                      tile_geometry::TilePiece piece);
     CellPieceEdit placePiece(TilePos pos, SolidCellRevision expected,
                              tile_geometry::TilePiece piece);
     CellPieceEdit removePiece(TilePos pos, SolidCellRevision expected,

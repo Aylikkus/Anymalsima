@@ -161,14 +161,34 @@ class GameplayState : public IGameState {
     std::optional<TileRaycastHit> pickTile(int mouseX, int mouseY,
                                            bool liquids = false);
 
-    enum class ShapeKind { Cube, Slab, Ramp, Wall };
+    enum class ShapeKind { Cube, Slab, Ramp, Wall, Layer, RampInfill };
     ShapeKind shapeKind = ShapeKind::Cube;
     unsigned facing = 0, thickness = 0, rampForm = 0;
     unsigned rampRun = 1, rampSegment = 1;
     TextButton *shapeButton = nullptr, *facingButton = nullptr,
                *thicknessButton = nullptr, *formButton = nullptr,
                *runButton = nullptr, *segmentButton = nullptr;
+    TextButton *materialButton = nullptr, *targetButton = nullptr,
+               *elevationButton = nullptr;
+    unsigned layerThickness = 0, elevation = 0, infillHeight = 20;
+    bool timber = false, sameTile = false;
+    uint8_t stoneId = 0, timberId = 0;
     TileShape placementShape() const;
+    struct PiecePlacement {
+        TilePos pos;
+        tile_geometry::TilePiece piece;
+        SolidCellRevision revision;
+        CellPieceEdit status;
+    };
+    std::optional<PiecePlacement> placementPreview;
+    std::optional<PiecePlacement> placementAt(const TileRaycastHit& hit);
+    std::string lastBuildAction;
+    MeshHandle previewMesh;
+    ShaderProperty previewColor;
+    std::optional<tile_geometry::TilePiece> previewShape;
+    void renderPlacementPreview(RenderTarget& target, IRenderer& renderer);
+    std::optional<TilePos> constructionSite;
+    void setupConstructionFixture();
     void updateShapeControls();
 
     std::optional<GroundedProbe> probe;

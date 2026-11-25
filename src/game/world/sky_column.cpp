@@ -5,6 +5,7 @@
 
 #include "consts.hpp"
 #include "save/chunk_codec.hpp"
+#include "structure_voxels.hpp"
 
 namespace sky {
 
@@ -25,8 +26,11 @@ uint8_t Column::direct(int y) const {
 }
 
 voxel_light::Cell Column::cellAt(int y) const {
-    if (opaque != None && y <= opaque)
+    if (opaque != None && y <= opaque) {
+        if (y == opaque && opaqueCompound)
+            return voxel_light::Cell(opaqueCompound);
         return {Opaque, y == opaque ? opaqueShape : TileShape{}};
+    }
     for (const auto& span : spans)
         if (y <= span.top && y >= span.bottom) return span.cell();
     return 0;
@@ -38,6 +42,7 @@ Tile::Tile(const std::array<Column, Size>& columns) {
     for (int i = 0; i < Size; ++i) {
         const auto& c = columns[size_t(i)];
         opaque[size_t(i)] = c.opaque;
+        if (c.opaqueCompound) opaqueCompounds.emplace(i, c.opaqueCompound);
         if (c.opaqueShape.code()) {
             if (opaqueShapes.empty()) opaqueShapes.resize(Size);
             opaqueShapes[i] = c.opaqueShape;
@@ -53,6 +58,9 @@ Column Tile::column(int i) const {
     Column c;
     c.opaque = opaque[size_t(i)];
     if (!opaqueShapes.empty()) c.opaqueShape = opaqueShapes[i];
+    if (const auto found = opaqueCompounds.find(i);
+        found != opaqueCompounds.end())
+        c.opaqueCompound = found->second;
     c.spans.assign(spans.begin() + spanBegin[size_t(i)],
                    spans.begin() + spanBegin[size_t(i)] + spanCount[size_t(i)]);
     c.overflow = overflow(i);
@@ -74,6 +82,21 @@ int Tile::highest() const {
     int best = None;
     for (int i = 0; i < Size; ++i) best = std::max(best, top(i));
     return best;
+}
+
+bool Tile::operator==(const Tile& other) const {
+    if (opaque != other.opaque || opaqueShapes != other.opaqueShapes ||
+        spanBegin != other.spanBegin || spanCount != other.spanCount ||
+        flags != other.flags || spans != other.spans ||
+        opaqueCompounds.size() != other.opaqueCompounds.size())
+        return false;
+    for (const auto& [i, piece] : opaqueCompounds) {
+        const auto found = other.opaqueCompounds.find(i);
+        if (found == other.opaqueCompounds.end() ||
+            piece->pieces != found->second->pieces)
+            return false;
+    }
+    return true;
 }
 
 void Tile::set(int i, const Column& column) {
@@ -101,6 +124,14 @@ EditTiles decodeEdit(const ColumnEdit& edit, const OpacityTable& opacity) {
             for (int x = 0; x < Chunk::SIZE_X; ++x)
                 for (int y = Chunk::SIZE_Y - 1; y >= 0; --y) {
                     const uint8_t block = part.tiles[z][y][x].block_id;
+                    const auto cell = Chunk::cell(x, y, z);
+                    if (part.hasCompoundAt(cell)) {
+                        out.tiles[size_t(Tile::index(x, z))].emplace_back(
+                            int(it->first) * Chunk::SIZE_Y + y,
+                            voxel_light::Cell(voxel_light::coverPieces(
+                                part.solidCellAt(cell), opacity)));
+                        continue;
+                    }
                     if (!block || !opacity[block]) continue;
                     out.tiles[size_t(Tile::index(x, z))].emplace_back(
                         int(it->first) * Chunk::SIZE_Y + y,
@@ -116,6 +147,14 @@ Tile build(const TileInputs& in) {
     const auto& opacity = *in.opacity;
     EditTiles edits;
     if (in.edit) edits = decodeEdit(*in.edit, opacity);
+    std::map<int, structure_voxels::Slab> exact;
+    if (in.structures) {
+        const auto slabs = in.structures->exactSkySlabs();
+        for (int cy = 0; cy < Y_CHUNKS; ++cy)
+            if (slabs.test(cy))
+                if (auto slab = in.structures->rasterize(cy))
+                    exact.emplace(cy, std::move(*slab));
+    }
     std::array<Column, Tile::Size> columns;
     for (int i = 0; i < Tile::Size; ++i) {
         const size_t s = size_t(i);
@@ -136,11 +175,25 @@ Tile build(const TileInputs& in) {
         if (!built.empty()) from = std::max(from, built.front().first);
         size_t next = 0;
         columns[s] = scanColumn(from, 0, [&](int y) -> voxel_light::Cell {
-            if (y == structure || (y < ground && ground >= 0)) return Opaque;
-            if (y == ground) return groundCell;
+            if (y < ground && ground >= 0) return Opaque;
             while (next < built.size() && built[next].first > y) ++next;
             if (next < built.size() && built[next].first == y)
                 return built[next].second;
+            if (auto at = exact.find(y / Chunk::SIZE_Y); at != exact.end()) {
+                const int x = i % Chunk::SIZE_X, z = i / Chunk::SIZE_X;
+                const auto cell = Chunk::cell(x, y % Chunk::SIZE_Y, z);
+                if (at->second.bits.test(cell) &&
+                    (!in.edit || !in.edit->suppresses(x, y, z))) {
+                    if (at->second.pieces.contains(cell))
+                        return voxel_light::Cell(voxel_light::coverPieces(
+                            at->second.solidCellAt(cell), opacity));
+                    return {opacity[at->second.tileAt(cell)],
+                            at->second.shapeAt(cell)};
+                }
+            } else if (y == structure) {
+                return Opaque;
+            }
+            if (y == ground) return groundCell;
             if (y > ground && y <= waterTop)
                 return waterOpacity(y == waterTop ? water.topFill : 255);
             return {};

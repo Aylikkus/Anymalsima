@@ -232,7 +232,8 @@
         "assets/data/blocks/rocks.json",
         "assets/data/blocks/soils.json",
         "assets/data/blocks/test_light.json",
-        "assets/data/blocks/trees.json"
+        "assets/data/blocks/trees.json",
+        "assets/data/blocks/timber.json"
       ]
     },
     {

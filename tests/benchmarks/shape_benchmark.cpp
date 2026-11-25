@@ -69,14 +69,27 @@ int compoundWall() {
             const auto cell = snapshot->solidCellAt(index);
             pieceReads += cell.pieces().size();
         }
+    const double scanMs = millis(scanStart) / scans;
+    test::Assets assets;
+    ChunkMesher mesher(assets);
+    const Tile air{};
+    size_t meshTriangles = 0;
+    constexpr int MeshRuns = 32;
+    const auto meshStart = Clock::now();
+    for (int i = 0; i < MeshRuns; ++i) {
+        const auto mesh = mesher.build(*snapshot, {0, 0, 0},
+                                       [&](int, int, int) { return &air; });
+        meshTriangles += mesh.indices.size() / 3;
+    }
+    const double meshMs = millis(meshStart) / MeshRuns;
     std::printf(
         "compound_wall_cells=%zu piece_storage_bytes=%zu "
         "legacy_shape_bytes=%zu build_ms=%.4f snapshot_ms=%.4f "
         "edit_while_shared_ms=%.4f snapshot_scan_ms=%.4f "
-        "pieces_read=%zu\n",
+        "pieces_read=%zu mesh_ms=%.4f mesh_triangles=%zu\n",
         snapshot->compoundCount(), snapshot->pieceStorageBytes(),
-        snapshot->shapeStorageBytes(), buildMs, snapshotMs, editMs,
-        millis(scanStart) / scans, pieceReads);
+        snapshot->shapeStorageBytes(), buildMs, snapshotMs, editMs, scanMs,
+        pieceReads, meshMs, meshTriangles / MeshRuns);
     return 0;
 }
 

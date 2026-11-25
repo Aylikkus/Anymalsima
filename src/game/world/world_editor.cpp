@@ -79,6 +79,33 @@ void WorldEditor::forPlantsNear(int64_t x, int y, int64_t z, F&& fn) {
         }
 }
 
+CellPieceEdit WorldEditor::checkPiecePlacement(TilePos pos,
+                                               const SolidCellSnapshot& before,
+                                               tile_geometry::TilePiece piece) {
+    if (!piece.blockId || piece.blockId > blocks.items.size() ||
+        (before.base.tile.isLiquid() &&
+         before.base.tile.waterOrigin == WaterOrigin::Local))
+        return CellPieceEdit::Invalid;
+    if (before.pieces().size() >= Chunk::MaxPiecesPerCell)
+        return CellPieceEdit::TooMany;
+    auto geometry = before.geometry();
+    const auto placement = geometry.tryAdd(piece);
+    if (placement == tile_geometry::PiecePlacement::Overlap)
+        return CellPieceEdit::Overlap;
+    if (placement != tile_geometry::PiecePlacement::Added)
+        return CellPieceEdit::Invalid;
+
+    pos.x = int(chunks.wrap().wrapTile(pos.x));
+    bool blocked = false;
+    forPlantsNear(pos.x, pos.y, pos.z,
+                  [&](const ChunkCoord&, size_t, const FloraInstance&,
+                      const FloraVolume& volume, const FloraSpeciesRule& rule) {
+                      blocked |= rule.blocksPlacement &&
+                                 volume.contains(pos.x, pos.y, pos.z);
+                  });
+    return blocked ? CellPieceEdit::Blocked : CellPieceEdit::Applied;
+}
+
 CellPieceEdit WorldEditor::placePiece(TilePos pos, SolidCellRevision expected,
                                       tile_geometry::TilePiece piece) {
     return editPiece(pos, expected, piece.id, &piece);
@@ -99,17 +126,8 @@ CellPieceEdit WorldEditor::editPiece(
     const auto pieces = before->cell.pieces();
     std::vector<CellPiece> replacement(pieces.begin(), pieces.end());
     if (placement) {
-        if (!placement->blockId || placement->blockId > blocks.items.size())
-            return CellPieceEdit::Invalid;
-        bool blocked = false;
-        forPlantsNear(
-            pos.x, pos.y, pos.z,
-            [&](const ChunkCoord&, size_t, const FloraInstance&,
-                const FloraVolume& volume, const FloraSpeciesRule& rule) {
-                blocked |= rule.blocksPlacement &&
-                           volume.contains(pos.x, pos.y, pos.z);
-            });
-        if (blocked) return CellPieceEdit::Blocked;
+        const auto result = checkPiecePlacement(pos, before->cell, *placement);
+        if (result != CellPieceEdit::Applied) return result;
         replacement.push_back({*placement, {PieceOrigin::Player}});
     } else if (!std::erase_if(replacement, [&](const CellPiece& piece) {
                    return piece.geometry.id == id;
@@ -281,15 +299,21 @@ void WorldEditor::recordChange(const BlockChange& change, Pending& pending) {
               lz = z % Chunk::SIZE_Z;
     pending.modified.insert(coord);
     // A shape change can move an anchor without destroying the plant.
+    const auto edited =
+        change.piecesChanged ? chunks.solidCellAt(change.pos) : std::nullopt;
     forPlantsNear(
         x, y, z,
         [&](const ChunkCoord& c, size_t i, const FloraInstance& p,
             const FloraVolume& v, const FloraSpeciesRule& rule) {
             const bool lostSupport =
                 v.supportedBy(x, y, z) &&
-                !floraSupportHeight(rule, {change.after, change.afterShape},
-                                    p.localX() - p.tileX(),
-                                    p.localZ() - p.tileZ());
+                !(edited
+                      ? floraCellSupportHeight(rule, edited->cell,
+                                               p.localX() - p.tileX(),
+                                               p.localZ() - p.tileZ())
+                      : floraSupportHeight(
+                            rule, ShapedTile{change.after, change.afterShape},
+                            p.localX() - p.tileX(), p.localZ() - p.tileZ()));
             if (lostSupport || (change.after.isSolid() && v.contains(x, y, z)))
                 pending.plants[c].push_back(i);
         });

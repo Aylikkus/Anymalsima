@@ -9,6 +9,8 @@
 //              {u32 chunkX, u32 chunkZ, u16 count,
 //               {u8 tile index, i16 opaque, u8 overflow, u8 spans,
 //                {i16 top, i16 bottom, u8 opacity}...}...}
+//   v2 adds legacy shape codes. v3 appends optional piece coverage to the
+//   opaque top and each span, using piece records with opacity as material.
 // The rest of the heightmap is rebuilt from terrain, trees and terrain
 // edits. Unknown sections are kept in `extra`.
 namespace sky_codec {

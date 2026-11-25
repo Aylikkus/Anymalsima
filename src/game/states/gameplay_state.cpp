@@ -3,6 +3,7 @@
 #include <bx/math.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 
 #include "gettext_wrapper.hpp"
@@ -29,8 +30,33 @@ constexpr Profile RampProfiles[][6] = {
      Profile::InnerThirdLow, Profile::InnerThirdMiddle,
      Profile::InnerThirdHigh},
 };
-constexpr const char* ShapeNames[] = {__("Cube"), __("Slab"), __("Ramp"),
-                                      __("Wall")};
+constexpr const char* ShapeNames[] = {__("Cube"),  __("Slab"),
+                                      __("Ramp"),  __("Wall"),
+                                      __("Layer"), __("Ramp infill")};
+constexpr auto LayerSizes = std::array{
+    tile_geometry::LayerThickness::Cm5,  tile_geometry::LayerThickness::Cm10,
+    tile_geometry::LayerThickness::Cm25, tile_geometry::LayerThickness::Cm50,
+    tile_geometry::LayerThickness::Cm75, tile_geometry::LayerThickness::Cm100};
+
+std::string pieceEditLabel(CellPieceEdit status) {
+    switch (status) {
+        case CellPieceEdit::Applied:
+            return _("Ready");
+        case CellPieceEdit::Overlap:
+            return _("Pieces overlap");
+        case CellPieceEdit::Blocked:
+            return _("Blocked by a plant");
+        case CellPieceEdit::NotLoaded:
+            return _("Tile unavailable");
+        case CellPieceEdit::Stale:
+            return _("Tile changed");
+        case CellPieceEdit::TooMany:
+            return _("Piece limit reached");
+        case CellPieceEdit::Invalid:
+            return _("Invalid piece or tile");
+    }
+    return "";
+}
 
 std::string describeShape(TileShape shape) {
     const auto profile = shape.profile();
@@ -151,11 +177,20 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         });
         return button;
     };
-    placeButton = makeToolButton(_("PLACE BLOCK"), 0, EditTool::Place);
-    removeButton = makeToolButton(_("REMOVE BLOCK"), 3, EditTool::Remove);
+    placeButton = makeToolButton(_("PLACE PIECE"), 0, EditTool::Place);
+    removeButton = makeToolButton(_("REMOVE PIECE"), 3, EditTool::Remove);
     lightButton = makeToolButton(_("PLACE LIGHT"), 6, EditTool::PlaceLight);
     {
         const auto& blocks = context.assets->getStorage<Block>();
+        const auto id = [&](const char* name, uint8_t fallback) {
+            const auto found = blocks.indexByName.find(name);
+            return found == blocks.indexByName.end()
+                       ? fallback
+                       : blocks.items[found->second].id;
+        };
+        stoneId = id("blocks.slate",
+                     blocks.items.empty() ? 0 : blocks.items.front().id);
+        timberId = id("blocks.oak_timber", 0);
         const auto it = blocks.indexByName.find(TestLightBlock);
         if (it != blocks.indexByName.end())
             testLightId = blocks.items[it->second].id;
@@ -220,7 +255,12 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         facing = (facing + 1) % std::size(FacingNames);
     });
     thicknessButton = makeDebugButton({12, 14, 6, 1}, [this] {
-        thickness = (thickness + 1) % std::size(WallThickness);
+        if (shapeKind == ShapeKind::Layer)
+            layerThickness = (layerThickness + 1) % LayerSizes.size();
+        else if (shapeKind == ShapeKind::RampInfill)
+            infillHeight = infillHeight % 20 + 1;
+        else
+            thickness = (thickness + 1) % std::size(WallThickness);
     });
     formButton = makeDebugButton({0, 13, 6, 1}, [this] {
         rampForm = (rampForm + 1) % std::size(RampForms);
@@ -233,13 +273,32 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         {12, 13, 6, 1}, [this] { rampSegment = rampSegment % rampRun + 1; });
     walkButton = makeDebugButton({18, 14, 6, 1}, [this] { toggleWalk(); });
     walkButton->setText(_("Walk mode"));
+    materialButton = makeDebugButton({0, 12, 6, 1},
+                                     [this] { timber = timberId && !timber; });
+    targetButton =
+        makeDebugButton({6, 12, 6, 1}, [this] { sameTile = !sameTile; });
+    elevationButton = makeDebugButton(
+        {12, 12, 6, 1}, [this] { elevation = (elevation + 1) % 20; });
     updateShapeControls();
+    previewColor.initVec4("u_color", {0, 0, 0, 1});
 
     generator = std::make_unique<LocationGenerator>();
     mesher = std::make_unique<ChunkMesher>(*context.assets);
     chunkManager = std::make_unique<ChunkManager>(
         *generator, context.threadPool, mesher.get(), *this->world.get(),
         context.assets, std::move(landmarks));
+    setupConstructionFixture();
+    if (constructionSite) {
+        auto* button = makeDebugButton({18, 13, 6, 1}, [this] {
+            if (probe) toggleWalk();
+            const auto [x, y, z] = *constructionSite;
+            camera.position = {x + .5f, y + 1.f, z + .5f};
+            camera.yaw = 0;
+            camera.pitch = -.48f;
+            camera.distance = 12.f;
+        });
+        button->setText(_("Construction site"));
+    }
     // World-wide sources must be installed before any chunk is requested.
     try {
         auto file = save_catalog::readStructures(slot);
@@ -368,6 +427,69 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     focusRegion = startRegion;
 
     requestChunksAroundCamera();
+}
+
+void GameplayState::setupConstructionFixture() {
+    const char* enabled = std::getenv("ANYM_CONSTRUCTION_FIXTURE");
+    if (!enabled || std::string_view(enabled) != "1" || !stoneId || !timberId)
+        return;
+    const int x = int(slot.meta.startRegion.x) * 128 + 64;
+    const int z = int(slot.meta.startRegion.y) * 128 + 64;
+    int y = 0;
+    std::array<std::array<int, 7>, 7> terrain{};
+    for (int dz = -3; dz <= 3; ++dz)
+        for (int dx = -3; dx <= 3; ++dx) {
+            const int top = chunkManager->generatedSurfaceY(x + dx, z + dz);
+            terrain[dz + 3][dx + 3] = top;
+            y = std::max(y, top + 1);
+        }
+    if (y + 4 >= WORLD_HEIGHT_Y) return;
+
+    using namespace structure_voxels;
+    using tile_geometry::LayerThickness;
+    using tile_geometry::TilePiece;
+    constexpr uint64_t Key = 0xf000000000000005ULL;
+    Override layout;
+    layout.mode = OverrideMode::Replace;
+    layout.anchorX = x;
+    layout.anchorZ = z;
+    layout.landmark = true;
+    // Level deck with footings on the sampled terrain, spanning a chunk seam.
+    for (int dz = -3; dz <= 3; ++dz)
+        for (int dx = -3; dx <= 3; ++dx) {
+            layout.voxels[{x + dx, y, z + dz}] = OverrideVoxel(stoneId);
+            if (std::abs(dx) != 3 || std::abs(dz) != 3) continue;
+            for (int foot = terrain[dz + 3][dx + 3] + 1; foot < y; ++foot)
+                layout.voxels[{x + dx, foot, z + dz}] = OverrideVoxel(stoneId);
+        }
+
+    const auto put = [&](int dx, int dy, int dz,
+                         std::initializer_list<TilePiece> pieces) {
+        const auto& first = *pieces.begin();
+        OverrideVoxel voxel(first.blockId,
+                            first.legacyShape().value_or(TileShape{}));
+        for (const auto& piece : pieces)
+            voxel.pieces.push_back({piece, {PieceOrigin::Structure, Key}});
+        layout.voxels[{x + dx, y + dy, z + dz}] = std::move(voxel);
+    };
+    const auto wall = TileShape::make(Profile::Wall25);
+    put(-1, 1, -1,
+        {TilePiece::layer(1, stoneId, LayerThickness::Cm5),
+         TilePiece{2, timberId, wall, {0, .05f, 0}}});
+    for (int dy = 1; dy <= 2; ++dy)
+        for (int dx : {-2, 1})
+            layout.voxels[{x + dx, y + dy, z + 1}] = OverrideVoxel(stoneId);
+    for (int dx = -2; dx <= 1; ++dx)
+        put(dx, 3, 1,
+            {TilePiece{1,
+                       timberId,
+                       wall,
+                       {0, .75f, 0},
+                       tile_geometry::PieceFill::BelowProfile,
+                       .25f}});
+    constructionSite = TilePos{x, y, z};
+    chunkManager->setGeneratedStructureKinds(applyOverrides(
+        {}, {{"construction_fixture", {{Key, std::move(layout)}}}}));
 }
 
 GameplayState::~GameplayState() {
@@ -680,6 +802,7 @@ void GameplayState::handleInput(Game& game, const InputEvent& e,
 
 void GameplayState::setTool(EditTool value) {
     tool = value;
+    lastBuildAction.clear();
     const Color armed{120, 200, 120, 255};
     const Color idle{232, 232, 232, 255};
     placeButton->getButton()->setNormalColor(tool == EditTool::Place ? armed
@@ -700,10 +823,12 @@ TileShape GameplayState::placementShape() const {
     const auto rotation = TileFacing(facing);
     switch (shapeKind) {
         case ShapeKind::Cube:
+        case ShapeKind::Layer:
             return {};
         case ShapeKind::Slab:
             return TileShape::make(Profile::Slab);
-        case ShapeKind::Ramp: {
+        case ShapeKind::Ramp:
+        case ShapeKind::RampInfill: {
             const auto index = rampRun * (rampRun - 1) / 2 + rampSegment - 1;
             return TileShape::make(RampProfiles[rampForm][index], rotation);
         }
@@ -716,11 +841,22 @@ TileShape GameplayState::placementShape() const {
 
 void GameplayState::updateShapeControls() {
     const bool placing = tool == EditTool::Place;
-    const bool ramp = placing && shapeKind == ShapeKind::Ramp;
+    const bool infill = placing && shapeKind == ShapeKind::RampInfill;
+    const bool ramp = infill || (placing && shapeKind == ShapeKind::Ramp);
+    const bool layer = placing && shapeKind == ShapeKind::Layer;
     const bool wall = placing && shapeKind == ShapeKind::Wall;
     shapeButton->setVisible(placing);
     facingButton->setVisible(ramp || wall);
-    thicknessButton->setVisible(wall);
+    thicknessButton->setVisible(wall || layer || infill);
+    materialButton->setVisible(placing);
+    targetButton->setVisible(placing);
+    elevationButton->setVisible(placing);
+    materialButton->setText(timber ? _("Material: Oak timber")
+                                   : _("Material: Stone"));
+    targetButton->setText(sameTile ? _("Target: This tile")
+                                   : _("Target: Next tile"));
+    elevationButton->setText(
+        fmt::format(fmt::runtime(_("Height: {} cm")), elevation * 5));
     formButton->setVisible(ramp);
     runButton->setVisible(ramp);
     segmentButton->setVisible(ramp);
@@ -730,8 +866,11 @@ void GameplayState::updateShapeControls() {
                                      _(ShapeNames[unsigned(shapeKind)])));
     facingButton->setText(
         fmt::format(fmt::runtime(_("Rotate: {}")), FacingNames[facing]));
-    thicknessButton->setText(fmt::format(fmt::runtime(_("Thickness: {} cm")),
-                                         WallThickness[thickness]));
+    thicknessButton->setText(fmt::format(
+        fmt::runtime(infill ? _("Fill to: {} cm") : _("Thickness: {} cm")),
+        infill  ? int(infillHeight * 5)
+        : layer ? int(LayerSizes[layerThickness])
+                : WallThickness[thickness]));
     formButton->setText(
         fmt::format(fmt::runtime(_("Form: {}")), _(RampForms[rampForm])));
     runButton->setText(fmt::format(fmt::runtime(_("Run: {} m")), rampRun));
@@ -802,6 +941,87 @@ std::optional<TileRaycastHit> GameplayState::pickTile(int mouseX, int mouseY,
                        camera.distance + 64.f, liquids);
 }
 
+std::optional<GameplayState::PiecePlacement> GameplayState::placementAt(
+    const TileRaycastHit& hit) {
+    TilePos pos{hit.tx, hit.ty, hit.tz};
+    if (!sameTile) {
+        if (hit.placementOffset == TilePos{}) return std::nullopt;
+        pos.x += hit.placementOffset.x;
+        pos.y += hit.placementOffset.y;
+        pos.z += hit.placementOffset.z;
+    }
+    pos.x = int(chunkManager->wrap().wrapTile(pos.x));
+    const auto cell = chunkManager->solidCellAt(pos);
+    const auto id = [&]() -> tile_geometry::PieceId {
+        if (!cell) return 0;
+        auto candidate = tile_geometry::PieceId(0);
+        for (const auto& entry : cell->cell.pieces()) {
+            if (entry.geometry.id != candidate) break;
+            ++candidate;
+        }
+        return candidate;
+    }();
+    const auto material = timber ? timberId : stoneId;
+    const Vec3 offset{0, float(elevation * 5) / 100, 0};
+    const bool infill = shapeKind == ShapeKind::RampInfill;
+    const auto fill = infill ? tile_geometry::PieceFill::AboveProfile
+                             : tile_geometry::PieceFill::BelowProfile;
+    const float ceiling = infill ? float(infillHeight * 5) / 100 : 1.f;
+    const auto piece =
+        shapeKind == ShapeKind::Layer
+            ? tile_geometry::TilePiece::layer(
+                  id, material, LayerSizes[layerThickness], offset)
+            : tile_geometry::TilePiece{id,     material, placementShape(),
+                                       offset, fill,     ceiling};
+    // Retired generated IDs are tracked with their owner, so a player piece
+    // can reuse an otherwise unoccupied numeric ID.
+    return PiecePlacement{
+        pos, piece, cell ? cell->revision : SolidCellRevision{},
+        cell ? editor->checkPiecePlacement(pos, cell->cell, piece)
+             : CellPieceEdit::NotLoaded};
+}
+
+void GameplayState::renderPlacementPreview(RenderTarget& target,
+                                           IRenderer& renderer) {
+    if (!placementPreview) return;
+    auto piece = placementPreview->piece;
+    piece.id = 0;  // The preview buffer depends on geometry alone.
+    piece.blockId = 1;
+    if (previewShape != piece || !previewMesh.drawable()) {
+        tile_geometry::CellGeometry geometry;
+        if (geometry.tryAdd(piece) != tile_geometry::PiecePlacement::Added)
+            return;
+        std::vector<PosVertex> vertices;
+        std::vector<uint32_t> indices;
+        for (const auto& face : geometry.exteriorFaces()) {
+            const auto base = uint32_t(vertices.size());
+            for (auto point : face.vertices) {
+                // Lift the preview just above coincident surfaces.
+                point = point + face.plane.normal * .003f;
+                vertices.push_back({point.x, point.y, point.z});
+            }
+            for (uint32_t i = 1; i + 1 < face.vertices.size(); ++i)
+                indices.insert(indices.end(), {base, base + i, base + i + 1});
+        }
+        if (!previewMesh.drawable())
+            previewMesh.initDynamic<PosVertex>(&renderer, 64, 96);
+        previewMesh.update(vertices.data(), vertices.size(), indices.data(),
+                           indices.size(), true);
+        previewShape = piece;
+    }
+
+    const auto [x, y, z] = placementPreview->pos;
+    const auto eye = camera.eye();
+    const bool allowed = placementPreview->status == CellPieceEdit::Applied;
+    previewColor.setVec4(allowed ? std::array{.06f, .36f, .20f, 1.f}
+                                 : std::array{.60f, .08f, .05f, 1.f});
+    static const std::string Shader = "color";
+    target.drawVertexBuffer(
+        previewMesh.get(), &Shader, {&previewColor}, false,
+        relativeTransform(camera, world->wrap().imageX(x, eye.x), y, z),
+        DrawLayer::GAME_GLOW);
+}
+
 void GameplayState::useTool(int mouseX, int mouseY) {
     const auto hit = pickTile(mouseX, mouseY);
     if (!hit) return;
@@ -817,7 +1037,11 @@ void GameplayState::useTool(int mouseX, int mouseY) {
         return;
     }
     if (tool == EditTool::Remove) {
-        editor->removeBlock({hit->tx, hit->ty, hit->tz});
+        const auto result = editor->removePiece({hit->tx, hit->ty, hit->tz},
+                                                hit->revision, hit->pieceId);
+        lastBuildAction = result == CellPieceEdit::Applied
+                              ? _("Piece removed")
+                              : pieceEditLabel(result);
         return;
     }
     if (tool == EditTool::PlantTree) {
@@ -830,17 +1054,24 @@ void GameplayState::useTool(int mouseX, int mouseY) {
                 : "cannot plant here (solid ground, open air above)";
         return;
     }
-    const auto& blocks = uiContext->assets->getStorage<Block>();
-    if (blocks.items.empty() || hit->placementOffset == TilePos{}) return;
-    // Against the face under the cursor: the debug light, or else the first
-    // defined block.
-    if (tool == EditTool::PlaceLight && !testLightId) return;
-    const uint8_t block =
-        tool == EditTool::PlaceLight ? *testLightId : blocks.items.front().id;
-    const auto [dx, dy, dz] = hit->placementOffset;
-    editor->placeBlock(
-        {hit->tx + dx, hit->ty + dy, hit->tz + dz}, block,
-        tool == EditTool::Place ? placementShape() : TileShape{});
+    if (tool == EditTool::Place) {
+        if (const auto placement = placementAt(*hit)) {
+            const auto result =
+                placement->status == CellPieceEdit::Applied
+                    ? editor->placePiece(placement->pos, placement->revision,
+                                         placement->piece)
+                    : placement->status;
+            lastBuildAction = result == CellPieceEdit::Applied
+                                  ? _("Piece placed")
+                                  : pieceEditLabel(result);
+        }
+        return;
+    }
+    if (testLightId && hit->placementOffset != TilePos{}) {
+        const auto [dx, dy, dz] = hit->placementOffset;
+        editor->placeBlock({hit->tx + dx, hit->ty + dy, hit->tz + dz},
+                           *testLightId);
+    }
 }
 
 void GameplayState::update(Game& game, float dt) {
@@ -918,9 +1149,22 @@ void GameplayState::update(Game& game, float dt) {
             controls += probe->grounded() ? _("Walking: WASD, Shift to run")
                                           : _("Falling");
         if (!controls.empty()) controls += '\n';
-        if (tool == EditTool::Place)
-            controls += fmt::format(fmt::runtime(_("Placing: {}\n")),
-                                    describeShape(placementShape()));
+        if (constructionSite) {
+            const auto [x, y, z] = *constructionSite;
+            controls +=
+                fmt::format("Construction deck [{}, {}, {}]\n", x, y, z);
+            const auto& at = camera.position;
+            controls += fmt::format("Camera [{:.1f}, {:.1f}, {:.1f}]\n", at.x,
+                                    at.y, at.z);
+        }
+        placementPreview =
+            tool == EditTool::Place && hit ? placementAt(*hit) : std::nullopt;
+        if (placementPreview) {
+            const auto [x, y, z] = placementPreview->pos;
+            controls += fmt::format("[{}, {}, {}] {}\n", x, y, z,
+                                    pieceEditLabel(placementPreview->status));
+        }
+        if (!lastBuildAction.empty()) controls += lastBuildAction + "\n";
         // Voxel streaming counters: a stuck queue shows here first.
         const std::string streaming =
             "Chunks: " + std::to_string(chunkManager->pendingGeneration()) +
@@ -952,9 +1196,13 @@ void GameplayState::update(Game& game, float dt) {
 
             ss << "\n--- Block ---\n";
             ss << "block_id:  " << (int)t.block_id << "\n";
-            if (t.isSolid())
+            if (t.isSolid()) {
+                const auto& block =
+                    uiContext->assets->getStorage<Block>().get(t.block_id);
+                ss << block.name << " · " << hit->pieceId << "\n";
                 ss << fmt::format(fmt::runtime(_("Picked shape: {}\n")),
                                   describeShape(hit->shape));
+            }
 
             ss << "\n--- Liquid ---\n";
             ss << "liquid:      " << (int)t.liquid << "\n";
@@ -1118,6 +1366,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     treeRenderer->render(target, displayedCamera, frustum, *lightRenderer, now,
                          clock.days(), water);
     lightRenderer->drawGlare(target, displayedCamera, viewport);
+    renderPlacementPreview(target, *context.renderer);
 
     ui_manager->render(target, context);
 }

@@ -15,6 +15,8 @@ struct TileRaycastHit {
     Vec3 position;  // world-space position in the ray's copy of the world
     Vec3 normal;    // geometric outward normal, zero for an inside hit
     TilePos placementOffset;
+    tile_geometry::PieceId pieceId;
+    SolidCellRevision revision;
 };
 
 // The direction is unit length. Liquid-only cells retain whole-cell picking.
@@ -49,24 +51,45 @@ inline std::optional<TileRaycastHit> castTileRay(ChunkManager& chunks,
         size_t axis = 2;
         if (next[1] < next[axis]) axis = 1;
         if (next[0] < next[axis]) axis = 0;
-        const auto cell = chunks.cellAt(tile[0], tile[1], tile[2]);
+        const auto selected = chunks.solidCellAt({tile[0], tile[1], tile[2]});
+        const auto* cell = selected ? &selected->cell.base : nullptr;
         if (cell &&
             (cell->tile.isSolid() || (hitLiquids && !cell->tile.isAir()))) {
             const Vec3 gridNormal{enteredFace[0], enteredFace[1],
                                   enteredFace[2]};
             std::optional<tile_geometry::RayHit> hit{
                 tile_geometry::RayHit{0, gridNormal}};
-            if (cell->shape != TileShape{}) {
+            auto hitTile = cell->tile;
+            auto hitShape = cell->shape;
+            tile_geometry::PieceId pieceId =
+                selected->cell.simple ? selected->cell.simple->geometry.id : 0;
+            if (selected->cell.compound || cell->shape != TileShape{}) {
                 auto local = [&](size_t i) {
                     return static_cast<float>(std::clamp(
                         origin[i] - tile[i] + dir[i] * entry, 0.0, 1.0));
                 };
                 const Vec3 start{local(0), local(1), local(2)};
-                if (!first || !tile_geometry::contains(cell->shape, start)) {
-                    hit = tile_geometry::intersectRay(
-                        cell->shape, start, direction, 0,
-                        static_cast<float>(
-                            std::min(next[axis], double(maxDistance)) - entry));
+                const float limit =
+                    float(std::min(next[axis], double(maxDistance)) - entry);
+                if (selected->cell.compound) {
+                    const auto piece = selected->cell.geometry().intersectRay(
+                        start, direction, 0, limit);
+                    if (piece) {
+                        hit = piece->hit;
+                        if (!first && hit->normal == Vec3{})
+                            hit->normal = gridNormal;
+                        pieceId = piece->id;
+                        hitTile.block_id = piece->blockId;
+                        for (const auto& part : selected->cell.pieces())
+                            if (part.geometry.id == pieceId)
+                                hitShape = part.geometry.shape;
+                    } else {
+                        hit.reset();
+                    }
+                } else if (!first ||
+                           !tile_geometry::contains(cell->shape, start)) {
+                    hit = tile_geometry::intersectRay(cell->shape, start,
+                                                      direction, 0, limit);
                     if (hit && hit->normal == Vec3{}) hit->normal = gridNormal;
                 }
             }
@@ -79,14 +102,16 @@ inline std::optional<TileRaycastHit> castTileRay(ChunkManager& chunks,
                 return TileRaycastHit{int(chunks.wrap().wrapTile(tile[0])),
                                       tile[1],
                                       tile[2],
-                                      cell->tile,
-                                      cell->shape,
+                                      hitTile,
+                                      hitShape,
                                       static_cast<float>(t),
                                       {float(origin[0] + dir[0] * t),
                                        float(origin[1] + dir[1] * t),
                                        float(origin[2] + dir[2] * t)},
                                       n,
-                                      offset};
+                                      offset,
+                                      pieceId,
+                                      selected->revision};
             }
         }
 
