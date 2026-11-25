@@ -83,12 +83,16 @@ struct TerrainNeighborhood {
     Vec2u center{};
     int width = 0;
     int height = 0;
+    int generatorVersion = 0;
     uint32_t height_seed = 0;
     uint32_t feature_seed = 0;
     std::shared_ptr<const GeneratedHydrology> hydrology;
 
     static TerrainNeighborhood capture(const World& world, Vec2u center,
                                        const IAssets& assets);
+    // Natural ramps were introduced with WorldMeta::NaturalShapeVersion.
+    // Older saved generators keep the cube-only surface rule.
+    bool naturalShapes() const;
     // World width in tiles: the X period of every sampled field.
     int periodX() const {
         return width > 0 ? width * TerrainTuning::RegionX : 0;
@@ -113,6 +117,9 @@ struct ColumnGenerationInput {
     // Same value as TerrainSampler::sample(x, z).slope.
     double slope = 0;
     WaterSurface water;
+    // Generated surface profile for the tile at surface_y. Cube for legacy
+    // worlds and for columns the ramp rule leaves uncut.
+    TileShape groundShape{};
 };
 
 struct ChunkColumnInputs {
@@ -125,6 +132,10 @@ class TerrainSampler {
     double surface(double x, double z) const;
     bool belowSea(int x, int z) const;
     TerrainSample sample(int64_t x, int64_t z) const;
+    // Generated surface profile of one tile, using the same deterministic
+    // rule as columns(). Empty when the world's generator predates natural
+    // shapes or the column is not eligible.
+    TileShape surfaceShape(int64_t x, int64_t z) const;
     WaterSurface water(int64_t x, int64_t z, int groundY) const;
     SoilColumn soil(int64_t x, int64_t z, const TerrainSample& terrain) const;
     SoilColumn soil(int64_t x, int64_t z, const TerrainSample& terrain,
@@ -137,6 +148,7 @@ class TerrainSampler {
         double original;
     };
     Heights heightsAt(double x, double z) const;
+    bool shapeEligible(int64_t x, int64_t z) const;
 
     const TerrainNeighborhood& data;
     double control(int gx, int gz, bool amplitude) const;

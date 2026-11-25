@@ -118,6 +118,10 @@ bool TerrainEditTracker::refresh(uint64_t key) {
                             block = chunks.generatedGroundBlock(
                                 cx, cz, baseline, ground);
                         shape = old->groundShape[i];
+                        // Generated ground below an unloaded slab keeps the
+                        // current generator's surface profile.
+                        if (!shape.code() && ground == surface)
+                            shape = baseline.groundShape;
                         const int oldCap = old->reservoirCeiling[i];
                         const int oldWater = old->waterY[i];
                         if (water < 0 && oldWater >= 0 && y > ground)
@@ -168,7 +172,7 @@ bool TerrainEditTracker::refresh(uint64_t key) {
             next->groundBlock[i] = block;
             next->groundShape[i] = shape;
             generated &=
-                ground == surface && !shape.code() &&
+                ground == surface && shape == baseline.groundShape &&
                 block == chunks.generatedGroundBlock(cx, cz, baseline, surface);
             const int generatedWater = baseline.water.surfaceY;
             if (projected) {

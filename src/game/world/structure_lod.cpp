@@ -553,11 +553,15 @@ void StructureLod::request() {
                                                    Chunk::cell(lx, ly, lz))};
                         }
                         // Faces resting on the (possibly edited) ground hide
-                        // (a cell by the ground at its centre).
-                        return y * s + s / 2 <= ground.height(x * s + s / 2,
-                                                              z * s + s / 2)
-                                   ? &solid
-                                   : &air;
+                        // (a cell by the ground at its centre). Carry the
+                        // ground profile too: a thin wall over a partially
+                        // occupied substrate cell exposes only the remainder.
+                        const int groundX = x * s + s / 2;
+                        const int groundZ = z * s + s / 2;
+                        if (y * s + s / 2 <= ground.height(groundX, groundZ))
+                            return {&solid,
+                                    ground.groundShape(groundX, groundZ)};
+                        return &air;
                     });
                 const auto base = baseOf(coord);
                 for (auto& v : mesh.vertices) {

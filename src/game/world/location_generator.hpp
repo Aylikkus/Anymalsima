@@ -42,5 +42,5 @@ class LocationGenerator {
                         const Region& region,
                         const std::vector<RegionLayer>& layers,
                         const SoilColumn& soil, int surfaceY,
-                        WaterSurface water) const;
+                        WaterSurface water, TileShape shape = {}) const;
 };

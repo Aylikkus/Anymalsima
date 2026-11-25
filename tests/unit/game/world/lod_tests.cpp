@@ -11,6 +11,7 @@
 #include "world/detail_coverage.hpp"
 #include "world/location_generator.hpp"
 #include "world/lod_cover.hpp"
+#include "world/save/world_meta.hpp"
 
 namespace {
 World worldForLod(int width = 6, int depth = 6, int height = 430) {
@@ -129,6 +130,45 @@ TEST(lod_surface_matches_chunks) {
         CHECK(loaded == (eye < 400.f));
     }
 }
+TEST(lod_natural_shape_geometry) {
+    test::Assets assets;
+    auto world = worldForLod();
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    SurfaceSampler sampler(world, assets);
+    int foundX = -1, foundZ = -1;
+    for (int z = 256; z < 288 && foundX < 0; ++z)
+        for (int x = 256; x < 288; ++x) {
+            if (sampler.column(x, z).groundShape.code()) {
+                foundX = x;
+                foundZ = z;
+                break;
+            }
+        }
+    CHECK(foundX >= 0);
+    const auto column = sampler.column(foundX, foundZ);
+    const TerrainLod::Patch patch{256, 256, 1};
+    const auto mesh = TerrainLod::build(patch, sampler, running);
+    const float middle =
+        TerrainLod::meshHeight(patch, sampler, foundX + .5f, foundZ + .5f);
+    const auto height =
+        tile_geometry::supportHeight(column.groundShape, .5f, .5f);
+    CHECK(height);
+    CHECK(close(middle, column.surfaceY + *height));
+    // A natural ramp has a sloped top surface and both actual endpoints in
+    // the stepped patch; the old cube top would have one flat quad instead.
+    bool low = false, high = false, sloped = false;
+    for (const auto& v : mesh.vertices) {
+        if (v.x < foundX - .0001f || v.x > foundX + 1.0001f ||
+            v.z < foundZ - .0001f || v.z > foundZ + 1.0001f ||
+            v.layer != column.material)
+            continue;
+        low |= close(v.y, float(column.surfaceY));
+        high |= close(v.y, float(column.surfaceY + 1));
+        sloped |= v.ny > .01f && v.ny < .99f;
+    }
+    CHECK(low && high && sloped);
+}
+
 TEST(lod_geology_order_independent) {
     test::Assets assets;
     auto world = worldForLod();

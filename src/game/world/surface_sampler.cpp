@@ -38,6 +38,10 @@ int SurfaceSampler::height(int x, int z) {
     return value;
 }
 
+TileShape SurfaceSampler::groundShape(int x, int z) {
+    return column(x, z).groundShape;
+}
+
 const ColumnEdit* SurfaceSampler::editAt(int x, int z) {
     if (!edits || edits->empty()) return nullptr;
     x = wrapX(x);
@@ -57,8 +61,11 @@ CoverTexel SurfaceSampler::cover(int x, int z) {
     if (!column.soil.cover || !assets.hasStorage<GroundCover>()) return {};
     if (const auto* edit = editAt(x, z)) {
         const int wx = wrapX(x), wz = std::clamp(z, 0, depth() - 1);
-        if (edit->groundY[ColumnEdit::index(
-                wx % Chunk::SIZE_X, wz % Chunk::SIZE_Z)] != column.surfaceY)
+        const int i = ColumnEdit::index(wx % Chunk::SIZE_X, wz % Chunk::SIZE_Z);
+        // A shape-only edit clears the generated cover just like a moved
+        // ground tile does.
+        if (edit->groundY[i] != column.surfaceY ||
+            edit->groundShape[i] != column.groundShape)
             return {};
     }
     const auto& definition =
@@ -151,6 +158,7 @@ SurfaceColumn SurfaceSampler::generatedColumn(int x, int z) {
     result.surfaceY = terrain.surface_y;
     result.water = generatedWater(x, z, result.surfaceY);
     result.soil = sampler.soil(x, z, terrain, result.water);
+    result.groundShape = sampler.surfaceShape(x, z);
     result.material = material(data, result, result.surfaceY);
     // The smooth LOD uses one side material per column. Use the sediment
     // below the surface here; stepped LODs sample the actual layers by Y.

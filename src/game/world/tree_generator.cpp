@@ -200,6 +200,7 @@ class RegionGenerator {
         bool valid = false;
         int surfaceY = 0;
         double slope = 0;
+        TileShape shape{};
         FloraSite site;
     };
     struct Candidate {
@@ -242,6 +243,7 @@ const RegionGenerator::Env& RegionGenerator::env(int64_t x, int64_t z) {
             e.surfaceY = t.surface_y;
             e.site.submerged = sampler.water(cx, z, t.surface_y).wet();
             e.slope = t.slope;
+            e.shape = sampler.surfaceShape(cx, z);
             e.site.surfaceY = t.surface_y;
             e.site.slope = t.slope;
             e.site.cover = soil.cover;
@@ -271,13 +273,14 @@ bool RegionGenerator::level(const TreeSpeciesRule& r, double x, double z,
                           0.5;
     const int64_t cx = int64_t(std::floor(x)), cz = int64_t(std::floor(z));
     const auto& centre = env(cx, cz);
-    if (!centre.valid) return false;
+    if (!centre.valid || centre.shape.code()) return false;
     int low = centre.surfaceY, high = centre.surfaceY;
     for (int i = 0; i < 8; ++i) {
         const double a = i * 0.785398163397448;
         const auto& e = env(int64_t(std::floor(x + std::cos(a) * radius)),
                             int64_t(std::floor(z + std::sin(a) * radius)));
-        if (!e.valid || e.site.submerged) return false;
+        // Trees need full cube landings; natural ramps stay clear of roots.
+        if (!e.valid || e.site.submerged || e.shape.code()) return false;
         low = std::min(low, e.surfaceY);
         high = std::max(high, e.surfaceY);
     }

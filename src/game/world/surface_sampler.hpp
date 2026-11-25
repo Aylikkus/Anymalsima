@@ -92,6 +92,8 @@ class SurfaceSampler {
     uint16_t materialAt(int x, int y, int z);
     // Ground height after edits.
     int height(int x, int z);
+    // Surface profile after edits, at the column's ground tile.
+    TileShape groundShape(int x, int z);
     WaterSurface waterAt(int x, int z);
     bool submerged(int x, int z, float y);
     int channelFloorLevel(int x, int z, int radius) const;

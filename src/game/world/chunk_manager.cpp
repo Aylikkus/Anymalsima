@@ -125,9 +125,11 @@ bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
                                                    column.surface_y, worldY)
                                          : structures ? structures->tileAt(cell)
                                                       : 0;
-                const auto expectedShape = !ground && structures
-                                               ? structures->shapeAt(cell)
-                                               : TileShape{};
+                const auto expectedShape =
+                    ground ? (worldY == column.surface_y ? column.groundShape
+                                                         : TileShape{})
+                    : structures ? structures->shapeAt(cell)
+                                 : TileShape{};
                 if (block != expected || shape != expectedShape) return true;
 
                 const auto liquid =

@@ -110,6 +110,9 @@ class World {
     std::vector<RiverPolyline> rivers;
     RiverMesh riverMesh;
     WorldGenSettings genSettings;
+    // Saved generator that produced this map. Zero is an unversioned
+    // fixture and keeps the legacy cube-only surface rule.
+    int generatorVersion = 0;
     std::shared_ptr<const GeneratedHydrology> hydrology;
     std::shared_ptr<Reservoirs> reservoirs;
     void update();

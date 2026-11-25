@@ -30,7 +30,8 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
                                        int chunkBaseY, const Region& region,
                                        const std::vector<RegionLayer>& layers,
                                        const SoilColumn& soil, int surfaceY,
-                                       WaterSurface water) const {
+                                       WaterSurface water,
+                                       TileShape shape) const {
     for (int localY = 0; localY < Chunk::SIZE_Y; ++localY) {
         const int tileY = chunkBaseY + localY;
         Tile& tile = chunk.tiles[localZ][localY][localX];
@@ -45,6 +46,8 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
             // when that tile is topsoil on dry land).
             if (tileY == surfaceY && soil.cover)
                 tile.setCover(soil.cover, soil.coverDensity);
+            if (tileY == surfaceY && shape.code())
+                chunk.setCell(Chunk::cell(localX, localY, localZ), tile, shape);
 
         } else if (water.fills(tileY, surfaceY)) {
             tile.block_id = 0;
@@ -87,7 +90,8 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
                 column ? column->surface_y : region.land_height_m;
             generateColumn(chunk, localX, localZ, chunkBaseY, region, layers,
                            cover, ground,
-                           column ? column->water : WaterSurface::sea(ground));
+                           column ? column->water : WaterSurface::sea(ground),
+                           column ? column->groundShape : TileShape{});
         }
 }
 

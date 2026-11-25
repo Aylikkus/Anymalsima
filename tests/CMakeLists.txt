@@ -4,6 +4,7 @@ find_package(Threads REQUIRED)
 add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/location_generator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/natural_shape.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/reservoirs.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_hydrology.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_rivers.cpp
@@ -184,6 +185,7 @@ set(world_cases
     sunlight_stale_result
 )
 list(APPEND world_cases
+    edit_natural_ground_shape_is_baseline
     edit_dig_pit_lowers_ground
     edit_structure_overhang
     edit_structure_crosses_region
@@ -274,7 +276,8 @@ endforeach()
 foreach(case chunk_codec_uniform chunk_codec_shapes chunk_codec_mixed_strips_light
              chunk_codec_wide_palette chunk_codec_rejects_corrupt
              region_file_roundtrip world_seed_derivation world_map_roundtrip
-             save_catalog_slots region_index_covers_world_height
+             save_generator_version_gate save_catalog_slots
+             region_index_covers_world_height
              terrain_edits_roundtrip terrain_edits_rejects_corrupt
              structure_save_migrates_trees
              light_sources_roundtrip light_sources_rejects_corrupt
@@ -423,7 +426,11 @@ foreach(case terrain_caps_repeatability terrain_shared_edges_corners
              terrain_geology_erosion terrain_soil_transition
              terrain_streaming_cache terrain_column_inputs_seams
              terrain_height_profile terrain_coast_organic
-             terrain_surface_ceiling terrain_mountain_relief)
+             terrain_surface_ceiling terrain_mountain_relief
+             terrain_natural_ramps terrain_natural_outer_corner
+             terrain_natural_inner_corner terrain_natural_landing_is_not_cut
+             terrain_natural_ramp_wraps_x
+             terrain_generation_and_lod_apply_natural_shapes)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES
         LABELS "unit;gameplay;world;terrain" TIMEOUT 15)
@@ -440,7 +447,7 @@ foreach(case lod_surface_matches_chunks lod_geology_order_independent
              lod_loaded_water_mesh lod_detail_survives_refresh
              lod_local_water_keeps_drawable_detail_during_remesh
              lod_detail_hysteresis lod_detail_low_handoff_wraps
-             lod_mesh_height_matches_triangles
+             lod_mesh_height_matches_triangles lod_natural_shape_geometry
              lod_detail_coarse_joins)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.world.${case} PROPERTIES

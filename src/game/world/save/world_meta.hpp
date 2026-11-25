@@ -35,7 +35,14 @@ struct WorldMeta : ISerializable {
     // Existing coastal worlds get the corrected projection with stable IDs.
     // 24 leaves freeboard on generated standing water; existing projected
     // surfaces use the same resting elevation. Terrain and IDs stay stable.
-    static constexpr int GeneratorVersion = 24;
+    // 25 cuts natural one-metre ramps and their junctions into eligible
+    // surface columns. Existing worlds keep cube-only terrain until they are
+    // recreated; explicit shape edits still load in them.
+    static constexpr int GeneratorVersion = 25;
+    // First generator that selects natural surface shapes. Kept separate from
+    // the codec versions: shape payloads are understood by every format that
+    // can read the current chunk data.
+    static constexpr int NaturalShapeVersion = 25;
     // Oldest generator version supported by terrain edit comparisons.
     // Later surface changes are selected by the saved generator version.
     static constexpr int SurfaceVersion = 9;

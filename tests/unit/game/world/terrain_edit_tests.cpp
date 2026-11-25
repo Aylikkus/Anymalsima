@@ -7,6 +7,7 @@
 #include "world/save/chunk_codec.hpp"
 #include "world/save/structures_codec.hpp"
 #include "world/save/terrain_edits_codec.hpp"
+#include "world/save/world_meta.hpp"
 #include "world/sky_height_map.hpp"
 #include "world/surface_sampler.hpp"
 #include "world/terrain_edit_tracker.hpp"
@@ -91,6 +92,54 @@ struct EditFixture {
     }
 };
 }  // namespace
+
+TEST(edit_natural_ground_shape_is_baseline) {
+    test::Assets assets;
+    auto world = editWorld();
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    LocationGenerator generator;
+    ThreadPool pool{2};
+    ChunkManager chunks{generator, pool, nullptr, world, &assets};
+    LocationManager locations{chunks, world};
+    locations.loadRegion({0, 0}, 1);
+    struct Found {
+        unsigned x = 0, y = 0, z = 0;
+        int lx = 0, ly = 0, lz = 0;
+        TileShape shape{};
+        bool ok = false;
+    } found;
+    for (unsigned cz = 0; cz < 8 && !found.ok; ++cz)
+        for (unsigned cx = 0; cx < 8 && !found.ok; ++cx) {
+            const auto columns = chunks.generatedColumns(cx, cz);
+            if (!columns) continue;
+            for (int i = 0; i < Chunk::SIZE_X * Chunk::SIZE_Z; ++i) {
+                const auto& column = columns->columns[i];
+                if (!column.groundShape.code()) continue;
+                found.x = cx;
+                found.z = cz;
+                found.y = unsigned(column.surface_y / Chunk::SIZE_Y);
+                found.lx = i % Chunk::SIZE_X;
+                found.lz = i / Chunk::SIZE_X;
+                found.ly = column.surface_y % Chunk::SIZE_Y;
+                found.shape = column.groundShape;
+                found.ok = true;
+                break;
+            }
+        }
+    CHECK(found.ok);
+    const ChunkCoord coord{found.x, found.y, found.z};
+    for (int round = 0; round < 200; ++round) {
+        if (chunks.request(coord)) break;
+        chunks.update();
+        CHECK(pool.wait_for(std::chrono::seconds(3)));
+    }
+    CHECK(chunks.isReady(coord));
+    const auto* chunk = chunks.getChunk(coord);
+    CHECK(chunk->cellAt(found.lx, found.ly, found.lz).shape == found.shape);
+    // Generated natural shapes are not player edits.
+    CHECK(!chunks.isEdited(coord));
+    pool.wait();
+}
 
 TEST(edit_dig_pit_lowers_ground) {
     EditFixture f;

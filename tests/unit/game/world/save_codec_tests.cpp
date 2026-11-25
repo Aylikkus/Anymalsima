@@ -299,6 +299,26 @@ TEST(world_map_roundtrip) {
     CHECK(throwsSerialization([&] { world_map_codec::decode(bytes); }));
 }
 
+TEST(save_generator_version_gate) {
+    const auto root = scratch("generator_version");
+    auto world = smallWorld();
+    world.generatorVersion = WorldMeta::NaturalShapeVersion - 1;
+    auto legacy = save_catalog::create(world, {0, 0}, root);
+    legacy.meta.generatorVersion = world.generatorVersion;
+    save_catalog::writeMeta(legacy);
+    const auto old = save_catalog::readWorldMap(legacy);
+    EQUAL(old->generatorVersion, WorldMeta::NaturalShapeVersion - 1,
+          "legacy generator stays selected");
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    auto current = save_catalog::create(world, {1, 1}, root);
+    current.meta.generatorVersion = world.generatorVersion;
+    save_catalog::writeMeta(current);
+    const auto loaded = save_catalog::readWorldMap(current);
+    EQUAL(loaded->generatorVersion, WorldMeta::GeneratorVersion,
+          "current generator selects natural shapes");
+    std::filesystem::remove_all(root);
+}
+
 TEST(save_catalog_slots) {
     const auto root = scratch("catalog");
     const auto world = smallWorld();

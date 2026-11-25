@@ -1,6 +1,6 @@
 # Tile shapes, terrain ramps, and placement
 
-**Current step: 6 — natural ramps and distant terrain.**
+**Current step: 7 — end-to-end validation, performance and documentation.**
 This handoff covers the terrain foundation for weather. Snowfall,
 melting, temperature simulation, and NPC building generation have their own
 future work.
@@ -14,7 +14,7 @@ future work.
 | 3 | Near mesh, material shading, grass and plant support | 1–2 | Complete |
 | 4 | Accurate picking, debug placement and grounded traversal | 1–3 | Complete |
 | 5 | Directional light transport and shadows | 1–3 | Complete |
-| 6 | Natural ramps, distant terrain and structure handoff | 1–5 | Pending |
+| 6 | Natural ramps, distant terrain and structure handoff | 1–5 | Complete (headless; device capture in step 7) |
 | 7 | End-to-end validation, performance and documentation | 1–6 | Pending |
 
 Step 1 adds the shared geometry in `src/game/world/tile_shape.*` and the
@@ -144,11 +144,46 @@ and quarter-turned wall at the same chunk edge. The night capture showed
 light on both grassy junction facets and across their diagonal. The Vulkan
 `lights` regression scene passed all nine phases.
 
+Step 6 adds `natural_shape.*`, a bounded pure rule over the cube-only height
+field. A high cell becomes a ramp when its only lower cardinal neighbour is a
+one-metre step and the opposite cell keeps the old top as a landing; two
+adjacent lows form an outer corner when both perpendicular approaches are
+straight ramps, and one low diagonal between two approaches forms an inner
+corner. Candidate and landing checks keep a second cut from removing the first
+ramp's high edge. Cliffs, hydrology-carved banks, wet ground and tree/plant
+footprints that need level support stay uncut. `terrain_sampler.*` records the
+profile in `ColumnGenerationInput::groundShape` and in `SurfaceSampler`, shared
+by chunk generation, the edit baseline, flora and LOD. `LocationGenerator`,
+`ChunkManager::isEdited`, `TerrainEditTracker`, `flora_generator.*` and
+`tree_generator.*` consume the same value.
+
+`WorldMeta::NaturalShapeVersion` (generator 25) gates new worlds through
+`World::generatorVersion`, `save_catalog::readWorldMap` and
+`WorldGenerator::generate`. Saved worlds below that version keep cube-only
+terrain, including unseen chunks; codec versions are independent.
+
+`terrain_lod.*` draws spacing-one shaped tops from the actual profile,
+including both junction facet normals and the corner diagonal, clips boundary
+sides against the neighbour's real profile, and carries the shaped rim into
+`meshHeight` and detail joins. `structure_lod.*` supplies the ground profile
+when a proxy wall rests on a partially occupied substrate cell; edited walls,
+slabs and rotated ramps already arrive through CHNK/EDIT and the structure
+voxel baselines.
+
+The Release logic target and app built. All 389 CTest cases passed. New cases
+cover straight ramps, both corner forms and rotations, landing conflicts, the X
+seam, generation wiring, generator-version gating and save reload,
+generated-shape edit baselines, and stepped LOD shape height/normals. The
+Vulkan `shapes` smoke scene passed as a regression. The natural-terrain device
+check (natural ramp, both junction forms, near/LOD transition, shoreline and
+structure foundation) is recorded as remaining for step 7.
+
 When picking this up, update the current step and its row. Before marking a row
 done, record the affected paths, tests run and outcome in the row or immediately
 below it. Record any remaining device check, blocking dependency, or changed
 decision explicitly. Use the acceptance checks in each step to resume midway.
-Keep generated ramps disabled until the consumers in steps 2–5 understand them.
+Natural ramps stay gated by the saved generator version; never enable them for
+a world that recorded an older generator.
 
 ## 1. Define geometry once and keep ordinary chunks cheap
 

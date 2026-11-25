@@ -93,6 +93,7 @@ void writeWorldMap(const SaveSlot& slot, const World& world) {
 std::unique_ptr<World> readWorldMap(const SaveSlot& slot) {
     const auto bytes = FileIO::readBytes(slot.directory / MapFile);
     auto world = std::make_unique<World>(world_map_codec::decode(bytes));
+    world->generatorVersion = slot.meta.generatorVersion;
     if (slot.meta.generatorVersion >= WorldMeta::HydrologyVersion)
         world->hydrology = GeneratedHydrology::build(
             *world, {}, slot.meta.generatorVersion >= WorldMeta::RiverVersion,

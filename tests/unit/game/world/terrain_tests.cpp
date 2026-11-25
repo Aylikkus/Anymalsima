@@ -1,7 +1,10 @@
 #include <chrono>
 #include <climits>
+#include <map>
 
 #include "world/location_manager.hpp"
+#include "world/natural_shape.hpp"
+#include "world/save/world_meta.hpp"
 #include "world/terrain_sampler.hpp"
 #include "world_fixture.hpp"
 
@@ -47,6 +50,149 @@ void addProfiles(TerrainNeighborhood& data, bool restrictSecond = false) {
     }
 }
 }  // namespace
+
+namespace {
+using Profile = TileShapeProfile;
+using Heights = std::map<std::pair<int, int>, int>;  // top, not surface_y
+
+natural_shape::Field shapeField(const Heights& tops, int fallback, int width,
+                                int height) {
+    const auto wrap = [&](int x) {
+        const int period = width;
+        return period > 0 ? (x % period + period) % period : x;
+    };
+    return natural_shape::Field(
+        [tops, fallback, wrap, height](int64_t x, int64_t z) {
+            const int zz = std::clamp(int(z), 0, height - 1);
+            const auto it = tops.find({wrap(int(x)), zz});
+            const int top = it == tops.end() ? fallback : it->second;
+            return top - 1;
+        },
+        [](int64_t, int64_t) { return true; });
+}
+}  // namespace
+
+TEST(terrain_natural_ramps) {
+    constexpr int H = 6;
+    Heights tops;
+    // A terrace edge: one low west neighbour, level sides and landing.
+    tops[{9, 10}] = H - 1;
+    auto field = shapeField(tops, H, 32, 32);
+    const auto ramp = field.at(10, 10);
+    EQUAL(int(ramp.profile()), int(Profile::Ramp), "terrace ramp");
+    EQUAL(int(ramp.facing()), int(TileFacing::PosX), "uphill landing");
+    CHECK(!field.at(11, 10).code());
+}
+
+TEST(terrain_natural_outer_corner) {
+    constexpr int H = 6;
+    constexpr int dx[4] = {0, 1, 0, -1};
+    constexpr int dz[4] = {1, 0, -1, 0};
+    for (unsigned turn = 0; turn < 4; ++turn) {
+        Heights tops;
+        const unsigned west = (3 + turn) & 3, south = (2 + turn) & 3;
+        const unsigned east = (1 + turn) & 3, north = (0 + turn) & 3;
+        tops[{10 + dx[west], 10 + dz[west]}] = H - 1;
+        tops[{10 + dx[south], 10 + dz[south]}] = H - 1;
+        tops[{10 + dx[west] + dx[north], 10 + dz[west] + dz[north]}] = H - 1;
+        tops[{10 + dx[south] + dx[east], 10 + dz[south] + dz[east]}] = H - 1;
+        auto field = shapeField(tops, H, 32, 32);
+        const auto corner = field.at(10, 10);
+        EQUAL(int(corner.profile()), int(Profile::OuterCorner),
+              "outer corner turn " + std::to_string(turn));
+        EQUAL(int(corner.facing()), int(turn), "outer facing");
+        const auto approachEast = field.at(10 + dx[east], 10 + dz[east]);
+        const auto approachNorth = field.at(10 + dx[north], 10 + dz[north]);
+        CHECK(approachEast.profile() == Profile::Ramp &&
+              unsigned(approachEast.facing()) == ((0 + turn) & 3));
+        CHECK(approachNorth.profile() == Profile::Ramp &&
+              unsigned(approachNorth.facing()) == ((1 + turn) & 3));
+    }
+}
+
+TEST(terrain_natural_inner_corner) {
+    constexpr int H = 6;
+    constexpr int dx[4] = {0, 1, 0, -1};
+    constexpr int dz[4] = {1, 0, -1, 0};
+    for (unsigned turn = 0; turn < 4; ++turn) {
+        Heights tops;
+        const unsigned west = (3 + turn) & 3, south = (2 + turn) & 3;
+        tops[{10 + dx[west] + dx[south], 10 + dz[west] + dz[south]}] = H - 1;
+        auto field = shapeField(tops, H, 32, 32);
+        const auto corner = field.at(10, 10);
+        EQUAL(int(corner.profile()), int(Profile::InnerCorner),
+              "inner corner turn " + std::to_string(turn));
+        EQUAL(int(corner.facing()), int(turn), "inner facing");
+        const auto approachWest = field.at(10 + dx[west], 10 + dz[west]);
+        const auto approachSouth = field.at(10 + dx[south], 10 + dz[south]);
+        CHECK(approachWest.profile() == Profile::Ramp &&
+              unsigned(approachWest.facing()) == ((0 + turn) & 3));
+        CHECK(approachSouth.profile() == Profile::Ramp &&
+              unsigned(approachSouth.facing()) == ((1 + turn) & 3));
+    }
+}
+
+TEST(terrain_natural_landing_is_not_cut) {
+    constexpr int H = 6;
+    Heights tops;
+    tops[{9, 10}] = H - 1;   // low west of the candidate
+    tops[{11, 11}] = H - 1;  // low north of its eastern landing
+    auto field = shapeField(tops, H, 32, 32);
+    CHECK(!field.at(10, 10).code());
+    CHECK(field.at(11, 10).profile() == Profile::Ramp);
+}
+
+TEST(terrain_natural_ramp_wraps_x) {
+    constexpr int H = 6, W = 32;
+    Heights tops;
+    tops[{W - 1, 10}] = H - 1;  // low west of the seam cell
+    auto field = shapeField(tops, H, W, 32);
+    const auto atZero = field.at(0, 10);
+    const auto atPeriod = field.at(W, 10);
+    CHECK(atZero.code());
+    EQUAL(int(atZero.code()), int(atPeriod.code()), "seam repeat");
+    EQUAL(int(atZero.facing()), int(TileFacing::PosX), "seam uphill");
+}
+
+TEST(terrain_generation_and_lod_apply_natural_shapes) {
+    test::Assets assets;
+    auto world = terrainWorld(5, 5, 420, LandType::HILLS);
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    const std::vector<RegionLayer> layers = {
+        {RegionLayerType::Rock, 1, 1024, 0, 0, 1}};
+    auto data = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    TerrainSampler sampler(data);
+    bool found = false;
+    for (int cz = 16; cz < 24 && !found; ++cz)
+        for (int cx = 16; cx < 24 && !found; ++cx) {
+            const auto columns = sampler.columns(cx, cz);
+            for (int i = 0; i < Chunk::SIZE_X * Chunk::SIZE_Z; ++i) {
+                const auto shape = columns.columns[i].groundShape;
+                if (!shape.code()) continue;
+                found = true;
+                const int lx = i % Chunk::SIZE_X, lz = i / Chunk::SIZE_X;
+                const int surface = columns.columns[i].surface_y;
+                Chunk chunk;
+                LocationGenerator{}.generateChunk(
+                    chunk, {unsigned(cx), unsigned(surface / 16), unsigned(cz)},
+                    {}, world.regions[12], layers, {}, &columns);
+                const auto cell = chunk.cellAt(lx, surface % 16, lz);
+                CHECK(cell.tile.isSolid());
+                EQUAL(int(cell.shape.code()), int(shape.code()),
+                      "generated surface shape");
+                break;
+            }
+        }
+    CHECK(found);
+
+    // The same map under the previous generator stays cube-only.
+    world.generatorVersion = WorldMeta::NaturalShapeVersion - 1;
+    auto legacy = TerrainNeighborhood::capture(world, {2, 2}, assets);
+    CHECK(!legacy.naturalShapes());
+    const auto columns = TerrainSampler(legacy).columns(16, 16);
+    for (const auto& column : columns.columns)
+        CHECK(!column.groundShape.code());
+}
 
 TEST(terrain_caps_repeatability) {
     test::Assets assets;

@@ -7,6 +7,7 @@
 #include "generation/perlin_noise.hpp"
 #include "height_profile.hpp"
 #include "layers_generator.hpp"
+#include "save/world_meta.hpp"
 #include "serialization/data_storage_api.hpp"
 
 World WorldGenerator::generate(const WorldGenSettings &settings,
@@ -22,6 +23,9 @@ World WorldGenerator::generate(const WorldGenSettings &settings,
 
     if (shouldCancel()) return {};
     world.genSettings = settings;
+    // New worlds opt into the current surface rule through world.json. Loaded
+    // worlds keep the generator recorded in their save.
+    world.generatorVersion = WorldMeta::GeneratorVersion;
     world.hydrology = GeneratedHydrology::build(world, shouldCancel, true, true,
                                                 true, true, true, true, true);
     if (!world.hydrology) return {};

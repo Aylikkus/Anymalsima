@@ -191,6 +191,7 @@ struct Env {
     uint8_t cover = 0, coverDensity = 0;
     uint8_t soil = 0;
     bool topsoil = false;
+    TileShape shape{};
     const Region* region = nullptr;
 };
 
@@ -259,12 +260,14 @@ const Env& Generator::env(int64_t x, int64_t z) {
             e.surfaceY = c.surface_y;
             e.submerged = c.water.wet();
             e.slope = c.slope;
+            e.shape = c.groundShape;
             soil = c.soil;
         } else {
             const auto t = sampler.sample(cx, z);
             e.surfaceY = t.surface_y;
             e.submerged = sampler.water(cx, z, t.surface_y).wet();
             e.slope = t.slope;
+            e.shape = sampler.surfaceShape(cx, z);
             soil = sampler.soil(cx, z, t);
         }
         e.cover = soil.cover;
@@ -314,6 +317,9 @@ bool Generator::suits(const Candidate& c) {
             if (under ? e.surfaceY != anchor.surfaceY
                       : e.surfaceY > anchor.surfaceY)
                 return false;
+            // Large plants need full cube landings: a ramp or slab under any
+            // part of the footprint would leave their roots unsupported.
+            if (e.shape.code()) return false;
         }
     return true;
 }

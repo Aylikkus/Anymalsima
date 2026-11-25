@@ -10,6 +10,7 @@ add_library(game
     world/world_generation_task.cpp
     world/location_generator.cpp
     world/terrain_sampler.cpp
+    world/natural_shape.cpp
     world/reservoirs.cpp
     world/generated_hydrology.cpp
     world/generated_rivers.cpp
@@ -74,6 +75,7 @@ add_library(game
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(
         world/terrain_sampler.cpp
+        world/natural_shape.cpp
         world/generated_hydrology.cpp
         world/generated_rivers.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Debug>:-O2>"

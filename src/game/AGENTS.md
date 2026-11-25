@@ -29,6 +29,18 @@ requests, draw bounds and structure handoff. `DetailCoverage` admits columns
 two chunks inside the draw radius and keeps uploaded columns through the
 next ring. The outer ring supplies mesh neighbors.
 
+Generator 25 (`WorldMeta::NaturalShapeVersion`) selects one-metre natural
+ramps and their junctions through `world/natural_shape.*`: a high cell is cut
+only when its low neighbour, opposite landing and (for bends) both approach
+ramps agree. `TerrainSampler::columns` stores the result in
+`ColumnGenerationInput::groundShape`; `SurfaceSampler`, chunk generation, the
+edit baseline, flora and trees all read the same field. Worlds saved with an
+older generator stay cube-only, including unseen chunks. Stepped `terrain_lod`
+patches draw the actual profile, corner diagonal and rim height; coarse
+patches may simplify the interior, so keep their joins and skirts consistent
+with the shaped near mesh. Structure proxies pass the ground profile to the
+mesher when a wall rests on a partially occupied substrate cell.
+
 ### Lighting
 
 Tiles carry two 4-bit light levels: `sun_exposure` (`SunLightPropagator`) and `artificial_light` (`BlockLightPropagator`). `LightVolumeManager` encodes both into RGBA8 volumes (R sun, G block light, BA block-light chroma) sampled by `shaders/block/block.frag`. Light changes go through `ChunkManager::markLightChanged` and never remesh.

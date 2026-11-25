@@ -3,6 +3,8 @@
 #include <limits>
 
 #include "generated_hydrology.hpp"
+#include "natural_shape.hpp"
+#include "save/world_meta.hpp"
 
 namespace {
 double smooth(double value) {
@@ -62,6 +64,7 @@ TerrainNeighborhood TerrainNeighborhood::capture(const World& world,
     result.center = center;
     result.width = world.width;
     result.height = world.height;
+    result.generatorVersion = world.generatorVersion;
     result.height_seed = world.genSettings.height_seed;
     result.feature_seed = world.genSettings.feature_seed;
     result.hydrology = world.hydrology;
@@ -98,6 +101,10 @@ TerrainNeighborhood TerrainNeighborhood::capture(const World& world,
         }
     }
     return result;
+}
+
+bool TerrainNeighborhood::naturalShapes() const {
+    return generatorVersion >= WorldMeta::NaturalShapeVersion;
 }
 
 // Half-region lattice: centers take their region ceiling, edge midpoints the
@@ -349,6 +356,43 @@ TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
     return result;
 }
 
+bool TerrainSampler::shapeEligible(int64_t x, int64_t z) const {
+    if (!data.naturalShapes() || data.periodX() <= 0) return false;
+    const int ground = int(std::floor(heightsAt(x, z).ground));
+    // A partial solid owns its whole fluid cell, so keep ramps out of wet
+    // ground and hydrology-controlled banks.
+    const auto surfaceWater = water(x, z, ground);
+    if (surfaceWater.wet() && surfaceWater.surfaceY > ground) return false;
+    const auto terrain = sample(x, z);
+    if (terrain.slope > 1.0 + 1e-6) return false;
+    // Carved river banks and coastal cuts have a different ground and
+    // original profile; leave them to hydrology so a ramp cannot breach the
+    // water barrier.
+    if (terrain.originalSlope > terrain.slope + 1e-6) return false;
+    constexpr int sx = TerrainTuning::RegionX, sz = TerrainTuning::RegionZ;
+    const int period = data.periodX();
+    const int wx = period > 0 ? int(WorldWrap::mod(x, period)) : int(x);
+    if (data.hydrology && data.hydrology->riverAt(wx, int(z))) return false;
+    const int rx = wx / sx, rz = int(z) / sz;
+    if (data.hydrology && !data.hydrology->containsColumn(wx, int(z)))
+        return false;
+    const auto& region = data.at(rx, rz).region;
+    if (region.hasFeature(FeatureMask::CLIFF) ||
+        region.hasFeature(FeatureMask::RAVINE))
+        return false;
+    return true;
+}
+
+TileShape TerrainSampler::surfaceShape(int64_t x, int64_t z) const {
+    if (!data.naturalShapes()) return {};
+    natural_shape::Field field(
+        [this](int64_t px, int64_t pz) {
+            return int(std::floor(heightsAt(px, pz).ground));
+        },
+        [this](int64_t px, int64_t pz) { return shapeEligible(px, pz); });
+    return field.at(x, z);
+}
+
 WaterSurface TerrainSampler::water(int64_t x, int64_t z, int groundY) const {
     if (!data.hydrology) return WaterSurface::sea(groundY);
     return data.hydrology->waterAt(int(WorldWrap::mod(x, data.periodX())),
@@ -505,6 +549,14 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
         for (int x = -1; x <= Chunk::SIZE_X; ++x)
             heights[(z + 1) * pitch + x + 1] =
                 heightsAt(originX + x, originZ + z);
+    // One resolver per chunk shares the eligibility and proposal caches
+    // with every column, so border decisions do not depend on the caller's
+    // chunk order.
+    natural_shape::Field shapes(
+        [this](int64_t px, int64_t pz) {
+            return int(std::floor(heightsAt(px, pz).ground));
+        },
+        [this](int64_t px, int64_t pz) { return shapeEligible(px, pz); });
     ChunkColumnInputs out;
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
         for (int x = 0; x < Chunk::SIZE_X; ++x) {
@@ -524,7 +576,9 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
             out.columns[z * Chunk::SIZE_X + x] = {
                 terrain.surface_y,
                 soil(originX + x, originZ + z, terrain, surfaceWater),
-                terrain.slope, surfaceWater};
+                terrain.slope, surfaceWater,
+                data.naturalShapes() ? shapes.at(originX + x, originZ + z)
+                                     : TileShape{}};
         }
     return out;
 }

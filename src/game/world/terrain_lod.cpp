@@ -70,6 +70,33 @@ void quad(Geometry& mesh, Point a, Point b, Point c, Point d, float layer,
     triangle(mesh, a, b, c, layer, top, edgeKind, tint);
     triangle(mesh, a, c, d, layer, top, edgeKind, tint);
 }
+// Side quad with per-vertex rim heights for ground-cover fringes and an
+// explicit outward normal, common to cube and shaped ground edges.
+void shadeQuad(Geometry& mesh, std::array<Point, 4> p,
+               std::array<float, 4> tops, Point normal, float layer,
+               float edgeKind = 0) {
+    const Point a{p[1].x - p[0].x, p[1].y - p[0].y, p[1].z - p[0].z};
+    const Point b{p[2].x - p[0].x, p[2].y - p[0].y, p[2].z - p[0].z};
+    const Point cross{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
+                      a.x * b.y - a.y * b.x};
+    if (cross.x * normal.x + cross.y * normal.y + cross.z * normal.z < 0) {
+        std::swap(p[1], p[3]);
+        std::swap(tops[1], tops[3]);
+    }
+    for (unsigned i = 1; i + 1 < p.size(); ++i) {
+        const auto base = uint32_t(mesh.vertices.size());
+        const std::array<Point, 3> points{p[0], p[i], p[i + 1]};
+        const std::array<float, 3> top{tops[0], tops[i], tops[i + 1]};
+        for (unsigned v = 0; v < 3; ++v) {
+            mesh.vertices.push_back({points[v].x, points[v].y, points[v].z,
+                                     normal.x, normal.y, normal.z, 1, 0, 0,
+                                     top[v], edgeKind, layer, 0xffffffffu});
+            mesh.bounds.minY = std::min(mesh.bounds.minY, points[v].y);
+            mesh.bounds.maxY = std::max(mesh.bounds.maxY, points[v].y);
+        }
+        mesh.indices.insert(mesh.indices.end(), {base, base + 1, base + 2});
+    }
+}
 void waterTile(Mesh& patch, SurfaceSampler& sampler, int x, int z,
                WaterSurface water, bool wrapX, bool top = true) {
     if (!water.wet()) return;
@@ -347,8 +374,10 @@ float skirtDepth(const Patch& p, float error) {
     return std::clamp(2 * error + p.spacing, 4.f, 256.f);
 }
 
+float shapeTopAt(SurfaceSampler& sampler, float x, float z);
+
 float meshHeight(const Patch& p, SurfaceSampler& sampler, float x, float z) {
-    if (p.spacing == 1) return sampler.height(int(x), int(z)) + 1;
+    if (p.spacing == 1) return shapeTopAt(sampler, x, z);
     const int endX = std::min(p.x + p.size(), sampler.width());
     const int endZ = std::min(p.z + p.size(), sampler.depth());
     const int step = channelSpacing(p);
@@ -432,17 +461,27 @@ Mesh joinDetails(std::span<const Patch> layout,
                     });
                 if (patch == layout.end() || patch->spacing == 1) continue;
                 const auto inside = sampler.column(ix, iz);
-                const float top = inside.surfaceY + 1;
+                // Detailed chunks and shaped stepped patches expose their
+                // actual rim at the shared edge, not the nominal cube top.
+                const auto localTop = [&](float wx, float wz) {
+                    const float lx = wx - float(ix);
+                    const float lz = wz - float(iz);
+                    const auto height = tile_geometry::supportHeight(
+                        inside.groundShape, lx, lz);
+                    return float(inside.surfaceY) + height.value_or(1.f);
+                };
+                const float top0 = localTop(x, z), top1 = localTop(x1, z1);
                 const float y0 = meshHeight(*patch, sampler, x - shift, z);
                 const float y1 = meshHeight(*patch, sampler, x1 - shift, z1);
-                if (std::abs(top - y0) < .0001f && std::abs(top - y1) < .0001f)
+                if (std::abs(top0 - y0) < .0001f &&
+                    std::abs(top1 - y1) < .0001f)
                     continue;
-                const float sign = top >= (y0 + y1) * .5f ? 1 : -1;
+                const float sign = (top0 + top1) >= (y0 + y1) ? 1 : -1;
                 const float layer = inside.material;
                 const float water = inside.water.height();
                 const uint32_t base = uint32_t(result.vertices.size());
-                for (const auto& point : std::array<Point, 4>{{{x, top, z},
-                                                               {x1, top, z1},
+                for (const auto& point : std::array<Point, 4>{{{x, top0, z},
+                                                               {x1, top1, z1},
                                                                {x1, y1, z1},
                                                                {x, y0, z}}})
                     result.vertices.push_back(
@@ -490,6 +529,140 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
     if (highWater >= 0)
         result.water = SurfaceBand{cx, cz, lowWater / slab, highWater / slab};
     return result;
+}
+
+float shapeTopAt(SurfaceSampler& sampler, float x, float z) {
+    const int ix = int(std::floor(x)), iz = int(std::floor(z));
+    const auto column = sampler.column(ix, iz);
+    const auto height = tile_geometry::supportHeight(
+        column.groundShape, x - float(ix), z - float(iz));
+    return float(column.surfaceY) + height.value_or(1.f);
+}
+
+// Exact top and exposed sides of one shaped ground tile. Boundary sides are
+// clipped against the neighbour's actual profile, so matching ramp edges
+// disappear while a cube/ramp or ramp/ramp mismatch still closes the seam.
+void shapedColumn(Mesh& mesh, SurfaceSampler& sampler, int x, int z,
+                  const SurfaceColumn& column, bool wrapX) {
+    const auto shape = column.groundShape;
+    if (!shape.code()) return;
+    const float base = float(column.surfaceY);
+    const auto surface = tile_geometry::surface(shape);
+    const auto point = [&](Vec3 p) {
+        return Point{float(x) + p.x, base + p.y, float(z) + p.z};
+    };
+    for (unsigned i = 0; i < surface.count; ++i) {
+        const auto& polygon = surface.faces[i];
+        const float ny = polygon.plane.normal.y;
+        if (ny > .01f) {
+            // Top wedges, including a corner's two planes and diagonal.
+            for (unsigned v = 1; v + 1 < polygon.count; ++v)
+                triangle(mesh, point(polygon.vertices[0]),
+                         point(polygon.vertices[v]),
+                         point(polygon.vertices[v + 1]), column.material);
+        } else if (ny < -.01f) {
+            continue;  // buried in the substrate below
+        } else if (!tile_geometry::boundaryFace(polygon)) {
+            // Inset faces (wall thickness, slab side) stay inside the cell.
+            float rim = base;
+            for (unsigned v = 0; v < polygon.count; ++v)
+                rim = std::max(rim, base + polygon.vertices[v].y);
+            for (unsigned v = 1; v + 1 < polygon.count; ++v)
+                triangle(mesh, point(polygon.vertices[0]),
+                         point(polygon.vertices[v]),
+                         point(polygon.vertices[v + 1]), column.material, rim);
+        }
+    }
+    constexpr std::array<Face, 4> faces{Face::PosX, Face::NegX, Face::PosZ,
+                                        Face::NegZ};
+    for (const auto face : faces) {
+        const auto polygon = tile_geometry::boundaryFace(shape, face);
+        if (!polygon) continue;
+        const bool xAxis = face == Face::PosX || face == Face::NegX;
+        float low = 1, high = 0;
+        for (unsigned i = 0; i < polygon->count; ++i) {
+            const float axis =
+                xAxis ? polygon->vertices[i].z : polygon->vertices[i].x;
+            low = std::min(low, axis);
+            high = std::max(high, axis);
+        }
+        const auto ownTop = [&](float axis) -> std::optional<float> {
+            const float lx = xAxis ? (face == Face::PosX ? 1.f : 0.f) : axis;
+            const float lz = xAxis ? axis : (face == Face::PosZ ? 1.f : 0.f);
+            const auto height = tile_geometry::supportHeight(shape, lx, lz);
+            return height ? std::optional<float>(base + *height) : std::nullopt;
+        };
+        const auto top0 = ownTop(low), top1 = ownTop(high);
+        if (!top0 || !top1) continue;
+
+        int nx = x, nz = z;
+        if (face == Face::PosX) ++nx;
+        if (face == Face::NegX) --nx;
+        if (face == Face::PosZ) ++nz;
+        if (face == Face::NegZ) --nz;
+        const bool outside = nz < 0 || nz >= sampler.depth() ||
+                             (!wrapX && (nx < 0 || nx >= sampler.width()));
+        std::optional<float> neighbour0, neighbour1;
+        if (!outside) {
+            const auto columnAt = sampler.column(nx, nz);
+            // Where a partial neighbour does not reach the shared point, the
+            // solid below its surface cell bounds the exposed wall.
+            const float fallback =
+                std::min(base, float(columnAt.surfaceY) + 1.f);
+            const auto neighbour = [&](float axis) -> float {
+                const float lx =
+                    xAxis ? (face == Face::PosX ? 0.f : 1.f) : axis;
+                const float lz =
+                    xAxis ? axis : (face == Face::PosZ ? 0.f : 1.f);
+                const auto height =
+                    tile_geometry::supportHeight(columnAt.groundShape, lx, lz);
+                return height ? float(columnAt.surfaceY) + *height : fallback;
+            };
+            neighbour0 = neighbour(low);
+            neighbour1 = neighbour(high);
+        }
+
+        const float xw = float(x) + (face == Face::PosX ? 1.f : 0.f);
+        const float zw = float(z) + (face == Face::PosZ ? 1.f : 0.f);
+        const auto at = [&](unsigned endpoint) {
+            return xAxis ? std::pair{xw, float(z) + (endpoint ? high : low)}
+                         : std::pair{float(x) + (endpoint ? high : low), zw};
+        };
+        const Point normal = face == Face::PosX   ? Point{1, 0, 0}
+                             : face == Face::NegX ? Point{-1, 0, 0}
+                             : face == Face::PosZ ? Point{0, 0, 1}
+                                                  : Point{0, 0, -1};
+        const auto [x0, z0] = at(0);
+        const auto [x1, z1] = at(1);
+        const float bottom0 =
+            std::max(base, std::min(*top0, neighbour0.value_or(base)));
+        const float bottom1 =
+            std::max(base, std::min(*top1, neighbour1.value_or(base)));
+        if (*top0 > bottom0 + .0001f || *top1 > bottom1 + .0001f) {
+            shadeQuad(mesh,
+                      {{{x0, *top0, z0},
+                        {x1, *top1, z1},
+                        {x1, bottom1, z1},
+                        {x0, bottom0, z0}}},
+                      {*top0, *top1, *top1, *top0}, normal, column.material);
+        }
+        // Below the shaped cell the substrate is a cube. Close the exposed
+        // cliff down to the lower neighbour, as the stepped cube path does.
+        const float lower0 = neighbour0.value_or(outside ? 0.f : base);
+        const float lower1 = neighbour1.value_or(outside ? 0.f : base);
+        const float floor0 = std::max(0.f, std::min(base, lower0));
+        const float floor1 = std::max(0.f, std::min(base, lower1));
+        if (floor0 < base - .0001f || floor1 < base - .0001f) {
+            const float layer =
+                sampler.materialAt(x, std::max(0, int(base) - 1), z);
+            shadeQuad(mesh,
+                      {{{x0, base, z0},
+                        {x1, base, z1},
+                        {x1, floor1, z1},
+                        {x0, floor0, z0}}},
+                      {base, base, base, base}, normal, layer);
+        }
+    }
 }
 
 Mesh build(const Patch& p, SurfaceSampler& sampler,
@@ -544,6 +717,11 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 continue;
             }
             const auto column = sampler.column(x, z);
+            if (column.groundShape.code()) {
+                shapedColumn(mesh, sampler, x, z, column, wrapX);
+                waterTile(mesh, sampler, x, z, column.water, wrapX);
+                continue;
+            }
             const float y = column.surfaceY + 1;
             quad(mesh, {float(x), y, float(z)}, {float(x), y, z1}, {x1, y, z1},
                  {x1, y, float(z)}, column.material);
