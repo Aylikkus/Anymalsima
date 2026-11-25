@@ -74,6 +74,7 @@ add_executable(world_logic_tests
     unit/game/world/tile_shape_tests.cpp
     unit/game/world/tile_piece_tests.cpp
     unit/game/world/snow_settlement_tests.cpp
+    unit/game/world/climate_tests.cpp
     unit/game/world/chunk_piece_tests.cpp
     unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
@@ -152,6 +153,13 @@ set(world_cases
     snow_settlement_gentle_slope_pocket
     snow_cover_projects_settlement
     snow_settlement_serialization
+    climate_calendar_dates
+    climate_year_curve_continuous
+    climate_opposite_seasons_and_latitude
+    climate_position_continuity
+    climate_daily_range_and_elevation
+    climate_map_less_fallback
+    climate_clock_pause_and_midnight_save
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision

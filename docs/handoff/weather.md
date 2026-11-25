@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–07 complete · Step 08 pending.**
+**Steps 01–08 complete · Step 09 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -19,7 +19,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 05 | Build, pick, walk on and render compound tiles | Complete | A · Construction |
 | 06 | Gravity settlement at slopes and ledges | Complete | |
 | 07 | Visible dusting, toe fill and snow collision | Complete | B · Five-centimetre ramp |
-| 08 | Calendar and seasonal ambient temperature | Pending | |
+| 08 | Calendar and seasonal ambient temperature | Complete | |
 | 09 | Regional weather, presentation and inspection | Pending | C · Weather and seasons |
 | 10 | Exposure, snowfall and outdoor melt | Pending | |
 | 11 | Unloaded weather history and elapsed-time reconciliation | Pending | D · Shelter and travel |
@@ -720,3 +720,58 @@ chalk material with the dedicated snow albedo and normal textures.
 4. Apply **SNOW +5 m** to the numeric landing until it buries the ramp, then
    **CLEAR SNOW**. Inspect the restored grass/rock, the absent white geometry
    and the walking height. Capture the side view before and after clearing.
+
+### Step 08 · 2026-11-26
+
+[WorldCalendar](../../src/game/world/world_calendar.hpp) derives the display
+date from the saved fractional `worldDays`. Elapsed day zero is day 1 of month
+1 of year 1; months have 30 days and years 12 months. Day 29 is D30/M1, day 30
+rolls to D1/M2, day 359 is D30/M12 and day 360 starts D1/M1/Y2. The annual
+curve uses the fractional day, so month and year boundaries have no step.
+
+[WorldClimate](../../src/game/world/world_climate.hpp) treats the generated
+`Region::temperature_c` as the region's annual mean at its own surface height;
+it already includes the generator's altitude cooling. The seasonal curve is a
+cosine over the 360-day year with a maximum amplitude of 18 °C at the poles
+and a latitude exponent of 1.5, which makes the amplitude vanish with zero
+slope at the equator. Region row 0 is the northern pole, so month 1 is
+northern midwinter and southern midsummer. The daily curve has an 8 °C range,
+warmest at 15:00 and coolest at 03:00. Local elevation adds a 0.0065 °C/m
+correction relative to the bilinearly blended regional surface. Position
+sampling follows `ground_cover_climate::at`: X wraps and Z clamps, so the X
+seam and the equator stay continuous. A world without a map keeps the mild
+15 °C fallback and the daily curve.
+
+The HUD time button now reads `D<day>/M<month>/Y<year> HH:MM x<speed>` and its
+speed cycle includes paused time. The tile panel gained a **Climate** section
+showing the date, regional mean, seasonal and daily offsets, elevation
+correction and resulting local °C. The world save format is unchanged:
+`worldDays` already carries the fractional day through `world.json`.
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -R 'climate_' --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R 'climate_' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The Release app and logic tests built. All 7 climate cases and all 429
+gameplay cases passed. The same 7 cases passed with ASan and UBSan. Acceptance
+ran headlessly with synthetic worlds; no seed or save fixture is required.
+`climate_calendar_dates` checks days 0, 29, 30, 359 and 360;
+`climate_year_curve_continuous` checks month and year boundaries;
+`climate_opposite_seasons_and_latitude` checks both poles and the equator;
+`climate_position_continuity` checks the wrapped X seam and the equator;
+`climate_daily_range_and_elevation` checks the daily curve and lapse rate;
+`climate_map_less_fallback` keeps the map-less default;
+`climate_clock_pause_and_midnight_save` checks pause, accelerated time and a
+`world.json` round-trip across midnight.
+
+V1 keeps the seasonal amplitude latitude-only and the daily range constant.
+Weather offsets, regional precipitation and shelter arrive in steps 09–15.
+Ground-cover tints still use the annual `ground_cover_climate::at` values so
+seasonal climate does not remesh terrain.

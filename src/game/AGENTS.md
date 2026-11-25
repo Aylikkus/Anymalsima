@@ -80,6 +80,19 @@ Ground cover (grass) and plants follow `docs/handoff/flora.md` (its Progress sec
 - Game time is `WorldClock` (`world/world_clock.hpp`, saved as `worldDays` in `world.json`). Plant stages are analytic in the clock's day; `FloraSimulation` advances layers lazily (on load and in a slow sweep): dead plants are removed, populations continue only through seeds (dropped once per seeding cycle, germinating against local crowding toward the generated density; deterministic and deduplicated), chunks unloaded for a year or more are re-sampled at equilibrium (`regenerateFlora`, epoch-salted placement with fixed cluster patches), harvests regrow, and cover regrows on exposed topsoil. Never tick plants per frame or per day across the world. Large plants need level ground under their footprint and nothing rising beside it, and `FloraMeshBuilder` keeps their canopy within the footprint plus 0.3 m. Rare species are data (tiny `density_per_100m2`; `persistent_sites` keeps their sites across epochs by placing them with the unsalted seed, `FloraGenerationInput::clusterSeed`).
 - Modder-facing documentation of the data formats is `docs/modding/plants.md`: update it with any change to ground cover, foliage material or flora schemas.
 
+### Climate and calendar
+
+`world/world_calendar.hpp` derives the display date from `WorldClock`'s
+fractional days: day 1/month 1/year 1 at elapsed day zero, 30-day months and
+a 360-day year. `world/world_climate.hpp` treats the generated
+`Region::temperature_c` as the annual mean at that region's surface and adds
+the annual curve, the daily range and a local lapse-rate correction. Region row
+0 is the northern pole; month 1 is northern midwinter. Seasonal amplitude
+vanishes at the equator so wrapped X and equator sampling stay continuous.
+Keep the generated temperature as the generation and tint baseline; weather,
+snow and ice consume the dated sample instead of baking seasons into terrain.
+The HUD time button shows D/M/Y, and hovering a tile shows the climate terms.
+
 ### Trees
 
 Trees follow `docs/handoff/trees.md` (its Progress section lists what exists); modder docs are `docs/modding/trees.md` (update with any `Tree` schema change).

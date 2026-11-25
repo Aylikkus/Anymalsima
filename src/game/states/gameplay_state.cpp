@@ -11,6 +11,8 @@
 #include "render/frustrum.hpp"
 #include "world/day_night.hpp"
 #include "world/generated_hydrology.hpp"
+#include "world/world_calendar.hpp"
+#include "world/world_climate.hpp"
 
 namespace {
 
@@ -247,7 +249,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         }
     });
     // Debug game speed: normal (a day per 72 minutes), then a day every
-    // 72 s, 6 s and 0.6 s.
+    // 72 s, 6 s and 0.6 s, and finally paused time.
     timeButton = ui_manager->createWidget(
         std::make_unique<TextButton>(context, "ui.black.9slice", "mouse_click"),
         root_ptr);
@@ -255,7 +257,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     timeButton->setFontRole(FontRole::Bold);
     timeButton->setGridPlacement({20, 15, 4, 1});
     timeButton->onClick.connect([this]() {
-        static constexpr double Speeds[] = {1, 60, 720, 7200};
+        static constexpr double Speeds[] = {0, 1, 60, 720, 7200};
         size_t next = 0;
         for (size_t i = 0; i < std::size(Speeds); ++i)
             if (clock.speed() == Speeds[i]) next = (i + 1) % std::size(Speeds);
@@ -1361,11 +1363,12 @@ void GameplayState::update(Game& game, float dt) {
     treeSim->update(clock.days());
     saveStructures();
     if (timeButton) {
+        const auto date = world_calendar::fromDays(clock.days());
         const double t = clock.timeOfDay() * 24;
-        char label[64];
-        std::snprintf(label, sizeof(label), "DAY %lld %02d:%02d x%g",
-                      static_cast<long long>(clock.day()), int(t),
-                      int((t - int(t)) * 60), clock.speed());
+        char label[80];
+        std::snprintf(label, sizeof(label), "D%d/M%d/Y%lld %02d:%02d x%g",
+                      date.day, date.month, static_cast<long long>(date.year),
+                      int(t), int((t - int(t)) * 60), clock.speed());
         timeButton->setText(label);
     }
 
@@ -1415,9 +1418,20 @@ void GameplayState::update(Game& game, float dt) {
             std::to_string(chunkManager->treeJobsInFlight()) + " building, " +
             std::to_string(chunkManager->pendingTreeSets()) + " waiting\n";
         if (!hit) {
+            const auto date = world_calendar::fromDays(clock.days());
+            const auto climate =
+                world_climate::at(*world, camera.position.x, camera.position.z,
+                                  clock.days(), camera.position.y);
+            const std::string climateLine = fmt::format(
+                "D{}/M{}/Y{} climate {:.1f} C (mean {:.1f}, season {:+.1f}, "
+                "daily {:+.1f}, elevation {:+.1f})\n",
+                date.day, date.month, date.year, climate.temperatureC,
+                climate.meanC, climate.seasonalC, climate.dailyC,
+                climate.elevationC);
             tileDebugText->setText(
-                controls + _("No tile") + "\n" + streaming + "LOD: " +
-                std::to_string(terrainLod->patchCount()) + " patches, " +
+                controls + climateLine + _("No tile") + "\n" + streaming +
+                "LOD: " + std::to_string(terrainLod->patchCount()) +
+                " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
                 std::to_string(terrainLod->jobCount()) + " LOD jobs, " +
                 std::to_string(terrainLod->terrainBacklog()) +
@@ -1462,6 +1476,22 @@ void GameplayState::update(Game& game, float dt) {
                                       *level, *level - base);
                 }
                 ss << "\n";
+            }
+
+            ss << "\n--- Climate ---\n";
+            {
+                const auto date = world_calendar::fromDays(clock.days());
+                const auto climate = world_climate::at(
+                    *world, double(hit->tx) + .5, double(hit->tz) + .5,
+                    clock.days(), double(hit->ty) + .5);
+                ss << fmt::format("date: D{} M{} Y{}\n", date.day, date.month,
+                                  date.year);
+                ss << fmt::format(
+                    "mean {:.1f} C, seasonal {:+.1f}, daily {:+.1f}, "
+                    "elevation {:+.1f}\n",
+                    climate.meanC, climate.seasonalC, climate.dailyC,
+                    climate.elevationC);
+                ss << fmt::format("local {:.1f} C\n", climate.temperatureC);
             }
 
             ss << "\n--- Liquid ---\n";
