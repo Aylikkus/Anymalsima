@@ -8,5 +8,37 @@
             "flammable": false,
             "opacity": 15
         }
+    },
+    {
+        "name": "blocks.heater",
+        "material": "materials.quartzite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 2,
+            "flammable": false,
+            "opacity": 15
+        },
+        "thermal": {
+            "enabled": true,
+            "delta_c": 20.0,
+            "radius": 6.0,
+            "falloff": 1.5
+        }
+    },
+    {
+        "name": "blocks.cooler",
+        "material": "materials.basalt",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 2,
+            "flammable": false,
+            "opacity": 15
+        },
+        "thermal": {
+            "enabled": true,
+            "delta_c": -15.0,
+            "radius": 5.0,
+            "falloff": 1.5
+        }
     }
 ]

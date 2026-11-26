@@ -1,0 +1,20 @@
+[
+    {
+        "name": "items.heater",
+        "thermal": {
+            "enabled": true,
+            "delta_c": 20.0,
+            "radius": 6.0,
+            "falloff": 1.5
+        }
+    },
+    {
+        "name": "items.cooler",
+        "thermal": {
+            "enabled": true,
+            "delta_c": -15.0,
+            "radius": 5.0,
+            "falloff": 1.5
+        }
+    }
+]

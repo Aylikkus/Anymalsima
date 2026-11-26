@@ -93,6 +93,16 @@ Keep the generated temperature as the generation and tint baseline; weather,
 snow and ice consume the dated sample instead of baking seasons into terrain.
 The HUD time button shows D/M/Y, and hovering a tile shows the climate terms.
 
+`items/thermal_emission.hpp` defines signed block and item heat (`delta_c`,
+`radius`, `falloff`). `world/thermal_sources.hpp` indexes placed block sources
+(kept in step by `thermal_source_tracker.hpp`) and movable item sources;
+`world/local_temperature.hpp` combines the dated outdoor sample with nearby
+sources using distance falloff and loaded voxel barriers. Item sources persist
+in `thermal_sources.dat`. Dated `RegionalHeat` entries are for large sources
+that cannot be sampled in detail; a producer shares its `key` with the local
+source and the detailed registration wins, so a source contributes once at
+the handover. `docs/modding/temperature.md` is the data reference.
+
 `world/world_weather.hpp` adds the regional weather sample. Cloud cover,
 physical precipitation (mm/h rain equivalent), a separate visual particle
 density, a temperature offset and surface wind are a seeded, model-versioned
@@ -160,6 +170,7 @@ Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/sa
 - `terrain_edits.dat`: `terrain_edits_codec` section `EDIT` v4, the world-wide index of edited chunk columns that distant terrain shows (`world/terrain_edits.hpp`). It includes ground and above-ground structure shapes, generated structure suppression masks and caps for edited reservoir columns. The v1 reader loads additions without masks. The v2 reader restores fixed water summaries. Region files hold the authoritative tiles.
 - `water.dat`: authoritative `RSVR` v9 section with standing volume, local cell credits, river holds, the budget clock, certified surface breaches and dams (including their upstream masks and closure times), spring closure and reopening times, detached lake compartments, and dug channel paths and arrivals. Load it before requesting chunks. The chunk codec omits projected water. See [water](../../docs/handoff/water.md#5-add-local-finite-volume-flow-and-edited-connections).
 - `light_sources.dat`: `light_sources_codec` section `LITE` (v2: position, block id, open faces), the world-wide index of emissive tiles (see Lighting). Also derived.
+- `thermal_sources.dat`: `thermal_sources_codec` section `HEAT` v1, movable item heat/cold sources (position, item definition name, handover key, carried flag). Block sources are derived from tiles. Emission values come from item definitions on load.
 - `sky.dat`: `sky_codec` section `SKYO` v1, sky heightmap overrides (`SkyHeightMap`, `docs/handoff/sky-light.md`): tile columns whose loaded tiles differ from terrain, trees and `terrain_edits.dat` (holes dug into tree wood). The rest of the heightmap is rebuilt on load. `GameplayState` writes it with `terrain_edits.dat`.
 - `structures.dat`: authoritative `TREE` v4 and `VOXL` v3 sections (tree overrides and per-kind voxel and piece overrides). The save catalog imports `trees.dat` when the new file is absent. Region `STRB` records the structure baseline for each saved slab so chunk loading can reconcile a new revision with the saved tiles.
 

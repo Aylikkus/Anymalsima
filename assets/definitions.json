@@ -243,6 +243,12 @@
       ]
     },
     {
+      "type": "items",
+      "files": [
+        "assets/data/items/thermal.json"
+      ]
+    },
+    {
       "type": "foliage_materials",
       "files": [
         "assets/data/foliage_materials/foliage_materials.json"

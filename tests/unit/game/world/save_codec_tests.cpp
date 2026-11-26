@@ -1,4 +1,5 @@
 #include <filesystem>
+#include <limits>
 
 #include "serialization/file_io.hpp"
 #include "test.hpp"
@@ -629,6 +630,85 @@ TEST(light_sources_versions) {
     badContainer.put("LITE", 2, bad.take());
     const auto encoded = badContainer.encode();
     CHECK(throwsSerialization([&] { light_sources_codec::decode(encoded); }));
+}
+
+TEST(thermal_sources_roundtrip) {
+    using thermal_sources_codec::Record;
+    const std::vector<Record> records{
+        {{12.5, 40.5, -3.5}, "items.heater", 7, false},
+        {{-1.5, 8.25, 300.5}, "items.cooler", 11, true},
+    };
+    SectionContainer extra;
+    extra.put("FUTR", 3, Bytes{std::byte{1}, std::byte{2}});
+    const auto file = thermal_sources_codec::decode(
+        thermal_sources_codec::encode(records, extra));
+    EQUAL(file.records.size(), size_t(2), "records");
+    // Sorted by key, then position.
+    CHECK(file.records[0] == records[0]);
+    CHECK(file.records[1] == records[1]);
+    CHECK(file.extra.find("FUTR") != nullptr);
+    CHECK(file.extra.find("HEAT") == nullptr);
+
+    const auto root = scratch("thermal_sources_codec");
+    std::filesystem::create_directories(root);
+    CHECK(save_catalog::readThermalSources({root, {}}).records.empty());
+    save_catalog::writeThermalSources({root, {}}, records);
+    EQUAL(save_catalog::readThermalSources({root, {}}).records.size(),
+          size_t(2), "written file");
+    std::filesystem::remove_all(root);
+}
+
+TEST(thermal_sources_rejects_corrupt) {
+    const auto bytes = thermal_sources_codec::encode(
+        {{{1.5, 2.5, 3.5}, "items.heater", 4, true}});
+    CHECK(throwsSerialization([&] {
+        thermal_sources_codec::decode(ByteView(bytes).first(bytes.size() - 3));
+    }));
+    auto section = [](auto&& fill) {
+        BinaryWriter out;
+        fill(out);
+        SectionContainer container;
+        container.put("HEAT", 1, out.take());
+        return container.encode();
+    };
+    auto record = [](BinaryWriter& out, std::string item, uint8_t carried) {
+        out.write(1.5);
+        out.write(2.5);
+        out.write(3.5);
+        out.writeString(item);
+        out.write(uint64_t(4));
+        out.write(carried);
+    };
+    const auto emptyItem = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        record(out, "", 0);
+    });
+    CHECK(
+        throwsSerialization([&] { thermal_sources_codec::decode(emptyItem); }));
+    const auto badFlag = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        record(out, "items.heater", 2);
+    });
+    CHECK(throwsSerialization([&] { thermal_sources_codec::decode(badFlag); }));
+    const auto trailing = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        record(out, "items.heater", 0);
+        out.write(uint8_t(0));
+    });
+    CHECK(
+        throwsSerialization([&] { thermal_sources_codec::decode(trailing); }));
+    // A non-finite position is rejected.
+    const auto nonFinite = section([&](BinaryWriter& out) {
+        out.write(uint32_t(1));
+        out.write(std::numeric_limits<double>::infinity());
+        out.write(2.5);
+        out.write(3.5);
+        out.writeString("items.heater");
+        out.write(uint64_t(4));
+        out.write(uint8_t(0));
+    });
+    CHECK(
+        throwsSerialization([&] { thermal_sources_codec::decode(nonFinite); }));
 }
 
 TEST(chunk_codec_pieces) {

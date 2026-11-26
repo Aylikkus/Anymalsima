@@ -8,6 +8,7 @@
 #include "light_emission.hpp"
 #include "render/renderer_api.hpp"
 #include "serialization/serializable_api.hpp"
+#include "thermal_emission.hpp"
 #include "utils/enum_parser.hpp"
 #include "utils/items_enum_maps.hpp"
 
@@ -32,6 +33,8 @@ struct Block {
     BlockProperties properties;
     // Present when the block emits light (see light_emission.hpp).
     std::optional<LightEmission> light;
+    // Present when the block warms or cools nearby space (thermal_emission).
+    std::optional<ThermalEmission> thermal;
 };
 
 inline void from_json(const Json& j, BlockProperties& p) {
@@ -53,6 +56,14 @@ inline void from_json(const Json& j, Block& b) {
             throw std::runtime_error(b.name + ": " + e.what());
         }
         if (!b.light->emits()) b.light.reset();
+    }
+    if (j.contains("thermal")) {
+        try {
+            b.thermal = j.at("thermal").get<ThermalEmission>();
+        } catch (const std::exception& e) {
+            throw std::runtime_error(b.name + ": " + e.what());
+        }
+        if (!b.thermal->emits()) b.thermal.reset();
     }
     if (j.contains("render_category")) {
         b.renderCategory = EnumParser<BlockRenderCategory>::parse(

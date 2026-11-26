@@ -16,6 +16,7 @@ constexpr const char* MetaFile = "world.json";
 constexpr const char* MapFile = "world_map.dat";
 constexpr const char* EditsFile = "terrain_edits.dat";
 constexpr const char* LightsFile = "light_sources.dat";
+constexpr const char* ThermalFile = "thermal_sources.dat";
 constexpr const char* StructuresFile = "structures.dat";
 constexpr const char* TreesFile = "trees.dat";
 constexpr const char* SkyFile = "sky.dat";
@@ -134,6 +135,21 @@ void writeLightSources(const SaveSlot& slot,
     FileIO::writeBytesAtomic(
         slot.directory / LightsFile,
         light_sources_codec::encode(std::move(lights), extra));
+}
+
+thermal_sources_codec::File readThermalSources(const SaveSlot& slot) {
+    const auto path = slot.directory / ThermalFile;
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return {};
+    return thermal_sources_codec::decode(FileIO::readBytes(path));
+}
+
+void writeThermalSources(const SaveSlot& slot,
+                         std::vector<thermal_sources_codec::Record> records,
+                         const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(
+        slot.directory / ThermalFile,
+        thermal_sources_codec::encode(std::move(records), extra));
 }
 
 sky_codec::File readSky(const SaveSlot& slot) {

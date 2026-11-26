@@ -5,6 +5,7 @@
 #include "composite/text_button.hpp"
 #include "game.hpp"
 #include "game_state.hpp"
+#include "items/thermal_item.hpp"
 #include "main_menu_state.hpp"
 #include "render/renderer_api.hpp"
 #include "ui_manager.hpp"
@@ -22,6 +23,7 @@
 #include "world/light_renderer.hpp"
 #include "world/light_sources.hpp"
 #include "world/light_volume_manager.hpp"
+#include "world/local_temperature.hpp"
 #include "world/location_generator.hpp"
 #include "world/location_manager.hpp"
 #include "world/save/region_store.hpp"
@@ -31,6 +33,8 @@
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
+#include "world/thermal_source_tracker.hpp"
+#include "world/thermal_sources.hpp"
 #include "world/tile_raycast.hpp"
 #include "world/tree_renderer.hpp"
 #include "world/tree_simulation.hpp"
@@ -157,6 +161,28 @@ class GameplayState : public IGameState {
     std::unique_ptr<LightVolumeManager> lightVolumes;
     // Listens to chunkManager and editor; destroyed before both.
     std::unique_ptr<TerrainEditTracker> editTracker;
+
+    // Signed local heat and cold (docs/handoff/weather.md, step 15). Block
+    // sources follow loaded tiles through thermalTracker; item sources are
+    // persistent and movable. Declared after chunkManager/editor so these
+    // listeners are destroyed first.
+    std::unique_ptr<ThermalSourceRegistry> thermalSources;
+    std::unique_ptr<ThermalSourceTracker> thermalTracker;
+    std::unique_ptr<thermal::Query> thermalQuery;
+    SectionContainer thermalExtra;
+    std::future<void> thermalWrite;
+    uint8_t heaterBlockId = 0, coolerBlockId = 0;
+    uint8_t heaterItemId = 0, coolerItemId = 0;
+    std::optional<ThermalSourceRegistry::Id> carriedThermalItem;
+    bool thermalItemCarried = false;
+    std::optional<TilePos> thermalFixtureSite;
+    void setupThermalFixture();
+    void spawnThermalItem(uint8_t itemId);
+    void updateThermalItem();
+    void dropThermalItem();
+    void clearThermalItems();
+    void loadThermalSources(const DataStorage<ThermalItem>& items);
+    void saveThermalSources(bool wait);
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     std::unique_ptr<LightRenderer> lightRenderer;

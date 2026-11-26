@@ -10,6 +10,7 @@
 #include "items/material.hpp"
 #include "items/rock.hpp"
 #include "items/soil_validation.hpp"
+#include "items/thermal_item.hpp"
 #include "utils/utf8.hpp"
 
 const bgfx::Memory* ResourceManager::loadMemory(const std::string& path) {
@@ -61,6 +62,8 @@ ResourceManager::ResourceManager() {
     registerDataType<Flora>();
     // Trees (docs/handoff/trees.md); ids saved raw like flora.
     registerDataType<Tree>();
+    // Movable thermal items (docs/handoff/weather.md, step 15).
+    registerDataType<ThermalItem>();
 }
 
 inline FontRole matchRole(std::string key) {

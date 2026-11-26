@@ -21,6 +21,9 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/sunlight_propagator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/block_light_propagator.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/light_sources.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/thermal_sources.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/thermal_source_tracker.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/local_temperature.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/lod_light_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_occlusion_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_column.cpp
@@ -51,6 +54,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/save/save_catalog.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/terrain_edits_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/light_sources_codec.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/save/thermal_sources_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/trees_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/structures_codec.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/save/sky_codec.cpp
@@ -76,6 +80,7 @@ add_executable(world_logic_tests
     unit/game/world/snow_settlement_tests.cpp
     unit/game/world/climate_tests.cpp
     unit/game/world/weather_tests.cpp
+    unit/game/world/thermal_tests.cpp
     unit/game/world/chunk_piece_tests.cpp
     unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
@@ -197,6 +202,13 @@ set(world_cases
     weather_history_keeps_legacy_model_before_upgrade
     weather_presentation_fixture_wrap_and_handoff
     weather_presentation_dated_reload_and_lod_cache
+    thermal_registry_lifecycle
+    thermal_local_temperature_attenuation
+    thermal_barrier_and_opening
+    thermal_regional_dated_handover
+    thermal_x_wrap
+    thermal_tracker_block_lifecycle
+    thermal_carried_source_save_roundtrip
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision
@@ -324,7 +336,9 @@ foreach(case IN LISTS block_light_cases)
 endforeach()
 foreach(case block_default_opacity block_explicit_opacity
              light_emission_defaults light_emission_rejects_invalid
-             light_emission_curve light_chroma_encoding)
+             light_emission_curve light_chroma_encoding
+             thermal_emission_defaults thermal_emission_rejects_invalid
+             thermal_block_parsing thermal_item_parsing)
     add_test(NAME game.items.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.items.${case} PROPERTIES
         LABELS "unit;gameplay;data" TIMEOUT 10)
@@ -363,7 +377,8 @@ foreach(case chunk_codec_uniform chunk_codec_shapes chunk_codec_pieces chunk_cod
              terrain_edits_roundtrip terrain_edits_rejects_corrupt
              structure_save_migrates_trees structure_override_codec_versions
              light_sources_roundtrip light_sources_rejects_corrupt
-             light_sources_versions)
+             light_sources_versions
+             thermal_sources_roundtrip thermal_sources_rejects_corrupt)
     add_test(NAME game.save.${case} COMMAND world_logic_tests ${case})
     set_tests_properties(game.save.${case} PROPERTIES
         LABELS "unit;gameplay;save" TIMEOUT 10)

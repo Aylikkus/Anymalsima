@@ -40,6 +40,23 @@ class Assets final : public IAssets {
         LightEmission spot;
         spot.cone = LightCone{{0, -1, 0}, 20, 30};
         lamp(7, "spot", spot);
+        // Thermal sources: 8 heater (+20 C, 8 m), 9 cooler (-15 C, 5 m).
+        auto thermal = [&](int id, const std::string& name, float delta,
+                           float radius) {
+            Block block;
+            block.id = id;
+            block.name = name;
+            block.material = name;
+            block.properties.opacity = 15;
+            block.thermal = ThermalEmission{};
+            block.thermal->deltaC = delta;
+            block.thermal->radius = radius;
+            block.thermal->falloff = 1;
+            blocks->indexByName[block.name] = blocks->items.size();
+            blocks->items.push_back(block);
+        };
+        thermal(8, "heater", 20.f, 8.f);
+        thermal(9, "cooler", -15.f, 5.f);
         dataStorages[Block::TypeName] = std::move(blocks);
         auto rocks = std::make_unique<DataStorage<Rock>>();
         Rock rock{};

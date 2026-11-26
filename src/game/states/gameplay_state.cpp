@@ -292,6 +292,15 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     }
     lightSources = std::make_unique<LightSourceRegistry>();
     loadLightSources(context.assets->getStorage<Block>());
+    thermalSources = std::make_unique<ThermalSourceRegistry>();
+    {
+        const auto& items = context.assets->getStorage<ThermalItem>();
+        for (const auto& item : items.items) {
+            if (item.name == "items.heater") heaterItemId = item.id;
+            if (item.name == "items.cooler") coolerItemId = item.id;
+        }
+        loadThermalSources(items);
+    }
     ui_manager = std::make_unique<UIManager>(context);
 
     auto root = std::make_unique<Panel>();
@@ -345,6 +354,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                      blocks.items.empty() ? 0 : blocks.items.front().id);
         timberId = id("blocks.oak_timber", 0);
         snowId = id("blocks.snow", 0);
+        heaterBlockId = id("blocks.heater", 0);
+        coolerBlockId = id("blocks.cooler", 0);
         if (snowId) {
             const auto layer =
                 context.assets->getMaterialAlbedoLayer("materials.snow");
@@ -468,6 +479,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         context.assets, std::move(landmarks));
     setupConstructionFixture();
     setupSnowFixture();
+    setupThermalFixture();
     setupWeatherTravelFixture();
     setupPolarPackFixture();
     if (polarPackSite)
@@ -587,6 +599,36 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         makeDebugButton({18, 10, 6, 1}, [this] {
             if (weatherTravelHold) advanceSnow(true, 1. / 24);
         })->setText(_("Catch up 1h"));
+    }
+    if (const char* fixture = std::getenv("ANYM_THERMAL_FIXTURE");
+        fixture && std::string_view(fixture) == "1") {
+        if (heaterItemId)
+            makeDebugButton({0, 6, 6, 1}, [this] {
+                spawnThermalItem(heaterItemId);
+            })->setText(_("HEATER ITEM"));
+        if (coolerItemId)
+            makeDebugButton({6, 6, 6, 1}, [this] {
+                spawnThermalItem(coolerItemId);
+            })->setText(_("COOLER ITEM"));
+        makeDebugButton({12, 6, 6, 1}, [this] {
+            dropThermalItem();
+        })->setText(_("THERMAL DROP"));
+        makeDebugButton({18, 6, 6, 1}, [this] {
+            if (carriedThermalItem) thermalItemCarried = true;
+        })->setText(_("THERMAL TAKE"));
+        makeDebugButton({18, 7, 6, 1}, [this] {
+            clearThermalItems();
+        })->setText(_("CLEAR HEAT ITEMS"));
+        if (thermalFixtureSite) {
+            makeDebugButton({0, 7, 6, 1}, [this] {
+                if (probe) toggleWalk();
+                const auto [x, y, z] = *thermalFixtureSite;
+                camera.position = {x + .5f, y + 3.f, z - 4.f};
+                camera.yaw = 0;
+                camera.pitch = -.28f;
+                camera.distance = 12.f;
+            })->setText(_("Heat site"));
+        }
     }
     // World-wide sources must be installed before any chunk is requested.
     try {
@@ -717,6 +759,11 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         return true;
     });
     blockLight->watch(*editor);
+    thermalTracker = std::make_unique<ThermalSourceTracker>(
+        *chunkManager, context.assets->getStorage<Block>(), *thermalSources);
+    thermalTracker->watch(*editor);
+    thermalQuery = std::make_unique<thermal::Query>(
+        *this->world, *thermalSources, thermal::voxelBarrier(*chunkManager));
     skyMap->watch(*editor);
     snowEditConnection =
         editor->blockChanged.connect([this](const BlockChange& change) {
@@ -993,6 +1040,201 @@ void GameplayState::setupSnowFixture() {
     snowDropSite = TilePos{x, groundY + 1, z + 6};
     chunkManager->setGeneratedStructureKinds(
         applyOverrides({}, {{"snow_fixture", {{Key, std::move(layout)}}}}));
+}
+
+// A reproducible step 15 scene: a stone pad with a heater block, a cooler
+// block and a short wall for shelter. The movable debug item is spawned from
+// the Heat site controls; neither is required for the headless checks.
+void GameplayState::setupThermalFixture() {
+    const char* enabled = std::getenv("ANYM_THERMAL_FIXTURE");
+    if (!enabled || std::string_view(enabled) != "1" || !stoneId ||
+        !heaterBlockId || !coolerBlockId)
+        return;
+    const int x = int(slot.meta.startRegion.x) * 128 + 64;
+    const int z = int(slot.meta.startRegion.y) * 128 + 64;
+    int maxTop = 0;
+    for (int dz = -4; dz <= 4; ++dz)
+        for (int dx = -4; dx <= 4; ++dx)
+            maxTop = std::max(maxTop,
+                              chunkManager->generatedSurfaceY(x + dx, z + dz));
+    const int groundY = maxTop + 1;
+    if (groundY + 6 >= WORLD_HEIGHT_Y) return;
+
+    using namespace structure_voxels;
+    constexpr uint64_t Key = 0xf000000000000015ULL;
+    Override layout;
+    layout.mode = OverrideMode::Replace;
+    layout.anchorX = x;
+    layout.anchorZ = z;
+    layout.landmark = true;
+    const auto support = [&](int px, int pz) {
+        const int top = chunkManager->generatedSurfaceY(px, pz);
+        for (int y = top + 1; y <= groundY; ++y)
+            layout.voxels[{px, y, pz}] = OverrideVoxel(stoneId);
+    };
+    for (int dz = -3; dz <= 3; ++dz)
+        for (int dx = -3; dx <= 3; ++dx) {
+            support(x + dx, z + dz);
+            layout.voxels[{x + dx, groundY, z + dz}] = OverrideVoxel(stoneId);
+        }
+    layout.voxels[{x - 2, groundY + 1, z}] = OverrideVoxel(heaterBlockId);
+    layout.voxels[{x + 2, groundY + 1, z}] = OverrideVoxel(coolerBlockId);
+    // A wall on the far side: the same tile has open air on the near side.
+    for (int dy = 1; dy <= 4; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+            layout.voxels[{x + dx, groundY + dy, z + 2}] =
+                OverrideVoxel(stoneId);
+    thermalFixtureSite = TilePos{x, groundY + 1, z};
+    chunkManager->setGeneratedStructureKinds(
+        applyOverrides({}, {{"thermal_fixture", {{Key, std::move(layout)}}}}));
+}
+
+void GameplayState::spawnThermalItem(uint8_t itemId) {
+    if (!thermalSources || !itemId) return;
+    const auto& items = uiContext->assets->getStorage<ThermalItem>();
+    if (itemId == 0 || itemId > items.items.size()) return;
+    const auto& item = items.get(itemId);
+    if (!item.thermal.emits()) return;
+    if (carriedThermalItem) {
+        thermalSources->remove(*carriedThermalItem);
+        carriedThermalItem.reset();
+    }
+    ThermalSource source;
+    source.owner = ThermalSource::Owner::Item;
+    source.item = itemId;
+    source.emission = item.thermal;
+    const auto position = [this] {
+        if (probe) {
+            const auto feet = probe->feet();
+            return std::array<double, 3>{feet.x, double(feet.y) + 1.0, feet.z};
+        }
+        return std::array<double, 3>{camera.position.x, camera.position.y,
+                                     camera.position.z};
+    }();
+    source.position = position;
+    carriedThermalItem = thermalSources->add(std::move(source));
+    thermalItemCarried = true;
+    lastBuildAction = fmt::format(fmt::runtime(_("Carried {}")), item.name);
+}
+
+void GameplayState::updateThermalItem() {
+    if (!thermalItemCarried || !carriedThermalItem || !thermalSources) return;
+    if (!thermalSources->find(*carriedThermalItem)) {
+        carriedThermalItem.reset();
+        thermalItemCarried = false;
+        return;
+    }
+    const std::array<double, 3> position = [this] {
+        if (probe) {
+            const auto feet = probe->feet();
+            return std::array<double, 3>{double(feet.x), double(feet.y) + 1.0,
+                                         double(feet.z)};
+        }
+        return std::array<double, 3>{double(camera.position.x),
+                                     double(camera.position.y),
+                                     double(camera.position.z)};
+    }();
+    thermalSources->place(*carriedThermalItem, position);
+}
+
+void GameplayState::dropThermalItem() {
+    if (!carriedThermalItem || !thermalSources) return;
+    if (const auto* source = thermalSources->find(*carriedThermalItem)) {
+        auto position = source->position;
+        if (probe)
+            position[1] = double(probe->feet().y) + .2;
+        else
+            position[1] = std::max(0.0, position[1] - 1.5);
+        thermalSources->place(*carriedThermalItem, position);
+    }
+    thermalItemCarried = false;
+    lastBuildAction = _("Dropped the thermal item");
+}
+
+void GameplayState::clearThermalItems() {
+    if (!thermalSources) return;
+    std::vector<ThermalSourceRegistry::Id> ids;
+    thermalSources->forEachItem(
+        [&](ThermalSourceRegistry::Id id, const ThermalSource&) {
+            ids.push_back(id);
+        });
+    for (const auto id : ids) thermalSources->remove(id);
+    carriedThermalItem.reset();
+    thermalItemCarried = false;
+    lastBuildAction = _("Cleared thermal items");
+}
+
+void GameplayState::loadThermalSources(const DataStorage<ThermalItem>& items) {
+    try {
+        auto file = save_catalog::readThermalSources(slot);
+        thermalExtra = std::move(file.extra);
+        for (const auto& record : file.records) {
+            const auto found = items.indexByName.find(record.item);
+            if (found == items.indexByName.end()) {
+                std::cerr << "Dropping thermal item " << record.item
+                          << ": definition not found\n";
+                continue;
+            }
+            const auto& item = items.items[found->second];
+            if (!item.thermal.emits()) continue;
+            ThermalSource source;
+            source.owner = ThermalSource::Owner::Item;
+            source.item = item.id;
+            source.emission = item.thermal;
+            source.position = record.position;
+            source.key = record.key;
+            const auto id = thermalSources->add(std::move(source));
+            if (record.carried) {
+                carriedThermalItem = id;
+                thermalItemCarried = true;
+            }
+        }
+    } catch (const std::exception& e) {
+        // Item sources are debug content today; a corrupt file must not make
+        // the world unreadable.
+        std::cerr << "Thermal sources unreadable (" << e.what()
+                  << "); starting empty\n";
+    }
+    thermalSources->dirty = false;
+}
+
+void GameplayState::saveThermalSources(bool wait) {
+    using namespace std::chrono_literals;
+    if (thermalWrite.valid()) {
+        if (!wait && thermalWrite.wait_for(0s) != std::future_status::ready)
+            return;
+        try {
+            thermalWrite.get();
+        } catch (const std::exception& e) {
+            std::cerr << "Saving thermal sources failed: " << e.what() << '\n';
+            thermalSources->dirty = true;
+        }
+    }
+    if (!thermalSources->dirty) return;
+    thermalSources->dirty = false;
+    const auto& items = uiContext->assets->getStorage<ThermalItem>();
+    std::vector<thermal_sources_codec::Record> records;
+    thermalSources->forEachItem([&](ThermalSourceRegistry::Id id,
+                                    const ThermalSource& source) {
+        if (!source.item || source.item > items.items.size()) return;
+        records.push_back({source.position, items.get(source.item).name,
+                           source.key,
+                           carriedThermalItem && *carriedThermalItem == id});
+    });
+    auto write = [target = slot, records = std::move(records),
+                  extra = thermalExtra]() mutable {
+        save_catalog::writeThermalSources(target, std::move(records), extra);
+    };
+    if (!wait) {
+        thermalWrite = uiContext->threadPool.submit_task(std::move(write));
+        return;
+    }
+    try {
+        write();
+    } catch (const std::exception& e) {
+        std::cerr << "Saving thermal sources failed: " << e.what() << '\n';
+        thermalSources->dirty = true;
+    }
 }
 
 void GameplayState::applyWeatherOverride(world_weather::Sample& weather) const {
@@ -1534,6 +1776,7 @@ GameplayState::~GameplayState() {
         regionStore->flush();
         saveTerrainEdits(true);
         saveLightSources(true);
+        saveThermalSources(true);
         saveSky(true);
         writeMeta();
     } catch (const std::exception& e) {
@@ -1731,6 +1974,7 @@ void GameplayState::updateAutosave(float dt) {
             saveReservoirs();
             saveTerrainEdits(false);
             saveLightSources(false);
+            saveThermalSources(false);
             saveSky(false);
             writeMeta();
         }
@@ -1744,6 +1988,7 @@ void GameplayState::updateAutosave(float dt) {
         saveReservoirs();
         saveTerrainEdits(false);
         saveLightSources(false);
+        saveThermalSources(false);
         saveSky(false);
         writeMeta();
     }
@@ -2161,6 +2406,7 @@ void GameplayState::update(Game& game, float dt) {
     editTracker->update();
     chunkManager->commitWaterEdits();
     if (probe) updateWalk(dt);
+    updateThermalItem();
     // X wraps around the world (stored canonically in [0, W)); Z is bounded.
     camera.position.x = float(world->wrap().wrapX(camera.position.x));
     if (camera.position.x >= float(world->wrap().tiles))
@@ -2312,6 +2558,10 @@ void GameplayState::update(Game& game, float dt) {
             controls += fmt::format("Polar pack border [{}, {}, {}] to Y {}\n",
                                     x, y, z, y + snow::MaximumDepth);
         }
+        if (thermalFixtureSite) {
+            const auto [x, y, z] = *thermalFixtureSite;
+            controls += fmt::format("Thermal site [{}, {}, {}]\n", x, y, z);
+        }
         if (weatherTravelSites) {
             controls += fmt::format("Travel fixture {} · target day {:.4f}\n",
                                     weatherTravelHold ? "held" : "automatic",
@@ -2343,7 +2593,8 @@ void GameplayState::update(Game& game, float dt) {
                 weatherRenderer->summaryRebuilds(),
                 weatherRenderer->particleCount(), weatherFrameMs, dt * 1000.);
         }
-        if (constructionSite || snowFixtureSite || snowDropSite) {
+        if (constructionSite || snowFixtureSite || snowDropSite ||
+            thermalFixtureSite) {
             const auto& at = camera.position;
             controls += fmt::format("Camera [{:.1f}, {:.1f}, {:.1f}]\n", at.x,
                                     at.y, at.z);
@@ -2382,10 +2633,22 @@ void GameplayState::update(Game& game, float dt) {
                 weather.cloudCover * 100.f, weather.precipitationRate,
                 weather.visualDensity, weather.windSpeed,
                 weather.temperatureOffsetC, weatherForce ? _(" (forced)") : "");
+            std::string localLine;
+            if (thermalQuery) {
+                const auto local = thermalQuery->at(
+                    {double(camera.position.x), double(camera.position.y),
+                     double(camera.position.z)},
+                    clock.days());
+                localLine = fmt::format(
+                    "local temperature {:.1f} C (ambient {:.1f}, sources "
+                    "{:+.1f}, regional {:+.1f}, {} nearby)\n",
+                    local.temperatureC, local.ambientC, local.detailedC,
+                    local.regionalC, local.detailedSources);
+            }
             tileDebugText->setText(
-                controls + climateLine + weatherLine + _("No tile") + "\n" +
-                streaming + "LOD: " + std::to_string(terrainLod->patchCount()) +
-                " patches, " +
+                controls + climateLine + weatherLine + localLine +
+                _("No tile") + "\n" + streaming + "LOD: " +
+                std::to_string(terrainLod->patchCount()) + " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
                 std::to_string(terrainLod->jobCount()) + " LOD jobs, " +
                 std::to_string(terrainLod->terrainBacklog()) +
@@ -2494,6 +2757,28 @@ void GameplayState::update(Game& game, float dt) {
                     "wind {:.1f} m/s, snow fraction {:.2f}, sample v{}\n",
                     weather.windSpeed, weather.snowFraction,
                     world_weather::ModelVersion);
+            }
+
+            ss << "\n--- Temperature ---\n";
+            if (thermalQuery) {
+                const auto local = thermalQuery->at(
+                    {double(hit->tx) + .5, double(hit->ty) + .5,
+                     double(hit->tz) + .5},
+                    clock.days());
+                ss << fmt::format(
+                    "ambient {:.1f} C\nsources {:+.1f} C ({} nearby)\n"
+                    "regional {:+.1f} C ({} dated)\nlocal {:.1f} C\n",
+                    local.ambientC, local.detailedC, local.detailedSources,
+                    local.regionalC, local.regionalSources, local.temperatureC);
+            }
+            if (carriedThermalItem) {
+                if (const auto* source =
+                        thermalSources->find(*carriedThermalItem))
+                    ss << fmt::format(
+                        "{} item at [{:.2f}, {:.2f}, {:.2f}]\n",
+                        thermalItemCarried ? _("Carried") : _("Dropped"),
+                        source->position[0], source->position[1],
+                        source->position[2]);
             }
 
             ss << "\n--- Liquid ---\n";

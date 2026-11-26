@@ -8,6 +8,7 @@
 #include "sky_codec.hpp"
 #include "structures_codec.hpp"
 #include "terrain_edits_codec.hpp"
+#include "thermal_sources_codec.hpp"
 #include "world/world.hpp"
 #include "world_meta.hpp"
 
@@ -54,6 +55,12 @@ light_sources_codec::File readLightSources(const SaveSlot& slot);
 void writeLightSources(const SaveSlot& slot,
                        std::vector<light_sources_codec::Record> lights,
                        const SectionContainer& extra = {});
+// thermal_sources.dat: movable item sources. Block sources are derived from
+// tiles. Empty when the file does not exist yet; throws on corrupt data.
+thermal_sources_codec::File readThermalSources(const SaveSlot& slot);
+void writeThermalSources(const SaveSlot& slot,
+                         std::vector<thermal_sources_codec::Record> records,
+                         const SectionContainer& extra = {});
 // sky.dat (sky heightmap overrides): empty when the file does not exist
 // yet. Throws on corrupt data.
 sky_codec::File readSky(const SaveSlot& slot);

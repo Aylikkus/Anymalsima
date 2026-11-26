@@ -29,6 +29,9 @@ add_library(game
     world/sunlight_propagator.cpp
     world/block_light_propagator.cpp
     world/light_sources.cpp
+    world/thermal_sources.cpp
+    world/thermal_source_tracker.cpp
+    world/local_temperature.cpp
     world/light_renderer.cpp
     world/light_shadows.cpp
     world/lod_light_map.cpp
@@ -65,6 +68,7 @@ add_library(game
     world/save/save_catalog.cpp
     world/save/terrain_edits_codec.cpp
     world/save/light_sources_codec.cpp
+    world/save/thermal_sources_codec.cpp
     world/save/trees_codec.cpp
     world/save/structures_codec.cpp
     world/save/sky_codec.cpp

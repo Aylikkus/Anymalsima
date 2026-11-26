@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–14 complete · Step 15 pending.**
+**Steps 01–15 complete · Step 16 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -26,8 +26,8 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 12 | Regional weather at distance | Complete | E · Weather from afar |
 | 13 | Polar baselines, vertical runs and excavation | Complete | |
 | 14 | Deep-pack LOD, structures and travel | Complete | F · Arctic shelter |
-| 15 | Local heating and cooling from blocks and items | Pending | |
-| 16 | Room air, wall heat storage and local melt | Pending | G · Heated room |
+| 15 | Local heating and cooling from blocks and items | Complete | |
+| 16 | Room air, wall heat storage, local melt and setpoint heaters | Pending | G · Heated room |
 | 17 | Partial-cell water capacity and connectivity | Pending | |
 | 18 | Water–ice transfers, persistence and meltwater | Pending | |
 | 19 | Surface ice in still and flowing water | Pending | H · Frozen shore |
@@ -180,7 +180,16 @@ Add a data-defined thermal source with signed output and an effective range. Exp
 
 Compute connected indoor air in the active area with leakage through openings, exposure to outdoors, and heat exchange with surrounding material. Treat warmed walls as finite stores that can release heat into adjacent air. Use baseline ground temperature and insulation for sheltered caves. Bound connectivity work across unloaded boundaries; record the approximation there and invalidate it on geometry changes. Persist significant stored heat and its timestamp; cooling during absence should match the documented approximation. Feed the same local °C into snowmelt and later phase changes.
 
-**Playcheck G.** Measure a heater outdoors, then inside the fixture room. Open the door, close it, turn off the heater and observe air and walls cooling at different rates. Remove a roof piece during snowfall and check exposure and heat loss. Repeat with the cooler. Inspect a patch of snow beside the warm wall and another farther away. Reload while the wall is still warm.
+**Configurable setpoint heaters.** Step 15's `ThermalEmission` remains an open-loop, fixed offset. Step 16 adds an optional thermostat controller so a block or item can hold a room at a requested temperature such as 21 °C. The controller must use the connected room-air temperature, not a single point sample presented as the whole room:
+
+- Extend the thermal data with a mode (`fixed` by default, or `target`) and, for target mode, `target_c`, `deadband_c`, `gain`, `min_delta_c` and `max_delta_c`.
+- Each simulation tick, set the source's effective `delta_c` from `clamp(gain × (target_c - room_temperature), min_delta_c, max_delta_c)`. Support positive and negative output, hysteresis through the deadband, and anti-windup so a door left open cannot accumulate an unbounded commanded output.
+- Rooms with little connected air or large leakage need the controller to saturate at `max_delta_c`; that is expected, and the inspection panel should show the target, measured room temperature, current command and saturation.
+- Move the source through the same block/item owner lifecycle as step 15, update it at the room simulation cadence rather than every frame, and keep the existing local/regional handover key.
+- Persist the thermostat setting and any significant controller state with the room's stored heat. A reload must not silently switch a configured heater back to fixed mode or forget its target.
+- A fixed `delta_c` source keeps its step 15 behaviour and requires no migration.
+
+**Playcheck G.** Measure a heater outdoors, then inside the fixture room. Open the door, close it, turn off the heater and observe air and walls cooling at different rates. Remove a roof piece during snowfall and check exposure and heat loss. Repeat with the cooler. Inspect a patch of snow beside the warm wall and another farther away. Reload while the wall is still warm. Also configure a heater for 21 °C, open the door during cold weather and watch its command rise toward saturation, then close the door and watch it settle into the deadband. Compare it with a fixed-offset heater and reload to confirm the target and measured room temperature survive.
 
 ### 17. Teach water about partial-cell solids
 
@@ -1839,3 +1848,74 @@ shows the 2 cm snapping removing the dark speck field.
 
 The maintainer confirmed the tunnel snow, night lighting, ramp, ridge and
 far/near snow fixes and signed Playcheck F off. Step 14 is complete.
+
+### Step 15 · 2026-11-27
+
+`items/thermal_emission.hpp` defines a data-driven signed source:
+`delta_c` is the °C offset at the source centre, `radius` is its effective
+range in metres and `falloff` is the exponent of `(1 - d / radius)`. The same
+object is accepted by blocks and by the new `ThermalItem` data type.
+`assets/data/blocks/weather.json` appends `blocks.heater` (+20 °C, 6 m) and
+`blocks.cooler` (−15 °C, 5 m) after the existing block files, preserving all
+saved numeric block IDs. `assets/data/items/thermal.json` defines the movable
+debug heater and cooler. The schema, units and ranges are documented in
+[`docs/modding/temperature.md`](../../docs/modding/temperature.md).
+
+`world/thermal_sources.hpp` indexes block and item sources in 32-tile
+buckets with X wrapping. `world/thermal_source_tracker.hpp` scans chunks when
+they become ready, reconciles one tile on `WorldEditor::blockChanged`, and
+removes a chunk's sources on unload. `world/local_temperature.hpp` combines
+the dated outdoor weather sample with nearby sources, adds overlapping
+sources linearly, and attenuates each path by the length of solid material it
+crosses. The V1 barrier is an exponential e-folding length of 5 cm, so a wall
+is effectively opaque while a doorway or thin pane passes some heat. The
+query also exposes a dated `RegionalHeat` list for future large fires. A
+detailed source and its regional summary share a stable `key`; while the
+detailed source is registered the regional entry with that key is skipped.
+That is the recorded handover convention, and identical definitions produce
+the same open-air value when the detailed copy is removed.
+
+Item sources persist in `thermal_sources.dat` (`thermal_sources_codec` section
+`HEAT` v1: position, item definition name, key and carried flag). Block
+sources are derived from loaded tiles, like emissive tiles. The gameplay
+fixture also tracks a carried item at the player position, drops it, picks it
+up, clears item sources, and reports ambient, source, regional and local °C in
+the tile panel.
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -R 'thermal_|game.items.thermal' \
+  --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R 'thermal_|game.items.thermal' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+Asset generation added the `items` data type and preserved the existing block
+file order. The Release app and logic tests built. All 13 focused cases and
+all 483 gameplay cases passed. The focused ASan/UBSan run also passed all 13.
+The first sanitizer run exposed a test-fixture destruction order that removed
+the editor before the tracker; the fixture now declares the tracker after the
+editor, matching the production ownership order.
+
+The headless cases cover one heater, one cooler, their overlapping sum,
+distance falloff, a wrapped-X source, a full wall and a doorway created from
+the same wall, the inactive edges of a dated regional entry, the detailed
+source winning the handover, removal leaving no registered source, and a
+carried item moving and round-tripping through `thermal_sources.dat`. The
+block tracker registers a placed heater, replaces it with a cooler, removes
+it and clears the registry when its chunk unloads. No maintainer playcheck is
+scheduled for this step.
+
+The optional in-game scene is `ANYM_THERMAL_FIXTURE=1 ./build/src/app/app`.
+Select **Heat site** for a stone pad with a heater at X−2, a cooler at X+2 and
+a shelter wall at Z+2 relative to the reported site. **HEATER ITEM** and
+**COOLER ITEM** spawn a carried source, **THERMAL DROP** leaves it in place,
+**THERMAL TAKE** carries it again, and **CLEAR HEAT ITEMS** removes item
+sources. Walking across the wrapped X seam moves the carried source with the
+player; reloading restores dropped and carried sources. The local °C panel is
+the acceptance readout.
