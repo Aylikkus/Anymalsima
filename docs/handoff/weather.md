@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–08 complete · Step 09 pending.**
+**Steps 01–09 complete · Step 10 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -20,18 +20,19 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 06 | Gravity settlement at slopes and ledges | Complete | |
 | 07 | Visible dusting, toe fill and snow collision | Complete | B · Five-centimetre ramp |
 | 08 | Calendar and seasonal ambient temperature | Complete | |
-| 09 | Regional weather, presentation and inspection | Pending | C · Weather and seasons |
+| 09 | Regional weather, presentation and inspection | Complete | C · Weather and seasons |
 | 10 | Exposure, snowfall and outdoor melt | Pending | |
 | 11 | Unloaded weather history and elapsed-time reconciliation | Pending | D · Shelter and travel |
-| 12 | Polar baselines, vertical runs and excavation | Pending | |
-| 13 | Deep-pack LOD, structures and travel | Pending | E · Arctic shelter |
-| 14 | Local heating and cooling from blocks and items | Pending | |
-| 15 | Room air, wall heat storage and local melt | Pending | F · Heated room |
-| 16 | Partial-cell water capacity and connectivity | Pending | |
-| 17 | Water–ice transfers, persistence and meltwater | Pending | |
-| 18 | Surface ice in still and flowing water | Pending | G · Frozen shore |
-| 19 | Load-bearing ice and local break-through | Pending | H · Thin ice |
-| 20 | Migration, extended travel and performance | Pending | I · End-to-end |
+| 12 | Regional weather at distance | Pending | E · Weather from afar |
+| 13 | Polar baselines, vertical runs and excavation | Pending | |
+| 14 | Deep-pack LOD, structures and travel | Pending | F · Arctic shelter |
+| 15 | Local heating and cooling from blocks and items | Pending | |
+| 16 | Room air, wall heat storage and local melt | Pending | G · Heated room |
+| 17 | Partial-cell water capacity and connectivity | Pending | |
+| 18 | Water–ice transfers, persistence and meltwater | Pending | |
+| 19 | Surface ice in still and flowing water | Pending | H · Frozen shore |
+| 20 | Load-bearing ice and local break-through | Pending | I · Thin ice |
+| 21 | Migration, extended travel and performance | Pending | J · End-to-end |
 
 ## Starting points and ownership
 
@@ -52,7 +53,7 @@ Read the [game module guide](../../src/game/AGENTS.md), the [world vision](../..
 
 Extend the existing shape and river fixtures, or provide a reproducible placement sequence for them. Include a flat landing, straight ramp in four rotations, diagonal and inner/outer corner, two consecutive ramps ending at a drop, rim across a chunk face, solid and transparent roofs, a shallow pool and a moving reach. Put a second case at the wrapped X seam. Keep a disposable copy of a pre-feature save containing shaped edits, flora, structure overrides and water. Record build type, seed, camera, detail preset and clock time.
 
-**Verify.** Build the app and gameplay tests, run the gameplay suite, and capture the original shape and river views. Record bytes per ordinary chunk, mesh build time, median and p95 frame time, worker queue high-water mark and save size for a settled view and a streaming walk. Reuse these measurements in step 20. Commands and device requirements are in the [test guide](../../tests/README.md).
+**Verify.** Build the app and gameplay tests, run the gameplay suite, and capture the original shape and river views. Record bytes per ordinary chunk, mesh build time, median and p95 frame time, worker queue high-water mark and save size for a settled view and a streaming walk. Reuse these measurements in step 21. Commands and device requirements are in the [test guide](../../tests/README.md).
 
 ### 02. Define geometry for more than one solid in a tile
 
@@ -106,7 +107,7 @@ Use a spatially coherent, temporally continuous seeded field for cloudiness, pre
 
 ### 10. Apply exposure, accumulation and outdoor melt
 
-Use a precipitation query along gravity that finds the first intercepting surface. Reuse sky-height acceleration where valid and consult actual shape coverage for openings. Account for transparent roofs, ledges, constructed pieces and terrain edits. Define tree interception for the first version against the existing trunk/canopy representations and document it in the fixture. Stop visible precipitation under a closed roof. Integrate precipitation rate over elapsed world time, feed snow to step 06, and melt according to sustained positive local temperature. Track snow water equivalent using a documented conversion; measured snow depth and liquid water depth have different units of accounting. Track meltwater awaiting routing until step 17.
+Use a precipitation query along gravity that finds the first intercepting surface. Reuse sky-height acceleration where valid and consult actual shape coverage for openings. Account for transparent roofs, ledges, constructed pieces and terrain edits. Define tree interception for the first version against the existing trunk/canopy representations and document it in the fixture. Stop visible precipitation under a closed roof. Integrate precipitation rate over elapsed world time, feed snow to step 06, and melt according to sustained positive local temperature. Track snow water equivalent using a documented conversion; measured snow depth and liquid water depth have different units of accounting. Track meltwater awaiting routing until step 18.
 
 **Verify.** Test roof, glass, open hatch, cave, roof edge above a ramp, and opening or closing a hatch halfway through snowfall. Pause produces zero change. Ten small intervals and their combined interval agree within the recorded quantization tolerance; rainfall does not add snow. Preserve buried vegetation and uncover its prior state.
 
@@ -116,37 +117,45 @@ Introduce dated regional precipitation and temperature integrals (or determinist
 
 **Playcheck D.** Set up matching covered and exposed sites. Keep one pair active and leave the other pair for several regions during snow and a thaw. Return, inspect the depths, and reload during catch-up. Covered floors stay dry, exposed deposits agree within the measured tolerance, and there is no second snowfall on loading. Automated cases should also compare different visit orders and a full-year skip.
 
-### 12. Generate and edit deep polar packs
+### 12. Show regional weather at distance
+
+Use the dated regional precipitation and temperature summaries from step 11 to draw weather in neighbouring regions without requesting their chunks. Build one presentation summary per visible weather cell or region: condition, rain or snow, physical rate, visual density, cloud darkness and drift. Render distant rain as depth-aware shafts or curtains and snow as a lighter haze or veil, grouped by summary so a heavy neighbour reads clearly from a ridge while the current region stays clear. The near rain and snow from step 09 own the detail radius; distant weather fades in beyond it and must hand over without a double layer or a pop. Separate physical rate from visual density exactly as in step 09. Bound the work: one summary-driven batch per frame, cached by region, step 11 revision, model date and LOD distance; no voxel-chunk requests, no full-world sweep and no per-frame allocation growth. Respect wrapped X and the Z map edge. Provide a session-only debug force for regional conditions so the same path can be exercised without waiting for weather.
+
+**Verify.** Use a fixed seed and date with four adjacent regions: clear, heavy rain, snow and cloudy/dry. Inspect from a ridge, from the region boundary, across wrapped X and through a pause and reload. Confirm the rain neighbour is visible, snow is a lighter veil, clear stays empty, and no chunks are requested for unloaded neighbours. Check Low, Medium and High detail: distant precipitation fades out as the near particles take over, with no double layer, pop or draw-through at the camera. Record summary rebuilds, draw calls or instances and frame time while stationary and while crossing regions. A time jump changes the summary only through step 11's dated data; pause freezes it.
+
+**Playcheck E.** Stand in a clear region beside a heavy-rain region and a snow region. From a ridge, see rain falling in the neighbour while the local sky stays clear; move to the boundary and watch the near particles take over. Repeat at a second detail preset, across the wrapped X seam, and after pausing and reloading. Confirm no rain appears in the clear region and no chunks stream for the distant weather.
+
+### 13. Generate and edit deep polar packs
 
 Generate established packs for eligible new-world polar terrain using climate, exposure and a deterministic starting date. Implement continuous depths from dusting through **16 m**. Store undisturbed pack as compact vertical runs or equivalent reproducible intervals. Record exceptions at arbitrary heights and surface caps. The cap is measured as accumulated depth above the relevant support; retain a documented overflow policy at saturation for the water budget. Crossing a vertical chunk boundary must preserve continuous support and volume. Version the baseline. Proposed migration for an existing world is to start weather at its saved date with zero initial deposit, including unseen regions of that world; this keeps existing buildings accessible and avoids a boundary between explored and unexplored terrain.
 
 **Verify.** Generate a 16 m fixture with the pack crossing a slab boundary. Excavate the middle of a column and keep the snow above and below. Remove the roof of a buried room and apply new snowfall. A side entrance under a roof stays sheltered. Validate compact storage, excavation across region borders, save/reload and the old-world policy.
 
-### 13. Carry snow into distant terrain and structures
+### 14. Carry snow into distant terrain and structures
 
 Make terrain LOD sample the same dated pack summaries and edited surface intervals. Resolve roofs and snow-covered structures at the structure handover. Update silhouettes, sky occlusion, shadows, flora visibility and walkable surfaces as depth changes. Limit invalidation by changed footprint and quantized geometry changes. Underground voids belong to exact nearby geometry; preserve them in the saved data when a far patch simplifies the exterior.
 
-**Playcheck E.** Find the seeded 16 m pack, cut a side entrance and room across a chunk boundary, and add a roof or structural support. Watch snowfall outside. Leave to distant view, approach again, travel three regions away, and reload. Inspect the silhouette, tunnel headroom, snow above it and grass or rock at the excavated floor.
+**Playcheck F.** Find the seeded 16 m pack, cut a side entrance and room across a chunk boundary, and add a roof or structural support. Watch snowfall outside. Leave to distant view, approach again, travel three regions away, and reload. Inspect the silhouette, tunnel headroom, snow above it and grass or rock at the excavated floor.
 
-### 14. Measure local heat and cold
+### 15. Measure local heat and cold
 
 Add a data-defined thermal source with signed output and an effective range. Expose it from a placed block and from an item at its current world position; use a movable debug item if the inventory path is unavailable. Attach, move and remove sources through their owners' lifecycles. Provide a local °C query usable by snow, ice and future actors. Use an indexed local neighbourhood and measure attenuation with distance and barriers. Provide a dated regional contribution interface for future large fires. Record the handover convention so a source contributes once where coarse and detailed simulation meet.
 
 **Verify.** Use one heater, one cooler and an overlapping pair. Sample at specified distances and behind shelter. Move a carried source across a region boundary, drop or remove it, save and return. Check for residual registered sources and temperature jumps at handover. Document configurable units and ranges alongside the item data.
 
-### 15. Let rooms and walls store heat
+### 16. Let rooms and walls store heat
 
 Compute connected indoor air in the active area with leakage through openings, exposure to outdoors, and heat exchange with surrounding material. Treat warmed walls as finite stores that can release heat into adjacent air. Use baseline ground temperature and insulation for sheltered caves. Bound connectivity work across unloaded boundaries; record the approximation there and invalidate it on geometry changes. Persist significant stored heat and its timestamp; cooling during absence should match the documented approximation. Feed the same local °C into snowmelt and later phase changes.
 
-**Playcheck F.** Measure a heater outdoors, then inside the fixture room. Open the door, close it, turn off the heater and observe air and walls cooling at different rates. Remove a roof piece during snowfall and check exposure and heat loss. Repeat with the cooler. Inspect a patch of snow beside the warm wall and another farther away. Reload while the wall is still warm.
+**Playcheck G.** Measure a heater outdoors, then inside the fixture room. Open the door, close it, turn off the heater and observe air and walls cooling at different rates. Remove a roof piece during snowfall and check exposure and heat loss. Repeat with the cooler. Inspect a patch of snow beside the warm wall and another farther away. Reload while the wall is still warm.
 
-### 16. Teach water about partial-cell solids
+### 17. Teach water about partial-cell solids
 
 Audit solid checks in projection, barriers, local flow, face culling, submersion and picking. Use the occupied geometry to calculate available liquid volume at a given head and face openings shared with neighbouring cells. Distinguish stacked free intervals and sealed pockets. Fill only connected space up to its hydraulic head. Version and migrate any persisted local-volume assumptions. Check old edited dams and reservoir barriers explicitly because existing partial solids used to seal an entire cell. Preserve established legacy barriers through migration where opening them would drain a saved body.
 
 **Verify.** Test a slab above water, an elevated lid over connected liquid, a fully closed face, a wall with a side gap, a ramp shoreline and two disconnected cavities. Check the local, independent/legacy and reservoir-projected water paths. An unchanged full cube still dams a river. Existing river, lake, drawdown and save/load tests must pass.
 
-### 17. Give freeze, thaw and runoff one balance sheet
+### 18. Give freeze, thaw and runoff one balance sheet
 
 Keep authoritative phase state beside the water volume it changes. Record source/body or local owner, column or interval, frozen water equivalent, residual phase progress and last-applied time. Use fixed volume units or an explicit remainder when converting between the water system's fill levels and centimetres. Commit the liquid debit and frozen credit together. Make a load, retry, stale worker result, or interruption between region and world saves safe to replay; test recovery at each write boundary. For legacy independent water, establish one owner before conversion. Keep projected ice out of ordinary solid edit saves.
 
@@ -154,23 +163,23 @@ Route rain and credited snowmelt through dated, once-only inputs to a local cell
 
 **Verify.** Cycle through freeze, thaw, drain, refill, excavation and reload. Include a full destination, changed reservoir head, frozen and unloaded regional boundary, and one source sending to two receivers. Verify the balance and ensure remote catch-up and local detail cannot both apply a transfer.
 
-### 18. Grow surface ice and show the water underneath
+### 19. Grow surface ice and show the water underneath
 
 Use prolonged subzero or positive local temperatures to drive phase progress. Show successive 5, 10, 25, 50, 75 and 100 cm stages and retain sub-stage progress across reversals and loads. Expose thickness and remaining liquid depth to gameplay. Start at the fractional mean waterline and grow down into available water; limit growth by depth and supply. Use the mean river stage for simulation. Suppress animated liquid waves where covered. Choose and record a reduced freezing rate for flowing reaches. Reconcile changing stage, stranded ice and open patches without recreating liquid from a projection. A dated frozen fraction or equivalent summary should give distant lakes and rivers the same broad ice footprint as nearby cells.
 
-**Playcheck G.** Inspect a shallow bank and a deeper pool from above and below while accelerating a cold spell. Measure the first lid at a non-integer waterline; the shallow bank freezes through first. Compare with a moving reach. Heat one patch, reload midway through thaw, then cross near/far range. Inspect the opening, liquid beneath the remaining ice and the reported volume balance.
+**Playcheck H.** Inspect a shallow bank and a deeper pool from above and below while accelerating a cold spell. Measure the first lid at a non-integer waterline; the shallow bank freezes through first. Compare with a moving reach. Heat one patch, reload midway through thaw, then cross near/far range. Inspect the opening, liquid beneath the remaining ice and the reported volume balance.
 
-### 19. Break ice under a load
+### 20. Break ice under a load
 
 Keep ice strength a separate gameplay rule reading thickness, support and applied load. Provide data-defined test thresholds and a grounded debug probe with selectable loads until actors supply their own. Break the contacted patch once, remove its support, and let the probe fall into the exposed liquid. Route the displaced ice through a documented budget policy; an acceptable V1 approximation is to credit the broken mass back to local liquid. Persist the opening and reset local growth progress so it refreezes over elapsed time.
 
-**Playcheck H.** Put a light and a heavy load on matching thin lids, then the heavy load on thick ice. Break through near the shore and at a chunk edge. Inspect the fall, adjacent intact ice, and the saved hole; wait for refreezing. Confirm breakage and thaw cannot both credit the same ice.
+**Playcheck I.** Put a light and a heavy load on matching thin lids, then the heavy load on thick ice. Break through near the shore and at a chunk edge. Inspect the fall, adjacent intact ice, and the saved hole; wait for refreezing. Confirm breakage and thaw cannot both credit the same ice.
 
-### 20. Verify the combined rollout
+### 21. Verify the combined rollout
 
 Repeat step 01 with ordinary terrain, a compound village fixture, active snowfall, deep polar terrain, and a freezing river. Record memory, frame times, meshes built, worker backlog, catch-up latency and save growth at the same presets and routes. Separate the cost of a settled scene from active streaming. Investigate regressions against the baseline, especially allocations per ordinary tile, full-world sweeps, remeshing on every temperature sample, and repeated reconstruction of deep packs. Run old-save and malformed-save tests, the full gameplay suite, the relevant device scenes, and exit with background work pending. Update the water, shape and modding guides where their described behaviour or schemas have actually changed.
 
-**Playcheck I.** In a new world, travel from rain to a polar shelter, alter a shore and excavate under the pack. Spend a season away, return and reload. In the disposable pre-feature world, verify the stored date, original buildings, old dam and terrain edits before advancing through its first weather. Record final performance evidence, any accepted approximations, and the maintainer result.
+**Playcheck J.** In a new world, travel from rain to a polar shelter, alter a shore and excavate under the pack. Spend a season away, return and reload. In the disposable pre-feature world, verify the stored date, original buildings, old dam and terrain edits before advancing through its first weather. Record final performance evidence, any accepted approximations, and the maintainer result.
 
 ## Execution log
 
@@ -239,7 +248,7 @@ logical file sizes across the slot after flushing the checkpoint. The
 streaming save includes newly visited terrain. Frame time includes CPU work
 through renderer flush and any wait inside submission. Queue peaks count
 waiting jobs at the two per-frame sample points. Use the same sample points
-and route in step 20.
+and route in step 21.
 
 The CPU mesh benchmark supplies per-chunk costs for both workloads using
 the same 64 surface slabs per run. An ordinary chunk uses 24,576 bytes of
@@ -436,7 +445,7 @@ the grounded probe query the actual solid surfaces and clearances.
 Distant structure levels 1 and 2 still simplify to coarse voxels. The coarse
 GPU sky map uses opaque heights on its existing four-metre grid. The exact
 heightmap and level-zero handover are used to check the one-metre beam
-opening. Per-piece water capacity is deferred to step 16.
+opening. Per-piece water capacity is deferred to step 17.
 
 #### Execution checks
 
@@ -615,7 +624,7 @@ separate term yet: a steep face is shallow in free volume, so it drains to the
 lowest opening, while a gentler face builds a cell-sized pocket that spills at
 the next sill. This is the tuning choice reserved for playcheck B. Enclosed
 cavities under an overhang stay outside the surface-connected model until
-steps 10 and 15. Z edges are closed; volume above the world top is an
+steps 10 and 16. Z edges are closed; volume above the world top is an
 accounted sink. The settlement has no world save section or debug controls
 yet; step 07 supplies rendering and interaction, and steps 10–11 supply dated
 weather input and unloaded history.
@@ -772,6 +781,182 @@ ran headlessly with synthetic worlds; no seed or save fixture is required.
 `world.json` round-trip across midnight.
 
 V1 keeps the seasonal amplitude latitude-only and the daily range constant.
-Weather offsets, regional precipitation and shelter arrive in steps 09–15.
+Weather offsets, regional precipitation and shelter arrive in steps 09–16.
 Ground-cover tints still use the annual `ground_cover_climate::at` values so
 seasonal climate does not remesh terrain.
+
+### Step 09 · 2026-11-26
+
+[WorldWeather](../../src/game/world/world_weather.hpp) samples cloud cover,
+precipitation, the weather temperature offset and surface wind from the master
+seed, a model version, world position and `WorldClock` days. The field is a sum
+of long plane waves whose X frequencies are multiples of the world's wrap
+period, so it is spatially coherent, continuous in time and seamless across X.
+Region centres are blended bilinearly exactly like `world_climate::at` and
+`ground_cover_climate::at`; a map-less world samples the field directly.
+
+The physical precipitation rate is a rain-equivalent in mm/h. A separate
+0..1 visual density drives presentation; snow reaches a higher visual density
+per millimetre, and dry cloud produces no particles. Conditions are `Clear`
+(below 35% cloud), `Cloudy` (dry), `Rain` and `Snow`. The rain/snow choice
+uses a deterministic 1 °C band around 0 °C, with `Snow` at and below the
+halfway point. Precipitation now fades in with cloud cover, so a broken deck
+does not drizzle from a nearly clear sky.
+
+Presentation extends `SkyState` with cloud cover, visual precipitation,
+snow fraction, animation time and a wind direction and speed. The sky program
+draws a flat-shaded cumulus layer after the sun and moon, dimming them and
+covering stars. Its three tones, crisp body edge and sun-facing crown follow
+the reference art; precipitation darkens the same palette. Clouds are sampled
+from a world-anchored three-dimensional shell, so the field no longer stretches
+into curtains at the horizon, and wind translates the layer along the ground
+plane instead of spinning it around a sky projection. Near rain and snow are
+world-space instanced billboards in the dedicated `RenderViews::Weather` view
+after the world and before glow: they fall under gravity, drift with the wind,
+are depth-tested against blocks and never write depth. Rain streaks fall
+downward and stay vertical; snow uses camera-facing flakes. Their counts scale
+with visual density and blend across the freezing band. Cloud and particle
+presentation follow a visual clock capped at 5× game speed, and stop when the
+clock is paused.
+
+The tile panel's **Climate** section now shows the climate baseline, the
+weather offset and the resulting local °C. The new **Weather** section shows
+the condition, cloud cover, physical rate, visual density, snow fraction, wind
+speed and model version; the no-tile line summarises the camera's weather.
+
+#### Debug controls
+
+Launch with `ANYM_WEATHER_FIXTURE=1` to add session-only controls. Nothing is
+saved; reload returns to `AUTO` and the start site.
+
+- **WEATHER +6H / +1D / +30D / +180D** jump game time. The existing time
+  button still cycles pause and accelerated speeds, which also animates the
+  clouds and particles.
+- **WEATHER FORCE: AUTO/CLEAR/CLOUDY/RAIN/SNOW** overrides presentation only.
+  The sampled temperature and weather offset stay visible in the climate
+  section, and a forced sample is marked in the weather section.
+- **WEATHER SITE: START/NORTH POLE/EQUATOR/SOUTH POLE/X SEAM** teleports the
+  orbit camera to a region centre. `X SEAM` stands at tile X 0.5. Wait for
+  streaming after a jump.
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests lod_render_smoke \
+  shape_benchmark --parallel 6
+ctest --test-dir build -R 'weather_' --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R 'weather_' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The Release app, logic tests, smoke harness and shape benchmark built. All 6
+weather cases and all 435 gameplay cases passed. The same 6 cases passed with
+ASan and UBSan. The shaders were also compiled directly through `shaderc`
+with a checked exit status; `assets/definitions.json` gained `weather`.
+`weather_field_reproducible_and_seeded`, `weather_x_seam_is_continuous` and
+`weather_time_is_continuous` check determinism, the wrapped X seam and day,
+month and year boundaries. `weather_condition_thresholds` checks the four
+conditions and the freezing band; `weather_temperature_and_rate_bounds`
+checks the rate, offset and visual bounds; `weather_opposite_seasons` checks
+that the weather result keeps the opposite annual curves at the two poles.
+
+Visual presentation is unverified in the sandbox: Vulkan could not open a
+window here. The app and the device smoke target built, so Playcheck C is
+ready for the maintainer.
+
+#### Playcheck C · Weather and seasons
+
+From the repository root:
+
+```bash
+ANYM_WEATHER_FIXTURE=1 ./build/src/app/app
+```
+
+Load a world with known seed and date, or create a new one. The weather
+buttons are in the two rows above the snow controls. The HUD time button
+shows D/M/Y and speed; **WEATHER SITE** prints the chosen site in the action
+line.
+
+1. At **START**, read the winter sample in **Climate** and **Weather**. Click
+   **WEATHER +180D** and compare the same region in summer. The baseline
+   should swing by roughly twice the latitude's seasonal amplitude, while the
+   weather offset stays within ±8 °C. The daily range should remain 8 °C at
+   the same hour.
+2. Cycle **WEATHER SITE** through **NORTH POLE**, **EQUATOR** and
+   **SOUTH POLE**. Wait for streaming after each jump. At one date the poles
+   show opposite seasons and the equator shows little seasonal swing. Snow is
+   expected at the winter pole even when the same date rains at the equator.
+3. Cycle to **X SEAM**, then orbit or walk across tile X 0. Watch a cloud band
+   cross the seam without a jump in cover or precipitation. Travel into the
+   next region and confirm the field blends rather than switching.
+4. Use **WEATHER +6H** and **+1D** to follow a band. Find a dry cloudy period,
+   rain, and a rain-to-snow transition near 0 °C. **WEATHER FORCE** can preview
+   each presentation immediately; set it back to **AUTO** to inspect the real
+   sample. Rain falls as thin downward streaks; snow falls as larger white
+   flakes. Both are world-space and should be hidden by blocks in front of
+   them. Watch the reported wind move the clouds and slant the particle drift.
+5. Pause with the time button, note the date and both HUD sections, then quit
+   and load the same slot. The same date, position and seed must produce the
+   same cloud cover, precipitation rate and offset. Forced presentation must
+   be back at **AUTO**.
+
+Expected result: cloud cover visibly follows the reported cloudiness; near
+precipitation is visible only for the reported rain or snow; the HUD reports
+date, baseline, weather offset, resulting °C and physical rate; the wrapped
+X seam and region hand-over show no step.
+
+#### Deviations
+
+Cloud cover and near precipitation are presentation layers driven by the
+regional sample. They do not yet stop under a roof, accumulate snow or melt
+it; exposure, dated accumulation and outdoor melt remain step 10. The debug
+force is deliberately session-only and never changes the sampled ledger.
+
+#### Follow-up · 2026-11-26
+
+The first device check reported four presentation problems: rain and snow
+moved upward, particles read as a flat screen overlay, clouds tore into
+curtains near the skyline, and the palette did not match the cel-shaded
+reference. The maintainer accepted the sampling, HUD, controls and station
+behaviour otherwise.
+
+The fix keeps the weather sample but replaces the presentation. Rain now uses
+world-space instanced billboards whose centres fall with time; the previous
+screen-space grid was stepped the wrong way. Snow uses the same world-space
+path, so both are depth-tested against blocks and drift with wind. Clouds are
+sampled from a three-dimensional shell around the view direction instead of a
+radial sky plane. Wind now translates that shell along the ground plane, so
+clouds slide horizontally instead of spinning around the dome, and the
+mapping no longer tears into curtains at the horizon. Cloud and near-particle
+drift accumulate wind over time on the CPU; multiplying a freshly sampled wind
+direction by the whole elapsed time was what made a ten-metre walk shift the
+sky. Presentation uses a separate visual clock capped at 5× game speed so
+debug time acceleration cannot make the sky spin. The palette uses three
+flat tones
+with a crisp body edge and a sun-facing crown in the style of the reference
+images in `/tmp/clouds-style`. The sample gained surface wind: direction and
+speed come from two more seeded fields, clouds drift from the wind, and
+particle drift follows the same vector. Wind speed is reported in the Weather
+section.
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests lod_render_smoke \
+  shape_benchmark --parallel 6
+ctest --test-dir build -R 'weather_' --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R 'weather_' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The app and device targets built; all 6 weather cases and all 435 gameplay
+cases passed, and the 6 weather cases passed with ASan and UBSan. The shaders
+were compiled with checked `shaderc` exit status; `weather_particles` replaced
+the old `weather` overlay program. The maintainer confirmed the retest and
+accepted Playcheck C on 2026-11-26.

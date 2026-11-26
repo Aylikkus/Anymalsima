@@ -22,6 +22,8 @@ class SkyRenderer {
     const ResourceManager& resources;
     bgfx::UniformHandle cameraUniform;
     bgfx::UniformHandle sunUniform;
+    bgfx::UniformHandle weatherUniform;
+    bgfx::UniformHandle cloudOffsetUniform;
     bgfx::UniformHandle seedUniform;
     std::array<bgfx::UniformHandle, 2> samplers;
 };

@@ -3,6 +3,7 @@
 #include <bx/math.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 
@@ -13,6 +14,7 @@
 #include "world/generated_hydrology.hpp"
 #include "world/world_calendar.hpp"
 #include "world/world_climate.hpp"
+#include "world/world_weather.hpp"
 
 namespace {
 
@@ -156,6 +158,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         edits.get());
     // The shadowed-light budget follows the terrain detail setting.
     lightRenderer = std::make_unique<LightRenderer>(*context.renderer, detail);
+    weatherRenderer = std::make_unique<WeatherRenderer>(*context.renderer);
     {
         std::vector<ShaderProperty*> patchLights, blockLights;
         lightRenderer->appendUniforms(patchLights, LightRenderer::Program::Lod);
@@ -378,6 +381,31 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         });
         button->setText(_("Snow drop"));
     }
+    // Weather inspection and time advance for playcheck C. The force button
+    // only changes presentation; it is never saved and leaves the sampled
+    // temperature and precipitation ledger alone.
+    if (const char* weatherFixture = std::getenv("ANYM_WEATHER_FIXTURE");
+        weatherFixture && std::string_view(weatherFixture) == "1") {
+        auto* sixHours = makeDebugButton(
+            {0, 9, 6, 1}, [this] { clock.set(clock.days() + 6.0 / 24.0); });
+        sixHours->setText(_("WEATHER +6H"));
+        auto* oneDay = makeDebugButton(
+            {6, 9, 6, 1}, [this] { clock.set(clock.days() + 1.0); });
+        oneDay->setText(_("WEATHER +1D"));
+        auto* thirtyDays = makeDebugButton(
+            {12, 9, 6, 1}, [this] { clock.set(clock.days() + 30.0); });
+        thirtyDays->setText(_("WEATHER +30D"));
+        auto* halfYear = makeDebugButton(
+            {12, 8, 6, 1}, [this] { clock.set(clock.days() + 180.0); });
+        halfYear->setText(_("WEATHER +180D"));
+        weatherForceButton = makeDebugButton({18, 9, 6, 1}, [this] {
+            weatherForce = (weatherForce + 1) % 5;
+            updateWeatherControls();
+        });
+        weatherSiteButton =
+            makeDebugButton({18, 8, 6, 1}, [this] { cycleWeatherSite(); });
+        updateWeatherControls();
+    }
     // World-wide sources must be installed before any chunk is requested.
     try {
         auto file = save_catalog::readStructures(slot);
@@ -438,6 +466,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     blockLight->watch(*editor);
     skyMap->watch(*editor);
     clock.set(slot.meta.worldDays);
+    weatherVisualDays = clock.days();
     floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
                                                  *this->world, *skyMap);
     floraSim->watch(*editor);
@@ -675,6 +704,99 @@ void GameplayState::setupSnowFixture() {
     snowDropSite = TilePos{x, groundY + 1, z + 6};
     chunkManager->setGeneratedStructureKinds(
         applyOverrides({}, {{"snow_fixture", {{Key, std::move(layout)}}}}));
+}
+
+void GameplayState::applyWeatherOverride(world_weather::Sample& weather) const {
+    switch (weatherForce) {
+        case 1:  // Clear
+            weather.cloudCover = .08f;
+            weather.precipitationRate = 0;
+            weather.visualDensity = 0;
+            weather.condition = world_weather::Condition::Clear;
+            break;
+        case 2:  // Cloudy and dry
+            weather.cloudCover = .78f;
+            weather.precipitationRate = 0;
+            weather.visualDensity = 0;
+            weather.condition = world_weather::Condition::Cloudy;
+            break;
+        case 3:  // Rain
+            weather.cloudCover = .86f;
+            weather.precipitationRate = 6.f;
+            weather.visualDensity = .70f;
+            weather.snowFraction = 0;
+            weather.condition = world_weather::Condition::Rain;
+            break;
+        case 4:  // Snow
+            weather.cloudCover = .88f;
+            weather.precipitationRate = 4.f;
+            weather.visualDensity = .80f;
+            weather.snowFraction = 1;
+            weather.condition = world_weather::Condition::Snow;
+            break;
+        default:
+            break;
+    }
+}
+
+world_weather::Sample GameplayState::weatherAt(const Vec3& position) const {
+    auto weather = world_weather::at(*world, position.x, position.z,
+                                     clock.days(), double(position.y));
+    applyWeatherOverride(weather);
+    return weather;
+}
+
+void GameplayState::updateWeatherControls() {
+    static constexpr const char* ForceNames[] = {"AUTO", "CLEAR", "CLOUDY",
+                                                 "RAIN", "SNOW"};
+    static constexpr const char* SiteNames[] = {
+        "START", "NORTH POLE", "EQUATOR", "SOUTH POLE", "X SEAM"};
+    if (weatherForceButton)
+        weatherForceButton->setText(
+            std::string(_("WEATHER FORCE: ")) +
+            _(ForceNames[weatherForce % std::size(ForceNames)]));
+    if (weatherSiteButton)
+        weatherSiteButton->setText(
+            std::string(_("WEATHER SITE: ")) +
+            _(SiteNames[weatherSiteIndex % std::size(SiteNames)]));
+}
+
+void GameplayState::cycleWeatherSite() {
+    static constexpr const char* SiteNames[] = {
+        "START", "NORTH POLE", "EQUATOR", "SOUTH POLE", "X SEAM"};
+    constexpr size_t SiteCount = std::size(SiteNames);
+    weatherSiteIndex = (weatherSiteIndex + 1) % SiteCount;
+    const Vec2u start = slot.meta.startRegion;
+    Vec2u region = start;
+    switch (weatherSiteIndex) {
+        case 1:
+            region = {start.x, 0};
+            break;
+        case 2:
+            region = {start.x, unsigned(std::max(0, world->height / 2))};
+            break;
+        case 3:
+            region = {start.x, unsigned(std::max(0, world->height - 1))};
+            break;
+        case 4:
+            region = {0, start.y};
+            break;
+        default:
+            break;
+    }
+    if (probe) toggleWalk();
+    double x = (double(region.x) + .5) * WorldWrap::RegionSize;
+    if (weatherSiteIndex == 4) x = .5;  // stand on the wrapped X seam
+    const double z = (double(region.y) + .5) * WorldWrap::RegionSize;
+    const int top = chunkManager->generatedSurfaceY(int(x), int(z));
+    camera.position = {float(x), float(top) + 12.f, float(z)};
+    camera.yaw = 0;
+    camera.pitch = -.12f;
+    camera.distance = 12.f;
+    lastBuildAction =
+        fmt::format(fmt::runtime(_("Weather site: {} [{}, {}]")),
+                    _(SiteNames[weatherSiteIndex]), region.x, region.y);
+    updateWeatherControls();
 }
 
 void GameplayState::rebuildSnow() {
@@ -1358,6 +1480,18 @@ void GameplayState::update(Game& game, float dt) {
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
+    const double visualDays = double(dt) * std::min(clock.speed(), 5.0) /
+                              WorldClock::DayLengthSeconds;
+    weatherVisualDays += visualDays;
+    if (visualDays > 0.0) {
+        const auto wind = weatherAt(camera.position);
+        const double gameSeconds = visualDays * 86400.0;
+        const double gameHours = gameSeconds / 3600.0;
+        cloudDriftX += wind.windX * gameHours * .20;
+        cloudDriftZ += wind.windZ * gameHours * .20;
+        windTravelX += wind.windX * gameSeconds;
+        windTravelZ += wind.windZ * gameSeconds;
+    }
     chunkManager->advanceWater(uint64_t(clock.days() * 86400));
     floraSim->update(clock.days());
     treeSim->update(clock.days());
@@ -1422,15 +1556,22 @@ void GameplayState::update(Game& game, float dt) {
             const auto climate =
                 world_climate::at(*world, camera.position.x, camera.position.z,
                                   clock.days(), camera.position.y);
+            const auto weather = weatherAt(camera.position);
             const std::string climateLine = fmt::format(
-                "D{}/M{}/Y{} climate {:.1f} C (mean {:.1f}, season {:+.1f}, "
-                "daily {:+.1f}, elevation {:+.1f})\n",
-                date.day, date.month, date.year, climate.temperatureC,
-                climate.meanC, climate.seasonalC, climate.dailyC,
-                climate.elevationC);
+                "D{}/M{}/Y{} climate {:.1f} C (baseline {:.1f}, weather "
+                "{:+.1f})\n",
+                date.day, date.month, date.year, weather.temperatureC,
+                climate.temperatureC, weather.temperatureOffsetC);
+            const std::string weatherLine = fmt::format(
+                "weather {} cloud {:.0f}% precip {:.1f} mm/h visual {:.2f}, "
+                "wind {:.1f} m/s, offset {:+.1f} C{}\n",
+                _(world_weather::conditionName(weather.condition)),
+                weather.cloudCover * 100.f, weather.precipitationRate,
+                weather.visualDensity, weather.windSpeed,
+                weather.temperatureOffsetC, weatherForce ? _(" (forced)") : "");
             tileDebugText->setText(
-                controls + climateLine + _("No tile") + "\n" + streaming +
-                "LOD: " + std::to_string(terrainLod->patchCount()) +
+                controls + climateLine + weatherLine + _("No tile") + "\n" +
+                streaming + "LOD: " + std::to_string(terrainLod->patchCount()) +
                 " patches, " +
                 std::to_string(terrainLod->residentBytes() / 1024) + " KiB\n" +
                 std::to_string(terrainLod->jobCount()) + " LOD jobs, " +
@@ -1484,14 +1625,37 @@ void GameplayState::update(Game& game, float dt) {
                 const auto climate = world_climate::at(
                     *world, double(hit->tx) + .5, double(hit->tz) + .5,
                     clock.days(), double(hit->ty) + .5);
+                const auto weather = world_weather::at(
+                    *world, double(hit->tx) + .5, double(hit->tz) + .5,
+                    clock.days(), double(hit->ty) + .5);
                 ss << fmt::format("date: D{} M{} Y{}\n", date.day, date.month,
                                   date.year);
                 ss << fmt::format(
-                    "mean {:.1f} C, seasonal {:+.1f}, daily {:+.1f}, "
-                    "elevation {:+.1f}\n",
-                    climate.meanC, climate.seasonalC, climate.dailyC,
-                    climate.elevationC);
-                ss << fmt::format("local {:.1f} C\n", climate.temperatureC);
+                    "baseline {:.1f} C (mean {:.1f}, seasonal {:+.1f}, "
+                    "daily {:+.1f}, elevation {:+.1f})\n",
+                    climate.temperatureC, climate.meanC, climate.seasonalC,
+                    climate.dailyC, climate.elevationC);
+                if (weatherForce)
+                    ss << _("presentation forced (sample unchanged)\n");
+                ss << fmt::format("weather offset {:+.1f} C\n",
+                                  weather.temperatureOffsetC);
+                ss << fmt::format("local {:.1f} C\n", weather.temperatureC);
+            }
+
+            ss << "\n--- Weather ---\n";
+            {
+                auto weather =
+                    weatherAt({float(hit->tx) + .5f, float(hit->ty) + .5f,
+                               float(hit->tz) + .5f});
+                ss << fmt::format(
+                    "{} cloud {:.0f}% precip {:.1f} mm/h visual {:.2f}{}\n",
+                    _(world_weather::conditionName(weather.condition)),
+                    weather.cloudCover * 100.f, weather.precipitationRate,
+                    weather.visualDensity, weatherForce ? _(" (forced)") : "");
+                ss << fmt::format(
+                    "wind {:.1f} m/s, snow fraction {:.2f}, sample v{}\n",
+                    weather.windSpeed, weather.snowFraction,
+                    world_weather::ModelVersion);
             }
 
             ss << "\n--- Liquid ---\n";
@@ -1568,12 +1732,19 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                            std::chrono::steady_clock::now() - started)
                            .count();
     camera.sky = skyAtTime(clock.timeOfDay(), world->genSettings.seed);
+    const auto weather = weatherAt(camera.position);
+    camera.sky.weather = {weather.cloudCover, weather.visualDensity,
+                          weather.snowFraction,
+                          float(std::fmod(weatherVisualDays * 24.0, 100000.0))};
+    camera.sky.cloudOffset = {float(cloudDriftX), float(cloudDriftZ), 0, 0};
     lightRenderer->setSky(camera.sky);
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
     lightRenderer->setSkyOcclusion(skyMap->skyOcclusion());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize(), lightVolumes.get());
     camera.underwater = terrainLod->eyeUnderwater();
+    weatherRenderer->render(target, camera, weather, weatherVisualDays,
+                            windTravelX, windTravelZ, world->genSettings.seed);
     Camera displayedCamera = camera;
     displayedCamera.viewDistance = terrainLod->visibleDistance();
     context.renderer->setCamera(displayedCamera);

@@ -6,6 +6,8 @@ $input v_ray
 
 uniform vec4 u_sky_camera;
 uniform vec4 u_sky_seed;
+uniform vec4 u_sky_weather; // cloud cover, visual precipitation, snow, hours
+uniform vec4 u_sky_cloud_offset; // accumulated ground-parallel drift
 SAMPLER2D(u_sky_sun_map, 0);
 SAMPLER2D(u_sky_moon_map, 1);
 
@@ -134,6 +136,94 @@ vec3 skySprite(vec3 sky, vec3 ray, vec3 direction, bool moon)
     return mix(sky, art.rgb, art.a * aboveHorizon);
 }
 
+float cloudHash3(vec3 cell)
+{
+    vec3 p = fract(cell * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
+float cloudNoise3(vec3 position)
+{
+    vec3 f = fract(position);
+    f = f * f * (3.0 - 2.0 * f);
+    vec3 cell = floor(position);
+    float c000 = cloudHash3(cell);
+    float c100 = cloudHash3(cell + vec3(1.0, 0.0, 0.0));
+    float c010 = cloudHash3(cell + vec3(0.0, 1.0, 0.0));
+    float c110 = cloudHash3(cell + vec3(1.0, 1.0, 0.0));
+    float c001 = cloudHash3(cell + vec3(0.0, 0.0, 1.0));
+    float c101 = cloudHash3(cell + vec3(1.0, 0.0, 1.0));
+    float c011 = cloudHash3(cell + vec3(0.0, 1.0, 1.0));
+    float c111 = cloudHash3(cell + vec3(1.0, 1.0, 1.0));
+    float bottom = mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y);
+    float top = mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y);
+    return mix(bottom, top, f.z);
+}
+
+float cloudFbm3(vec3 position)
+{
+    float value = 0.0;
+    float amplitude = 0.55;
+    for (int i = 0; i < 3; ++i) {
+        value += cloudNoise3(position) * amplitude;
+        position = position * 2.03 + vec3(3.7, 1.9, 5.1);
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+// A procedural cumulus shell in the game's flat-shaded palette. Sampling a
+// volume on a sphere avoids the radial projection that made clouds spin and
+// stretch when the camera turned. Coverage follows cloudiness, precipitation
+// darkens it, and wind translates the whole field along the ground plane.
+vec3 skyClouds(vec3 sky, vec3 ray, float day)
+{
+    float cover = clamp(max(u_sky_weather.x, u_sky_weather.y * 0.85),
+                        0.0, 1.0);
+    if (cover <= 0.001 || ray.y <= 0.0) return sky;
+
+    vec2 drift = u_sky_cloud_offset.xy;
+    vec3 p = ray * 9.0 + vec3(drift.x, 0.0, drift.y)
+                       + (u_sky_seed.xyz - vec3_splat(0.5)) * 13.0;
+    float shape = cloudFbm3(p * 0.42) * 0.68
+                + cloudFbm3(p * 1.15 + vec3(7.3, 2.7, 4.6)) * 0.32;
+    float threshold = mix(0.72, 0.28, cover);
+    float mask = smoothstep(threshold, threshold + 0.035, shape);
+    mask *= smoothstep(0.0, 0.08, ray.y);
+    if (mask <= 0.001) return sky;
+
+    // Three flat tones: shaded body, lit body and a sun-facing crown/rim.
+    float body = smoothstep(threshold + 0.03, threshold + 0.22, shape);
+    float crown = smoothstep(threshold + 0.15, threshold + 0.42, shape);
+    vec3 sunDir = skySunDirection();
+    float facing = clamp(dot(ray, sunDir) * 0.5 + 0.5, 0.0, 1.0);
+
+    float storm = clamp(u_sky_weather.y * 1.6 + u_sky_weather.x * 0.30,
+                        0.0, 1.0);
+    vec3 shade = mix(vec3(0.055, 0.085, 0.20),
+                     vec3(0.47, 0.59, 0.78), day);
+    vec3 middle = mix(vec3(0.09, 0.14, 0.30),
+                      vec3(0.80, 0.86, 0.95), day);
+    vec3 lit = mix(vec3(0.17, 0.25, 0.45),
+                   vec3(1.0, 0.97, 0.89), day);
+    shade = mix(shade, mix(vec3(0.06, 0.08, 0.13),
+                           vec3(0.32, 0.37, 0.45), day), storm * 0.85);
+    middle = mix(middle, mix(vec3(0.09, 0.12, 0.19),
+                             vec3(0.47, 0.52, 0.59), day), storm * 0.80);
+    lit = mix(lit, mix(vec3(0.15, 0.19, 0.28),
+                       vec3(0.68, 0.72, 0.77), day), storm * 0.70);
+
+    vec3 colour = mix(shade, middle, body);
+    colour = mix(colour, lit, crown * (0.50 + 0.50 * facing));
+    float rim = (1.0 - smoothstep(threshold + 0.02, threshold + 0.09,
+                                  shape))
+              * smoothstep(0.55, 1.0, facing);
+    colour = mix(colour, lit, rim * 0.55);
+    colour *= 1.0 + 0.06 * max(dot(ray, sunDir), 0.0) * day;
+    return mix(sky, colour, mask);
+}
+
 void main()
 {
     if (u_sky_camera.w > 0.5) {
@@ -156,5 +246,6 @@ void main()
     }
     if (sun.y > -0.13) sky = skySprite(sky, ray, sun, false);
     if (sun.y < 0.13) sky = skySprite(sky, ray, -sun, true);
+    sky = skyClouds(sky, ray, day);
     gl_FragColor = vec4(clamp(sky, 0.0, 1.0), 1.0);
 }

@@ -195,7 +195,8 @@
     "sprite": "assets/shaders/sprite",
     "terrain_lod": "assets/shaders/terrain_lod",
     "terrain_sky": "assets/shaders/terrain_sky",
-    "text": "assets/shaders/text"
+    "text": "assets/shaders/text",
+    "weather_particles": "assets/shaders/weather_particles"
   },
   "data": [
     {

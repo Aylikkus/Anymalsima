@@ -15,6 +15,10 @@ SkyRenderer::SkyRenderer(const ResourceManager& resources)
       cameraUniform(
           bgfx::createUniform("u_sky_camera", bgfx::UniformType::Vec4)),
       sunUniform(bgfx::createUniform("u_sky_sun", bgfx::UniformType::Vec4)),
+      weatherUniform(
+          bgfx::createUniform("u_sky_weather", bgfx::UniformType::Vec4)),
+      cloudOffsetUniform(
+          bgfx::createUniform("u_sky_cloud_offset", bgfx::UniformType::Vec4)),
       seedUniform(bgfx::createUniform("u_sky_seed", bgfx::UniformType::Vec4)),
       samplers{
           bgfx::createUniform("u_sky_sun_map", bgfx::UniformType::Sampler),
@@ -23,7 +27,8 @@ SkyRenderer::SkyRenderer(const ResourceManager& resources)
 SkyRenderer::~SkyRenderer() {
     for (const auto uniform : samplers)
         if (bgfx::isValid(uniform)) bgfx::destroy(uniform);
-    for (const auto uniform : {cameraUniform, sunUniform, seedUniform})
+    for (const auto uniform : {cameraUniform, sunUniform, weatherUniform,
+                               cloudOffsetUniform, seedUniform})
         if (bgfx::isValid(uniform)) bgfx::destroy(uniform);
 }
 
@@ -33,6 +38,8 @@ void SkyRenderer::draw(const Camera& camera, float aspect,
                                 camera.underwater ? 1.f : 0.f};
     bgfx::setUniform(cameraUniform, cameraData.data());
     bgfx::setUniform(sunUniform, camera.sky.sun.data());
+    bgfx::setUniform(weatherUniform, camera.sky.weather.data());
+    bgfx::setUniform(cloudOffsetUniform, camera.sky.cloudOffset.data());
     bgfx::setUniform(seedUniform, camera.sky.seed.data());
     constexpr uint32_t flags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
     for (uint8_t stage = 0; stage < samplers.size(); ++stage) {

@@ -75,6 +75,7 @@ add_executable(world_logic_tests
     unit/game/world/tile_piece_tests.cpp
     unit/game/world/snow_settlement_tests.cpp
     unit/game/world/climate_tests.cpp
+    unit/game/world/weather_tests.cpp
     unit/game/world/chunk_piece_tests.cpp
     unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
@@ -160,6 +161,12 @@ set(world_cases
     climate_daily_range_and_elevation
     climate_map_less_fallback
     climate_clock_pause_and_midnight_save
+    weather_field_reproducible_and_seeded
+    weather_x_seam_is_continuous
+    weather_time_is_continuous
+    weather_condition_thresholds
+    weather_temperature_and_rate_bounds
+    weather_opposite_seasons
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision

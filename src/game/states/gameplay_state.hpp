@@ -34,9 +34,11 @@
 #include "world/tile_raycast.hpp"
 #include "world/tree_renderer.hpp"
 #include "world/tree_simulation.hpp"
+#include "world/weather_renderer.hpp"
 #include "world/world_clock.hpp"
 #include "world/world_editor.hpp"
 #include "world/world_generation_task.hpp"
+#include "world/world_weather.hpp"
 
 class GameplayState : public IGameState {
    public:
@@ -113,6 +115,8 @@ class GameplayState : public IGameState {
 
     std::unique_ptr<TerrainLodManager> terrainLod;
     std::unique_ptr<LightRenderer> lightRenderer;
+    // Near rain/snow billboards; shares the world camera and depth buffer.
+    std::unique_ptr<WeatherRenderer> weatherRenderer;
     // Declared after chunkManager and editor: they disconnect from their
     // signals.
     std::unique_ptr<FloraRenderer> floraRenderer;
@@ -133,6 +137,13 @@ class GameplayState : public IGameState {
     void updatePlantLabel();
     // Game time (saved in world.json); the TIME button cycles debug speeds.
     WorldClock clock;
+    // Presentation time for clouds and particles: follows the clock but caps
+    // accelerated speeds so weather does not spin during debug time jumps.
+    double weatherVisualDays = 0;
+    // Integrated ground-parallel wind. Presentation consumes these totals so
+    // a fresh wind direction is never multiplied by all elapsed time.
+    double cloudDriftX = 0, cloudDriftZ = 0;
+    double windTravelX = 0, windTravelZ = 0;
     TextButton* timeButton = nullptr;
     TextButton* harvestButton = nullptr;
     std::string lastHarvest;
@@ -218,6 +229,16 @@ class GameplayState : public IGameState {
     std::optional<TilePos> snowDropSite;
     void setupSnowFixture();
     void updateShapeControls();
+    // Weather presentation and the session-scoped test controls (step 09).
+    // weatherForce is 0 for the sampled field, then Clear/Cloudy/Rain/Snow.
+    int weatherForce = 0;
+    size_t weatherSiteIndex = 0;
+    TextButton* weatherForceButton = nullptr;
+    TextButton* weatherSiteButton = nullptr;
+    world_weather::Sample weatherAt(const Vec3& position) const;
+    void applyWeatherOverride(world_weather::Sample& weather) const;
+    void updateWeatherControls();
+    void cycleWeatherSite();
 
     std::optional<GroundedProbe> probe;
     Vec2 walkInput{};

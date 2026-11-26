@@ -93,6 +93,26 @@ Keep the generated temperature as the generation and tint baseline; weather,
 snow and ice consume the dated sample instead of baking seasons into terrain.
 The HUD time button shows D/M/Y, and hovering a tile shows the climate terms.
 
+`world/world_weather.hpp` adds the regional weather sample. Cloud cover,
+physical precipitation (mm/h rain equivalent), a separate visual particle
+density, a temperature offset and surface wind are a seeded, model-versioned
+field over world position and world days. Spatially coherent plane waves wrap
+exactly in X; region-centre values use the same bilinear wrap/clamp blend as
+climate. A 1 °C freezing band derives `Clear`, `Cloudy`, `Rain` and `Snow`;
+`Snow` begins at and below the halfway point. Use `world_weather::at` for
+resulting outdoor °C, not the climate baseline alone. The sky draws a
+flat-shaded cloud shell from `SkyState::weather` and `SkyState::wind`, and
+`WeatherRenderer` adds near rain/snow as world-space, depth-tested instanced
+billboards in `RenderViews::Weather`. Wind translates clouds along the ground
+plane; cloud and particle drift integrate wind on the CPU rather than
+multiplying the current wind by elapsed time, and presentation uses a visual
+clock capped at 5× game speed so debug time acceleration does not spin the sky.
+Cloudiness and precipitation presentation stop when the clock is paused.
+Exposure, roof interception, accumulation and melt are step 10; do not treat
+the current presentation particles as precipitation input.
+`ANYM_WEATHER_FIXTURE=1` adds session-only time jumps, a presentation force and
+site teleports; the force never changes the sampled ledger or save.
+
 ### Trees
 
 Trees follow `docs/handoff/trees.md` (its Progress section lists what exists); modder docs are `docs/modding/trees.md` (update with any `Tree` schema change).

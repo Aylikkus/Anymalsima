@@ -54,6 +54,7 @@ add_library(game
     world/tree_wood_lod.cpp
     world/tree_generator.cpp
     world/flora_renderer.cpp
+    world/weather_renderer.cpp
     world/tree_foliage_builder.cpp
     world/tree_renderer.cpp
     world/tree_simulation.cpp

@@ -23,7 +23,7 @@
 // space is shallow; gentler faces build cell-sized pockets that spill at the
 // next sill. Enclosed cavities under an overhang are outside the surface-
 // connected model until the exposure work in step 10 and room storage in
-// step 15. The X axis follows the world wrap; Z edges are closed and overflow
+// step 16. The X axis follows the world wrap; Z edges are closed and overflow
 // above the world top is recorded as an accounted sink. Bulk snow volume is
 // stored in cubic centimetres; water equivalent is a later conversion.
 namespace snow {

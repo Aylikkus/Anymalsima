@@ -196,6 +196,26 @@ after flush. The shape benchmark measures isolated CPU mesh builds with air
 neighbors. The [weather handoff](../docs/handoff/weather.md#execution-log)
 records the fixture coordinates and reference measurements.
 
+### Regional weather fixture
+
+Step 09 adds a session-only inspection fixture to the app. It does not change
+the world or save file.
+
+```bash
+ANYM_WEATHER_FIXTURE=1 ./build/src/app/app
+```
+
+The two rows above the snow controls gain **WEATHER +6H**, **+1D**, **+30D**
+and **+180D**, a **WEATHER FORCE** cycle (AUTO, CLEAR, CLOUDY, RAIN, SNOW) and
+**WEATHER SITE** (START, NORTH POLE, EQUATOR, SOUTH POLE, X SEAM). The force
+changes presentation only; the climate panel keeps the sampled temperature.
+The tile panel shows the date, climate baseline, weather offset, resulting °C,
+condition, cloud cover, physical precipitation rate, visual density, snow
+fraction and wind speed. Rain and snow are near-camera world-space particles;
+clouds drift with the sampled wind. Wait for streaming after a site jump. The
+expected results and the step 09 replay are in the
+[weather handoff](../docs/handoff/weather.md#step-09--2026-11-26).
+
 ## Natural shape budget
 
 `shape_benchmark` reports natural ramp coverage, column and mesh time,

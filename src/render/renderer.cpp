@@ -100,8 +100,7 @@ void Renderer::beginFrame() {
     float aspect = float(res.x) / float(res.y);
 
     bx::mtxProj(proj_g, 60.0f, aspect, camera.nearPlane,
-                camera.viewDistance + 512.f,
-                bgfx::getCaps()->homogeneousDepth);
+                camera.viewDistance + 512.f, bgfx::getCaps()->homogeneousDepth);
 
     bgfx::setViewTransform(0, view_g, proj_g);
     bgfx::setViewRect(0, 0, 0, (uint16_t)res.x, (uint16_t)res.y);
@@ -111,6 +110,11 @@ void Renderer::beginFrame() {
     bgfx::setViewClear(RenderViews::Glow, BGFX_CLEAR_NONE);
     bgfx::setViewTransform(RenderViews::Glow, view_g, proj_g);
     bgfx::setViewRect(RenderViews::Glow, 0, 0, (uint16_t)res.x,
+                      (uint16_t)res.y);
+    // Near weather particles share the world camera and depth buffer.
+    bgfx::setViewClear(RenderViews::Weather, BGFX_CLEAR_NONE);
+    bgfx::setViewTransform(RenderViews::Weather, view_g, proj_g);
+    bgfx::setViewRect(RenderViews::Weather, 0, 0, (uint16_t)res.x,
                       (uint16_t)res.y);
     // Shadow views always run first, whether or not they are used.
     RenderViews::applyOrder(RenderViews::MaxShadowViews);
@@ -318,6 +322,11 @@ void Renderer::drawVB(const DrawVertexBufferCmd &cmd) {
             view = RenderViews::Glow;
             state = BGFX_STATE_WRITE_RGB | BGFX_STATE_DEPTH_TEST_LESS |
                     BGFX_STATE_BLEND_ADD;
+            break;
+        case DrawLayer::GAME_WEATHER:
+            view = RenderViews::Weather;
+            state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
+                    BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_BLEND_ALPHA;
             break;
         case DrawLayer::SHADOW:
             view = cmd.view;
