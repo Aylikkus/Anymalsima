@@ -315,6 +315,7 @@ TEST(probe_and_ray_chunk_seams) {
 TEST(environment_snow_pick_walk_mesh) {
     ShapeFixture f;
     f.load({0, 0, 0});
+    f.load({1, 0, 0});
     f.set(6, 4, 7);
     f.set(15, 4, 7);
     auto snow = tile_geometry::CellGeometry{}.freeSpaceBetween(0, .05f, 1, 1);
@@ -324,6 +325,13 @@ TEST(environment_snow_pick_walk_mesh) {
     chunkEnvironment->emplace(
         Chunk::cell(6, 5, 7),
         std::make_shared<const tile_geometry::CellGeometry>(std::move(snow)));
+    auto interior = std::make_shared<EnvironmentMap>();
+    interior->emplace(ChunkCoord{0, 0, 0}, chunkEnvironment);
+    const auto neighbor = f.chunks.solidCellAt({16, 5, 7})->revision;
+    f.chunks.setEnvironment(interior);
+    CHECK(f.chunks.solidCellAt({16, 5, 7})->revision == neighbor);
+
+    chunkEnvironment = std::make_shared<ChunkEnvironment>(*chunkEnvironment);
     chunkEnvironment->emplace(
         Chunk::cell(15, 5, 7),
         std::make_shared<const tile_geometry::CellGeometry>(
@@ -331,6 +339,7 @@ TEST(environment_snow_pick_walk_mesh) {
     auto environment = std::make_shared<EnvironmentMap>();
     environment->emplace(ChunkCoord{0, 0, 0}, chunkEnvironment);
     f.chunks.setEnvironment(environment);
+    CHECK(f.chunks.solidCellAt({16, 5, 7})->revision != neighbor);
 
     const auto hit = castTileRay(f.chunks, 6.5f, 7.f, 7.5f, 0, -1, 0);
     CHECK(hit);

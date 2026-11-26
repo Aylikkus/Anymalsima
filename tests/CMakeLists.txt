@@ -153,6 +153,7 @@ set(world_cases
     snow_settlement_top_sink
     snow_settlement_gentle_slope_pocket
     snow_cover_projects_settlement
+    snow_cover_refreshes_only_changed_resident_columns
     snow_settlement_serialization
     climate_calendar_dates
     climate_year_curve_continuous
@@ -172,6 +173,12 @@ set(world_cases
     weather_snow_hatch_timing
     weather_snow_and_melt_interval_accounting
     weather_melt_uncovers_vegetation
+    weather_history_shelter_travel_and_reload
+    weather_history_dated_exposure_change
+    weather_history_full_year_skip_visit_order
+    weather_history_snow_legacy_and_bad_versions
+    weather_history_dated_cells_wrap_and_clamp
+    weather_history_pending_transfer_survives_checkpoint
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision

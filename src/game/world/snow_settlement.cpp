@@ -10,6 +10,9 @@
 #include <tuple>
 #include <vector>
 
+#include "chunk.hpp"
+#include "weather_history.hpp"
+
 namespace snow {
 namespace {
 
@@ -27,6 +30,7 @@ constexpr double VolumeTolerance = 1e-6;  // cm3
 constexpr int MaxOpeningLookup = 64;
 constexpr size_t MaxSerializedColumns = 1 << 22;
 constexpr size_t MaxSerializedPending = 1 << 20;
+constexpr size_t MaxWeatherRecords = 1 << 26;
 constexpr int LevelIterations = 44;
 
 struct ColumnInfo {
@@ -166,7 +170,7 @@ double basinCapacityUnits(std::span<const int> columns,
 
 double levelForVolume(std::span<const int> columns,
                       const std::vector<ColumnInfo>& info, double volume,
-                      TerrainCache& cache) {
+                      TerrainCache& cache, double heightTolerance = 0) {
     if (columns.empty()) return 0;
     double low = std::numeric_limits<double>::infinity();
     for (int index : columns) low = std::min(low, info[index].baseWorld());
@@ -185,7 +189,9 @@ double levelForVolume(std::span<const int> columns,
            basinCapacityUnits(columns, info, high, cache) < volume) {
         high = std::min(ceiling, low + (high - low) * 2);
     }
-    for (int i = 0; i < LevelIterations && !cache.budget.exhausted(); ++i) {
+    for (int i = 0; i < LevelIterations && high - low > heightTolerance &&
+                    !cache.budget.exhausted();
+         ++i) {
         const double mid = (low + high) * .5;
         if (basinCapacityUnits(columns, info, mid, cache) >= volume)
             high = mid;
@@ -594,16 +600,27 @@ const SnowColumn* SnowSettlement::columnAt(int x, int z, int y) const {
 }
 
 std::optional<double> SnowSettlement::level(const SnowColumn& column) const {
-    if (!terrain_.cell({column.x, column.baseY, column.z})) return std::nullopt;
     WorkBudget budget{DefaultWorkBudget};
     TerrainCache cache(terrain_, budget);
+    const auto base = findBase(column.x, column.z, column.baseY, cache);
+    if (!base || base->baseY != column.baseY ||
+        base->baseLocal != column.baseLocal)
+        return std::nullopt;
     const std::vector<ColumnInfo> info{
         {column.x, column.z, column.baseY, column.baseLocal}};
     const std::array<int, 1> single{0};
-    return levelForVolume(single, info, double(column.volume), cache);
+    // Projection and inspection only need the precision used by the
+    // clipping planes. Settlement keeps its full precision for the ledger.
+    constexpr double ProjectionTolerance = 1e-6;
+    return levelForVolume(single, info, double(column.volume), cache,
+                          ProjectionTolerance);
 }
 
 void SnowSettlement::clear() {
+    for (const auto& [key, column] : columns_) {
+        (void)key;
+        invalidateProjection(column.x, column.z);
+    }
     columns_.clear();
     pending_.clear();
     meltwater_.clear();
@@ -611,6 +628,28 @@ void SnowSettlement::clear() {
     sink_ = 0;
     melted_ = 0;
     ++revision_;
+}
+
+bool SnowSettlement::hasSnowInChunkColumn(ChunkColumn column) const {
+    if (columns_.empty()) return false;
+    const int x0 = int(column.first) * Chunk::SIZE_X;
+    const int z0 = int(column.second) * Chunk::SIZE_Z;
+    for (int x = x0; x < x0 + Chunk::SIZE_X; ++x) {
+        const auto found = columns_.lower_bound({x, z0, terrain_.minY()});
+        if (found != columns_.end() && found->second.x == x &&
+            found->second.z < z0 + Chunk::SIZE_Z)
+            return true;
+    }
+    return false;
+}
+
+ChunkColumns SnowSettlement::takeProjectionChanges() {
+    return std::exchange(projectionChanges_, {});
+}
+
+void SnowSettlement::invalidateProjection(int x, int z) {
+    projectionChanges_.emplace(unsigned(x / Chunk::SIZE_X),
+                               unsigned(z / Chunk::SIZE_Z));
 }
 
 void SnowSettlement::queue(const PendingDeposit& deposit) {
@@ -669,12 +708,21 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
         const Volume volume = found == assigned.end() ? 0 : found->second;
         const auto& info = component.info[i];
         const SnowKey key{info.x, info.z, info.baseY};
-        if (volume > 0)
+        const auto existing = columns_.find(key);
+        if (volume > 0) {
+            if (existing != columns_.end() &&
+                existing->second.volume == volume &&
+                existing->second.baseLocal == info.baseLocal)
+                continue;
             columns_.insert_or_assign(
                 key,
                 SnowColumn{info.x, info.z, info.baseY, info.baseLocal, volume});
-        else
-            columns_.erase(key);
+        } else if (existing != columns_.end()) {
+            columns_.erase(existing);
+        } else {
+            continue;
+        }
+        invalidateProjection(info.x, info.z);
     }
     sink_ += overflow;
     ++revision_;
@@ -714,6 +762,7 @@ void SnowSettlement::supportChanged(TilePos pos) {
 
         columns_.erase(found);
         ++revision_;
+        invalidateProjection(pos.x, pos.z);
         const PendingDeposit deposit{pos.x, pos.z, y, column.volume, 2};
         if (tryApply(deposit, DefaultWorkBudget) != ApplyResult::Applied)
             queue(deposit);
@@ -729,6 +778,7 @@ Volume SnowSettlement::melt(SnowKey key, Volume volume) {
     meltwater_[key] += removed;
     melted_ += removed;
     ++revision_;
+    invalidateProjection(std::get<0>(key), std::get<1>(key));
     return removed;
 }
 
@@ -771,10 +821,72 @@ size_t SnowSettlement::settle(size_t budget) {
     return applied;
 }
 
+void SnowSettlement::beginWeather(double day) {
+    if (weatherEpoch_ < 0) resetWeather(day);
+}
+
+void SnowSettlement::resetWeather(double day) {
+    weatherEpoch_ = weatherHorizon_ = day;
+    weatherApplied_.clear();
+    weatherForces_.clear();
+    ++revision_;
+}
+
+double SnowSettlement::weatherDay(int x, int z) const {
+    const auto found = weatherApplied_.find({terrain_.wrapX(x), z});
+    return found == weatherApplied_.end() ? weatherEpoch_ : found->second;
+}
+
+void SnowSettlement::checkpointWeather(double day) {
+    if (day <= weatherHorizon_) return;
+    weatherHorizon_ = day;
+    ++revision_;
+}
+
+void SnowSettlement::markWeatherApplied(int x, int z, double day) {
+    weatherApplied_.insert_or_assign({terrain_.wrapX(x), z}, day);
+    weatherHorizon_ = std::max(weatherHorizon_, day);
+    ++revision_;
+}
+
+void SnowSettlement::setWeatherForce(double day, uint8_t force) {
+    const auto after = weatherForces_.upper_bound(day);
+    if ((after == weatherForces_.begin() ? 0 : std::prev(after)->second) ==
+        force)
+        return;
+    // Several UI clicks at the same paused date collapse to one transition.
+    auto at = weatherForces_.lower_bound(day);
+    const auto prior = at == weatherForces_.begin() ? 0 : std::prev(at)->second;
+    if (force == prior) {
+        if (at != after) weatherForces_.erase(at);
+    } else {
+        weatherForces_.insert_or_assign(day, force);
+    }
+    weatherHorizon_ = std::max(weatherHorizon_, day);
+    ++revision_;
+}
+
+std::optional<SnowColumn> SnowSettlement::weatherSupport(int x, int z,
+                                                         int fromY) const {
+    WorkBudget work{DefaultWorkBudget};
+    TerrainCache cache(terrain_, work);
+    const auto base = findBase(x, z, fromY, cache);
+    if (!base) return std::nullopt;
+    return SnowColumn{x, z, base->baseY, base->baseLocal, 0};
+}
+
+void SnowSettlement::recordWeatherMelt(SnowKey key, Volume amount) {
+    if (amount <= 0) return;
+    deposited_ += amount;
+    melted_ += amount;
+    meltwater_[key] += amount;
+    ++revision_;
+}
+
 Bytes SnowSettlement::encode() const {
     BinaryWriter writer;
     writer.writeTag("SNOW");
-    writer.write<uint32_t>(2);
+    writer.write<uint32_t>(3);
     writer.write<uint64_t>(deposited_);
     writer.write<uint64_t>(sink_);
     writer.write<int64_t>(melted_);
@@ -804,6 +916,21 @@ Bytes SnowSettlement::encode() const {
         writer.write<int32_t>(y);
         writer.write<int64_t>(volume);
     }
+    writer.write<uint32_t>(weather_history::SimulationVersion);
+    writer.write<uint32_t>(world_weather::ModelVersion);
+    writer.write<double>(weatherEpoch_);
+    writer.write<double>(weatherHorizon_);
+    writer.write<uint32_t>(uint32_t(weatherApplied_.size()));
+    for (const auto& [footprint, day] : weatherApplied_) {
+        writer.write<int32_t>(footprint.first);
+        writer.write<int32_t>(footprint.second);
+        writer.write<double>(day);
+    }
+    writer.write<uint32_t>(uint32_t(weatherForces_.size()));
+    for (const auto& [day, force] : weatherForces_) {
+        writer.write<double>(day);
+        writer.write<uint8_t>(force);
+    }
     return writer.take();
 }
 
@@ -812,10 +939,10 @@ bool SnowSettlement::restore(ByteView bytes) {
         BinaryReader reader(bytes);
         if (reader.readTag() != "SNOW") return false;
         const auto version = reader.read<uint32_t>();
-        if (version != 1 && version != 2) return false;
+        if (version < 1 || version > 3) return false;
         const auto deposited = reader.read<uint64_t>();
         const auto sink = reader.read<uint64_t>();
-        const Volume melted = version == 2 ? reader.read<int64_t>() : 0;
+        const Volume melted = version >= 2 ? reader.read<int64_t>() : 0;
         if (deposited > uint64_t(std::numeric_limits<Volume>::max()) ||
             sink > deposited || melted < 0 ||
             uint64_t(melted) > deposited - sink)
@@ -855,7 +982,7 @@ bool SnowSettlement::restore(ByteView bytes) {
             deposit.z = reader.read<int32_t>();
             deposit.fromY = reader.read<int32_t>();
             deposit.volume = reader.read<int64_t>();
-            if (version == 2) deposit.radius = reader.read<int32_t>();
+            if (version >= 2) deposit.radius = reader.read<int32_t>();
             if (deposit.volume <= 0 || deposit.volume > remaining ||
                 (deposit.radius != 0 && deposit.radius != 2) ||
                 !terrain_.inBounds(deposit.x, deposit.z) ||
@@ -872,7 +999,7 @@ bool SnowSettlement::restore(ByteView bytes) {
 
         std::map<SnowKey, Volume> meltwater;
         auto remainingMelt = melted;
-        if (version == 2) {
+        if (version >= 2) {
             const auto count = reader.read<uint32_t>();
             if (count > MaxSerializedColumns) return false;
             for (uint32_t i = 0; i < count; ++i) {
@@ -888,14 +1015,65 @@ bool SnowSettlement::restore(ByteView bytes) {
                 remainingMelt -= volume;
             }
         }
+        double epoch = -1, horizon = 0;
+        std::map<Footprint, double> applied;
+        std::map<double, uint8_t> forces;
+        if (version >= 3) {
+            if (reader.read<uint32_t>() != weather_history::SimulationVersion ||
+                reader.read<uint32_t>() != world_weather::ModelVersion)
+                return false;
+            epoch = reader.read<double>();
+            horizon = reader.read<double>();
+            if (!std::isfinite(epoch) || !std::isfinite(horizon) ||
+                (epoch < 0 && (epoch != -1 || horizon != 0)) ||
+                horizon < epoch || horizon < 0 ||
+                horizon >= double(std::numeric_limits<int64_t>::max() /
+                                  weather_history::IntervalsPerDay))
+                return false;
+            const auto validDay = [&](double day) {
+                return epoch >= 0 && day >= epoch && day <= horizon;
+            };
+            const auto count = reader.read<uint32_t>();
+            if (count > MaxWeatherRecords) return false;
+            for (uint32_t i = 0; i < count; ++i) {
+                const int x = reader.read<int32_t>(),
+                          z = reader.read<int32_t>();
+                const auto day = reader.read<double>();
+                if (!validDay(day) || !terrain_.inBounds(x, z) ||
+                    x != terrain_.wrapX(x) ||
+                    !applied.emplace(Footprint{x, z}, day).second)
+                    return false;
+            }
+            const auto forceCount = reader.read<uint32_t>();
+            if (forceCount > MaxWeatherRecords) return false;
+            for (uint32_t i = 0; i < forceCount; ++i) {
+                const auto day = reader.read<double>();
+                const auto force = reader.read<uint8_t>();
+                if (!validDay(day) || force > 4 ||
+                    !forces.emplace(day, force).second)
+                    return false;
+            }
+        }
         if (!reader.atEnd() || remainingMelt != 0) return false;
 
+        for (const auto& [key, column] : columns_) {
+            (void)key;
+            invalidateProjection(column.x, column.z);
+        }
         columns_ = std::move(columns);
+        for (const auto& [key, column] : columns_) {
+            (void)key;
+            invalidateProjection(column.x, column.z);
+        }
         pending_ = std::move(pending);
         meltwater_ = std::move(meltwater);
         deposited_ = Volume(deposited);
         sink_ = Volume(sink);
         melted_ = melted;
+        weatherEpoch_ = epoch;
+        weatherHorizon_ = horizon;
+        weatherApplied_ = std::move(applied);
+        weatherForces_ = std::move(forces);
         ++revision_;
         return true;
     } catch (const SerializationError&) {

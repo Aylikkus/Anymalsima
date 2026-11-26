@@ -61,9 +61,18 @@ CellGeometry cube() {
 
 void weather(snow::SnowSettlement& settlement, const Fixture& terrain, int x,
              int z, double hours, float rate, float temperature) {
-    precipitation::applyFootprint(
-        settlement, terrain, x, z, hours, rate,
-        [=](double) { return temperature; }, [](double) { return false; });
+    if (hours <= 0) return;
+    settlement.beginWeather(0);
+    const double target = settlement.weatherDay(x, z) + hours / 24;
+    precipitation::reconcile(
+        settlement, terrain, x, z, target, false,
+        [=](int64_t) {
+            world_weather::Sample sample;
+            sample.precipitationRate = rate;
+            sample.temperatureC = temperature;
+            return sample;
+        },
+        [](double) { return std::optional(false); });
 }
 
 CellGeometry ramp(TileFacing facing = TileFacing::PosZ) {
@@ -634,4 +643,228 @@ TEST(weather_melt_uncovers_vegetation) {
     CHECK(grass.block_id == original.block_id &&
           grass.cover == original.cover &&
           grass.coverState == original.coverState);
+}
+
+namespace {
+constexpr double SixHours = 6.0 / 24;
+
+double replay(snow::SnowSettlement& snow, const Fixture& terrain, int x, int z,
+              double day, bool ready = true) {
+    return precipitation::reconcile(
+        snow, terrain, x, z, day, false,
+        [](int64_t) { return world_weather::Sample{}; },
+        [=](double) -> std::optional<bool> {
+            if (!ready) return std::nullopt;
+            return false;
+        });
+}
+}  // namespace
+
+TEST(weather_history_shelter_travel_and_reload) {
+    Fixture terrain;
+    terrain.x1 = 12;
+    terrain.periodX = 12;
+    for (int x : {0, 3, 6, 9}) solid(terrain, x, 2, 0);
+    for (int x : {3, 9}) solid(terrain, x, 7, 0);
+
+    snow::SnowSettlement snow(terrain);
+    snow.beginWeather(0);
+    snow.setWeatherForce(0, 4);  // Snow
+    for (int bin = 1; bin <= 12; ++bin)
+        for (int x : {0, 3})
+            replay(snow, terrain, x, 0, weather_history::intervalStart(bin));
+    snow.setWeatherForce(SixHours, 1);  // Clear, +5 C
+    for (int bin = 13; bin <= 24; ++bin)
+        for (int x : {0, 3})
+            replay(snow, terrain, x, 0, weather_history::intervalStart(bin));
+
+    const double target = 2 * SixHours;
+    EQUAL(snow.weatherDay(6, 0), 0., "unvisited begins at weather epoch");
+    EQUAL(replay(snow, terrain, 6, 0, target, false), 0.,
+          "unready water and geometry do not advance the cursor");
+    const double halfway = 9. / 24;
+    replay(snow, terrain, 6, 0, halfway);
+    snow.checkpointWeather(target);
+
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(snow.encode()));
+    EQUAL(loaded.weatherHorizon(), target, "persisted world clock horizon");
+    EQUAL(loaded.weatherDay(-6, 0), halfway, "canonical progress after reload");
+    loaded.setWeatherForce(target, 0);  // In-game forcing resets on reload.
+    replay(loaded, terrain, 6, 0, target);
+    replay(loaded, terrain, 9, 0, target);
+    for (int x : {0, 6})
+        EQUAL(loaded.volumeAt(x, 0), 45000, "exposed pad keeps 45 mm");
+    for (int x : {3, 9}) {
+        CHECK(!loaded.columnAt(x, 0, 3));
+        EQUAL(loaded.volumeAt(x, 0), 45000, "snow fell on the roof");
+    }
+    EQUAL(loaded.meltwaterCm3(), 60000., "roof and floor meltwater conserved");
+    const auto saved = loaded.encode();
+    for (int x : {0, 3, 6, 9}) replay(loaded, terrain, x, 0, target);
+    CHECK(loaded.encode() == saved);
+    EQUAL(loaded.depositedVolume(), 480000, "no second snowfall");
+}
+
+TEST(weather_history_dated_exposure_change) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    snow::SnowSettlement snow(terrain);
+    snow.beginWeather(0);
+    snow.setWeatherForce(0, 4);
+    constexpr double editDay = 15. / (60 * 24);
+    replay(snow, terrain, 0, 0, editDay);
+    solid(terrain, 0, 7, 0);
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(snow.encode()));
+    replay(loaded, terrain, 0, 0, 2 * editDay);
+    EQUAL(loaded.columnAt(0, 0, 3)->volume, 5000, "snow before roof edit");
+    EQUAL(loaded.columnAt(0, 0, 8)->volume, 5000, "snow after roof edit");
+
+    loaded.setWeatherForce(2 * editDay, 1);
+    replay(loaded, terrain, 0, 0, SixHours);
+    EQUAL(loaded.volumeAt(0, 0), 5000, "closed roof shelters old floor snow");
+}
+
+TEST(weather_history_full_year_skip_visit_order) {
+    World world;
+    world.width = 4;
+    world.height = 3;
+    world.genSettings.seed = 2024;
+    world.regions.resize(world.width * world.height);
+    for (int z = 0; z < world.height; ++z)
+        for (int x = 0; x < world.width; ++x) {
+            auto& region = world.regions[z * world.width + x];
+            region.coord = {unsigned(x), unsigned(z)};
+            region.land_height_m = 64;
+            region.temperature_c = 4;
+        }
+
+    Fixture terrain;
+    terrain.x1 = world.width * WorldWrap::RegionSize;
+    terrain.periodX = terrain.x1;
+    terrain.highY = 100;
+    constexpr int A = 1, B = 65;
+    solid(terrain, A, 60, 0);
+    solid(terrain, B, 60, 0);
+    weather_history::Cache history;
+    constexpr double year = world_calendar::DaysPerYear;
+    const auto advance = [&](snow::SnowSettlement& snow, int x, double end) {
+        return precipitation::reconcile(
+            snow, terrain, x, 0, end, true,
+            [&](int64_t bin) { return history.at(world, x, 0, bin).weather; },
+            [](double) { return std::optional(false); });
+    };
+    const auto skip = [&](snow::SnowSettlement& snow, int x) {
+        int batches = 0;
+        while (snow.weatherDay(x, 0) < year) {
+            const double before = snow.weatherDay(x, 0);
+            const double after = advance(snow, x, year);
+            CHECK(after > before && after - before <= 7.);
+            CHECK(++batches <= 52);
+        }
+        EQUAL(batches, 52, "bounded full-year replay");
+    };
+
+    snow::SnowSettlement westFirst(terrain), eastFirst(terrain), daily(terrain);
+    for (auto* snow : {&westFirst, &eastFirst, &daily}) snow->beginWeather(0);
+    skip(westFirst, A);
+    skip(westFirst, B);
+    skip(eastFirst, B);
+    skip(eastFirst, A);
+    CHECK(westFirst.encode() == eastFirst.encode());
+    for (int day = 1; day <= year; ++day)
+        for (int x : {A, B}) EQUAL(advance(daily, x, day), day, "daily replay");
+    CHECK(westFirst.encode() == daily.encode());
+    CHECK(westFirst.meltwaterCm3() > 0 && westFirst.storedVolume() > 0);
+    EQUAL(westFirst.storedVolume() + westFirst.pendingVolume() +
+              westFirst.sinkVolume() +
+              std::llround(westFirst.meltwaterCm3() * snow::SnowPerWater),
+          westFirst.depositedVolume(), "full-year material balance");
+}
+
+TEST(weather_history_snow_legacy_and_bad_versions) {
+    Fixture terrain;
+    snow::SnowSettlement snow(terrain);
+    for (const unsigned version : {1, 2}) {
+        BinaryWriter legacy;
+        legacy.writeTag("SNOW");
+        legacy.write<uint32_t>(version);
+        legacy.write<uint64_t>(0);                    // supplied
+        legacy.write<uint64_t>(0);                    // sink
+        if (version == 2) legacy.write<int64_t>(0);   // melted
+        legacy.write<uint32_t>(0);                    // resting columns
+        legacy.write<uint32_t>(0);                    // pending transfers
+        if (version == 2) legacy.write<uint32_t>(0);  // meltwater
+        CHECK(snow.restore(legacy.take()));
+        snow.beginWeather(37.5);
+        EQUAL(snow.weatherDay(0, 0), 37.5, "legacy save starts at its date");
+    }
+    const auto before = snow.encode();
+    auto bad = before;
+    bad[44] = std::byte{0xff};  // history simulation version in empty v3
+    CHECK(!snow.restore(bad));
+    CHECK(snow.encode() == before);
+}
+
+TEST(weather_history_pending_transfer_survives_checkpoint) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    snow::SnowSettlement snow(terrain);
+    snow.beginWeather(0);
+    snow.setWeatherForce(0, 4);
+    replay(snow, terrain, 0, 0, SixHours);
+    CHECK(snow.deposit(0, 0, 3, 2500, 0) == snow::DepositOutcome::Pending);
+    snow.setWeatherForce(SixHours, 1);
+
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(snow.encode()));
+    EQUAL(loaded.weatherDay(0, 0), SixHours, "checkpoint retains cursor");
+    EQUAL(loaded.pendingVolume(), 2500, "checkpoint retains queued transfer");
+    EQUAL(loaded.settle(), size_t(1), "queued transfer commits once");
+    replay(loaded, terrain, 0, 0, 2 * SixHours);
+    EQUAL(loaded.volumeAt(0, 0), 47500, "old snow and transfer thaw together");
+    EQUAL(loaded.depositedVolume(), 122500, "past snowfall is counted once");
+    EQUAL(loaded.pendingVolume(), 0, "transit queue drained");
+}
+
+TEST(snow_cover_refreshes_only_changed_resident_columns) {
+    struct CountingTerrain : Fixture {
+        mutable size_t eastReads = 0;
+        std::optional<CellGeometry> cell(TilePos pos) const override {
+            if (pos.x >= 32) ++eastReads;
+            return Fixture::cell(pos);
+        }
+    } terrain;
+    terrain.x1 = 34;
+    solid(terrain, 1, 2, 0);
+    solid(terrain, 33, 2, 0);
+    snow::SnowSettlement snow(terrain);
+    for (int x : {1, 33})
+        CHECK(snow.snowfall(x, 0, 3, 50000) == snow::DepositOutcome::Settled);
+
+    snow::SnowCover cover;
+    snow::ChunkColumns resident = {{0, 0}, {2, 0}};
+    auto dirty = snow.takeProjectionChanges();
+    CHECK(dirty == resident);
+    cover.rebuild(snow, terrain, 42, &resident, &dirty);
+    const auto initial = cover.environment();
+    const ChunkCoord east{2, 0, 0};
+
+    EQUAL(snow.melt({1, 0, 3}, 25000), 25000, "partly melt west pad");
+    dirty = snow.takeProjectionChanges();
+    EQUAL(dirty.size(), size_t(1), "one chunk column is dirty");
+    terrain.eastReads = 0;
+    cover.rebuild(snow, terrain, 42, &resident, &dirty);
+    EQUAL(terrain.eastReads, size_t(0), "untouched geometry is not read");
+    CHECK(cover.environment()->at(east) == initial->at(east));
+    EQUAL(cover.changedChunks().size(), size_t(1), "only west slab published");
+    CHECK(cover.cellAt({1, 3, 0}));
+
+    resident.erase({0, 0});
+    cover.rebuild(snow, terrain, 42, &resident, &dirty);
+    CHECK(!cover.cellAt({1, 3, 0}));
+    CHECK(cover.environment()->at(east) == initial->at(east));
+    EQUAL(snow.volumeAt(1, 0), 25000, "unload preserves west material ledger");
+    CHECK(initial->contains({0, 0, 0}));
 }

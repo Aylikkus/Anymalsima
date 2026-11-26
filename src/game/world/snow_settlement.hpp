@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <tuple>
 #include <utility>
@@ -45,6 +46,8 @@ struct SnowColumn {
 };
 
 using SnowKey = std::tuple<int, int, int>;  // canonical x, z, support cell y
+using ChunkColumn = std::pair<unsigned, unsigned>;
+using ChunkColumns = std::set<ChunkColumn>;
 
 // Terrain queries used by settlement. Cells are one-metre cubes and positions
 // are canonical in X. Returning nullopt closes that side of the world.
@@ -110,7 +113,23 @@ class SnowSettlement {
     // liquid water, so conversion never rounds away a small melt.
     const std::map<SnowKey, Volume>& meltwater() const { return meltwater_; }
     uint64_t revision() const { return revision_; }
+    bool hasSnowInChunkColumn(ChunkColumn column) const;
+    ChunkColumns takeProjectionChanges();
     size_t pendingCount() const { return pending_.size(); }
+
+    // Weather cursors and deposits commit in the same snow.dat snapshot.
+    // Missing cursors use the world's weather epoch, including first visits.
+    void beginWeather(double day);
+    void resetWeather(double day);
+    double weatherDay(int x, int z) const;
+    double weatherHorizon() const { return weatherHorizon_; }
+    void checkpointWeather(double day);
+    void markWeatherApplied(int x, int z, double day);
+    void setWeatherForce(double day, uint8_t force);
+    const auto& weatherForces() const { return weatherForces_; }
+    std::optional<SnowColumn> weatherSupport(int x, int z, int fromY) const;
+    // Snow that fell and melted within one catch-up batch never needs a mesh.
+    void recordWeatherMelt(SnowKey key, Volume amount);
 
     // State includes resting columns, pending transfers, accepted input and
     // accounted sink volume. The version is independent of chunk saves.
@@ -133,6 +152,7 @@ class SnowSettlement {
                          size_t* used = nullptr);
     DepositOutcome submit(PendingDeposit request, size_t budget);
     void queue(const PendingDeposit& deposit);
+    void invalidateProjection(int x, int z);
 
     const SnowTerrain& terrain_;
     std::map<SnowKey, SnowColumn> columns_;
@@ -142,6 +162,11 @@ class SnowSettlement {
     Volume sink_ = 0;
     Volume melted_ = 0;
     uint64_t revision_ = 0;
+    ChunkColumns projectionChanges_;
+    double weatherEpoch_ = -1;
+    double weatherHorizon_ = 0;
+    std::map<Footprint, double> weatherApplied_;
+    std::map<double, uint8_t> weatherForces_;
 };
 
 }  // namespace snow

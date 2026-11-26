@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–10 complete · Step 11 pending.**
+**Steps 01–11 complete · Step 12 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -22,7 +22,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 08 | Calendar and seasonal ambient temperature | Complete | |
 | 09 | Regional weather, presentation and inspection | Complete | C · Weather and seasons |
 | 10 | Exposure, snowfall and outdoor melt | Complete | |
-| 11 | Unloaded weather history and elapsed-time reconciliation | Pending | D · Shelter and travel |
+| 11 | Unloaded weather history and elapsed-time reconciliation | Complete | D · Shelter and travel |
 | 12 | Regional weather at distance | Pending | E · Weather from afar |
 | 13 | Polar baselines, vertical runs and excavation | Pending | |
 | 14 | Deep-pack LOD, structures and travel | Pending | F · Arctic shelter |
@@ -129,6 +129,8 @@ Use the dated regional precipitation and temperature summaries from step 11 to d
 
 Generate established packs for eligible new-world polar terrain using climate, exposure and a deterministic starting date. Implement continuous depths from dusting through **16 m**. Store undisturbed pack as compact vertical runs or equivalent reproducible intervals. Record exceptions at arbitrary heights and surface caps. The cap is measured as accumulated depth above the relevant support; retain a documented overflow policy at saturation for the water budget. Crossing a vertical chunk boundary must preserve continuous support and volume. Version the baseline. Proposed migration for an existing world is to start weather at its saved date with zero initial deposit, including unseen regions of that world; this keeps existing buildings accessible and avoids a boundary between explored and unexplored terrain.
 
+Use deterministic regional snow-depth baselines to initialize undisturbed packs directly. Evaluate how much per-footprint catch-up this avoids, while preserving dated weather changes and sparse records for edits and shelter.
+
 **Verify.** Generate a 16 m fixture with the pack crossing a slab boundary. Excavate the middle of a column and keep the snow above and below. Remove the roof of a buried room and apply new snowfall. A side entrance under a roof stays sheltered. Validate compact storage, excavation across region borders, save/reload and the old-world policy.
 
 ### 14. Carry snow into distant terrain and structures
@@ -136,6 +138,8 @@ Generate established packs for eligible new-world polar terrain using climate, e
 Make terrain LOD sample the same dated pack summaries and edited surface intervals. Resolve roofs and snow-covered structures at the structure handover. Update silhouettes, sky occlusion, shadows, flora visibility and walkable surfaces as depth changes. Limit invalidation by changed footprint and quantized geometry changes. Underground voids belong to exact nearby geometry; preserve them in the saved data when a far patch simplifies the exterior.
 
 **Playcheck F.** Find the seeded 16 m pack, cut a side entrance and room across a chunk boundary, and add a roof or structural support. Watch snowfall outside. Leave to distant view, approach again, travel three regions away, and reload. Inspect the silhouette, tunnel headroom, snow above it and grass or rock at the excavated floor.
+
+Repeat the x7200 → x1 performance check on the same save and at the same camera position. Record frame times during acceleration and after returning to x1, alongside the work spent replaying weather and updating snow projections.
 
 ### 15. Measure local heat and cold
 
@@ -1050,3 +1054,185 @@ including the five new exposure, hatch, accounting and vegetation cases.
 The 26 focused weather and snow cases passed with ASan and UBSan. Validation
 ran headlessly. The near-particle change has no device capture for this
 step, and the handoff schedules no maintainer playcheck until step 11.
+
+### Step 11 · 2026-11-26
+
+[Dated weather summaries](../../src/game/world/weather_history.hpp) sample
+the seeded regional field at the centre of each 16 × 16 m cell and each
+30-game-minute interval. The results carry the weather model and simulation
+versions, physical rate, temperature and presentation fields. A bounded
+64-entry cache shares sampled days between footprints. X wraps, and cells at
+the Z edge use the last in-bounds row. Reading a summary needs only the
+world map, with no voxel requests.
+
+The active 9 × 9 m window replays completed intervals. The same replay
+handles first visits and returns. It uses four precipitation rays against
+the current raw solids, then applies melt and snowfall in date order at
+each receiving support. The support elevation adjusts the sampled
+temperature. A catch-up batch processes up to seven game days per
+footprint. The owner attempts at most eight successful batches per
+update, checks a 2 ms time budget between footprints and retries up to
+4,096 settlement work units for transfers. Automatic catch-up attempts
+run at most ten times per real second while behind and once per second
+when current. Missing receiving geometry or water information leaves the
+cursor unchanged. Pausing stops new weather time, while replay of
+already elapsed time can continue.
+
+Player placement and removal consume history through the exact edit date
+with the pre-edit exposure. If catch-up is still pending, the tool
+prioritizes that footprint for subsequent updates before accepting the
+edit. New or migrated worlds start the ledger at the saved world date.
+The sparse progress map stores only footprints that have applied weather,
+including dry sites. Unvisited footprints use the epoch by default.
+`snow.dat` (SNOW v3) stores the epoch, clock checkpoint, versioned
+cursors and dated physical fixture overrides along with snow, pending
+transfers and meltwater. Resting snow and its applied date commit together
+in one file replacement. SNOW v1 and v2 retain their saved material
+ledger. A physical force closes on load and the dated period remains
+available for unfinished replay. The ordinary presentation override
+continues to affect presentation alone. Debug date jumps now advance the
+physical history as well.
+
+The owner projects one dirty chunk column at a time from resident
+geometry and the committed ledger, at most eight times per real second
+during automatic updates. Pending changes to a column coalesce, and
+untouched slabs keep their immutable environment snapshots. A mesh
+outside the dirty slab is invalidated only when snow changes at its
+shared face. Chunk meshes use the existing topology revision checks.
+Unloading drops the projection for the released chunk column while
+preserving the material ledger. A support that is missing or mismatches
+the recorded geometry is left out of the projection until it can be
+resolved. Projection heights use the clipping planes' one-micrometre
+tolerance. Settlement keeps the original volume precision.
+
+#### Accuracy and limits
+
+- With fixed exposure and an isolated support, replay agrees with the
+  same dated interval sequence applied one interval at a time. Bulk
+  additions and removals round to the nearest cubic centimetre, at most
+  0.5 cm³ of each per interval and receiver. Splitting an interval at an
+  edit or a fixture control adds another rounding. The shelter and
+  full-year headless cases measured zero difference at matching dates.
+- The summaries approximate the continuous weather field using 30-minute
+  midpoint samples on a 16 m grid. Potential precipitation error is bounded
+  by the model's 16 mm SWE/h rate cap. For a mapped footprint, the
+  temperature error at equal elevation is at most
+  `3.2 °C + (8/128) × (Dx + Dz)`, where `Dx` and `Dz` bound adjacent
+  regional climate differences along each axis at the same elevation and
+  date. The 3.2 °C covers the spatial weather offset, the fastest weather
+  wave, and the diurnal and annual temperature curves. The corresponding
+  bound on potential melt rate is half the temperature bound in mm SWE/h
+  per square metre of exposed area.
+- In a multi-day batch, snow spends the thermal calculation at its
+  interception support. Gravity distributes surviving snow after the
+  batch. On connected slopes and ledges, this can shift the place and
+  timing of melt or change depths with visit order. The worst-case
+  volume difference at a receiver is bounded by the starting snow plus
+  snowfall and incoming transfers available to the connected catchment
+  over the replay. The balance sheet conserves calculated snow input
+  through resting volume, transit, sink and meltwater.
+- Replay uses current generated tree geometry and liquid coverage for
+  unloaded dates. Player edits consume their prior exposure before
+  changing it. Generated tree growth and shoreline changes have no dated
+  geometry history in this step. The four rays sample exposure in
+  quarter-square-metre increments, with a worst-case error of one
+  square metre for shapes that pass between all four rays. These
+  approximations can matter near a changing shoreline or thin opening.
+
+#### Playcheck D · Shelter and travel
+
+The disposable fixture uses the step 01 seed 2024 save, generator 27 and
+Low terrain detail. Its two sets of pads sit four regions apart.
+The exposed floor is two tiles west of each site centre and the covered
+floor is two tiles east. The table gives their coordinates.
+
+| Site | Exposed X | Covered X | Z |
+| --- | ---: | ---: | ---: |
+| A | 6206 | 6210 | 6208 |
+| B | 6718 | 6722 | 6208 |
+
+The HUD reports the floor Y, both floor volumes and the world day applied
+to each pad. The fixture starts paused and limits deposition sources to
+the four pads, so surrounding terrain does not add snow to the
+comparison. Use the same fixture flag when reloading. The repository's
+baseline save is copied into the disposable slot.
+
+```bash
+mkdir -p build/weather-travel-playcheck/saves
+cp -an build/weather-baseline/weather-walk_saves/2024_2026-11-25_22-28-13 \
+    build/weather-travel-playcheck/saves/
+ln -sfn ../src/app/assets build/weather-travel-playcheck/assets
+cd build/weather-travel-playcheck
+ANYM_WEATHER_TRAVEL_FIXTURE=1 ../src/app/app
+```
+
+1. In **Load World**, select seed 2024 dated 2026-11-25 22:28:13.
+   Click **Travel site A** and let chunks stream in. Click **CLEAR SNOW**
+   to reset both pads and start the comparison at the current date.
+2. Cycle **WEATHER FORCE** to **SNOW** and click **WEATHER +6H**.
+   Wait for A's dates to reach the target. The open floor should hold
+   about 120,000 cm³ (120 mm) and the covered floor should stay at zero.
+   B should still show the date at which you cleared snow.
+3. Cycle through **AUTO** to **CLEAR** without advancing time. Click
+   **WEATHER +6H** again. A's exposed floor should hold about
+   45,000 cm³ (45 mm) after the thaw. Its covered floor stays dry.
+4. Click **Toggle catch-up hold**, then **Travel site B**. Let its
+   geometry stream in and use **Catch up 1h** eight times. The open pad
+   should have about 95,000 cm³ with four hours of thaw still to apply.
+   Use Escape, then load the same slot. The fixture resumes automatic
+   catch-up at the saved clock date.
+5. Once B's dates reach the target, compare the pads. Both covered
+   floors should report zero. The open floors should agree within
+   12 cm³ (0.012 mm), allowing rounding when the manual steps split
+   intervals. Reload once more at the same date and check that both
+   volumes stay fixed.
+
+#### Execution checks
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 3
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -j 4 --output-on-failure \
+  --no-tests=error -R 'weather_|snow_settlement|snow_cover'
+```
+
+The Release app built, all 446 gameplay tests passed, and 32 focused
+cases passed under ASan and UBSan. The shelter case yielded 45,000 cm³
+on both exposed pads and zero on both covered floors, including a
+checkpoint during thaw and a second replay at the same date. The
+seed 2024 full-year case used 52 bounded batches per site and produced
+identical saved ledgers when reversing visit order and comparing against
+daily replay. Additional cases covered an edit at a fractional date, X
+wrapping, Z clamping, legacy snow data, and a pending transfer after
+reload. The sandbox could not open display `:0`, so the in-game fixture
+and visual confirmation remain part of Playcheck D.
+
+#### Accelerated-clock follow-up · 2026-11-26
+
+The maintainer saw snow forming and reported sustained 5–15 FPS after
+using x7200 and returning to x1. The old replay loop could run every frame
+while behind. An update with any volume change rebuilt snow over all
+resident columns and invalidated the affected slabs and all six
+neighbours.
+Projection now follows dirty column changes and publishes at a bounded
+real-time rate. The saved weather cursor still advances in date order
+and preserves the remainder across a change of clock speed.
+
+A Release CPU comparison used a 48 × 48 m mixed flat-and-ramp snowfield
+with 2,678 projected cells. After one footprint advanced, the old update
+reprojected the full snowfield and took 138 ms in the initial run. The
+updated path republished one chunk column in roughly 12–13 ms in two
+runs. The regression test verifies that an untouched column receives no
+geometry queries and keeps its prior snapshot. A second test covers mesh
+revision changes on a shared face. The Release app built, all 447 gameplay
+tests passed, and 43 focused weather, snow and compound geometry tests
+passed under ASan and UBSan. Live frame rate remains unverified.
+
+The maintainer approved marking step 11 complete and reported that FPS
+still drops after using x7200. Further optimization is deferred to steps
+13–14. Step 13 will evaluate predefined regional snow depths to reduce
+per-footprint work, and step 14 will repeat the accelerated-clock
+performance check.

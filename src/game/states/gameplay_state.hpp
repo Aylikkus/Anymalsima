@@ -34,6 +34,7 @@
 #include "world/tile_raycast.hpp"
 #include "world/tree_renderer.hpp"
 #include "world/tree_simulation.hpp"
+#include "world/weather_history.hpp"
 #include "world/weather_renderer.hpp"
 #include "world/world_clock.hpp"
 #include "world/world_editor.hpp"
@@ -81,17 +82,27 @@ class GameplayState : public IGameState {
     std::unique_ptr<ChunkSnowTerrain> snowTerrain;
     std::unique_ptr<snow::SnowSettlement> snowSettlement;
     std::unique_ptr<snow::SnowCover> snowCover;
+    snow::ChunkColumns snowResident;
+    snow::ChunkColumns snowDirtyColumns;
+    snow::ChunkColumn lastSnowProjection{};
+    double snowProjectionSeconds = 0;
+    Signal<uint64_t>::Connection snowColumnReleased;
     uint8_t snowId = 0;
-    double snowAppliedDays = 0;
+    weather_history::Cache snowHistory;
+    size_t snowNextFootprint = 0;
+    bool snowCatchingUp = false;
+    std::optional<TilePos> snowEditPending;
     double snowUpdateSeconds = 0;
     uint64_t savedSnowRevision = 0;
-    bool snowProjectionDirty = false;
     Signal<const BlockChange&>::Connection snowEditConnection;
     bool depositionFixture = false;
     // cm3: the step 06 fixture amount for a 5 cm landing plus a 5 cm toe.
     int64_t snowAddVolume = 51250;
-    void rebuildSnow();
-    void advanceSnow();
+    void rebuildSnow(size_t maxColumns = 1);
+    void advanceSnow(bool throughNow = false, double maxDays = 7);
+    bool reconcileSnowAt(int x, int z, double target);
+    bool prepareSnowEdit(TilePos pos);
+    void clearSnow();
     void skipWeatherTime(double days);
     void addSnow(const TileRaycastHit& hit);
     std::unique_ptr<LocationManager> locationMgr;
@@ -238,6 +249,10 @@ class GameplayState : public IGameState {
     std::optional<TilePos> snowFixtureSite;
     std::optional<TilePos> snowDropSite;
     void setupSnowFixture();
+    std::optional<std::array<TilePos, 2>> weatherTravelSites;
+    bool weatherTravelHold = false;
+    void setupWeatherTravelFixture();
+    void visitWeatherTravelSite(size_t site);
     void updateShapeControls();
     // Weather presentation and the session-scoped test controls (step 09).
     // weatherForce is 0 for the sampled field, then Clear/Cloudy/Rain/Snow.

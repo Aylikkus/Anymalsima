@@ -705,19 +705,48 @@ void ChunkManager::setEnvironment(std::shared_ptr<const EnvironmentMap> value) {
             affected.insert(coord);
     }
     const auto wrapX = wrap();
+    auto remesh = affected;
+    const ChunkEnvironment empty;
+    const auto slab = [&](const EnvironmentMap& map,
+                          const ChunkCoord& coord) -> const ChunkEnvironment& {
+        const auto found = map.find(coord);
+        return found == map.end() || !found->second ? empty : *found->second;
+    };
     for (const auto& coord : affected) {
-        markDirty(coord, true);
-        // Border faces are clipped against the neighbouring environment.
-        const int64_t offsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
-                                       {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
-        for (const auto& offset : offsets) {
-            const int64_t x = wrapX.wrapChunk(int64_t{coord.x} + offset[0]);
-            const int64_t y = int64_t{coord.y} + offset[1];
-            const int64_t z = int64_t{coord.z} + offset[2];
-            if (x < 0 || y < 0 || z < 0) continue;
-            markDirty({unsigned(x), unsigned(y), unsigned(z)}, true);
+        // Mesh snapshots consult adjacent slabs only across their shared face.
+        const auto invalidateBorder = [&](uint16_t index) {
+            const int x = index % Chunk::SIZE_X;
+            const int y = index / Chunk::SIZE_X % Chunk::SIZE_Y;
+            const int z = index / (Chunk::SIZE_X * Chunk::SIZE_Y);
+            const auto neighbor = [&](int dx, int dy, int dz) {
+                const auto nx = wrapX.wrapChunk(int64_t(coord.x) + dx);
+                const auto ny = int64_t(coord.y) + dy;
+                const auto nz = int64_t(coord.z) + dz;
+                if (nx >= 0 && ny >= 0 && nz >= 0)
+                    remesh.insert({unsigned(nx), unsigned(ny), unsigned(nz)});
+            };
+            if (x == 0) neighbor(-1, 0, 0);
+            if (x == Chunk::SIZE_X - 1) neighbor(1, 0, 0);
+            if (y == 0) neighbor(0, -1, 0);
+            if (y == Chunk::SIZE_Y - 1) neighbor(0, 1, 0);
+            if (z == 0) neighbor(0, 0, -1);
+            if (z == Chunk::SIZE_Z - 1) neighbor(0, 0, 1);
+        };
+        const auto& before = slab(*previous, coord);
+        const auto& after = slab(*environment, coord);
+        for (const auto& [index, cell] : before) {
+            const auto found = after.find(index);
+            if (found == after.end() ||
+                (cell != found->second &&
+                 (!cell || !found->second || *cell != *found->second)))
+                invalidateBorder(index);
+        }
+        for (const auto& [index, cell] : after) {
+            (void)cell;
+            if (!before.contains(index)) invalidateBorder(index);
         }
     }
+    for (const auto& coord : remesh) markDirty(coord, true);
 }
 
 std::shared_ptr<const ChunkEnvironment> ChunkManager::environmentFor(

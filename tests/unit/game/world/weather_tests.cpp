@@ -1,6 +1,7 @@
 #include <cmath>
 
 #include "test.hpp"
+#include "world/weather_history.hpp"
 #include "world/world.hpp"
 #include "world/world_climate.hpp"
 #include "world/world_weather.hpp"
@@ -204,4 +205,21 @@ TEST(weather_opposite_seasons) {
     CHECK(southWinter.temperatureC > southSummer.temperatureC + 15.f);
     CHECK(northWinter.baselineC < -15.f);
     CHECK(southWinter.baselineC > 15.f);
+}
+
+TEST(weather_history_dated_cells_wrap_and_clamp) {
+    World world = makeWorld(4, 3);
+    world.genSettings.seed = 2024;
+    weather_history::Cache history;
+    constexpr int bin = weather_history::IntervalsPerDay + 2;
+    const auto west = history.at(world, -1, -5, bin);
+    const auto east = history.at(world, 511, 0, bin);
+    EQUAL(west.cellX, east.cellX, "wrapped weather cell key");
+    EQUAL(west.cellZ, east.cellZ, "weather summary stays inside Z edge");
+    EQUAL(west.interval, int64_t(bin), "summary date");
+    CHECK(sameSample(east.weather,
+                     world_weather::at(world, 504, 8, (bin + .5) / 48, 0)));
+    CHECK(sameSample(west.weather, east.weather));
+    CHECK(
+        !sameSample(east.weather, history.at(world, -1, -5, bin + 48).weather));
 }

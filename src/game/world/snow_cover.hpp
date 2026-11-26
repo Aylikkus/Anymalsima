@@ -26,8 +26,11 @@ class SnowCover {
     // Piece IDs stay clear of the small IDs used by tile pieces.
     static constexpr tile_geometry::PieceId EnvironmentPieceBase = 0x40000000u;
 
+    // With a change set, recalculate and publish only those columns.
+    // Deselected residents keep their previous immutable slab snapshots.
     void rebuild(const SnowSettlement& settlement, const SnowTerrain& terrain,
-                 uint8_t snowBlock);
+                 uint8_t snowBlock, const ChunkColumns* resident = nullptr,
+                 const ChunkColumns* changed = nullptr);
     void clear();
 
     const std::shared_ptr<const EnvironmentMap>& environment() const {
