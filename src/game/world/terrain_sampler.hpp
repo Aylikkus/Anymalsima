@@ -127,6 +127,10 @@ struct ColumnGenerationInput {
     // Generated surface profile for the tile at surface_y. Cube for legacy
     // worlds and for columns the ramp rule leaves uncut.
     TileShape groundShape{};
+    // Preserve the original hydrology when a reservoir snapshot updates water.
+    bool generatedWet = false;
+    // Largest local grade in the one-tile neighbourhood of a polar footprint.
+    double snowSlope = 0;
 };
 
 struct ChunkColumnInputs {
@@ -148,6 +152,7 @@ class TerrainSampler {
     int tileSurface(int64_t x, int64_t z) const;
     bool belowSea(int x, int z) const;
     TerrainSample sample(int64_t x, int64_t z) const;
+    double snowSlope(int64_t x, int64_t z) const;
     // Generated surface profile of one tile, using the same deterministic
     // rule as columns(). Empty when the world's generator predates natural
     // shapes or the column is not eligible.

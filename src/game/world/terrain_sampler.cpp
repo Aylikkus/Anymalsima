@@ -4,6 +4,7 @@
 
 #include "generated_hydrology.hpp"
 #include "natural_shape.hpp"
+#include "polar_snow.hpp"
 #include "save/world_meta.hpp"
 
 namespace {
@@ -50,6 +51,27 @@ double gradientField(double x, double z, int scale, uint32_t seed,
                   std::lerp(dot(gx, gz + 1), dot(gx + 1, gz + 1), u), v);
     // 2D Perlin stays within about ±0.71.
     return std::clamp(.5 + value * .7071, 0.0, 1.0);
+}
+template <typename GroundHeight>
+double snowNeighbourhoodSlope(const GroundHeight& height) {
+    constexpr std::array<Vec2i, 4> cardinal{{{-1, 0}, {0, -1}, {1, 0}, {0, 1}}};
+    const double center = height(0, 0);
+    std::array<double, cardinal.size()> neighbours;
+    for (size_t i = 0; i < cardinal.size(); ++i)
+        neighbours[i] = height(cardinal[i].x, cardinal[i].y);
+    double grade = 0;
+    for (size_t i = 0; i < cardinal.size(); ++i) {
+        const size_t next = (i + 1) % cardinal.size();
+        const auto [x, z] = cardinal[i];
+        const double h = neighbours[i];
+        const double outside = height(2 * x, 2 * z);
+        const double corner =
+            height(x + cardinal[next].x, z + cardinal[next].y);
+        grade = std::max({grade, std::abs(h - center), std::abs(h - outside),
+                          std::abs(h - corner),
+                          std::abs(neighbours[next] - corner)});
+    }
+    return grade;
 }
 }  // namespace
 
@@ -368,6 +390,11 @@ TerrainSample TerrainSampler::sample(int64_t x, int64_t z) const {
     return result;
 }
 
+double TerrainSampler::snowSlope(int64_t x, int64_t z) const {
+    return snowNeighbourhoodSlope(
+        [&](int dx, int dz) { return shapeHeights(x + dx, z + dz).ground; });
+}
+
 bool TerrainSampler::shapeEligible(int64_t x, int64_t z) const {
     if (!data.naturalShapes() || data.periodX() <= 0) return false;
     const uint64_t key = (uint64_t(x) << 32) ^ uint32_t(z);
@@ -625,9 +652,17 @@ ChunkColumnInputs TerrainSampler::columns(unsigned chunkX,
             out.columns[z * Chunk::SIZE_X + x] = {
                 terrain.surface_y,
                 soil(originX + x, originZ + z, terrain, surfaceWater),
-                terrain.slope, surfaceWater,
+                terrain.slope,
+                surfaceWater,
                 data.naturalShapes() ? surfaceShape(originX + x, originZ + z)
-                                     : TileShape{}};
+                                     : TileShape{},
+                surfaceWater.wet(),
+                !surfaceWater.wet() && terrain.slope < 1 &&
+                        data.generatorVersion >= WorldMeta::PolarPackVersion
+                    ? snowNeighbourhoodSlope([&](int dx, int dz) {
+                          return heights[index + dx + dz * pitch].ground;
+                      })
+                    : terrain.slope};
         }
     return out;
 }

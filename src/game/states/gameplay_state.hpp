@@ -61,6 +61,16 @@ class GameplayState : public IGameState {
 
     void requestChunksAroundCamera();
 
+    // Read by the fixed-camera device benchmark at phase boundaries.
+    struct SnowWork {
+        double replayMs = 0, projectionMs = 0;
+        double waterMs = 0, floraMs = 0, treeMs = 0, seasonMs = 0;
+        double lodMs = 0, chunkMs = 0;
+        size_t batches = 0, weatherSamples = 0, projectedColumns = 0;
+    };
+    void startWeatherClockMeasurement(double speed);
+    SnowWork measuredSnowWork() const { return snowWork; }
+
    private:
     std::unique_ptr<UIManager> ui_manager;
     std::shared_ptr<World> world;
@@ -84,11 +94,24 @@ class GameplayState : public IGameState {
     std::unique_ptr<snow::SnowCover> snowCover;
     snow::ChunkColumns snowResident;
     snow::ChunkColumns snowDirtyColumns;
+    snow::ChunkColumns snowFullProjection;
+    snow::ChunkColumns snowSeasonProjection;
+    std::map<snow::ChunkColumn, snow::Footprints> snowDirtyFootprints;
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> snowSurface;
+    snow::ChunkColumns snowPackChanges;
+    void collectSnowChanges();
+    void publishSnowSurface(bool all = false);
+    void updateSnowSeason();
+    void trackSnowEdit(TilePos pos);
+    void refreshSnowEnvironment();
     snow::ChunkColumn lastSnowProjection{};
     double snowProjectionSeconds = 0;
+    double snowSurfaceSeconds = 0;
     Signal<uint64_t>::Connection snowColumnReleased;
     uint8_t snowId = 0;
     weather_history::Cache snowHistory;
+    bool measureSnow = false;
+    SnowWork snowWork;
     size_t snowNextFootprint = 0;
     bool snowCatchingUp = false;
     std::optional<TilePos> snowEditPending;
@@ -98,7 +121,8 @@ class GameplayState : public IGameState {
     bool depositionFixture = false;
     // cm3: the step 06 fixture amount for a 5 cm landing plus a 5 cm toe.
     int64_t snowAddVolume = 51250;
-    void rebuildSnow(size_t maxColumns = 1);
+    void rebuildSnow(size_t maxColumns = 1, bool streamingOnly = false);
+    void publishSnow(const snow::ChunkColumns& selected);
     void advanceSnow(bool throughNow = false, double maxDays = 7);
     bool reconcileSnowAt(int x, int z, double target);
     bool prepareSnowEdit(TilePos pos);
@@ -178,6 +202,9 @@ class GameplayState : public IGameState {
         std::chrono::steady_clock::now();
     // Shadow caster passes of the far lights due this frame.
     void renderShadowCasters(RenderTarget& target, double now);
+    // x = snow albedo layer (-1 disables), y = side-face sky softening.
+    // Declared before terrainLod because the manager holds this pointer.
+    ShaderProperty snowSoft;
     // Whether render() draws this chunk's blocks: inside the detail chunk
     // box around the camera target and in a detailed column (frustum and
     // mesh aside). Shared by the chunk pass, shadow casters and trees.
@@ -249,6 +276,8 @@ class GameplayState : public IGameState {
     std::optional<TilePos> snowFixtureSite;
     std::optional<TilePos> snowDropSite;
     void setupSnowFixture();
+    std::optional<TilePos> polarPackSite;
+    void setupPolarPackFixture();
     std::optional<std::array<TilePos, 2>> weatherTravelSites;
     bool weatherTravelHold = false;
     void setupWeatherTravelFixture();

@@ -5,6 +5,7 @@
 #include <unordered_map>
 
 #include "layers_generator.hpp"
+#include "polar_snow.hpp"
 #include "reservoirs.hpp"
 #include "terrain_edits.hpp"
 #include "terrain_sampler.hpp"
@@ -24,6 +25,7 @@ struct SurfaceColumn {
     uint16_t material = 0;
     uint16_t rockMaterial = 0;
     TileShape groundShape{};
+    float snowTop = 0;
 };
 
 // Per-region sampling inputs: captured terrain neighbourhood and rock layers.
@@ -67,7 +69,7 @@ class SurfaceSampler {
     // height, top block, water). Structures above the generated surface are
     // not part of the height field; see structureTop().
     SurfaceSampler(
-        const World& world, IAssets& assets,
+        const World& world, const IAssets& assets,
         std::shared_ptr<SurfaceInputCache> shared = nullptr,
         std::shared_ptr<const EditMap> edits = nullptr,
         WaterDetail waterDetail = WaterDetail::Exact,
@@ -90,6 +92,12 @@ class SurfaceSampler {
     // Generated strata at height y. Edits keep the original layers, so a dug
     // pit shows them on its walls.
     uint16_t materialAt(int x, int y, int z);
+    // Raw ground height after edits, also used by hydrology and structure
+    // support. Terrain meshes use the exterior height below.
+    float seasonalTop(int x, int z);
+    float exteriorHeight(int x, int z);
+    float packTop(int x, int z);
+    void setSnow(std::shared_ptr<const snow::polar::SurfaceSnapshot> value);
     // Ground height after edits.
     int height(int x, int z);
     // Surface profile after edits, at the column's ground tile.
@@ -131,12 +139,15 @@ class SurfaceSampler {
     WaterSurface generatedWater(int x, int z, int groundY) const;
     SurfaceColumn generatedColumn(int x, int z);
     const World& world;
-    IAssets& assets;
+    const IAssets& assets;
     LayersGenerator layers;
     std::shared_ptr<SurfaceInputCache> shared;
     std::shared_ptr<const EditMap> edits;
     WaterDetail waterDetail;
     std::shared_ptr<const ReservoirSnapshot> reservoirs;
+    snow::polar::Baselines polar{world};
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> snow;
+    std::unordered_map<uint64_t, float> packHeights;
     uint64_t lastEditKey = UINT64_MAX;
     const ColumnEdit* lastEdit = nullptr;
     std::unordered_map<uint64_t, std::shared_ptr<const RegionInput>> regions;

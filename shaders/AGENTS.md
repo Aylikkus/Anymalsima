@@ -38,3 +38,13 @@ Verify `SHADERC_PATH` in `generate_assets.py` matches the built executable. The 
 ## Validation
 
 The generation script does not check compiler return codes or print stderr. Confirm both binaries were freshly generated; rerun failed shaderc invocations directly to inspect diagnostics. Launch the affected scene and check geometry, textures, transparency, zoom, and boundaries as relevant. Include screenshots for visual changes and review generated asset-definition changes before committing.
+
+
+## Snow side faces
+
+`u_material_soft` (block and `terrain_lod` programs) carries the snow albedo
+layer in x and a side strength in y. Its owner sets it once per frame; every
+draw using `world_surface.sh` must receive the property. `surfaceLight` uses
+it only for near-vertical snow faces: it mixes the sky term toward the
+top-facing sky and applies a small light floor so centimetre snow steps do
+not turn into dark contour lines. Foliage passes zero.

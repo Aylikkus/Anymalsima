@@ -67,7 +67,8 @@ void WeatherRenderer::render(RenderTarget& target, Camera& camera,
                              const World& world,
                              const world_weather::Sample& localWeather,
                              const Frame& frame,
-                             const snow::SnowTerrain& terrain) {
+                             const snow::SnowTerrain& terrain,
+                             const snow::SnowSettlement& snow) {
     drawn = farDrawn = wetRegions = 0;
     const auto eye = camera.eye();
     updateWeatherMap(camera, world, frame);
@@ -142,8 +143,9 @@ void WeatherRenderer::render(RenderTarget& target, Camera& camera,
             isSnow ? .032f + .028f * size : .018f + .014f * size;
         const float halfHeight =
             isSnow ? halfWidth : .26f + .38f * unit(mix64(h ^ 5));
-        const auto surface =
-            precipitation::firstSurface(terrain, worldX, worldZ);
+        const auto surface = precipitation::firstSurface(
+            terrain, worldX, worldZ,
+            snow.surfacePack(int(std::floor(worldX)), int(std::floor(worldZ))));
         if (!surface || (surface->height &&
                          double(eye.y) + y - halfHeight < *surface->height))
             continue;

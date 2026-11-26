@@ -18,8 +18,11 @@ struct PieceCoverage {
     };
     std::vector<tile_geometry::TilePiece> pieces;  // blockId holds opacity
     std::array<std::vector<FacePolygon>, 6> faces;
+    EnvironmentCell environment;
+    uint8_t environmentOpacity = 0;
     uint8_t vertical = 0;
     uint8_t maximum = 0;
+    bool operator==(const PieceCoverage& other) const;
 };
 
 std::shared_ptr<const PieceCoverage> coverPieces(
@@ -27,6 +30,8 @@ std::shared_ptr<const PieceCoverage> coverPieces(
 using OpacityTable = std::array<uint8_t, 256>;
 std::shared_ptr<const PieceCoverage> coverPieces(const SolidCellSnapshot& cell,
                                                  const OpacityTable& opacity);
+uint8_t overheadLoss(const tile_geometry::CellGeometry& geometry,
+                     uint8_t opacity);
 
 struct Cell {
     uint8_t opacity = 0;
@@ -46,19 +51,35 @@ struct Cell {
     bool operator==(const Cell& other) const {
         return opacity == other.opacity && shape == other.shape &&
                (compound == other.compound ||
-                (compound && other.compound &&
-                 compound->pieces == other.compound->pieces));
+                (compound && other.compound && *compound == *other.compound));
     }
 };
 
 // Snapshot shapes only in chunks that contain them, indexed like Chunk::cell.
 class Shapes {
    public:
-    void capture(const Chunk& chunk, const OpacityTable& opacity) {
+    void capture(const Chunk& chunk, const OpacityTable& opacity,
+                 const ChunkEnvironment* environment = nullptr) {
         compounds.clear();
         chunk.forEachPieceCell([&](uint16_t i, const SolidCellSnapshot& cell) {
             if (cell.compound) compounds.emplace(i, coverPieces(cell, opacity));
         });
+        if (environment) {
+            std::unordered_map<const tile_geometry::CellGeometry*,
+                               std::shared_ptr<const PieceCoverage>>
+                reused;
+            for (const auto& [i, geometry] : *environment) {
+                auto cell = chunk.solidCellAt(i);
+                cell.environment = geometry;
+                if (!cell.base.tile.isSolid()) {
+                    auto [it, inserted] = reused.try_emplace(geometry.get());
+                    if (inserted) it->second = coverPieces(cell, opacity);
+                    compounds.insert_or_assign(i, it->second);
+                } else {
+                    compounds.insert_or_assign(i, coverPieces(cell, opacity));
+                }
+            }
+        }
         cells.clear();
         if (!chunk.hasShapes()) return;
         cells.resize(Chunk::SIZE_X * Chunk::SIZE_Y * Chunk::SIZE_Z);

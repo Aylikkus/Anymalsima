@@ -34,6 +34,7 @@ class SunLightPropagator {
     void update();
     void setFocus(Vec3 value) { focus = value; }
     void markColumnDirty(unsigned cx, unsigned cz);
+    void markEnvironmentChanged(const ChunkCoord& coord);
     bool isIdle() const;
     bool hasDirect(ChunkCoord coord) const;
     bool isComplete(ChunkCoord coord) const;

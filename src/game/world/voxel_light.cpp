@@ -123,6 +123,22 @@ float faceArea(std::span<const Vec3> polygon, Face face) {
 
 }  // namespace
 
+bool PieceCoverage::operator==(const PieceCoverage& other) const {
+    return pieces == other.pieces &&
+           environmentOpacity == other.environmentOpacity &&
+           (environment == other.environment ||
+            (environment && other.environment &&
+             *environment == *other.environment));
+}
+
+uint8_t overheadLoss(const tile_geometry::CellGeometry& geometry,
+                     uint8_t opacity) {
+    float covered = 1;
+    for (const auto& opening : geometry.overheadOpenings())
+        covered -= faceArea(opening, Face::PosY);
+    return quantize(opacity * std::clamp(covered, 0.f, 1.f));
+}
+
 std::shared_ptr<const PieceCoverage> coverPieces(
     std::span<const tile_geometry::TilePiece> pieces) {
     auto out = std::make_shared<PieceCoverage>();
@@ -166,7 +182,39 @@ std::shared_ptr<const PieceCoverage> coverPieces(const SolidCellSnapshot& cell,
         piece.blockId = std::min(opacity[piece.blockId], Opaque);
         if (piece.blockId) pieces.push_back(piece);
     }
-    return coverPieces(pieces);
+    auto base = coverPieces(pieces);
+    if (!cell.environment) return base;
+    auto combined = std::make_shared<PieceCoverage>(*base);
+    combined->environment = cell.environment;
+    uint8_t snowOpacity = 0;
+    for (auto& polygon : cell.environment->exteriorFaces()) {
+        const auto material = std::min(opacity[polygon.blockId], Opaque);
+        snowOpacity = std::max(snowOpacity, material);
+        if (const auto face = tile_geometry::boundaryFace(polygon.plane))
+            combined->faces[uint8_t(*face)].push_back(
+                {material, std::move(polygon.vertices)});
+    }
+    combined->environmentOpacity = snowOpacity;
+    combined->maximum = std::max(combined->maximum, snowOpacity);
+    // At the shared face the solids are disjoint. In the overhead projection
+    // they may overlap, so measure their union at each opacity threshold.
+    float vertical = 0;
+    int previous = 0;
+    for (int level = 1; level <= combined->maximum; ++level) {
+        if (level != snowOpacity &&
+            std::ranges::none_of(
+                pieces, [&](const auto& p) { return p.blockId == level; }))
+            continue;
+        tile_geometry::CellGeometry solids;
+        for (const auto& piece : pieces)
+            if (piece.blockId >= level) solids.tryAdd(piece);
+        if (snowOpacity >= level) solids.append(*cell.environment);
+        vertical +=
+            (level - previous) * overheadLoss(solids, Opaque) / float(Opaque);
+        previous = level;
+    }
+    combined->vertical = quantize(vertical);
+    return combined;
 }
 
 uint8_t rayOpacity(const Cell& cell, Vec3 origin, Vec3 direction, float enter,
@@ -179,6 +227,9 @@ uint8_t rayOpacity(const Cell& cell, Vec3 origin, Vec3 direction, float enter,
         return cell.opacity;
     }
     uint8_t opacity = 0;
+    if (cell.compound->environment && cell.compound->environment->intersectRay(
+                                          origin, direction, enter, leave))
+        opacity = cell.compound->environmentOpacity;
     for (const auto& piece : cell.compound->pieces) {
         if (piece.blockId <= opacity) continue;
         tile_geometry::CellGeometry geometry;

@@ -6,6 +6,7 @@
 
 #include "chunk.hpp"
 #include "snow_settlement.hpp"
+#include "structure_voxels.hpp"
 
 // Projects settled snow onto the actual free space of each cell. The result
 // is an environmental solid layer shared with ChunkManager: it is combined
@@ -23,15 +24,21 @@ class SnowCover {
     // Upward offset of a sub-centimetre dusting so it cannot z-fight with the
     // supporting surface.
     static constexpr float MinimumVisibleDepth = .002f;
-    // Piece IDs stay clear of the small IDs used by tile pieces.
-    static constexpr tile_geometry::PieceId EnvironmentPieceBase = 0x40000000u;
 
     // With a change set, recalculate and publish only those columns.
     // Deselected residents keep their previous immutable slab snapshots.
     void rebuild(const SnowSettlement& settlement, const SnowTerrain& terrain,
                  uint8_t snowBlock, const ChunkColumns* resident = nullptr,
-                 const ChunkColumns* changed = nullptr);
+                 const ChunkColumns* changed = nullptr,
+                 const std::map<ChunkColumn, Footprints>* footprints = nullptr);
     void clear();
+    void updateLooseExterior(
+        const SnowSettlement& settlement, const ChunkColumns& changed,
+        const ChunkColumns& resident, uint8_t snowBlock,
+        const std::map<ChunkColumn, Footprints>* footprints = nullptr);
+    void appendLooseExterior(std::vector<structure_voxels::SourcePtr>& sources,
+                             const WorldWrap& wrap, Vec3 eye,
+                             float range) const;
 
     const std::shared_ptr<const EnvironmentMap>& environment() const {
         return environment_;
@@ -46,6 +53,15 @@ class SnowCover {
     std::shared_ptr<const EnvironmentMap> environment_ =
         std::make_shared<const EnvironmentMap>();
     std::vector<ChunkCoord> changed_;
+    uint8_t packedBlock_ = 0;
+    EnvironmentCell packedCube_;
+    struct LooseExterior {
+        std::map<SnowKey, PackRun> intervals;
+        structure_voxels::SourcePtr source;
+    };
+    std::map<ChunkColumn, LooseExterior> looseExterior_;
+    std::map<SnowKey, double> projectedLevels_;
+    uint64_t exteriorRevision_ = 0;
     uint64_t revision_ = 0;
 };
 

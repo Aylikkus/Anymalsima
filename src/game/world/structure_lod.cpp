@@ -491,6 +491,8 @@ void StructureLod::request() {
              shared = inputs] {
                 SurfaceSampler ground(*source, *definitions, shared, edits);
                 std::unordered_map<ChunkCoord, std::unique_ptr<Chunk>> decoded;
+                std::unordered_map<ChunkCoord, ChunkEnvironment> snow;
+                const int s = 1 << level;
                 const auto structureChunk = [&](ChunkCoord c) -> const Chunk* {
                     auto [it, inserted] = decoded.try_emplace(c);
                     if (inserted) {
@@ -514,6 +516,37 @@ void StructureLod::request() {
                             if (!it->second)
                                 it->second = std::make_unique<Chunk>();
                             structure_voxels::stamp(*it->second, *w);
+                            for (const auto& [cell, layer] : w->snow) {
+                                const int x = int(c.x) * Chunk::SIZE_X +
+                                              cell % Chunk::SIZE_X;
+                                const int y =
+                                    int(baseOf(c).y) * Chunk::SIZE_Y +
+                                    cell / Chunk::SIZE_X % Chunk::SIZE_Y;
+                                const int z =
+                                    int(c.z) * Chunk::SIZE_Z +
+                                    cell / (Chunk::SIZE_X * Chunk::SIZE_Y);
+                                auto solid =
+                                    it->second->solidCellAt(cell).geometry();
+                                if (solid.empty() &&
+                                    y * s + s / 2 <=
+                                        ground.height(x * s + s / 2,
+                                                      z * s + s / 2)) {
+                                    if (level != 0 || y < ground.height(x, z))
+                                        continue;
+                                    const auto shape = ground.groundShape(x, z);
+                                    if (!shape.code()) continue;
+                                    solid.tryAdd({1, 1, shape});
+                                }
+                                auto fill = solid.freeSpaceBetween(
+                                    layer.low, layer.high, layer.block,
+                                    uint32_t{0x40000000});
+                                if (!fill.empty())
+                                    snow[c].emplace(
+                                        cell,
+                                        std::make_shared<
+                                            const tile_geometry::CellGeometry>(
+                                            std::move(fill)));
+                            }
                         }
                     }
                     return it->second.get();
@@ -525,7 +558,6 @@ void StructureLod::request() {
                     return tile;
                 }();
                 // Coarse levels: everything below is in cells of s tiles.
-                const int s = 1 << level;
                 const int width = ground.width() / s,
                           depth = (ground.depth() + s - 1) / s,
                           height = (WORLD_HEIGHT_Y + s - 1) / s;
@@ -548,6 +580,13 @@ void StructureLod::request() {
                                       ly = y % Chunk::SIZE_Y,
                                       lz = z % Chunk::SIZE_Z;
                             const auto& tile = chunk->tiles[lz][ly][lx];
+                            if (const auto layer = snow.find(c);
+                                layer != snow.end()) {
+                                const auto fill =
+                                    layer->second.find(Chunk::cell(lx, ly, lz));
+                                if (fill != layer->second.end())
+                                    return {*chunk, lx, ly, lz, fill->second};
+                            }
                             if (tile.isSolid()) return {*chunk, lx, ly, lz};
                         }
                         // Faces resting on the (possibly edited) ground hide
@@ -560,7 +599,9 @@ void StructureLod::request() {
                             return {&solid,
                                     ground.groundShape(groundX, groundZ)};
                         return &air;
-                    });
+                    },
+                    {}, {}, {},
+                    snow.contains(coord) ? &snow.at(coord) : nullptr);
                 const auto base = baseOf(coord);
                 for (auto& v : mesh.vertices) {
                     // Probe just outside the face, in the rendered X image.

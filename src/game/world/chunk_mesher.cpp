@@ -403,6 +403,16 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
         if (inserted) it->second = solid().geometry();
         return it->second;
     };
+    // Deep packs share the geometry of their whole cells across slabs.
+    // Test each shared volume once before clipping faces against it.
+    std::unordered_map<const tile_geometry::CellGeometry*, bool>
+        fullEnvironments;
+    const auto fillsCell = [&](const EnvironmentCell& geometry) {
+        if (!geometry) return false;
+        auto [it, inserted] = fullEnvironments.try_emplace(geometry.get());
+        if (inserted) it->second = geometry->isFull();
+        return it->second;
+    };
 
     // Clip a boundary against the actual open polygons of its neighbour.
     const auto emitBoundary = [&](std::span<const Vec3> polygon, Face face,
@@ -415,6 +425,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         climate);
             return;
         }
+        if (fillsCell(neighbour.environment)) return;
         if (!neighbour.isCompound() && !neighbour.shape.code()) return;
         const auto openings =
             neighbour.isCompound()
@@ -451,6 +462,17 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
         auto solid = chunk.solidCellAt(index);
         solid.environment = localEnvironment(index);
         if (solid.pieces().empty() && !solid.hasEnvironment()) continue;
+        if (fillsCell(solid.environment)) {
+            const auto covered = [&](int dx, int dy, int dz) {
+                const auto adjacent = getNeighbour(x + dx, y + dy, z + dz);
+                return fillsCell(adjacent.environment) ||
+                       (adjacent.hasSolid() && !adjacent.isCompound() &&
+                        !adjacent.shape.code());
+            };
+            if (covered(-1, 0, 0) && covered(1, 0, 0) && covered(0, -1, 0) &&
+                covered(0, 1, 0) && covered(0, 0, -1) && covered(0, 0, 1))
+                continue;
+        }
         const Vec3 cell{float(x), float(y), float(z)};
         const tile_geometry::TilePiece* first =
             solid.pieces().empty() ? nullptr : &solid.pieces().front().geometry;

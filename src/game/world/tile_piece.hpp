@@ -79,6 +79,7 @@ class CellGeometry {
     // interiors do not overlap (as with terrain solids and a deposit).
     void append(const CellGeometry& other);
     bool empty() const { return solids_.empty(); }
+    bool hasPiece(PieceId id) const;
     // The free space in the horizontal interval [low, high] (metres in the
     // cell) as one solid with disjoint convex parts. Used to project a snow
     // deposit onto the actual supporting facets.

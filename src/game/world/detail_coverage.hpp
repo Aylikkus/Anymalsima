@@ -36,7 +36,8 @@ class DetailCoverage {
     template <typename Current, typename Drawable>
     void update(ChunkCoord focus, std::span<const SurfaceBand> candidates,
                 Current&& current, Drawable&& drawable, int periodChunks = 0,
-                bool refreshBands = false) {
+                bool refreshBands = false,
+                const snow::ChunkColumns* pendingColumns = nullptr) {
         auto next = visible;
         const auto inRange = [&](const SurfaceBand& band, int radius) {
             return std::abs(WorldWrap::delta(band.x, int(focus.x),
@@ -61,6 +62,12 @@ class DetailCoverage {
             const Key key{band.x, band.z};
             const auto old = next.find(key);
             if (old != next.end() && (!refreshBands || old->second == band))
+                continue;
+            // Keep the exterior until a new streaming projection can be
+            // included in the current chunk meshes. A drawable column can
+            // retain its last mesh while a replacement is in flight.
+            if (pendingColumns &&
+                pendingColumns->contains({unsigned(band.x), unsigned(band.z)}))
                 continue;
             if (inRange(band, old == next.end() ? enterRadius() : keep) &&
                 ready(band, current))

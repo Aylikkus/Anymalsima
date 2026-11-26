@@ -53,6 +53,69 @@ int SurfaceSampler::height(int x, int z) {
     return value;
 }
 
+void SurfaceSampler::setSnow(
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> value) {
+    snow = std::move(value);
+    packHeights.clear();
+}
+
+float SurfaceSampler::packTop(int x, int z) {
+    if (!snow || !snow->block) return 0;
+    x = wrapX(x);
+    z = std::clamp(z, 0, depth() - 1);
+    double top = 0;
+    if (const auto pinned = snow->editedTop(x, z))
+        top = double(*pinned) / snow::UnitsPerCubicMetre;
+    else if (snow->initialPacks)
+        top = seasonalTop(x, z);
+    if (const auto loose = snow->looseTop(x, z))
+        top = std::max(top, double(*loose) / snow::UnitsPerCubicMetre);
+    return float(top);
+}
+
+float SurfaceSampler::seasonalTop(int x, int z) {
+    if (snow->fixture)
+        if (const auto fixture =
+                snow::polar::fixturePack(world, *snow->fixture, x, z))
+            return float(double(fixture->top) / snow::UnitsPerCubicMetre);
+    if (!snow::polar::supported(world)) return 0;
+
+    const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
+    if (const auto cached = packHeights.find(key); cached != packHeights.end())
+        return cached->second;
+    const double depth = polar.depth(x, z, snow->day);
+    if (depth <= 0) {
+        if (packHeights.size() >= 65536) packHeights.clear();
+        return packHeights.emplace(key, 0.f).first->second;
+    }
+    auto& sampler = samplerFor(x, z);
+    const auto ground = sampler.sample(x, z);
+    const auto shape = sampler.surfaceShape(x, z);
+    std::optional<snow::PackRun> pack;
+    // The chunk stores its starting pack from the *generated* water. The
+    // rendered lake/reservoir projection may temporarily cover a shore cell;
+    // using it here made the LOD bare where a loaded chunk had snow.
+    if ((shape.code() || ground.slope < 1) &&
+        !generatedWater(x, z, ground.surface_y).wet()) {
+        ColumnGenerationInput stock;
+        stock.surface_y = ground.surface_y;
+        stock.slope = ground.slope;
+        stock.snowSlope = sampler.snowSlope(x, z);
+        stock.groundShape = shape;
+        pack = snow::polar::Baselines::run(stock, depth);
+    }
+    if (packHeights.size() >= 65536) packHeights.clear();
+    return packHeights
+        .emplace(key, pack ? float(double(snow::projectedPackTop(*pack)) /
+                                   snow::UnitsPerCubicMetre)
+                           : 0.f)
+        .first->second;
+}
+
+float SurfaceSampler::exteriorHeight(int x, int z) {
+    return std::max(float(height(x, z) + 1), packTop(x, z));
+}
+
 TileShape SurfaceSampler::groundShape(int x, int z) {
     return column(x, z).groundShape;
 }
@@ -72,6 +135,9 @@ const ColumnEdit* SurfaceSampler::editAt(int x, int z) {
 }
 
 CoverTexel SurfaceSampler::cover(int x, int z) {
+    // Any settled snow hides the ground cover, including a centimetre layer
+    // that the LOD draws at the ground top rather than as a raised block.
+    if (packTop(x, z) > height(x, z) + .005f) return {};
     const auto column = generatedColumn(x, z);
     if (!column.soil.cover || !assets.hasStorage<GroundCover>()) return {};
     if (const auto* edit = editAt(x, z)) {
@@ -145,17 +211,30 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
     auto result = generatedColumn(x, z);
     const auto* edit = editAt(x, z);
     result.water = waterAt(x, z);
-    if (!edit) return result;
-    x = wrapX(x);
-    z = std::clamp(z, 0, depth() - 1);
-    const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
-    const bool heightChanged = edit->groundY[i] != result.surfaceY;
-    result.surfaceY = edit->groundY[i];
-    result.groundShape = edit->groundShape[i];
-    if (const auto block = edit->groundBlock[i]) {
+    if (edit) {
+        x = wrapX(x);
+        z = std::clamp(z, 0, depth() - 1);
+        const int i = ColumnEdit::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z);
+        const bool heightChanged = edit->groundY[i] != result.surfaceY;
+        result.surfaceY = edit->groundY[i];
+        result.groundShape = edit->groundShape[i];
+        if (const auto block = edit->groundBlock[i]) {
+            result.material = assets.getMaterialAlbedoLayer(
+                assets.getStorage<Block>().get(block).material);
+            if (heightChanged) result.rockMaterial = result.material;
+        }
+    }
+    const float top = packTop(x, z);
+    if (top > result.surfaceY + 1) {
+        result.snowTop = top;
         result.material = assets.getMaterialAlbedoLayer(
-            assets.getStorage<Block>().get(block).material);
-        if (heightChanged) result.rockMaterial = result.material;
+            assets.getStorage<Block>().get(snow->block).material);
+    } else if (top > result.surfaceY + .005f) {
+        // A layer thinner than one block stays at the terrain height but must
+        // still read as snow. Otherwise sparse tundra packs are white nearby
+        // and bare in the LOD.
+        result.material = assets.getMaterialAlbedoLayer(
+            assets.getStorage<Block>().get(snow->block).material);
     }
     return result;
 }

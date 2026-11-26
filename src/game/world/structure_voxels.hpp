@@ -71,6 +71,14 @@ struct Slab {
 
     std::map<uint16_t, std::shared_ptr<const std::vector<CellPiece>>> pieces;
 
+    // Runtime snow on a structure or the ground below it. Coordinates
+    // are cell-local at this slab's scale. The proxy clips the interval
+    // against its substrate before meshing.
+    struct SnowLayer {
+        float low = 0, high = 0;
+        uint8_t block = 0;
+    };
+    std::map<uint16_t, SnowLayer> snow;
     SolidCellSnapshot solidCellAt(uint16_t cell) const;
     void setPieces(uint16_t cell, std::span<const CellPiece> replacement);
     void erase(uint16_t cell);

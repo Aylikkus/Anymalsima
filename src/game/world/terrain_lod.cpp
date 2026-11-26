@@ -20,7 +20,7 @@ struct Point {
     float x, y, z;
 };
 Point terrainPoint(const Patch&, SurfaceSampler& sampler, float x, float z) {
-    return {x, float(sampler.height(int(x), int(z)) + 1), z};
+    return {x, sampler.exteriorHeight(int(x), int(z)), z};
 }
 int channelSpacing(const Patch& p) {
     if (p.spacing >= RootSpacing) return 8;
@@ -464,6 +464,7 @@ Mesh joinDetails(std::span<const Patch> layout,
                 // Detailed chunks and shaped stepped patches expose their
                 // actual rim at the shared edge, not the nominal cube top.
                 const auto localTop = [&](float wx, float wz) {
+                    if (inside.snowTop) return inside.snowTop;
                     const float lx = wx - float(ix);
                     const float lz = wz - float(iz);
                     const auto height = tile_geometry::supportHeight(
@@ -505,7 +506,8 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
             const int tx = cx * side + x, tz = cz * side + z;
             const int ground = sampler.height(tx, tz);
             lowGround = std::min(lowGround, ground);
-            highGround = std::max(highGround, ground);
+            highGround = std::max(
+                highGround, int(std::ceil(sampler.exteriorHeight(tx, tz))) - 1);
             if (x < 0 || x >= side || z < 0 || z >= side) continue;
             const auto water = sampler.waterAt(tx, tz);
             if (water.wet()) {
@@ -534,6 +536,7 @@ ColumnBands sampleBands(int cx, int cz, SurfaceSampler& sampler) {
 float shapeTopAt(SurfaceSampler& sampler, float x, float z) {
     const int ix = int(std::floor(x)), iz = int(std::floor(z));
     const auto column = sampler.column(ix, iz);
+    if (column.snowTop) return column.snowTop;
     const auto height = tile_geometry::supportHeight(
         column.groundShape, x - float(ix), z - float(iz));
     return float(column.surfaceY) + height.value_or(1.f);
@@ -611,6 +614,7 @@ void shapedColumn(Mesh& mesh, SurfaceSampler& sampler, int x, int z,
             const float fallback =
                 std::min(base, float(columnAt->surfaceY) + 1.f);
             const auto neighbour = [&](float axis) -> float {
+                if (columnAt->snowTop) return columnAt->snowTop;
                 const float lx =
                     xAxis ? (face == Face::PosX ? 0.f : 1.f) : axis;
                 const float lz =
@@ -734,12 +738,13 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                 continue;
             }
             const auto column = sampler.column(x, z);
-            if (column.groundShape.code()) {
+            if (!column.snowTop && column.groundShape.code()) {
                 shapedColumn(mesh, sampler, x, z, column, wrapX);
                 waterTile(mesh, sampler, x, z, column.water, wrapX);
                 continue;
             }
-            const float y = column.surfaceY + 1;
+            const float y =
+                column.snowTop ? column.snowTop : column.surfaceY + 1;
             quad(mesh, {float(x), y, float(z)}, {float(x), y, z1}, {x1, y, z1},
                  {x1, y, float(z)}, column.material);
             const int dx[4] = {-1, 1, 0, 0}, dz[4] = {0, 0, -1, 1};
@@ -754,24 +759,26 @@ Mesh build(const Patch& p, SurfaceSampler& sampler,
                     (!wrapX && (nx < 0 || nx >= sampler.width()));
                 // Boundary walls reach below the lower column so they
                 // overlap any neighbour patch's surface or skirt.
-                const int neighbour = sampler.height(nx, nz) + 1;
-                const int bottom =
-                    outside    ? 0
-                    : boundary ? std::max(0, std::min(neighbour, int(y)) -
-                                                 SteppedSkirt)
-                               : neighbour;
+                const float neighbour = sampler.exteriorHeight(nx, nz);
+                const float bottom =
+                    outside ? 0
+                    : boundary
+                        ? std::max(0.f, std::min(neighbour, y) - SteppedSkirt)
+                        : neighbour;
                 const auto wallLayer = [&](int tileY) {
                     // The top of an overlap wall is a continuation of the
                     // surface. Preserve the strata below it and on cliffs.
+                    if (column.snowTop && tileY > column.surfaceY)
+                        return column.material;
                     return boundary && !outside && tileY >= int(y) - 2
                                ? column.material
                                : sampler.materialAt(x, tileY, z);
                 };
-                for (int y0 = bottom; y0 < int(y);) {
+                for (float y0 = bottom; y0 < y;) {
                     const float layer = wallLayer(y0);
-                    int nextY = y0 + 1;
-                    while (nextY < int(y) && wallLayer(nextY) == layer) ++nextY;
-                    const float low = y0, high = nextY;
+                    int nextY = int(std::floor(y0)) + 1;
+                    while (nextY < y && wallLayer(nextY) == layer) ++nextY;
+                    const float low = y0, high = std::min(y, float(nextY));
                     y0 = nextY;
                     if (edge == 0)
                         quad(mesh, {float(x), low, float(z)},

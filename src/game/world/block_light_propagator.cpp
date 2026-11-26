@@ -101,7 +101,8 @@ std::shared_ptr<const BlockLightPropagator::Inputs> BlockLightPropagator::scan(
         voxel_light::OpacityTable byBlock{};
         for (const auto& block : blocks.items)
             byBlock[block.id] = block.properties.opacity;
-        inputs->shapes.capture(chunk, byBlock);
+        inputs->shapes.capture(chunk, byBlock,
+                               chunks.environmentFor(coord).get());
         for (int z = 0; z < Chunk::SIZE_Z; ++z)
             for (int y = 0; y < Chunk::SIZE_Y; ++y)
                 for (int x = 0; x < Chunk::SIZE_X; ++x) {

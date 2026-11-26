@@ -132,7 +132,11 @@ CellPieceEdit WorldEditor::editPiece(
     } else if (!std::erase_if(replacement, [&](const CellPiece& piece) {
                    return piece.geometry.id == id;
                })) {
-        return CellPieceEdit::Invalid;
+        return before->cell.environment &&
+                       before->cell.environment->hasPiece(id) &&
+                       removeEnvironment && removeEnvironment(pos, id)
+                   ? CellPieceEdit::Applied
+                   : CellPieceEdit::Invalid;
     }
     const bool wasRoot = chunks.rootAt(pos.x, pos.y, pos.z) != nullptr;
     const auto result = chunks.setCellPieces(pos, expected, replacement, true);

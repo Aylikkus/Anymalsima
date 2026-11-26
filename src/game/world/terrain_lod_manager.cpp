@@ -463,6 +463,7 @@ void TerrainLodManager::request() {
             [source = &world, definitions = &assets, shared = inputs, cancel, p,
              map = quality.materialMap, wrapX = periodX > 0, provisional,
              refiningWater, changes = edits ? edits->snapshot() : nullptr,
+             snow = snowSurface,
              reservoirs =
                  world.reservoirs ? world.reservoirs->snapshot() : nullptr] {
                 const auto water = provisional
@@ -470,12 +471,13 @@ void TerrainLodManager::request() {
                                        : SurfaceSampler::WaterDetail::Exact;
                 SurfaceSampler sampler(*source, *definitions, shared, changes,
                                        water, reservoirs);
+                sampler.setSnow(snow);
                 return TerrainLod::build(p, sampler, *cancel, map, wrapX,
                                          refiningWater);
             },
             refiningWater ? BS::pr::low : BS::pr::normal);
-        jobs.push_back({p, edits ? edits->revision() : 0, refiningWater,
-                        std::move(cancel), std::move(future)});
+        jobs.push_back({p, surfaceRevision, refiningWater, std::move(cancel),
+                        std::move(future)});
     };
     auto terrainJobs =
         size_t(std::count_if(jobs.begin(), jobs.end(), [](const Job& job) {
@@ -761,45 +763,86 @@ void TerrainLodManager::uploadReplacements(IRenderer& renderer) {
 }
 
 void TerrainLodManager::editChanged(uint64_t column) {
-    const int x0 = int(column >> 32) * Chunk::SIZE_X - 1,
-              z0 = int(uint32_t(column)) * Chunk::SIZE_Z - 1;
-    const int x1 = x0 + Chunk::SIZE_X + 2, z1 = z0 + Chunk::SIZE_Z + 2;
-    const auto touches = [&](const TerrainLod::Patch& p) {
-        // Normals and skirts sample up to one spacing outside the patch.
-        const auto at = [&](int shift) {
-            return p.x - p.spacing < x1 + shift &&
-                   p.x + p.size() + p.spacing > x0 + shift &&
-                   p.z - p.spacing < z1 && p.z + p.size() + p.spacing > z0;
-        };
-        return at(0) || (periodX > 0 && (at(periodX) || at(-periodX)));
-    };
-    invalidatePatches(touches);
     detailSampler.setEdits(edits->snapshot());
     if (structures) structures->edited(column);
-    const TerrainLod::DetailCoverage::Key key{int(column >> 32),
-                                              int(uint32_t(column))};
-    const WorldWrap wrap{periodX};
-    for (auto& job : bandJobs)
-        if (std::abs(wrap.deltaChunk(job.chunk.x, key.first)) <= 1 &&
-            std::abs(int(job.chunk.z) - key.second) <= 1)
-            job.stale = true;
-    for (int dz = -1; dz <= 1; ++dz)
-        for (int dx = -1; dx <= 1; ++dx) {
-            const TerrainLod::DetailCoverage::Key nearby{
-                int(wrap.wrapChunk(key.first + dx)), key.second + dz};
-            if (nearby.first < 0 || nearby.second < 0) continue;
-            // Above-ground chunks still use the previous ground band for
-            // drawing until its replacement arrives.
-            if (auto band = surfaceBands.find(nearby);
-                band != surfaceBands.end())
-                band->second.stale = true;
-        }
+    surfaceChanged({{unsigned(column >> 32), unsigned(column)}});
+}
+
+void TerrainLodManager::setSnow(
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> value,
+    const snow::ChunkColumns& changed) {
+    const bool all =
+        snowSurface && snowSurface->initialPacks != value->initialPacks;
+    const int before = snowSurface ? snowSurface->day : value->day;
+    const int after = value->day;
+    const bool seasonal = value->initialPacks && before != after;
+    snowSurface = std::move(value);
+    detailSampler.setSnow(snowSurface);
+    if (all || seasonal) {
+        const auto affects = [&](int x, int z, int size, int halo) {
+            return all || snow::polar::seasonChanges(
+                              world, x - halo, z - halo, x + size + halo,
+                              z + size + halo, before, after);
+        };
+        invalidatePatches([&](const TerrainLod::Patch& p) {
+            return affects(p.x, p.z, p.size(), p.spacing);
+        });
+        const auto affectsColumn = [&](int cx, int cz) {
+            return affects(cx * Chunk::SIZE_X, cz * Chunk::SIZE_Z,
+                           Chunk::SIZE_X, 1);
+        };
+        for (auto& job : bandJobs)
+            job.stale |= affectsColumn(job.chunk.x, job.chunk.z);
+        for (auto& [key, band] : surfaceBands)
+            band.stale |= affectsColumn(key.first, key.second);
+        joinedCoverageVersion = UINT64_MAX;
+    }
+    if (!all) surfaceChanged(changed);
+}
+
+void TerrainLodManager::surfaceChanged(const snow::ChunkColumns& columns) {
+    if (columns.empty()) return;
+    invalidatePatches([&](const TerrainLod::Patch& patch) {
+        return std::ranges::any_of(columns, [&](const auto& column) {
+            const int x = int(column.first) * Chunk::SIZE_X;
+            const int z = int(column.second) * Chunk::SIZE_Z;
+            const auto touches = [&](int shift) {
+                return patch.x - patch.spacing <
+                           x + Chunk::SIZE_X + 1 + shift &&
+                       patch.x + patch.size() + patch.spacing > x - 1 + shift &&
+                       patch.z - patch.spacing < z + Chunk::SIZE_Z + 1 &&
+                       patch.z + patch.size() + patch.spacing > z - 1;
+            };
+            return touches(0) ||
+                   (periodX > 0 && (touches(periodX) || touches(-periodX)));
+        });
+    });
+    for (const auto& column : columns) {
+        const TerrainLod::DetailCoverage::Key key{int(column.first),
+                                                  int(column.second)};
+        const WorldWrap wrap{periodX};
+        for (auto& job : bandJobs)
+            if (std::abs(wrap.deltaChunk(job.chunk.x, key.first)) <= 1 &&
+                std::abs(int(job.chunk.z) - key.second) <= 1)
+                job.stale = true;
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dx = -1; dx <= 1; ++dx) {
+                const TerrainLod::DetailCoverage::Key nearby{
+                    int(wrap.wrapChunk(key.first + dx)), key.second + dz};
+                if (nearby.first < 0 || nearby.second < 0) continue;
+                // Above-ground chunks still use the previous ground band for
+                // drawing until its replacement arrives.
+                if (auto band = surfaceBands.find(nearby);
+                    band != surfaceBands.end())
+                    band->second.stale = true;
+            }
+    }
     joinedCoverageVersion = UINT64_MAX;
 }
 
 void TerrainLodManager::invalidatePatches(
     const std::function<bool(const TerrainLod::Patch&)>& touches) {
-    const auto revision = edits ? edits->revision() : 0;
+    const auto revision = ++surfaceRevision;
     for (auto& job : jobs)
         if (touches(job.patch))
             job.cancel->store(true, std::memory_order_relaxed);
@@ -923,7 +966,8 @@ bool TerrainLodManager::drawsWater(const ChunkCoord& c) const {
 }
 void TerrainLodManager::updateCoverage(ChunkManager& chunks,
                                        const Camera& camera,
-                                       LightVolumeManager* lightVolumes) {
+                                       LightVolumeManager* lightVolumes,
+                                       const snow::ChunkColumns* pendingSnow) {
     using namespace std::chrono_literals;
     for (size_t i = 0; i < bandJobs.size();) {
         if (bandJobs[i].future.wait_for(0s) != std::future_status::ready) {
@@ -994,10 +1038,11 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         auto water = world.reservoirs ? world.reservoirs->snapshot() : nullptr;
         auto future = pool.submit_task(
             [source = &world, definitions = &assets, shared = inputs, changes,
-             water, x, z] {
+             water, x, z, snow = snowSurface] {
                 SurfaceSampler sampler(*source, *definitions, shared, changes,
                                        SurfaceSampler::WaterDetail::Exact,
                                        water);
+                sampler.setSnow(snow);
                 return TerrainLod::sampleBands(x, z, sampler);
             },
             BS::pr::normal);
@@ -1047,7 +1092,7 @@ void TerrainLodManager::updateCoverage(ChunkManager& chunks,
         [&](ChunkCoord coord) {
             return chunks.hasUploadedMesh(coord) && lit(coord);
         },
-        wrap.chunks(), true);
+        wrap.chunks(), true, pendingSnow);
 
     const auto waterDrawable = [&](ChunkCoord coord) {
         return chunks.hasUploadedMesh(coord) && lit(coord);
@@ -1166,8 +1211,8 @@ uint8_t TerrainLodManager::surfaceFill(TilePos pos, const Tile& tile) {
 
 void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
                                ChunkManager& chunks, const Camera& camera,
-                               Vec2 viewport,
-                               LightVolumeManager* lightVolumes) {
+                               Vec2 viewport, LightVolumeManager* lightVolumes,
+                               const snow::ChunkColumns* pendingSnow) {
     uploaded = 0;
     if (selectionDirty) {
         selectDrawn();
@@ -1185,7 +1230,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     // Water-only updates leave the ground shadow casters unchanged.
     if (uploaded) ++drawnRevision;
     uploadWater(renderer);
-    updateCoverage(chunks, camera, lightVolumes);
+    updateCoverage(chunks, camera, lightVolumes, pendingSnow);
     if (structures) {
         // The same hand-over to real chunks as the draw below.
         const size_t bytes = structures->upload(
@@ -1222,8 +1267,8 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z}, {look.x, look.y, look.z},
                   {0, 1, 0});
     bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y),
-                camera.nearPlane,
-                selectionRange + 512, bgfx::getCaps()->homogeneousDepth);
+                camera.nearPlane, selectionRange + 512,
+                bgfx::getCaps()->homogeneousDepth);
     bx::mtxMul(vp, view, proj);
     const auto frustum = Frustum::fromViewProj(vp);
     for (const auto& p : drawn) {

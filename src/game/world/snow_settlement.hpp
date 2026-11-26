@@ -2,13 +2,18 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <span>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "consts.hpp"
 #include "serialization/binary_stream.hpp"
 #include "tile_piece.hpp"
 #include "tile_pos.hpp"
@@ -34,6 +39,17 @@ namespace snow {
 // between region and world saves.
 using Volume = int64_t;
 inline constexpr Volume UnitsPerCubicMetre = 1'000'000;
+inline constexpr int MaximumDepth = 16;
+inline constexpr Volume MaximumVolume = MaximumDepth * UnitsPerCubicMetre;
+static_assert(WORLD_HEIGHT_Y * UnitsPerCubicMetre <= INT32_MAX);
+// Heights in millionths of a metre, equal to cm³ over a full footprint.
+// All legal overworld heights fit in 32 bits.
+struct PackRun {
+    int32_t bottom = 0;
+    int32_t top = 0;
+    bool operator==(const PackRun&) const = default;
+    Volume volume() const { return Volume(top) - bottom; }
+};
 // Settled V1 snow has a fixed density of 200 kg/m³.
 inline constexpr double SnowPerWater = 5;
 
@@ -49,6 +65,17 @@ using SnowKey = std::tuple<int, int, int>;  // canonical x, z, support cell y
 using ChunkColumn = std::pair<unsigned, unsigned>;
 using ChunkColumns = std::set<ChunkColumn>;
 
+// Sparse exterior overrides. Zero means a completely excavated or melted
+// pack. Unvisited columns derive their stock from the world generator.
+using Footprints = std::set<std::pair<int, int>>;
+using PackTops = std::map<std::pair<int, int>, int32_t>;
+inline constexpr Volume PackProjectionStep = 50'000;  // 5 cm
+inline int32_t projectedPackTop(PackRun run) {
+    // Keep a nonempty run visible and never extend it across a tile boundary.
+    return int32_t(std::max(Volume(run.bottom) + 1,
+                            run.top / PackProjectionStep * PackProjectionStep));
+}
+
 // Terrain queries used by settlement. Cells are one-metre cubes and positions
 // are canonical in X. Returning nullopt closes that side of the world.
 class SnowTerrain {
@@ -62,6 +89,11 @@ class SnowTerrain {
     // Conservative highest occupied cell, inclusive. Overhead air can be
     // skipped; a missing cell below this bound is still unknown.
     virtual int top(int, int) const { return maxY() - 1; }
+    virtual std::optional<PackRun> initialPack(int, int) const {
+        return std::nullopt;
+    }
+    virtual Volume initialPackCapacity(int, int) const { return MaximumVolume; }
+    virtual bool mayHaveInitialPack(int, int) const { return false; }
 };
 
 enum class DepositOutcome {
@@ -87,6 +119,21 @@ class SnowSettlement {
     DepositOutcome snowfall(int x, int z, int fromY, Volume volume);
     Volume melt(SnowKey key, Volume volume);
     void supportChanged(TilePos pos);
+    // The undisturbed interval is reproducible. A footprint is materialized
+    // only when its pack changes. Its ceiling is anchored at original ground.
+    static constexpr tile_geometry::PieceId PackPieceBase = 0x50000000u;
+    std::span<const PackRun> packRuns(int x, int z, PackRun& baseline) const;
+    std::optional<PackRun> surfacePack(int x, int z) const;
+    tile_geometry::CellGeometry packGeometry(
+        TilePos pos, const tile_geometry::CellGeometry& substrate,
+        uint8_t snowBlock) const;
+    bool excavatePack(TilePos pos, tile_geometry::PieceId id);
+    bool excavateLoose(TilePos pos, tile_geometry::PieceId id);
+    static constexpr tile_geometry::PieceId LoosePieceBase = 0x40000000u;
+    static tile_geometry::PieceId loosePieceId(int baseY, uint16_t cell);
+    Volume packHeadroom(int x, int z, PackRun surface) const;
+    void applyPackWeather(int x, int z, PackRun surface, Volume melted,
+                          Volume fresh, Volume rejected);
     // Removes every deposit and pending transfer. Debug and fixture use;
     // regular weather removal goes through melt and excavation steps.
     void clear();
@@ -104,6 +151,8 @@ class SnowSettlement {
 
     const std::map<SnowKey, SnowColumn>& columns() const { return columns_; }
 
+    // Ledger for loose snow, meltwater and overflow. Implicit pack stock
+    // is measured by summing packRuns over the footprint of interest.
     Volume storedVolume() const;
     Volume pendingVolume() const;
     Volume sinkVolume() const { return sink_; }
@@ -115,11 +164,33 @@ class SnowSettlement {
     uint64_t revision() const { return revision_; }
     bool hasSnowInChunkColumn(ChunkColumn column) const;
     ChunkColumns takeProjectionChanges();
+    ChunkColumns takePackChanges();
+    Footprints takeFootprintChanges();
+    bool initialPacksEnabled() const { return initialPacksEnabled_; }
+    // A v5 ledger can contain old automatic ground deposits. They predate the
+    // dated seasonal model and are rebased once on load; roofs, tunnels and
+    // cuts keep their records.
+    bool needsGroundRebase() const {
+        return loadedVersion_ == 5 && localWeather_.empty() &&
+               initialPacksEnabled_;
+    }
+    size_t dropGroundLoose(
+        const std::function<bool(int x, int z, int baseY)>& ground);
+    // Drops matching loose columns of one chunk column (resident rebase).
+    size_t dropLoose(ChunkColumn column,
+                     const std::function<bool(int x, int z, int baseY)>& match);
+    // Ground support cell of a footprint that can hold an established pack.
+    std::optional<int> groundBase(int x, int z) const;
+    // Pinned pack tops (only footprints with an edit) and the tops of loose
+    // snow resting on the generated ground, for the distant height field.
+    void updatePackTops(PackTops& pack, PackTops& loose,
+                        ChunkColumn column) const;
     size_t pendingCount() const { return pending_.size(); }
 
     // Weather cursors and deposits commit in the same snow.dat snapshot.
     // Missing cursors use the world's weather epoch, including first visits.
     void beginWeather(double day);
+    void migrateUnvisitedWeather(double savedDay);
     void resetWeather(double day);
     double weatherDay(int x, int z) const;
     double weatherHorizon() const { return weatherHorizon_; }
@@ -129,11 +200,16 @@ class SnowSettlement {
     int modelForWeatherInterval(int64_t interval) const;
     void checkpointWeather(double day);
     void markWeatherApplied(int x, int z, double day);
+    void trackLocalWeather(int x, int z, double day);
+    bool tracksLocalWeather(int x, int z) const;
+    bool hasLocalWeather() const { return !localWeather_.empty(); }
     void setWeatherForce(double day, uint8_t force);
     const auto& weatherForces() const { return weatherForces_; }
     std::optional<SnowColumn> weatherSupport(int x, int z, int fromY) const;
     // Snow that fell and melted within one catch-up batch never needs a mesh.
     void recordWeatherMelt(SnowKey key, Volume amount);
+    void recordWeatherOverflow(Volume amount);
+    Volume weatherCapacity(const SnowColumn& support) const;
 
     // State includes resting columns, pending transfers, accepted input and
     // accounted sink volume. The version is independent of chunk saves.
@@ -157,20 +233,32 @@ class SnowSettlement {
     DepositOutcome submit(PendingDeposit request, size_t budget);
     void queue(const PendingDeposit& deposit);
     void invalidateProjection(int x, int z);
+    struct PackEdit {
+        int32_t ceiling;
+        std::vector<PackRun> runs;
+    };
+    PackEdit& editPack(int x, int z);
 
     const SnowTerrain& terrain_;
     std::map<SnowKey, SnowColumn> columns_;
     std::map<SnowKey, PendingDeposit> pending_;
     std::map<SnowKey, Volume> meltwater_;
+    std::map<Footprint, PackEdit> packEdits_;
+    bool initialPacksEnabled_ = true;
     Volume deposited_ = 0;
     Volume sink_ = 0;
     Volume melted_ = 0;
     uint64_t revision_ = 0;
     ChunkColumns projectionChanges_;
+    ChunkColumns packChanges_;
+    Footprints footprintChanges_;
     double weatherEpoch_ = -1;
     double weatherHorizon_ = 0;
+    std::optional<double> unvisitedWeatherDay_;
     int64_t firstCurrentWeatherInterval_ = 0;
     std::map<Footprint, double> weatherApplied_;
+    int loadedVersion_ = 0;
+    Footprints localWeather_;
     std::map<double, uint8_t> weatherForces_;
 };
 

@@ -26,6 +26,7 @@ struct TilePosLess {
 };
 
 constexpr float SillTolerance = 1e-5f;
+constexpr float SavedSupportTolerance = 1e-6f;
 constexpr double VolumeTolerance = 1e-6;  // cm3
 constexpr int MaxOpeningLookup = 64;
 constexpr size_t MaxSerializedColumns = 1 << 22;
@@ -55,24 +56,53 @@ struct WorkBudget {
 
 class TerrainCache {
    public:
-    TerrainCache(const SnowTerrain& terrain, WorkBudget& budget)
-        : terrain(terrain), budget(budget) {}
+    TerrainCache(const SnowTerrain& terrain, WorkBudget& budget,
+                 const SnowSettlement& snow, bool limitDepth = true)
+        : terrain(terrain),
+          budget(budget),
+          snow(snow),
+          limitDepth(limitDepth) {}
+
+    int top(int x, int z) {
+        const auto pack = surfacePack(x, z);
+        return pack ? std::max(terrain.top(x, z),
+                               int((pack->top - 1) / UnitsPerCubicMetre))
+                    : terrain.top(x, z);
+    }
+
+    std::optional<PackRun> surfacePack(int x, int z) {
+        auto [entry, inserted] = surfaces.try_emplace({x, z});
+        if (inserted) entry->second = snow.surfacePack(x, z);
+        return entry->second;
+    }
+
+    bool supportedByPack(const ColumnInfo& column) {
+        const auto pack = surfacePack(column.x, column.z);
+        return pack && std::abs(column.baseWorld() -
+                                double(pack->top) / UnitsPerCubicMetre) < 1e-6;
+    }
 
     const std::optional<CellGeometry>& at(TilePos pos) {
         const auto found = cells.find(pos);
         if (found != cells.end()) return found->second;
         budget.spend();
         if (budget.exhausted()) return missing;
-        const auto [entry, inserted] = cells.emplace(pos, terrain.cell(pos));
+        auto cell = terrain.cell(pos);
+        if (cell && surfacePack(pos.x, pos.z))
+            cell->append(snow.packGeometry(pos, *cell, 1));
+        const auto [entry, inserted] = cells.emplace(pos, std::move(cell));
         (void)inserted;
         return entry->second;
     }
 
     const SnowTerrain& terrain;
     WorkBudget& budget;
+    const SnowSettlement& snow;
+    const bool limitDepth;
 
    private:
     std::map<TilePos, std::optional<CellGeometry>, TilePosLess> cells;
+    std::map<Footprint, std::optional<PackRun>> surfaces;
     std::optional<CellGeometry> missing;
 };
 
@@ -91,7 +121,7 @@ struct Basin {
 std::optional<ColumnInfo> findBase(int x, int z, int fromY,
                                    TerrainCache& cache) {
     const auto& terrain = cache.terrain;
-    const int top = std::min(fromY, terrain.top(x, z));
+    const int top = std::min(fromY, cache.top(x, z));
     for (int y = top; y >= terrain.minY(); --y) {
         if (!cache.budget.spend()) return std::nullopt;
         const auto& cell = cache.at({x, y, z});
@@ -104,7 +134,7 @@ std::optional<ColumnInfo> findBase(int x, int z, int fromY,
             return std::nullopt;
         }
         if (const auto support = cell->lowestUpwardSupport())
-            return ColumnInfo{x, z, y, *support};
+            return ColumnInfo{x, z, y, std::clamp(*support, 0.f, 1.f)};
     }
     return std::nullopt;
 }
@@ -131,6 +161,8 @@ std::optional<float> sillBetween(const ColumnInfo& a, const ColumnInfo& b,
 }
 
 double capacity(const ColumnInfo& column, double level, TerrainCache& cache) {
+    if (cache.limitDepth)
+        level = std::min(level, column.baseWorld() + MaximumDepth);
     if (!(level > column.baseWorld() + 1e-9)) return 0;
     const auto& terrain = cache.terrain;
     const int last =
@@ -178,7 +210,13 @@ double levelForVolume(std::span<const int> columns,
 
     // The top of the world is a closed edge; any excess is accounted as sink
     // by the caller. The bracket stays bounded even for very large volumes.
-    const double ceiling = double(cache.terrain.maxY());
+    double ceiling = cache.terrain.maxY();
+    if (cache.limitDepth) {
+        double deepest = low;
+        for (int index : columns)
+            deepest = std::max(deepest, info[index].baseWorld() + MaximumDepth);
+        ceiling = std::min(ceiling, deepest);
+    }
     const double flat = low + volume / (UnitsPerCubicMetre * columns.size());
     if (flat <= ceiling &&
         std::abs(basinCapacityUnits(columns, info, flat, cache) - volume) <=
@@ -256,6 +294,9 @@ bool discover(const ColumnInfo& seed, TerrainCache& cache, WorkBudget& budget,
                     if (budget.exhausted()) return false;
                     continue;
                 }
+                // Established pack surfaces retain their own snowfall and
+                // cap. Loose snow cannot spread laterally onto them.
+                if (cache.supportedByPack(*base)) continue;
                 other = int(out.info.size());
                 otherInfo = *base;
                 index.emplace(Footprint{nx, nz}, other);
@@ -526,14 +567,9 @@ bool solveComponent(Component& component, std::vector<double>& volume,
         subtotal += rounded[i];
         capacitySum += assignments[i].capacity;
     }
-    Volume target = targetTotal;
-    if (double(target) > capacitySum + 1) {
-        const Volume excess = Volume(std::floor(double(target) - capacitySum));
-        if (excess > 0) {
-            overflow += excess;
-            target -= excess;
-        }
-    }
+    const Volume target =
+        std::min(targetTotal, Volume(std::llround(capacitySum)));
+    overflow += targetTotal - target;
     Volume remaining = target - subtotal;
     for (size_t i = 0; i < assignments.size() && remaining > 0; ++i) {
         rounded[i] += 1;
@@ -561,6 +597,202 @@ bool solveComponent(Component& component, std::vector<double>& volume,
 
 SnowSettlement::SnowSettlement(const SnowTerrain& terrain)
     : terrain_(terrain) {}
+
+std::span<const PackRun> SnowSettlement::packRuns(int x, int z,
+                                                  PackRun& baseline) const {
+    x = terrain_.wrapX(x);
+    if (const auto edited = packEdits_.find({x, z}); edited != packEdits_.end())
+        return edited->second.runs;
+    if (!initialPacksEnabled_ || !terrain_.mayHaveInitialPack(x, z)) return {};
+    if (const auto initial = terrain_.initialPack(x, z)) {
+        baseline = *initial;
+        return {&baseline, 1};
+    }
+    return {};
+}
+
+std::optional<PackRun> SnowSettlement::surfacePack(int x, int z) const {
+    PackRun baseline;
+    const auto runs = packRuns(x, z, baseline);
+    return runs.empty() ? std::nullopt : std::optional(runs.back());
+}
+
+tile_geometry::CellGeometry SnowSettlement::packGeometry(
+    TilePos pos, const tile_geometry::CellGeometry& substrate,
+    uint8_t snowBlock) const {
+    PackRun baseline;
+    const Volume bottom = pos.y * UnitsPerCubicMetre;
+    CellGeometry result;
+    for (const auto run : packRuns(pos.x, pos.z, baseline)) {
+        const Volume low = std::max(Volume(run.bottom) - bottom, Volume{0});
+        const Volume high =
+            std::min(Volume(run.top) - bottom, UnitsPerCubicMetre);
+        if (high > low)
+            result.append(substrate.freeSpaceBetween(
+                float(low) / UnitsPerCubicMetre,
+                float(high) / UnitsPerCubicMetre, snowBlock, PackPieceBase));
+    }
+    return result;
+}
+
+SnowSettlement::PackEdit& SnowSettlement::editPack(int x, int z) {
+    if (const auto found = packEdits_.find({x, z}); found != packEdits_.end())
+        return found->second;
+    PackRun baseline;
+    const auto runs = packRuns(x, z, baseline);
+    // A footprint without stock has no support height yet. Cap a pack created
+    // later by weather at the world top; the usual depth limit still applies.
+    const Volume limit =
+        runs.empty() ? terrain_.maxY() * UnitsPerCubicMetre
+                     : baseline.bottom + terrain_.initialPackCapacity(x, z);
+    const auto ceiling =
+        int32_t(std::min(limit, terrain_.maxY() * UnitsPerCubicMetre));
+    PackEdit pack{ceiling, {}};
+    if (!runs.empty()) pack.runs.assign(runs.begin(), runs.end());
+    return packEdits_.emplace(Footprint{x, z}, std::move(pack)).first->second;
+}
+
+bool SnowSettlement::excavatePack(TilePos pos, tile_geometry::PieceId id) {
+    if (id != PackPieceBase || pos.y < terrain_.minY() ||
+        pos.y >= terrain_.maxY())
+        return false;
+    pos.x = terrain_.wrapX(pos.x);
+    PackRun baseline;
+    const auto runs = packRuns(pos.x, pos.z, baseline);
+    const auto low = int32_t(pos.y * UnitsPerCubicMetre);
+    const auto high = int32_t(low + UnitsPerCubicMetre);
+    const auto cut = std::ranges::find_if(
+        runs, [&](PackRun run) { return run.bottom < high && run.top > low; });
+    if (cut == runs.end()) return false;
+    const auto index = cut - runs.begin();
+    const auto original = *cut;
+    auto& edited = editPack(pos.x, pos.z).runs;
+    auto at = edited.erase(edited.begin() + index);
+    if (original.top > high) at = edited.insert(at, {high, original.top});
+    if (original.bottom < low) edited.insert(at, {original.bottom, low});
+    invalidateProjection(pos.x, pos.z);
+    packChanges_.emplace(pos.x / Chunk::SIZE_X, pos.z / Chunk::SIZE_Z);
+    ++revision_;
+    return true;
+}
+
+tile_geometry::PieceId SnowSettlement::loosePieceId(int baseY, uint16_t cell) {
+    return LoosePieceBase + tile_geometry::PieceId(baseY) * Chunk::CellCount +
+           cell;
+}
+
+size_t SnowSettlement::dropGroundLoose(
+    const std::function<bool(int x, int z, int baseY)>& ground) {
+    size_t dropped = 0;
+    for (auto it = columns_.begin(); it != columns_.end();) {
+        const auto& column = it->second;
+        if (!ground(column.x, column.z, column.baseY)) {
+            ++it;
+            continue;
+        }
+        deposited_ = std::max<Volume>(0, deposited_ - column.volume);
+        invalidateProjection(column.x, column.z);
+        it = columns_.erase(it);
+        ++dropped;
+    }
+    if (dropped) ++revision_;
+    return dropped;
+}
+
+size_t SnowSettlement::dropLoose(
+    ChunkColumn column,
+    const std::function<bool(int x, int z, int baseY)>& match) {
+    const int x0 = int(column.first) * Chunk::SIZE_X;
+    const int z0 = int(column.second) * Chunk::SIZE_Z;
+    size_t dropped = 0;
+    auto it = columns_.lower_bound({x0, z0, terrain_.minY()});
+    while (it != columns_.end() && it->second.x < x0 + Chunk::SIZE_X) {
+        const auto& c = it->second;
+        if (c.z >= z0 + Chunk::SIZE_Z) {
+            ++it;
+            continue;
+        }
+        if (!match(c.x, c.z, c.baseY)) {
+            ++it;
+            continue;
+        }
+        deposited_ = std::max<Volume>(0, deposited_ - c.volume);
+        invalidateProjection(c.x, c.z);
+        it = columns_.erase(it);
+        ++dropped;
+    }
+    if (dropped) ++revision_;
+    return dropped;
+}
+
+bool SnowSettlement::excavateLoose(TilePos pos, tile_geometry::PieceId id) {
+    if (id < LoosePieceBase || id >= PackPieceBase || pos.y < terrain_.minY() ||
+        pos.y >= terrain_.maxY())
+        return false;
+    pos.x = terrain_.wrapX(pos.x);
+    const int baseY = int((id - LoosePieceBase) / Chunk::CellCount);
+    if (baseY > pos.y || !terrain_.inBounds(pos.x, pos.z)) return false;
+    const auto cell = Chunk::cell(pos.x % Chunk::SIZE_X, pos.y % Chunk::SIZE_Y,
+                                  pos.z % Chunk::SIZE_Z);
+    if (id != loosePieceId(baseY, cell)) return false;
+    const auto at = columns_.find({pos.x, pos.z, baseY});
+    if (at == columns_.end()) return false;
+    const auto& column = at->second;
+    WorkBudget work{DefaultWorkBudget};
+    TerrainCache cache(terrain_, work, *this);
+    const ColumnInfo support{pos.x, pos.z, baseY, column.baseLocal};
+    const auto before = std::llround(capacityUnits(support, pos.y, cache));
+    const auto after = std::llround(capacityUnits(support, pos.y + 1., cache));
+    const Volume removed = std::min<Volume>(column.volume, after) - before;
+    if (work.exhausted() || removed <= 0) return false;
+
+    at->second.volume -= removed;
+    if (at->second.volume == 0) columns_.erase(at);
+    sink_ += removed;
+    invalidateProjection(pos.x, pos.z);
+    ++revision_;
+    return true;
+}
+
+Volume SnowSettlement::packHeadroom(int x, int z, PackRun surface) const {
+    x = terrain_.wrapX(x);
+    const auto found = packEdits_.find({x, z});
+    const Volume ceiling =
+        found != packEdits_.end()
+            ? found->second.ceiling
+            : std::min(surface.bottom + terrain_.initialPackCapacity(x, z),
+                       terrain_.maxY() * UnitsPerCubicMetre);
+    return ceiling - surface.top;
+}
+
+void SnowSettlement::applyPackWeather(int x, int z, PackRun surface,
+                                      Volume melted, Volume fresh,
+                                      Volume rejected) {
+    if (!melted && !fresh && !rejected) return;
+    x = terrain_.wrapX(x);
+    if (fresh != melted) {
+        auto& pack = editPack(x, z);
+        auto& runs = pack.runs;
+        if (runs.empty()) runs.push_back({surface.bottom, surface.bottom});
+        // The ceiling bounds the run interval and must stay within one
+        // maximum depth of the support, including a pack that weather
+        // starts on a surface with no earlier stock.
+        pack.ceiling = int32_t(
+            std::min(surface.bottom + terrain_.initialPackCapacity(x, z),
+                     terrain_.maxY() * UnitsPerCubicMetre));
+        auto& run = runs.back();
+        const auto before = projectedPackTop(run);
+        run.top = int32_t(run.top - melted + fresh);
+        const bool gone = run.top == run.bottom;
+        invalidateProjection(x, z);
+        if (gone || projectedPackTop(run) != before)
+            packChanges_.emplace(x / Chunk::SIZE_X, z / Chunk::SIZE_Z);
+        if (gone) runs.pop_back();
+        ++revision_;
+    }
+    recordWeatherMelt({x, z, int(surface.bottom / UnitsPerCubicMetre)}, melted);
+    recordWeatherOverflow(rejected);
+}
 
 Volume SnowSettlement::storedVolume() const {
     Volume total = 0;
@@ -601,7 +833,9 @@ const SnowColumn* SnowSettlement::columnAt(int x, int z, int y) const {
 
 std::optional<double> SnowSettlement::level(const SnowColumn& column) const {
     WorkBudget budget{DefaultWorkBudget};
-    TerrainCache cache(terrain_, budget);
+    // Old saves can contain loose deposits deeper than the new limit.
+    // Keep displaying that volume until melt or a new settlement changes it.
+    TerrainCache cache(terrain_, budget, *this, false);
     const auto base = findBase(column.x, column.z, column.baseY, cache);
     if (!base || base->baseY != column.baseY ||
         base->baseLocal != column.baseLocal)
@@ -622,6 +856,9 @@ void SnowSettlement::clear() {
         invalidateProjection(column.x, column.z);
     }
     columns_.clear();
+    packEdits_.clear();
+    localWeather_.clear();
+    initialPacksEnabled_ = false;
     pending_.clear();
     meltwater_.clear();
     deposited_ = 0;
@@ -631,10 +868,17 @@ void SnowSettlement::clear() {
 }
 
 bool SnowSettlement::hasSnowInChunkColumn(ChunkColumn column) const {
-    if (columns_.empty()) return false;
     const int x0 = int(column.first) * Chunk::SIZE_X;
     const int z0 = int(column.second) * Chunk::SIZE_Z;
     for (int x = x0; x < x0 + Chunk::SIZE_X; ++x) {
+        const auto edited = packEdits_.lower_bound({x, z0});
+        if (edited != packEdits_.end() && edited->first.first == x &&
+            edited->first.second < z0 + Chunk::SIZE_Z)
+            return true;
+        if (initialPacksEnabled_ &&
+            (terrain_.mayHaveInitialPack(x, z0) ||
+             terrain_.mayHaveInitialPack(x, z0 + Chunk::SIZE_Z - 1)))
+            return true;
         const auto found = columns_.lower_bound({x, z0, terrain_.minY()});
         if (found != columns_.end() && found->second.x == x &&
             found->second.z < z0 + Chunk::SIZE_Z)
@@ -647,9 +891,62 @@ ChunkColumns SnowSettlement::takeProjectionChanges() {
     return std::exchange(projectionChanges_, {});
 }
 
+Footprints SnowSettlement::takeFootprintChanges() {
+    return std::exchange(footprintChanges_, {});
+}
+
+ChunkColumns SnowSettlement::takePackChanges() {
+    return std::exchange(packChanges_, {});
+}
+
+std::optional<int> SnowSettlement::groundBase(int x, int z) const {
+    PackRun baseline;
+    const auto runs = packRuns(x, z, baseline);
+    if (runs.empty()) return std::nullopt;
+    return int(runs.front().bottom / UnitsPerCubicMetre);
+}
+
+void SnowSettlement::updatePackTops(PackTops& pack, PackTops& loose,
+                                    ChunkColumn column) const {
+    const int x0 = int(column.first) * Chunk::SIZE_X;
+    const int z0 = int(column.second) * Chunk::SIZE_Z;
+    const auto step = [](double level) {
+        const auto units = std::llround(level * UnitsPerCubicMetre);
+        return int32_t(std::max<Volume>(
+            0, units / PackProjectionStep * PackProjectionStep));
+    };
+    for (int x = x0; x < x0 + Chunk::SIZE_X; ++x) {
+        pack.erase(pack.lower_bound({x, z0}),
+                   pack.lower_bound({x, z0 + Chunk::SIZE_Z}));
+        loose.erase(loose.lower_bound({x, z0}),
+                    loose.lower_bound({x, z0 + Chunk::SIZE_Z}));
+        for (int z = z0; z < z0 + Chunk::SIZE_Z; ++z) {
+            PackRun baseline;
+            const auto runs = packRuns(x, z, baseline);
+            const auto edited = packEdits_.find({x, z});
+            if (edited != packEdits_.end())
+                pack[{x, z}] = runs.empty() ? 0 : projectedPackTop(runs.back());
+            if (runs.empty()) continue;
+            const int base = int(runs.front().bottom / UnitsPerCubicMetre);
+            const auto end = columns_.upper_bound({x, z, terrain_.maxY()});
+            int32_t top = 0;
+            for (auto it = columns_.lower_bound({x, z, terrain_.minY()});
+                 it != end; ++it) {
+                if (it->second.baseY != base) continue;
+                if (const auto level = this->level(it->second))
+                    top = std::max(top, step(*level));
+            }
+            if (top) loose[{x, z}] = top;
+        }
+    }
+}
+
 void SnowSettlement::invalidateProjection(int x, int z) {
-    projectionChanges_.emplace(unsigned(x / Chunk::SIZE_X),
-                               unsigned(z / Chunk::SIZE_Z));
+    footprintChanges_.emplace(x, z);
+    const auto column =
+        ChunkColumn{unsigned(x / Chunk::SIZE_X), unsigned(z / Chunk::SIZE_Z)};
+    projectionChanges_.emplace(column);
+    packChanges_.emplace(column);
 }
 
 void SnowSettlement::queue(const PendingDeposit& deposit) {
@@ -665,7 +962,7 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
         if (used) *used = work.used;
         return result;
     };
-    TerrainCache cache(terrain_, work);
+    TerrainCache cache(terrain_, work, *this);
     const int x = terrain_.wrapX(deposit.x);
     if (!terrain_.inBounds(x, deposit.z)) return finish(ApplyResult::Blocked);
 
@@ -674,6 +971,7 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
     if (!seed)
         return finish(deposit.radius ? ApplyResult::Retry
                                      : ApplyResult::Blocked);
+    if (cache.supportedByPack(*seed)) return finish(ApplyResult::Blocked);
 
     Component component;
     if (!discover(*seed, cache, work, component, deposit.radius))
@@ -731,6 +1029,20 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
 
 DepositOutcome SnowSettlement::deposit(int x, int z, int fromY, Volume volume,
                                        size_t budget) {
+    x = terrain_.wrapX(x);
+    if (volume > 0) {
+        const auto pack = surfacePack(x, z);
+        if (pack && Volume(fromY) * UnitsPerCubicMetre >= pack->top) {
+            WorkBudget work{budget};
+            TerrainCache cache(terrain_, work, *this);
+            const auto base = findBase(x, z, fromY, cache);
+            if (base && cache.supportedByPack(*base)) {
+                const Volume kept = std::min(volume, packHeadroom(x, z, *pack));
+                applyPackWeather(x, z, *pack, 0, kept, volume - kept);
+                return kept ? DepositOutcome::Settled : DepositOutcome::Sink;
+            }
+        }
+    }
     return submit({terrain_.wrapX(x), z, fromY, volume}, budget);
 }
 
@@ -755,7 +1067,7 @@ void SnowSettlement::supportChanged(TilePos pos) {
         if (found == columns_.end()) continue;
         const auto column = found->second;
         WorkBudget work{DefaultWorkBudget};
-        TerrainCache cache(terrain_, work);
+        TerrainCache cache(terrain_, work, *this);
         const auto base = findBase(pos.x, pos.z, y, cache);
         if (base && base->baseY == y && base->baseLocal == column.baseLocal)
             continue;
@@ -825,8 +1137,17 @@ void SnowSettlement::beginWeather(double day) {
     if (weatherEpoch_ < 0) resetWeather(day);
 }
 
+void SnowSettlement::migrateUnvisitedWeather(double savedDay) {
+    beginWeather(savedDay);
+    if (unvisitedWeatherDay_) return;
+    checkpointWeather(savedDay);
+    unvisitedWeatherDay_ = savedDay;
+    ++revision_;
+}
+
 void SnowSettlement::resetWeather(double day) {
     weatherEpoch_ = weatherHorizon_ = day;
+    unvisitedWeatherDay_ = day;
     firstCurrentWeatherInterval_ = 0;
     weatherApplied_.clear();
     weatherForces_.clear();
@@ -841,7 +1162,9 @@ int SnowSettlement::modelForWeatherInterval(int64_t interval) const {
 
 double SnowSettlement::weatherDay(int x, int z) const {
     const auto found = weatherApplied_.find({terrain_.wrapX(x), z});
-    return found == weatherApplied_.end() ? weatherEpoch_ : found->second;
+    return found == weatherApplied_.end()
+               ? unvisitedWeatherDay_.value_or(weatherEpoch_)
+               : found->second;
 }
 
 void SnowSettlement::checkpointWeather(double day) {
@@ -854,6 +1177,20 @@ void SnowSettlement::markWeatherApplied(int x, int z, double day) {
     weatherApplied_.insert_or_assign({terrain_.wrapX(x), z}, day);
     weatherHorizon_ = std::max(weatherHorizon_, day);
     ++revision_;
+}
+
+void SnowSettlement::trackLocalWeather(int x, int z, double day) {
+    x = terrain_.wrapX(x);
+    if (!terrain_.inBounds(x, z)) return;
+    // Exact replay starts at the edit. The untouched terrain keeps its dated
+    // seasonal stock until a later storm, excavation or support change pins a
+    // local pack.
+    localWeather_.emplace(x, z);
+    markWeatherApplied(x, z, day);
+}
+
+bool SnowSettlement::tracksLocalWeather(int x, int z) const {
+    return localWeather_.contains({terrain_.wrapX(x), z});
 }
 
 void SnowSettlement::setWeatherForce(double day, uint8_t force) {
@@ -876,7 +1213,7 @@ void SnowSettlement::setWeatherForce(double day, uint8_t force) {
 std::optional<SnowColumn> SnowSettlement::weatherSupport(int x, int z,
                                                          int fromY) const {
     WorkBudget work{DefaultWorkBudget};
-    TerrainCache cache(terrain_, work);
+    TerrainCache cache(terrain_, work, *this);
     const auto base = findBase(x, z, fromY, cache);
     if (!base) return std::nullopt;
     return SnowColumn{x, z, base->baseY, base->baseLocal, 0};
@@ -890,10 +1227,26 @@ void SnowSettlement::recordWeatherMelt(SnowKey key, Volume amount) {
     ++revision_;
 }
 
+void SnowSettlement::recordWeatherOverflow(Volume amount) {
+    if (amount <= 0) return;
+    deposited_ += amount;
+    sink_ += amount;
+    ++revision_;
+}
+
+Volume SnowSettlement::weatherCapacity(const SnowColumn& support) const {
+    WorkBudget work{DefaultWorkBudget};
+    TerrainCache cache(terrain_, work, *this);
+    const ColumnInfo base{support.x, support.z, support.baseY,
+                          support.baseLocal};
+    return std::llround(
+        capacityUnits(base, base.baseWorld() + MaximumDepth, cache));
+}
+
 Bytes SnowSettlement::encode() const {
     BinaryWriter writer;
     writer.writeTag("SNOW");
-    writer.write<uint32_t>(4);
+    writer.write<uint32_t>(6);
     writer.write<uint64_t>(deposited_);
     writer.write<uint64_t>(sink_);
     writer.write<int64_t>(melted_);
@@ -939,6 +1292,24 @@ Bytes SnowSettlement::encode() const {
         writer.write<double>(day);
         writer.write<uint8_t>(force);
     }
+    writer.write<double>(unvisitedWeatherDay_.value_or(weatherEpoch_));
+    writer.write<uint8_t>(initialPacksEnabled_);
+    writer.write<uint32_t>(uint32_t(packEdits_.size()));
+    for (const auto& [footprint, pack] : packEdits_) {
+        writer.write<int32_t>(footprint.first);
+        writer.write<int32_t>(footprint.second);
+        writer.write<int32_t>(pack.ceiling);
+        writer.write<uint8_t>(uint8_t(pack.runs.size()));
+        for (const auto run : pack.runs) {
+            writer.write<int32_t>(run.bottom);
+            writer.write<int32_t>(run.top);
+        }
+    }
+    writer.write<uint32_t>(uint32_t(localWeather_.size()));
+    for (const auto& [x, z] : localWeather_) {
+        writer.write<int32_t>(x);
+        writer.write<int32_t>(z);
+    }
     return writer.take();
 }
 
@@ -947,7 +1318,8 @@ bool SnowSettlement::restore(ByteView bytes) {
         BinaryReader reader(bytes);
         if (reader.readTag() != "SNOW") return false;
         const auto version = reader.read<uint32_t>();
-        if (version < 1 || version > 4) return false;
+        if (version < 1 || version > 6) return false;
+        loadedVersion_ = int(version);
         const auto deposited = reader.read<uint64_t>();
         const auto sink = reader.read<uint64_t>();
         const Volume melted = version >= 2 ? reader.read<int64_t>() : 0;
@@ -972,8 +1344,10 @@ bool SnowSettlement::restore(ByteView bytes) {
                 column.baseY >= terrain_.maxY() ||
                 !terrain_.inBounds(column.x, column.z) ||
                 column.x != terrain_.wrapX(column.x) ||
-                !(column.baseLocal >= 0 && column.baseLocal <= 1))
+                !(column.baseLocal >= -1e-6f &&
+                  column.baseLocal <= 1.f + 1e-6f))
                 return false;
+            column.baseLocal = std::clamp(column.baseLocal, 0.f, 1.f);
             remaining -= column.volume;
             if (!columns
                      .emplace(SnowKey{column.x, column.z, column.baseY}, column)
@@ -1078,6 +1452,57 @@ bool SnowSettlement::restore(ByteView bytes) {
                     return false;
             }
         }
+        std::optional<double> unvisitedDay;
+        bool initialPacksEnabled = true;
+        std::map<Footprint, PackEdit> packEdits;
+        if (version >= 5) {
+            unvisitedDay = reader.read<double>();
+            const auto enabled = reader.read<uint8_t>();
+            const auto count = reader.read<uint32_t>();
+            if (!(*unvisitedDay >= epoch && *unvisitedDay <= horizon) ||
+                enabled > 1 || count > MaxSerializedColumns)
+                return false;
+            initialPacksEnabled = enabled != 0;
+            const Volume low = terrain_.minY() * UnitsPerCubicMetre;
+            const Volume high = terrain_.maxY() * UnitsPerCubicMetre;
+            for (uint32_t i = 0; i < count; ++i) {
+                const int x = reader.read<int32_t>();
+                const int z = reader.read<int32_t>();
+                const int ceiling = reader.read<int32_t>();
+                const auto runCount = reader.read<uint8_t>();
+                if (!terrain_.inBounds(x, z) || x != terrain_.wrapX(x) ||
+                    ceiling <= low || ceiling > high || runCount > MaximumDepth)
+                    return false;
+                PackEdit pack{ceiling, {}};
+                Volume last = std::max(low, ceiling - MaximumVolume) - 1;
+                for (uint8_t j = 0; j < runCount; ++j) {
+                    const auto bottom = reader.read<int32_t>();
+                    const auto top = reader.read<int32_t>();
+                    if (bottom <= last || top <= bottom || top > ceiling ||
+                        (j && bottom / UnitsPerCubicMetre <=
+                                  (last - 1) / UnitsPerCubicMetre))
+                        return false;
+                    pack.runs.push_back({bottom, top});
+                    last = top;
+                }
+                if (!packEdits.emplace(Footprint{x, z}, std::move(pack)).second)
+                    return false;
+            }
+        }
+        Footprints localWeather;
+        if (version >= 6) {
+            const auto count = reader.read<uint32_t>();
+            if (count > MaxWeatherRecords) return false;
+            for (uint32_t i = 0; i < count; ++i) {
+                const int x = reader.read<int32_t>();
+                const int z = reader.read<int32_t>();
+                // A tracked edit need not own a pack: bare ground that later
+                // takes weather creates its pack then.
+                if (!terrain_.inBounds(x, z) || x != terrain_.wrapX(x) ||
+                    !localWeather.emplace(x, z).second)
+                    return false;
+            }
+        }
         if (!reader.atEnd() || remainingMelt != 0) return false;
 
         for (const auto& [key, column] : columns_) {
@@ -1090,6 +1515,18 @@ bool SnowSettlement::restore(ByteView bytes) {
             invalidateProjection(column.x, column.z);
         }
         pending_ = std::move(pending);
+        const auto invalidatePack = [&](const auto& entries) {
+            for (const auto& [footprint, pack] : entries) {
+                const auto [x, z] = footprint;
+                invalidateProjection(x, z);
+                packChanges_.emplace(x / Chunk::SIZE_X, z / Chunk::SIZE_Z);
+            }
+        };
+        invalidatePack(packEdits_);
+        invalidatePack(packEdits);
+        packEdits_ = std::move(packEdits);
+        initialPacksEnabled_ = initialPacksEnabled;
+        unvisitedWeatherDay_ = unvisitedDay;
         meltwater_ = std::move(meltwater);
         deposited_ = Volume(deposited);
         sink_ = Volume(sink);
@@ -1098,6 +1535,7 @@ bool SnowSettlement::restore(ByteView bytes) {
         weatherHorizon_ = horizon;
         firstCurrentWeatherInterval_ = firstCurrentInterval;
         weatherApplied_ = std::move(applied);
+        localWeather_ = std::move(localWeather);
         weatherForces_ = std::move(forces);
         ++revision_;
         return true;

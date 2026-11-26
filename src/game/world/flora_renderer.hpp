@@ -52,6 +52,7 @@ class FloraRenderer {
 
     // The map must outlive the renderer.
     void setSkyLight(SkyHeightMap& map);
+    void snowChanged(const ChunkCoord& coord);
     // Optional block light chroma (coloured lamps tint plants).
     // The propagator must outlive the renderer.
     void setBlockLight(const BlockLightPropagator* light) {

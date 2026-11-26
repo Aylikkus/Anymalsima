@@ -43,7 +43,9 @@ struct WorldMeta : ISerializable {
     // 25 world keeps the narrow cube-landing rule.
     // 27 cuts diagonal corner ramps where the surface steps down in both
     // horizontal axes. A 26 world keeps its block corners.
-    static constexpr int GeneratorVersion = 27;
+    // 28 introduces established polar snow from the starting climate.
+    static constexpr int PolarPackVersion = 28;
+    static constexpr int GeneratorVersion = PolarPackVersion;
     // First generator that selects natural surface shapes. Kept separate from
     // the codec versions: shape payloads are understood by every format that
     // can read the current chunk data.

@@ -111,6 +111,15 @@ function under `unit/` or `integration/` and register its name in CMake.
 
 ## Device targets (GPU and display)
 
+For fixed-camera snow replay and projection timings, run the
+`weather_clock_save` and `weather_clock` scenarios in `lod_render_smoke`.
+They exercise normal gameplay rendering and update work across 1×, 7200×,
+and return to 1×. The [weather handoff](../docs/handoff/weather.md#fixed-camera-performance-procedure)
+has the launch commands and fixture coordinates. `SMOKE_CAPTURE=<prefix>`
+writes one TGA per phase; `SMOKE_NO_ACCEL=1` omits the 7200x phase for a
+control. If X11 window mapping is unresponsive, use
+`SDL_VIDEODRIVER=wayland`, which bgfx supports for its Vulkan surface.
+
 `lod_render_smoke` renders real frames through bgfx/Vulkan. It needs a GPU and
 a display session, so it is built only on request (`EXCLUDE_FROM_ALL`) and is
 never registered in CTest. Agents and CI without a display must not run it;

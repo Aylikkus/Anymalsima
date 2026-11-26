@@ -11,6 +11,7 @@
 #include "camera_work_queue.hpp"
 #include "chunk_manager.hpp"
 #include "core/signal.hpp"
+#include "polar_snow.hpp"
 #include "sky_column.hpp"
 #include "sky_occlusion_map.hpp"
 #include "structure_voxels.hpp"
@@ -58,6 +59,13 @@ class SkyHeightMap {
 
     // Built map of a chunk column with overrides applied, or null.
     sky::TilePtr tile(unsigned chunkX, unsigned chunkZ) const;
+    std::optional<int> rawTop(int x, int z) const;
+    int snowOpaqueTop(int x, int z) const;
+    void setSnowEnvironment(const EnvironmentMap& environment,
+                            const snow::ChunkColumns& changed, uint8_t block);
+    void setSnowSurface(
+        std::shared_ptr<const snow::polar::SurfaceSnapshot> value,
+        const snow::ChunkColumns& changed);
     // One tile column (X wraps), or std::nullopt while not built.
     std::optional<sky::Column> column(int64_t x, int64_t z) const;
     // Highest recorded sky tile (sky::None: none).
@@ -105,8 +113,9 @@ class SkyHeightMap {
     const SunLightPropagator* voxelLight = nullptr;
 
     struct Entry {
-        sky::TilePtr derived;     // from the sources alone
-        sky::TilePtr effective;   // with overrides
+        sky::TilePtr derived;    // from the sources alone
+        sky::TilePtr effective;  // with overrides
+        sky::TilePtr withSnow;
         uint64_t generation = 0;  // of the newest dispatched build
         bool hasTrees = false;
         bool queried = false;
@@ -162,9 +171,17 @@ class SkyHeightMap {
         std::vector<int> tops;
     };
     using Projections = std::vector<std::shared_ptr<const Projection>>;
+    using SnowTops = std::array<int16_t, sky::Tile::Size>;
+    std::unordered_map<uint64_t, SnowTops> snowTops;
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> snowSurface;
+    void applySnow(uint64_t key, Entry& entry);
+
     struct TerrainRaster {
         int x0, z0;
+        bool initialPacks;
+        std::optional<TilePos> fixture;
         std::vector<float> heights;
+        std::vector<float> raw;
     };
     struct OcclusionInputs {
         Vec3 eye;
@@ -176,6 +193,7 @@ class SkyHeightMap {
         std::shared_ptr<const sky::OpacityTable> opacity;
         WorldWrap wrap;
         std::shared_ptr<const TerrainRaster> terrain;
+        std::shared_ptr<const snow::polar::SurfaceSnapshot> snow;
     };
     struct OcclusionResult {
         std::shared_ptr<const SkyOcclusionMap> map;
@@ -184,7 +202,8 @@ class SkyHeightMap {
     };
     static std::shared_ptr<const TerrainRaster> sampleTerrain(
         int x0, int z0, const World& world, const IAssets& assets,
-        WorldWrap wrap, std::shared_ptr<const TerrainRaster> previous);
+        WorldWrap wrap, std::shared_ptr<const TerrainRaster> previous,
+        const snow::polar::SurfaceSnapshot* snow);
     static OcclusionResult buildOcclusion(OcclusionInputs inputs,
                                           const World& world,
                                           const IAssets& assets);

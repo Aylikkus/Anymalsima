@@ -8,8 +8,9 @@
 #include "weather_presentation.hpp"
 
 namespace snow {
+class SnowSettlement;
 class SnowTerrain;
-}
+}  // namespace snow
 
 // Dated regional curtains and exposed, world-space near particles share the
 // weather field and depth-test against the world.
@@ -38,7 +39,8 @@ class WeatherRenderer {
 
     void render(RenderTarget& target, Camera& camera, const World& world,
                 const world_weather::Sample& localWeather, const Frame& frame,
-                const snow::SnowTerrain& terrain);
+                const snow::SnowTerrain& terrain,
+                const snow::SnowSettlement& snow);
 
     uint32_t particleCount() const { return drawn; }
     uint32_t regionCount() const { return farDrawn ? wetRegions : 0; }

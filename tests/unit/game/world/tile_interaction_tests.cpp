@@ -1,4 +1,5 @@
 #include "world/grounded_probe.hpp"
+#include "world/snow_cover.hpp"
 #include "world/world_editor.hpp"
 #include "world_fixture.hpp"
 
@@ -374,6 +375,108 @@ TEST(environment_snow_pick_walk_mesh) {
     CHECK(ground);
     EQUAL(ground->ty, 4, "cleared snow exposes the support");
     near(ground->position.y, 5.f);
+}
+
+TEST(polar_pack_editor_removes_only_the_picked_interval) {
+    ShapeFixture f;
+    for (unsigned cy : {0, 1}) f.load({0, cy, 0});
+    f.set(6, 11, 7);
+    struct Terrain final : snow::SnowTerrain {
+        ChunkManager& chunks;
+        explicit Terrain(ChunkManager& chunks) : chunks(chunks) {}
+        std::optional<tile_geometry::CellGeometry> cell(
+            TilePos pos) const override {
+            return chunks.rawCellGeometryAt(pos);
+        }
+        bool inBounds(int x, int z) const override { return x == 6 && z == 7; }
+        int minY() const override { return 0; }
+        int maxY() const override { return 32; }
+        bool mayHaveInitialPack(int x, int z) const override {
+            return inBounds(x, z);
+        }
+        std::optional<snow::PackRun> initialPack(int, int) const override {
+            return snow::PackRun{12000000, 28000000};
+        }
+    } terrain(f.chunks);
+    snow::SnowSettlement snow(terrain);
+    snow::SnowCover cover;
+    const snow::ChunkColumns resident{{0, 0}};
+    const auto publish = [&] {
+        cover.rebuild(snow, terrain, 1, &resident);
+        f.chunks.setEnvironment(cover.environment());
+    };
+    publish();
+
+    const auto hit = castTileRay(f.chunks, 4.5f, 16.5f, 7.5f, 1, 0, 0);
+    CHECK(hit && hit->pieceId == snow::SnowSettlement::PackPieceBase);
+    auto probe = f.spawn(6.5f, 29.f, 7.5f);
+    near(probe.feet().y, 28.f);
+    WorldEditor editor(f.chunks, nullptr, f.assets.getStorage<Block>());
+    editor.setEnvironmentRemoval([&](TilePos pos, auto id) {
+        if (!snow.excavatePack(pos, id)) return false;
+        publish();
+        return true;
+    });
+    const TilePos pos{hit->tx, hit->ty, hit->tz};
+    CHECK(editor.removePiece(pos, hit->revision, hit->pieceId) ==
+          CellPieceEdit::Applied);
+    CHECK(editor.removePiece(pos, hit->revision, hit->pieceId) ==
+          CellPieceEdit::Stale);
+    CHECK(!castTileRay(f.chunks, 4.5f, 16.5f, 7.5f, 1, 0, 0, 5));
+    CHECK(cover.cellAt({6, 15, 7}) && cover.cellAt({6, 17, 7}));
+    CHECK(f.chunks.getChunk({0, 1, 0})->tiles[7][0][6].isAir());
+}
+
+TEST(loose_snow_editor_removes_the_picked_cell) {
+    ShapeFixture f;
+    f.load({0, 0, 0});
+    f.set(6, 8, 7);
+    struct Terrain final : snow::SnowTerrain {
+        ChunkManager& chunks;
+        explicit Terrain(ChunkManager& chunks) : chunks(chunks) {}
+        std::optional<tile_geometry::CellGeometry> cell(
+            TilePos pos) const override {
+            return chunks.rawCellGeometryAt(pos);
+        }
+        bool inBounds(int x, int z) const override { return x == 6 && z == 7; }
+        int minY() const override { return 0; }
+        int maxY() const override { return 32; }
+    } terrain(f.chunks);
+    snow::SnowSettlement snow(terrain);
+    CHECK(snow.deposit(6, 7, 12, 1'250'000) == snow::DepositOutcome::Settled);
+    snow::SnowCover cover;
+    const snow::ChunkColumns resident{{0, 0}};
+    const auto publish = [&] {
+        cover.rebuild(snow, terrain, 1, &resident);
+        f.chunks.setEnvironment(cover.environment());
+    };
+    publish();
+    near(*snow.levelAt(6, 7), 10.25);
+
+    const auto top = castTileRay(f.chunks, 6.5f, 12, 7.5f, 0, -1, 0);
+    CHECK(top && top->ty == 10);
+    CHECK(top->pieceId >= snow::SnowSettlement::LoosePieceBase);
+    CHECK(top->pieceId < snow::SnowSettlement::PackPieceBase);
+    WorldEditor editor(f.chunks, nullptr, f.assets.getStorage<Block>());
+    editor.setEnvironmentRemoval([&](TilePos pos, auto id) {
+        if (!snow.excavateLoose(pos, id)) return false;
+        publish();
+        return true;
+    });
+    const TilePos pos{top->tx, top->ty, top->tz};
+    CHECK(editor.removePiece(pos, top->revision, top->pieceId) ==
+          CellPieceEdit::Applied);
+    near(*snow.levelAt(6, 7), 10.);
+    CHECK(editor.removePiece(pos, top->revision, top->pieceId) !=
+          CellPieceEdit::Applied);
+
+    const auto floor = castTileRay(f.chunks, 6.5f, 12, 7.5f, 0, -1, 0);
+    CHECK(floor && floor->ty == 9);
+    CHECK(floor->pieceId != top->pieceId);
+    CHECK(editor.removePiece({floor->tx, floor->ty, floor->tz}, floor->revision,
+                             floor->pieceId) == CellPieceEdit::Applied);
+    CHECK(!snow.levelAt(6, 7).value_or(0));
+    CHECK(!castTileRay(f.chunks, 6.5f, 12, 7.5f, 0, -1, 0, 2));
 }
 
 TEST(compound_build_pick_walk) {

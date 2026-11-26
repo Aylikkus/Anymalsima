@@ -547,6 +547,11 @@ double CellGeometry::freeVolumeBelow(float level) const {
 
 bool CellGeometry::isFull() const { return freeVolumeBelow(1) <= 1e-7; }
 
+bool CellGeometry::hasPiece(PieceId id) const {
+    return std::ranges::any_of(
+        solids_, [id](const Solid& solid) { return solid.id == id; });
+}
+
 std::optional<float> CellGeometry::lowestUpwardSupport() const {
     std::optional<float> lowest;
     for (const auto& face : exteriorFaces()) {

@@ -10,6 +10,8 @@ SAMPLER3D(u_light_volume, 2);
 // w = 0: no volume, use full sky light; 1: swept voxel light; 2: estimated
 // sky light (SunLightPropagator::isEstimated), shaded by u_sky_occlusion.
 uniform vec4 u_light_chunk;
+// x = snow albedo layer (-1 disables), y = side-face sky softening.
+uniform vec4 u_material_soft;
 uniform vec4 u_light_slot;   // xyz = slot base texel inside the page
 // LightShadows atlas and LodLightMap (LightRenderer).
 SAMPLER2D(u_shadow_atlas, 3);
@@ -145,7 +147,16 @@ void main()
     // Without a volume (distant joins and structures) small lights come
     // from the coarse distant glow map.
     if (u_light_chunk.w < 0.5) far += surfaceLodLight(v_position);
+    float soft = 0.0;
+    if (u_material_soft.x >= 0.0 && v_layer >= -0.5 &&
+        abs(floor(v_layer + 0.5) - u_material_soft.x) < 0.5)
+        soft = u_material_soft.y;
+    // A snow side face is lit by the air above its thin step, not by the
+    // ground cell behind it. Use that exposure so the side matches the top.
+    if (soft > 0.0 && u_light_chunk.w > 0.5 && abs(geometric.y) < 0.5)
+        light.x = max(light.x,
+                      sampleLightVolume(v_light + vec3(0.0, 1.0, 0.0)).r);
     color = surfaceLight(geometric, normal, color, light, tint, blockDir,
-                         blockDirStrength, far);
+                         blockDirStrength, far, soft);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

@@ -16,12 +16,17 @@
 #include <thread>
 #include <unordered_map>
 
+#include "game.hpp"
+#include "gettext_wrapper.hpp"
 #include "lod_capture_renderer.hpp"
 #include "lod_scene.hpp"
+#include "platform.hpp"
 #include "render/frustrum.hpp"
 #include "render/render_views.hpp"
+#include "renderer.hpp"
 #include "resource_manager.hpp"
 #include "sky_renderer.hpp"
+#include "states/gameplay_state.hpp"
 #include "weather_scene.hpp"
 #include "world/block_light_propagator.hpp"
 #include "world/day_night.hpp"
@@ -87,12 +92,122 @@ class WeatherSmokeTerrain final : public snow::SnowTerrain {
     tile_geometry::CellGeometry solid;
 };
 
+// Runs the production gameplay update, rendering, and jobs at one camera.
+int weatherClock(const std::filesystem::path& directory) {
+    using Clock = std::chrono::steady_clock;
+    SaveSlot slot{directory, {}};
+    slot.meta.deserialize(
+        FileIO::readJson((directory / "world.json").string()));
+    auto world = save_catalog::readWorldMap(slot);
+    Platform platform(1280, 720);
+    Renderer renderer(platform);
+    renderer.getResources().loadFromJson(
+        FileIO::readJson("assets/definitions.json"));
+    renderer.getResources().buildMaterialTextureArrays();
+    UIContext context(platform.getWindowSize(), &renderer,
+                      &renderer.getAudioSystem(), &platform,
+                      &renderer.getResources());
+    Settings settings;
+    if (const char* detail = std::getenv("SMOKE_TERRAIN"))
+        settings.setExtra("terrainDetail", std::atoi(detail));
+    context.playerSettings = &settings;
+    i18n::init("assets/i18n");
+    Game game(context);
+    auto gameplay = std::make_unique<GameplayState>(
+        game, context, std::move(world), std::move(slot));
+
+    InputSystem input;
+    RenderTarget target;
+    platform.setFpsLimit(0);
+    const auto phase = [&](std::string_view name, double speed, int seconds) {
+        gameplay->startWeatherClockMeasurement(speed);
+        std::vector<double> frames;
+        const auto start = Clock::now();
+        auto last = start;
+        float dt = 0;
+        const char* capture = std::getenv("SMOKE_CAPTURE");
+        bool captured = false;
+        while (platform.isRunning() &&
+               last - start < std::chrono::seconds(seconds)) {
+            platform.pollEvents(input);
+            gameplay->update(game, dt);
+            gameplay->render(target, context);
+            renderer.beginFrame();
+            renderer.draw(target);
+            if (!captured && capture &&
+                last - start >= std::chrono::seconds(seconds - 1)) {
+                const auto path =
+                    std::string(capture) + "-" + std::string(name);
+                bgfx::requestScreenShot(BGFX_INVALID_HANDLE, path.c_str());
+                captured = true;
+            }
+            renderer.endFrame();
+            renderer.getAudioSystem().update();
+            input.clear();
+            target.clear();
+            const auto now = Clock::now();
+            dt = std::chrono::duration<float>(now - last).count();
+            frames.push_back(dt * 1000);
+            last = now;
+        }
+        if (frames.empty()) return;
+        std::sort(frames.begin(), frames.end());
+        const auto snow = gameplay->measuredSnowWork();
+        std::cout << name << " speed=" << speed << " frames=" << frames.size()
+                  << " p50_ms=" << frames[frames.size() / 2]
+                  << " p95_ms=" << frames[(frames.size() - 1) * 95 / 100]
+                  << " replay_ms=" << snow.replayMs
+                  << " samples=" << snow.weatherSamples
+                  << " batches=" << snow.batches
+                  << " projection_ms=" << snow.projectionMs
+                  << " columns=" << snow.projectedColumns
+                  << " water=" << snow.waterMs << " flora=" << snow.floraMs
+                  << " tree=" << snow.treeMs << " season=" << snow.seasonMs
+                  << " lod=" << snow.lodMs << " chunk=" << snow.chunkMs
+                  << std::endl;
+    };
+    phase("warmup", 1, 25);
+    phase("baseline", 1, 10);
+    if (std::getenv("SMOKE_NO_ACCEL")) {
+        phase("returned", 1, 15);
+        phase("later_at_1x", 1, 15);
+    } else {
+        phase("accelerated", 7200, 15);
+        phase("returned", 1, 15);
+        phase("later_at_1x", 1, 15);
+    }
+    // Screen-shot callbacks are delivered after the requesting frame.
+    bgfx::frame();
+    bgfx::frame();
+    gameplay.reset();
+    game.close();
+    renderer.clear();
+    platform.close();
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::string output = argc > 1 ? argv[1] : "build/lod_capture";
     const int maxFrames = argc > 2 ? std::stoi(argv[2]) : 1200;
     const std::string scenario = argc > 3 ? argv[3] : "mountains";
+    if (scenario == "weather_clock") return weatherClock(output);
+    if (scenario == "weather_clock_save") {
+        auto world = weatherDistanceScene();
+        const Vec2u region{12, 9};
+        for (auto& cell : world.regions) {
+            cell.temperature_c = -20;
+            cell.humidity = .8;
+        }
+        auto slot = save_catalog::create(world, region, output);
+        slot.meta.camera = WorldMeta::CameraState{
+            Vec3{float((region.x + 1) * 128), 550, float(region.y * 128 + 63)},
+            0, -.5f, 0};
+        save_catalog::writeMeta(slot);
+        std::cout << slot.directory << '\n';
+        return 0;
+    }
     if (scenario == "weather_distance_save") {
         const auto world = weatherDistanceScene();
         const auto slot = save_catalog::create(world, {0, 48}, output);
@@ -399,6 +514,7 @@ int main(int argc, char** argv) {
         const weather_presentation::Fixture distanceFixture{0, 48};
         std::unique_ptr<WeatherRenderer> distantWeather;
         WeatherSmokeTerrain distantTerrain(surface, world.wrap());
+        snow::SnowSettlement distantSnow(distantTerrain);
         const auto placeWeatherCamera = [&](float x, float above) {
             constexpr int z = 48 * 128 + 98;
             const int at = int(world.wrap().wrapTile(int(std::floor(x))));
@@ -415,7 +531,9 @@ int main(int argc, char** argv) {
             if (naturalWeather) {
                 constexpr int x = 9800, z = 10600;
                 camera = {{x, float(distantTerrain.top(x, z)) + 82.f, z},
-                          bx::kPiHalf, .02f, 0};
+                          bx::kPiHalf,
+                          .02f,
+                          0};
             }
         }
         // The shape scene straddles the X face of a voxel chunk.
@@ -1192,7 +1310,7 @@ int main(int argc, char** argv) {
                          naturalWeather ? std::nullopt
                                         : std::optional(distanceFixture),
                          !dryComparison},
-                        distantTerrain);
+                        distantTerrain, distantSnow);
                     skyState = skyCamera.sky;
                     camera.weatherMap = skyCamera.weatherMap;
                     distantMs = since(start);
@@ -2510,8 +2628,8 @@ int main(int argc, char** argv) {
             if (weather && (!weatherMeasured ||
                             (weatherWalk && (phase != 2 || settled < 10))))
                 result = 1;
-            if (weatherDistance && (naturalWeather ? phase != 1
-                                                   : phase != 2 || settled < 10))
+            if (weatherDistance &&
+                (naturalWeather ? phase != 1 : phase != 2 || settled < 10))
                 result = 1;
             if (riverScene &&
                 (phase < 3 || settled < 10 || !capturedTransition))

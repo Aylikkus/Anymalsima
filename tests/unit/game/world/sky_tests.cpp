@@ -340,3 +340,32 @@ TEST(compound_sky_and_save) {
           "projected union counts once");
     CHECK(!closed.solidOpaque());
 }
+
+TEST(sky_snow_compound_lighting) {
+    constexpr uint8_t Snow = 3;
+    auto table = opacities();
+    table[Snow] = voxel_light::Opaque;
+    Chunk chunk;
+    Tile wall{};
+    wall.block_id = Stone;
+    const auto cell = Chunk::cell(0, 0, 0);
+    chunk.setCell(cell, wall, TileShape::make(TileShapeProfile::Wall25));
+    auto solid = chunk.solidCellAt(cell);
+    const auto geometry = solid.geometry();
+    const auto snow = geometry.freeSpaceBetween(.25f, .5f, Snow, 42);
+    const ChunkEnvironment environment{
+        {cell, std::make_shared<const tile_geometry::CellGeometry>(snow)}};
+    voxel_light::Shapes snapshot;
+    snapshot.capture(chunk, table, &environment);
+    const auto coverage = snapshot.cell(cell, table[Stone]);
+    EQUAL(int(voxel_light::verticalLoss(coverage)), 15,
+          "snow shades through the opening beside a wall");
+    const Vec2 open = geometry.contains({.125f, .5f, .125f})
+                          ? Vec2{.875f, .875f}
+                          : Vec2{.125f, .125f};
+    CHECK(!geometry.contains({open.x, .5f, open.y}));
+    CHECK(voxel_light::rayOpacity(coverage, {open.x, .3f, open.y}, {0, 1, 0}, 0,
+                                  .2f) == 15);
+    CHECK(voxel_light::rayOpacity(coverage, {open.x, .75f, open.y}, {0, 1, 0},
+                                  0, .2f) == 0);
+}

@@ -286,9 +286,16 @@ vec3 surfaceSunLight(vec3 geometric, float exposure)
 // channel, like the voxel field, so near and far light hand over smoothly.
 vec3 surfaceLight(vec3 geometric, vec3 normal, vec3 albedo, vec2 light,
                   vec3 blockTint, vec3 blockDir, float blockDirStrength,
-                  vec3 far)
+                  vec3 far, float softSides)
 {
     vec3 sky = surfaceSunLight(geometric, light.x);
+    if (softSides > 0.0 && abs(geometric.y) < 0.5) {
+        // Wrapped sky for near-vertical faces. It takes the brightness of
+        // the face's own top-facing sky, so it brightens thin steps by day
+        // and stays dark at night instead of becoming self-lit.
+        vec3 top = surfaceSunLight(vec3(0.0, 1.0, 0.0), light.x);
+        sky = mix(sky, max(sky, top), softSides);
+    }
     float toward = mix(1.0, max(dot(normal, blockDir), 0.0), blockDirStrength);
     vec3 block = blockTint * (light.y
                               * (SURFACE_AMBIENT + SURFACE_DIFFUSE * toward))

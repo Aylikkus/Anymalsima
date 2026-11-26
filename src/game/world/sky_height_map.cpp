@@ -6,6 +6,7 @@
 
 #include "light_volume.hpp"
 #include "sunlight_propagator.hpp"
+#include "surface_sampler.hpp"
 #include "world_editor.hpp"
 
 namespace {
@@ -114,6 +115,7 @@ SkyHeightMap::SkyHeightMap(ChunkManager& chunks, TerrainEdits& edits,
         [this](uint64_t key) { invalidate(key); });
     releasedConnection = chunks.columnReleased.connect([this](uint64_t key) {
         if (entries.erase(key)) ++revision;
+        snowTops.erase(key);
         queue.erase({unsigned(key >> 32), 0, unsigned(key)});
         observations.erase(key);
     });
@@ -342,6 +344,7 @@ void SkyHeightMap::refreshEffective(uint64_t key, Entry& entry) {
     }
     if (entry.effective && *entry.effective == *effective) return;
     entry.effective = std::move(effective);
+    applySnow(key, entry);
     ++revision;
     changed.emit(key);
 }
@@ -424,9 +427,121 @@ void SkyHeightMap::observe() {
     }
 }
 
+void SkyHeightMap::applySnow(uint64_t key, Entry& entry) {
+    entry.withSnow.reset();
+    const auto found = snowTops.find(key);
+    if (!entry.effective || found == snowTops.end()) return;
+    auto combined = std::make_shared<sky::Tile>(*entry.effective);
+    for (int i = 0; i < sky::Tile::Size; ++i) {
+        const int snow = found->second[i];
+        if (snow <= combined->opaqueTop(i)) continue;
+        const auto substrate = combined->column(i);
+        combined->set(i, sky::scanColumn(
+                             std::max(snow, substrate.top()), snow, [&](int y) {
+                                 return y == snow
+                                            ? voxel_light::Cell(sky::Opaque)
+                                            : substrate.cellAt(y);
+                             }));
+    }
+    entry.withSnow = std::move(combined);
+}
+
+void SkyHeightMap::setSnowEnvironment(const EnvironmentMap& environment,
+                                      const snow::ChunkColumns& columns,
+                                      uint8_t block) {
+    std::unordered_map<const tile_geometry::CellGeometry*, bool> opaque;
+    for (const auto& [cx, cz] : columns) {
+        SnowTops tops;
+        tops.fill(sky::None);
+        for (int cy = Y_CHUNKS - 1; cy >= 0; --cy) {
+            const auto slab = environment.find({cx, unsigned(cy), cz});
+            if (slab == environment.end()) continue;
+            for (const auto& [cell, geometry] : *slab->second) {
+                const int x = cell % Chunk::SIZE_X;
+                const int y =
+                    cy * Chunk::SIZE_Y + cell / Chunk::SIZE_X % Chunk::SIZE_Y;
+                const int z = cell / (Chunk::SIZE_X * Chunk::SIZE_Y);
+                auto& top = tops[sky::Tile::index(x, z)];
+                if (top >= y) continue;
+                auto [it, inserted] = opaque.try_emplace(geometry.get());
+                if (inserted)
+                    it->second =
+                        voxel_light::overheadLoss(
+                            *geometry, (*opacity)[block]) == sky::Opaque;
+                if (it->second) top = int16_t(y);
+            }
+        }
+        const auto key = columnKey(cx, cz);
+        const auto prior = snowTops.find(key);
+        if (prior != snowTops.end() && prior->second == tops) continue;
+        if (std::ranges::all_of(tops, [](int y) { return y == sky::None; })) {
+            if (snowTops.erase(key) == 0) continue;
+        } else {
+            snowTops.insert_or_assign(key, tops);
+        }
+        if (const auto entry = entries.find(key); entry != entries.end())
+            applySnow(key, entry->second);
+        ++revision;
+        changed.emit(key);
+    }
+}
+
+void SkyHeightMap::setSnowSurface(
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> value,
+    const snow::ChunkColumns& columns) {
+    const bool newBaseline = !snowSurface ||
+                             snowSurface->initialPacks != value->initialPacks ||
+                             snowSurface->fixture != value->fixture;
+    const auto heightTile = [](int32_t height) {
+        return (height + snow::UnitsPerCubicMetre - 1) /
+               snow::UnitsPerCubicMetre;
+    };
+    const auto differs = [&](const auto& nextMap, const auto& priorMap) {
+        return std::ranges::any_of(columns, [&](const auto& key) {
+            const auto next = nextMap.find(key);
+            const auto prior = priorMap.find(key);
+            if (next == nextMap.end() || prior == priorMap.end()) return true;
+            return !std::ranges::equal(*next->second, *prior->second,
+                                       [&](const auto& a, const auto& b) {
+                                           return a.first == b.first &&
+                                                  heightTile(a.second) ==
+                                                      heightTile(b.second);
+                                       });
+        });
+    };
+    const bool editsChanged =
+        snowSurface && differs(value->edits, snowSurface->edits);
+    const bool looseChanged =
+        snowSurface && differs(value->loose, snowSurface->loose);
+    if (newBaseline || looseChanged) occlusionTerrain.reset();
+    snowSurface = std::move(value);
+    if (newBaseline || editsChanged || looseChanged) ++revision;
+}
+
+std::optional<int> SkyHeightMap::rawTop(int x, int z) const {
+    x = int(chunks.wrap().wrapTile(x));
+    if (x < 0 || z < 0) return std::nullopt;
+    const auto entry =
+        entries.find(columnKey(x / Chunk::SIZE_X, z / Chunk::SIZE_Z));
+    if (entry == entries.end() || !entry->second.effective) return std::nullopt;
+    return entry->second.effective->top(
+        sky::Tile::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z));
+}
+
+int SkyHeightMap::snowOpaqueTop(int x, int z) const {
+    x = int(chunks.wrap().wrapTile(x));
+    if (x < 0 || z < 0) return sky::None;
+    const auto found =
+        snowTops.find(columnKey(x / Chunk::SIZE_X, z / Chunk::SIZE_Z));
+    if (found == snowTops.end()) return sky::None;
+    return found
+        ->second[sky::Tile::index(x % Chunk::SIZE_X, z % Chunk::SIZE_Z)];
+}
+
 sky::TilePtr SkyHeightMap::tile(unsigned chunkX, unsigned chunkZ) const {
     const auto it = entries.find(columnKey(chunkX, chunkZ));
-    return it == entries.end() ? nullptr : it->second.effective;
+    if (it == entries.end()) return nullptr;
+    return it->second.withSnow ? it->second.withSnow : it->second.effective;
 }
 
 std::optional<sky::Column> SkyHeightMap::column(int64_t x, int64_t z) const {
@@ -527,29 +642,34 @@ std::optional<uint8_t> SkyHeightMap::skyAt(int64_t x, int y, int64_t z) const {
 
 std::shared_ptr<const SkyHeightMap::TerrainRaster> SkyHeightMap::sampleTerrain(
     int x0, int z0, const World& world, const IAssets& assets, WorldWrap wrap,
-    std::shared_ptr<const TerrainRaster> terrain) {
+    std::shared_ptr<const TerrainRaster> terrain,
+    const snow::polar::SurfaceSnapshot* snow) {
     constexpr int Size = SkyOcclusionMap::Size;
     constexpr int Extent = SkyOcclusionMap::Extent;
     constexpr int Cell = SkyOcclusionMap::TilesPerTexel;
+    if (terrain && (terrain->initialPacks != bool(snow && snow->initialPacks) ||
+                    terrain->fixture != (snow ? snow->fixture : std::nullopt)))
+        terrain.reset();
     if (terrain && terrain->x0 == x0 && terrain->z0 == z0) return terrain;
     auto raster = std::make_shared<TerrainRaster>(TerrainRaster{
-        x0, z0,
+        x0, z0, bool(snow && snow->initialPacks),
+        snow ? snow->fixture : std::nullopt,
+        std::vector<float>(size_t(Size) * Size, SkyOcclusionMap::Open),
         std::vector<float>(size_t(Size) * Size, SkyOcclusionMap::Open)});
     // Sample generated terrain at texel centres. Reuse
     // the overlap when the camera moves to the next snap.
-    std::unordered_map<uint64_t, TerrainNeighborhood> regions;
-    const auto surface = [&](int x, int z) {
-        const Vec2u region{unsigned(x / TerrainTuning::RegionX),
-                           unsigned(z / TerrainTuning::RegionZ)};
-        const uint64_t key = columnKey(region.x, region.y);
-        auto it = regions.find(key);
-        if (it == regions.end())
-            it = regions
-                     .emplace(key, TerrainNeighborhood::capture(world, region,
-                                                                assets))
-                     .first;
-        return float(std::floor(TerrainSampler(it->second).surface(x, z)) + 1);
-    };
+    std::optional<SurfaceSampler> sampler;
+    if (!world.regions.empty()) {
+        sampler.emplace(world, assets);
+        if (snow) {
+            auto baseline = std::make_shared<snow::polar::SurfaceSnapshot>();
+            baseline->block = snow->block;
+            baseline->initialPacks = snow->initialPacks;
+            baseline->fixture = snow->fixture;
+            baseline->day = snow::polar::PermanentOnly;
+            sampler->setSnow(std::move(baseline));
+        }
+    }
     if (!world.regions.empty())
         for (int tz = 0; tz < Size; ++tz) {
             const int z = z0 + tz * Cell + Cell / 2;
@@ -562,11 +682,16 @@ std::shared_ptr<const SkyHeightMap::TerrainRaster> SkyHeightMap::sampleTerrain(
                                                  wrap.tiles))
                             : -1;
                 const int oldZ = terrain ? z - terrain->z0 : -1;
-                raster->heights[size_t(tz) * Size + tx] =
-                    oldX >= 0 && oldX < Extent && oldZ >= 0 && oldZ < Extent
-                        ? terrain->heights[size_t(oldZ / Cell) * Size +
-                                           oldX / Cell]
-                        : surface(wx, z);
+                const auto i = size_t(tz) * Size + tx;
+                if (oldX >= 0 && oldX < Extent && oldZ >= 0 && oldZ < Extent) {
+                    const auto prior = size_t(oldZ / Cell) * Size + oldX / Cell;
+                    raster->heights[i] = terrain->heights[prior];
+                    raster->raw[i] = terrain->raw[prior];
+                } else {
+                    raster->raw[i] = float(sampler->height(wx, z) + 1);
+                    raster->heights[i] =
+                        std::ceil(sampler->exteriorHeight(wx, z));
+                }
             }
         }
     return raster;
@@ -606,7 +731,8 @@ void SkyHeightMap::updateOcclusion(
 
     std::unordered_map<uint64_t, sky::TilePtr> tiles;
     for (const auto& [key, entry] : entries)
-        if (entry.effective) tiles.emplace(key, entry.effective);
+        if (auto effective = tile(unsigned(key >> 32), unsigned(key)))
+            tiles.emplace(key, std::move(effective));
     occlusionSources = structures;
     occlusionRevision = revision;
     occlusionEditRevision = edits.revision();
@@ -619,7 +745,8 @@ void SkyHeightMap::updateOcclusion(
                            overridden,
                            opacity,
                            chunks.wrap(),
-                           occlusionTerrain};
+                           occlusionTerrain,
+                           snowSurface};
     occlusionJob = pool.submit_task(
         [inputs = std::move(inputs), &world, &assets]() mutable {
             return buildOcclusion(std::move(inputs), world, assets);
@@ -630,7 +757,7 @@ void SkyHeightMap::updateOcclusion(
 SkyHeightMap::OcclusionResult SkyHeightMap::buildOcclusion(
     OcclusionInputs inputs, const World& world, const IAssets& assets) {
     auto& [eye, structures, previous, tiles, edits, overrides, opacity, wrap,
-           terrain] = inputs;
+           terrain, snow] = inputs;
     Projections next;
     for (const auto& source : structures) {
         const auto same = std::find_if(
@@ -658,9 +785,28 @@ SkyHeightMap::OcclusionResult SkyHeightMap::buildOcclusion(
         constexpr int Size = SkyOcclusionMap::Size;
         constexpr int Extent = SkyOcclusionMap::Extent;
         constexpr int Cell = SkyOcclusionMap::TilesPerTexel;
-        terrain =
-            sampleTerrain(x0, z0, world, assets, wrap, std::move(terrain));
+        terrain = sampleTerrain(x0, z0, world, assets, wrap, std::move(terrain),
+                                snow.get());
         heights = terrain->heights;
+        if (snow)
+            for (const auto& [key, tops] : snow->edits) {
+                const int x = int(key.first) * Chunk::SIZE_X;
+                const int z = int(key.second) * Chunk::SIZE_Z;
+                const int dx = int(WorldWrap::mod(int64_t(x) - x0, wrap.tiles));
+                const int dz = z - z0;
+                if (dx < 0 || dx >= Extent || dz < 0 || dz >= Extent) continue;
+                for (const auto& [point, top] : *tops) {
+                    const int lx = dx + point.first - x;
+                    const int lz = dz + point.second - z;
+                    if (lx % Cell != Cell / 2 || lz % Cell != Cell / 2)
+                        continue;
+                    const auto i = size_t(lz / Cell) * Size + lx / Cell;
+                    heights[i] =
+                        std::max(terrain->raw[i],
+                                 std::ceil(float(double(top) /
+                                                 snow::UnitsPerCubicMetre)));
+                }
+            }
 
         const auto add = [&](int x, int z, int top) {
             if (top < 0 || z < z0 || z >= z0 + Extent) return;
@@ -708,6 +854,28 @@ SkyHeightMap::OcclusionResult SkyHeightMap::buildOcclusion(
             if (const auto it = overrides.find(key); it != overrides.end())
                 for (const auto& [i, column] : it->second) tile.set(i, column);
             addTile(key, tile);
+            if (snow) {
+                const int x = int(unsigned(key >> 32)) * Chunk::SIZE_X;
+                const int z = int(unsigned(key)) * Chunk::SIZE_Z;
+                for (int dz = Cell / 2; dz < Chunk::SIZE_Z; dz += Cell)
+                    for (int dx = Cell / 2; dx < Chunk::SIZE_X; dx += Cell) {
+                        const int lx = int(
+                            WorldWrap::mod(int64_t(x + dx) - x0, wrap.tiles));
+                        const int lz = z + dz - z0;
+                        if (lx < 0 || lx >= Extent || lz < 0 || lz >= Extent)
+                            continue;
+                        const auto i = size_t(lz / Cell) * Size + lx / Cell;
+                        const auto edited = snow->editedTop(x + dx, z + dz);
+                        const float top =
+                            edited ? float(double(*edited) /
+                                           snow::UnitsPerCubicMetre)
+                            : terrain->heights[i] > terrain->raw[i]
+                                ? terrain->heights[i]
+                                : 0.f;
+                        if (top > 0)
+                            add(x + dx, z + dz, int(std::ceil(top)) - 1);
+                    }
+            }
         }
         for (const auto& [key, columns] : overrides) {
             if (tiles.contains(key) || edits->contains(key) || !inView(key))

@@ -117,6 +117,16 @@ void SunLightPropagator::removed(const ChunkCoord& coord) {
     removedColumns.insert(column);
 }
 
+void SunLightPropagator::markEnvironmentChanged(const ChunkCoord& coord) {
+    const auto it = states.find(coord);
+    if (it == states.end()) return;
+    it->second.opacityStale = true;
+    const auto key = columnKey(coord.x, coord.z);
+    columnRevisions[key] = ++nextRevision;
+    pendingDirect.insert(key);
+    invalidateAround(coord);
+}
+
 void SunLightPropagator::markColumnDirty(unsigned cx, unsigned cz) {
     const auto key = columnKey(cx, cz);
     columnRevisions[key] = ++nextRevision;
@@ -170,7 +180,8 @@ SunLightPropagator::snapshotColumn(uint64_t column) {
             voxel_light::OpacityTable byBlock{};
             for (const auto& block : blocks.items)
                 byBlock[block.id] = block.properties.opacity;
-            opacities->shapes.capture(chunk, byBlock);
+            opacities->shapes.capture(chunk, byBlock,
+                                      chunks.environmentFor(coord).get());
             for (int z = 0; z < Z; ++z)
                 for (int y = 0; y < Y; ++y)
                     for (int x = 0; x < X; ++x) {

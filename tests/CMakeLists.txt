@@ -140,6 +140,20 @@ set(world_cases
     tile_piece_free_volume
     tile_piece_free_space_between
     snow_settlement_ramp_wedge
+    polar_pack_generation_excavation_and_reload
+    polar_pack_exposure_saturation_and_thaw
+    polar_pack_starting_climate_and_legacy_world
+    polar_pack_direct_baseline_work
+    polar_pack_shelf_near_a_steep_slope
+    snow_weather_starts_a_pack_above_the_floor
+    v5_ground_snow_rebases_on_load
+    snow_save_normalizes_ramp_support_roundoff
+    seasonal_snow_blends_at_old_latitude_cutoff
+    seasonal_snow_has_no_region_step
+    snow_local_edit_and_loose_excavation_roundtrip
+    seasonal_snow_fills_deep_ramps
+    polar_pack_exterior_and_partial_projection
+    snow_roof_proxy_survives_unload
     snow_settlement_ramp_wedge_incremental
     snow_settlement_draining_ramp
     snow_settlement_blocked_toe
@@ -189,6 +203,8 @@ set(world_cases
     compound_mesh_materials_and_seam
     compound_build_pick_walk
     environment_snow_pick_walk_mesh
+    polar_pack_editor_removes_only_the_picked_interval
+    loose_snow_editor_removes_the_picked_cell
     compound_sky_and_save
     tile_classification
     generation_surface_layers
@@ -411,6 +427,7 @@ set_tests_properties(game.world.structure_chunk_stamping PROPERTIES
 foreach(case sky_column_scan_and_direct sky_tile_build_sources
              sky_tile_overrides sky_codec_roundtrip sky_shape_transmission_and_overrides tree_wood_tops_match_raster
              sky_heightmap_matches_chunks sky_queries_and_far_shade_without_chunks
+             sky_snow_compound_lighting
              sky_sunlight_without_upper_slabs
              sky_spread_without_waiting)
     add_test(NAME game.world.${case} COMMAND world_logic_tests ${case})
@@ -513,7 +530,8 @@ foreach(case terrain_caps_repeatability terrain_shared_edges_corners
     endif()
 endforeach()
 
-foreach(case lod_surface_matches_chunks lod_geology_order_independent
+foreach(case lod_detail_waits_for_streamed_snow lod_surface_matches_chunks lod_geology_order_independent
+             lod_polar_snow_surface
              lod_stepped_surface_and_bands lod_smooth_skirts_cover_edges
              lod_stepped_boundary_walls lod_water_and_bounds
              lod_selection_coverage_balance lod_cover_fallback lod_edits_lower_ground

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -80,6 +81,11 @@ class WorldEditor {
                              tile_geometry::TilePiece piece);
     CellPieceEdit removePiece(TilePos pos, SolidCellRevision expected,
                               tile_geometry::PieceId id);
+    // Environmental pieces retain their own save and publication owner.
+    void setEnvironmentRemoval(
+        std::function<bool(TilePos, tile_geometry::PieceId)> remove) {
+        removeEnvironment = std::move(remove);
+    }
     // Applies requests in order. Later requests see earlier results (placing
     // twice into one tile reports Occupied). Returns one status per request.
     std::vector<EditStatus> apply(std::span<const EditRequest> requests);
@@ -104,4 +110,5 @@ class WorldEditor {
     ChunkManager& chunks;
     SunLightPropagator* sunlight;
     const DataStorage<Block>& blocks;
+    std::function<bool(TilePos, tile_geometry::PieceId)> removeEnvironment;
 };

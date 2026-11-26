@@ -1,9 +1,13 @@
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <tuple>
 
 #include "test.hpp"
+#include "world/polar_snow.hpp"
 #include "world/precipitation.hpp"
 #include "world/snow_cover.hpp"
 #include "world/snow_settlement.hpp"
@@ -119,7 +123,467 @@ void nearLevel(const snow::SnowSettlement& settlement, int x, int z,
     CHECK(std::abs(*level - expected) < 1e-4);
 }
 
+struct PolarFixture : Fixture {
+    World world;
+    snow::polar::Baselines baselines{world};
+    ColumnGenerationInput ground;
+
+    PolarFixture() {
+        world.genSettings = WorldGenSettings::fromSeed(424242);
+        world.generatorVersion = WorldMeta::PolarPackVersion;
+        world.width = 2;
+        world.height = 8;
+        world.regions.resize(world.width * world.height);
+        for (auto& region : world.regions) {
+            region.temperature_c = -38;
+            region.humidity = .9f;
+            region.land_height_m = 11;
+        }
+        periodX = x1 = world.width * WorldWrap::RegionSize;
+        z1 = 16;
+        highY = 40;
+        ground.surface_y = 11;
+    }
+
+    bool mayHaveInitialPack(int x, int z) const override {
+        return inBounds(x, z) && snow::polar::eligibleLatitude(world, z);
+    }
+
+    std::optional<snow::PackRun> initialPack(int x, int z) const override {
+        return baselines.at(x, z, ground);
+    }
+
+    snow::Volume initialPackCapacity(int, int) const override {
+        return snow::polar::capacity(ground);
+    }
+
+    std::optional<CellGeometry> cell(TilePos pos) const override {
+        if (pos.y == ground.surface_y && inBounds(wrapX(pos.x), pos.z))
+            return cube();
+        return Fixture::cell(pos);
+    }
+};
+
 }  // namespace
+
+TEST(polar_pack_generation_excavation_and_reload) {
+    PolarFixture terrain;
+    snow::SnowSettlement settlement(terrain);
+    settlement.beginWeather(snow::polar::StartingDay);
+    const auto undisturbed = settlement.encode();
+    const snow::ChunkColumns resident{{7, 0}, {8, 0}, {15, 0}, {0, 0}};
+    snow::SnowCover cover;
+    cover.rebuild(settlement, terrain, 42, &resident);
+    EQUAL(settlement.surfacePack(127, 0)->volume(), snow::MaximumVolume,
+          "starting footprint contains 16 cubic metres");
+    EQUAL(settlement.surfacePack(128, 0)->top, 28 * snow::UnitsPerCubicMetre,
+          "region border has continuous pack height");
+    CHECK(cover.cellAt({127, 15, 0})->isFull());
+    CHECK(cover.cellAt({127, 16, 0})->isFull());
+    CHECK(cover.cellAt({127, 15, 0}) == cover.cellAt({127, 16, 0}));
+    CHECK(settlement.encode() == undisturbed);
+
+    for (const int x : {127, 128, -1, 0}) {
+        CHECK(settlement.excavatePack({x, 16, 0},
+                                      snow::SnowSettlement::PackPieceBase));
+        CHECK(!settlement.excavatePack({x, 16, 0},
+                                       snow::SnowSettlement::PackPieceBase));
+    }
+    const auto saved = settlement.encode();
+    // Four records, each with a footprint, cap and two surviving intervals.
+    EQUAL(saved.size() - undisturbed.size(), size_t(4 * (13 + 2 * 8)),
+          "one sparse exception per edited footprint");
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(saved));
+    const auto dirty = loaded.takeProjectionChanges();
+    CHECK(dirty == resident);
+    cover.rebuild(loaded, terrain, 42, &resident, &dirty);
+    for (const int x : {127, 128, 255, 0}) {
+        CHECK(cover.cellAt({x, 15, 0})->isFull());
+        CHECK(!cover.cellAt({x, 16, 0}));
+        CHECK(cover.cellAt({x, 17, 0})->isFull());
+        snow::PackRun baseline;
+        const auto runs = loaded.packRuns(x, 0, baseline);
+        EQUAL(runs.size(), size_t(2),
+              "middle cut leaves independent intervals");
+        EQUAL(runs.front().volume() + runs.back().volume(),
+              15 * snow::UnitsPerCubicMetre, "only the selected metre removed");
+    }
+    CHECK(cover.cellAt({128, 16, 1})->isFull());
+    auto truncated = saved;
+    truncated.pop_back();
+    CHECK(!loaded.restore(truncated));
+    CHECK(loaded.encode() == saved);
+}
+
+TEST(polar_pack_exposure_saturation_and_thaw) {
+    PolarFixture terrain;
+    snow::SnowSettlement settlement(terrain);
+    constexpr auto piece = snow::SnowSettlement::PackPieceBase;
+    // Two adjacent tunnel cells and an open column for the side entrance.
+    for (int x : {127, 128})
+        for (int y : {14, 15}) CHECK(settlement.excavatePack({x, y, 0}, piece));
+    for (int y = 14; y < 28; ++y)
+        CHECK(settlement.excavatePack({129, y, 0}, piece));
+    const auto top = settlement.surfacePack(127, 0);
+    const auto rays = precipitation::footprint(terrain, 127, 0, top);
+    CHECK(rays[0]->packed && *rays[0]->height == 28);
+
+    weather(settlement, terrain, 127, 0, 1, 10, -5);
+    EQUAL(settlement.sinkVolume(), 50000, "precipitation above cap is booked");
+    snow::PackRun baseline;
+    EQUAL(settlement.packRuns(127, 0, baseline).front().top,
+          14 * snow::UnitsPerCubicMetre,
+          "side entrance leaves floor sheltered");
+
+    // Cut the column above the first room cell, leaving its neighbor roofed.
+    for (int y = 16; y < 28; ++y)
+        CHECK(settlement.excavatePack({127, y, 0}, piece));
+    weather(settlement, terrain, 127, 0, 1, 10, -5);
+    EQUAL(settlement.surfacePack(127, 0)->top, 14050000,
+          "falling snow now reaches the opened room");
+    weather(settlement, terrain, 127, 0, 1, 0, 5);
+    EQUAL(settlement.surfacePack(127, 0)->top, 14037500,
+          "thaw removes the newly exposed surface");
+    EQUAL(settlement.meltwaterCm3(), 2500., "meltwater is accounted");
+    CHECK(settlement.surfacePack(128, 0)->top == 28000000);
+    const snow::ChunkColumns resident{{7, 0}, {8, 0}};
+    snow::SnowCover cover;
+    cover.rebuild(settlement, terrain, 42, &resident);
+    const auto cap = cover.cellAt({127, 14, 0});
+    CHECK(cap);
+    CHECK(std::abs(*cap->supportHeight({0, 0}, {1, 1}) - .04f) < 1e-5f);
+    CHECK(!cover.cellAt({128, 14, 0}));
+}
+
+TEST(polar_pack_exterior_and_partial_projection) {
+    PolarFixture terrain;
+    snow::SnowSettlement settlement(terrain);
+    const snow::ChunkColumns resident{{7, 0}, {8, 0}};
+    snow::SnowCover cover;
+    cover.rebuild(settlement, terrain, 42, &resident);
+    const auto untouched = cover.cellAt({126, 15, 0});
+    auto pack = settlement.surfacePack(127, 0);
+    CHECK(pack);
+    constexpr auto piece = snow::SnowSettlement::PackPieceBase;
+    CHECK(settlement.excavatePack({127, 15, 0}, piece));
+    auto changed = settlement.takeProjectionChanges();
+    std::map<snow::ChunkColumn, snow::Footprints> footprints;
+    footprints[{7, 0}] = settlement.takeFootprintChanges();
+    cover.rebuild(settlement, terrain, 42, &resident, &changed, &footprints);
+    CHECK(!cover.cellAt({127, 15, 0}));
+    CHECK(cover.cellAt({127, 16, 0})->isFull());
+    CHECK(cover.cellAt({126, 15, 0}) == untouched);
+
+    snow::PackTops exterior, looseTop;
+    for (const auto& column : settlement.takePackChanges())
+        settlement.updatePackTops(exterior, looseTop, column);
+    EQUAL(exterior.at({127, 0}), pack->top, "roof survives tunnel cut");
+    EQUAL(exterior.size(), size_t(1), "only edited footprint has an entry");
+    settlement.applyPackWeather(127, 0, *pack, 1000, 0, 0);
+    CHECK(!settlement.takePackChanges().empty());
+    settlement.applyPackWeather(127, 0, *settlement.surfacePack(127, 0), 1000,
+                                0, 0);
+    CHECK(!settlement.takePackChanges().empty());
+    CHECK(!settlement.takeFootprintChanges().empty());
+    for (int y = 12; y < 28; ++y)
+        if (y != 15) CHECK(settlement.excavatePack({127, y, 0}, piece));
+    settlement.updatePackTops(exterior, looseTop, {7, 0});
+    EQUAL(exterior.at({127, 0}), 0, "empty override suppresses baseline");
+}
+
+TEST(snow_roof_proxy_survives_unload) {
+    Fixture terrain;
+    solid(terrain, 0, 8, 0);
+    snow::SnowSettlement settlement(terrain);
+    weather(settlement, terrain, 0, 0, 1, 10, -5);
+    const snow::ChunkColumns resident{{0, 0}};
+    snow::SnowCover cover;
+    cover.updateLooseExterior(settlement, resident, resident, 42);
+    std::vector<structure_voxels::SourcePtr> sources;
+    cover.appendLooseExterior(sources, {}, {0, 10, 0}, 300);
+    EQUAL(sources.size(), size_t(1), "one roof source");
+    const auto slab = sources.front()->rasterize(0, 0, 0, 0);
+    CHECK(slab);
+    CHECK(!slab->snow.contains(Chunk::cell(0, 8, 0)));
+    const auto snow = slab->snow.at(Chunk::cell(0, 9, 0));
+    EQUAL(snow.low, 0.f, "snow rests on roof");
+    CHECK(std::abs(snow.high - .05f) < 1e-6f);
+    const auto coarse = sources.front()->rasterize(1, 0, 0, 0);
+    CHECK(coarse);
+    const auto layer = coarse->snow.at(Chunk::cell(0, 4, 0));
+    CHECK(std::abs((layer.high - layer.low) * 2 - .05f) < 1e-6f);
+    const auto original = sources.front();
+    cover.updateLooseExterior(settlement, resident, {}, 42);
+    sources.clear();
+    cover.appendLooseExterior(sources, {}, {0, 10, 0}, 300);
+    CHECK(sources.front() == original);
+
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(settlement.encode()));
+    snow::SnowCover reopened;
+    reopened.updateLooseExterior(loaded, loaded.takeProjectionChanges(), {},
+                                 42);
+    sources.clear();
+    reopened.appendLooseExterior(sources, {}, {0, 10, 0}, 300);
+    EQUAL(sources.size(), size_t(1), "roof snow reconstructed from save");
+    CHECK(sources.front()
+              ->rasterize(0, 0, 0, 0)
+              ->snow.contains(Chunk::cell(0, 9, 0)));
+}
+
+TEST(polar_pack_starting_climate_and_legacy_world) {
+    PolarFixture terrain;
+    auto sample = terrain.ground;
+    CHECK(terrain.baselines.at(128, 0, sample));
+    sample.slope = .75;
+    CHECK(terrain.baselines.at(128, 0, sample)->volume() < snow::MaximumVolume);
+    sample.generatedWet = true;
+    CHECK(!terrain.baselines.at(128, 0, sample));
+    const auto equator = terrain.baselines.at(128, 512, terrain.ground);
+    CHECK(equator && equator->volume() <= snow::UnitsPerCubicMetre / 2);
+    terrain.world.generatorVersion = WorldMeta::PolarPackVersion - 1;
+    CHECK(!terrain.baselines.at(128, 0, terrain.ground));
+
+    snow::SnowSettlement previous(terrain);
+    weather(previous, terrain, 0, 0, 1, 10, -5);
+    auto legacy = previous.encode();
+    // Current saves end with the v6 local-weather list (empty here).
+    legacy.resize(legacy.size() - sizeof(uint32_t));
+    legacy[4] = std::byte{4};
+    legacy.resize(legacy.size() - (sizeof(double) + 1 + sizeof(uint32_t)));
+    snow::SnowSettlement migrated(terrain);
+    CHECK(migrated.restore(legacy));
+    migrated.migrateUnvisitedWeather(37.5);
+    EQUAL(migrated.weatherDay(0, 0), 1. / 24, "visited cursor preserved");
+    EQUAL(migrated.weatherDay(128, 0), 37.5, "unseen starts at saved date");
+    CHECK(migrated.volumeAt(0, 0) > 0);
+    CHECK(!migrated.surfacePack(128, 0));
+    snow::SnowSettlement reopened(terrain);
+    CHECK(reopened.restore(migrated.encode()));
+    reopened.migrateUnvisitedWeather(44.);
+    EQUAL(reopened.weatherDay(128, 0), 37.5, "migration runs once");
+}
+
+TEST(polar_pack_shelf_near_a_steep_slope) {
+    PolarFixture terrain;
+    auto ground = terrain.ground;
+    const auto flat = terrain.baselines.at(127, 0, ground);
+    EQUAL(flat->volume(), snow::MaximumVolume, "flat polar ground stays deep");
+    ground.snowSlope = .25;
+    const auto shelf = terrain.baselines.at(127, 0, ground);
+    CHECK(shelf);
+    CHECK(shelf->volume() < 1.3 * snow::UnitsPerCubicMetre);
+    terrain.ground = ground;
+    snow::SnowSettlement snow(terrain);
+    const auto headroom = snow.packHeadroom(127, 0, *shelf);
+    const auto capacity = shelf->volume() + headroom;
+    CHECK(capacity < 1.3 * snow::UnitsPerCubicMetre);
+    CHECK(headroom >= 0);
+    weather(snow, terrain, 127, 0, 24, 25, -5);
+    EQUAL(snow.surfacePack(127, 0)->volume(), capacity,
+          "weather keeps the shelf pack below its terrain capacity");
+    ground.snowSlope = 1.;
+    CHECK(!terrain.baselines.at(127, 0, ground));
+}
+
+TEST(seasonal_snow_blends_at_old_latitude_cutoff) {
+    PolarFixture terrain;
+    for (auto& region : terrain.world.regions) {
+        region.temperature_c = -4;
+        region.humidity = .8f;
+    }
+    constexpr int x = 1, z = 143;  // old cutoff at z = 143.36 on this map
+    const auto winter = terrain.baselines.at(x, z, terrain.ground, 0);
+    const auto adjacent = terrain.baselines.at(x, z + 1, terrain.ground, 0);
+    CHECK(winter && adjacent);
+    CHECK(winter->volume() > 100'000);
+    CHECK(std::abs(winter->volume() - adjacent->volume()) < 20'000);
+    CHECK(!terrain.baselines.at(x, z, terrain.ground, 180));
+    CHECK(!terrain.baselines.at(x, z + 1, terrain.ground, 180));
+    EQUAL(terrain.baselines.at(x - terrain.periodX, z, terrain.ground, 0)->top,
+          winter->top, "seasonal stock wraps with snowline noise");
+    CHECK(snow::polar::seasonChanges(terrain.world, x, z, x + 15, z + 15, 0,
+                                     180));
+    for (auto& region : terrain.world.regions) region.temperature_c = -50;
+    CHECK(!snow::polar::seasonChanges(terrain.world, x, z, x + 15, z + 15, 0,
+                                      180));
+}
+
+TEST(seasonal_snow_has_no_region_step) {
+    PolarFixture terrain;
+    // Warm and cold region rows alternate; the continuous blend must not
+    // leave a straight snow line at their shared border.
+    for (size_t i = 0; i < terrain.world.regions.size(); ++i)
+        terrain.world.regions[i].temperature_c = i % 2 ? -20.f : 5.f;
+    const int height = terrain.world.height * WorldWrap::RegionSize;
+    double previous = 0;
+    double largest = 0;
+    for (int z = 0; z < height; ++z) {
+        const auto pack = terrain.baselines.at(0, z, terrain.ground, 0);
+        const double depth =
+            pack ? double(pack->volume()) / snow::UnitsPerCubicMetre : 0.;
+        if (z) largest = std::max(largest, std::abs(depth - previous));
+        previous = depth;
+    }
+    CHECK(largest < .2);
+}
+
+TEST(seasonal_snow_fills_deep_ramps) {
+    PolarFixture terrain;
+    auto ground = terrain.ground;
+    ground.groundShape = TileShape::make(TileShapeProfile::Ramp);
+    const auto deep = terrain.baselines.at(127, 0, ground, 0);
+    CHECK(deep);
+    CHECK(deep->volume() <= snow::Volume{snow::UnitsPerCubicMetre});
+    CHECK(deep->top <= (ground.surface_y + 1) * snow::UnitsPerCubicMetre);
+    EQUAL(deep->bottom, ground.surface_y * snow::UnitsPerCubicMetre,
+          "snow fills from the ramp cell floor");
+    CHECK(snow::polar::capacity(ground) == snow::Volume{snow::UnitsPerCubicMetre});
+    for (auto& region : terrain.world.regions) region.temperature_c = 12;
+    const auto warm = terrain.baselines.at(127, 0, ground, 180);
+    CHECK(!warm || warm->volume() < snow::UnitsPerCubicMetre);
+}
+
+TEST(snow_local_edit_and_loose_excavation_roundtrip) {
+    Fixture terrain;
+    solid(terrain, 0, 9, 0);
+    snow::SnowSettlement snow(terrain);
+    snow.beginWeather(0);
+    CHECK(snow.deposit(0, 0, 12, 1'250'000) == snow::DepositOutcome::Settled);
+    snow.trackLocalWeather(0, 0, 100);
+    CHECK(snow.tracksLocalWeather(0, 0));
+    CHECK(!snow.tracksLocalWeather(1, 0));
+    EQUAL(snow.weatherDay(0, 0), 100., "local cursor starts at the edit");
+    const auto id =
+        snow::SnowSettlement::loosePieceId(10, Chunk::cell(0, 11, 0));
+    CHECK(snow.excavateLoose({0, 11, 0}, id));
+    EQUAL(snow.volumeAt(0, 0), snow::Volume{1'000'000},
+          "remove just the loose snow in the picked cell");
+    CHECK(!snow.excavateLoose({0, 11, 0}, id));
+    conserved(snow);
+
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(snow.encode()));
+    CHECK(loaded.tracksLocalWeather(0, 0));
+    CHECK(!loaded.tracksLocalWeather(1, 0));
+    EQUAL(loaded.weatherDay(0, 0), 100., "restore the local edit date");
+    EQUAL(loaded.volumeAt(0, 0), snow.volumeAt(0, 0),
+          "remaining snow survives");
+    snow::PackTops tops, looseTop;
+    loaded.updatePackTops(tops, looseTop, {0, 0});
+    CHECK(tops.empty());
+}
+
+TEST(v5_ground_snow_rebases_on_load) {
+    Fixture terrain;
+    solid(terrain, 0, 9, 0);
+    snow::SnowSettlement snow(terrain);
+    CHECK(snow.deposit(0, 0, 12, 50'000) == snow::DepositOutcome::Settled);
+
+    auto bytes = snow.encode();
+    bytes.resize(bytes.size() - sizeof(uint32_t));  // drop the v6 local list
+    bytes[4] = std::byte{5};
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(bytes));
+    CHECK(loaded.needsGroundRebase());
+    const auto dropped = loaded.dropGroundLoose(
+        [](int, int, int base) { return base == 10; });
+    EQUAL(dropped, size_t(1), "the ground footprint rebased");
+    CHECK(!loaded.levelAt(0, 0));
+    conserved(loaded);
+    snow::SnowSettlement reopened(terrain);
+    CHECK(reopened.restore(loaded.encode()));
+    CHECK(!reopened.needsGroundRebase());
+}
+
+TEST(snow_weather_starts_a_pack_above_the_floor) {
+    Fixture terrain;
+    terrain.highY = 500;
+    snow::SnowSettlement snow(terrain);
+    snow.beginWeather(0);
+    const snow::PackRun support{400 * snow::UnitsPerCubicMetre,
+                                400 * snow::UnitsPerCubicMetre};
+    snow.applyPackWeather(0, 0, support, 0, 20'000, 0);
+    CHECK(snow.surfacePack(0, 0));
+    EQUAL(snow.surfacePack(0, 0)->volume(), snow::Volume{20'000}, "new pack");
+    const auto bytes = snow.encode();
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(bytes));
+    EQUAL(loaded.surfacePack(0, 0)->volume(), snow::Volume{20'000},
+          "a weather-created pack round-trips");
+    conserved(snow);
+}
+
+TEST(snow_save_normalizes_ramp_support_roundoff) {
+    Fixture terrain;
+    solid(terrain, 0, 9, 0);
+    snow::SnowSettlement original(terrain);
+    CHECK(original.deposit(0, 0, 12, 50'000) == snow::DepositOutcome::Settled);
+    auto bytes = original.encode();
+    // v5 header and first loose column's x, z and baseY.
+    constexpr size_t BaseLocal =
+        4 + sizeof(uint32_t) + 3 * sizeof(int64_t) + 4 * sizeof(int32_t);
+    const float roundoff = -std::numeric_limits<float>::epsilon() / 2;
+    std::memcpy(bytes.data() + BaseLocal, &roundoff, sizeof(roundoff));
+    snow::SnowSettlement loaded(terrain);
+    CHECK(loaded.restore(bytes));
+    EQUAL(loaded.columnAt(0, 0, 10)->baseLocal, 0.f, "snap support to tile");
+    EQUAL(loaded.volumeAt(0, 0), snow::Volume{50'000}, "preserve snow volume");
+
+    const float invalid = -.01f;
+    std::memcpy(bytes.data() + BaseLocal, &invalid, sizeof(invalid));
+    CHECK(!loaded.restore(bytes));
+}
+
+TEST(polar_pack_direct_baseline_work) {
+    PolarFixture terrain;
+    using Clock = std::chrono::steady_clock;
+    constexpr int Footprints = 256;
+    constexpr float Rate = 10;
+    constexpr double Days =
+        snow::MaximumVolume /
+        (Rate * precipitation::Cm3PerMillimetre * snow::SnowPerWater * 24);
+    const auto start = Clock::now();
+    snow::SnowSettlement direct(terrain);
+    direct.beginWeather(snow::polar::StartingDay);
+    for (int x = 0; x < Footprints; ++x)
+        EQUAL(direct.surfacePack(x, 0)->volume(), snow::MaximumVolume,
+              "direct initial stock");
+    const auto projected = Clock::now();
+    Fixture isolated;
+    isolated.highY = 40;
+    solid(isolated, 0, 11, 0);
+    size_t samples = 0;
+    for (int i = 0; i < Footprints; ++i) {
+        snow::SnowSettlement replayed(isolated);
+        replayed.beginWeather(0);
+        for (int batch = 0; batch < 2; ++batch)
+            precipitation::reconcile(
+                replayed, isolated, 0, 0, Days, false,
+                [&](int64_t) {
+                    ++samples;
+                    world_weather::Sample sample;
+                    sample.temperatureC = -5;
+                    sample.precipitationRate = Rate;
+                    return sample;
+                },
+                [](double) { return std::optional(false); });
+        EQUAL(replayed.weatherDay(0, 0), Days,
+              "history completed in two batches");
+        EQUAL(replayed.volumeAt(0, 0), snow::MaximumVolume,
+              "equivalent constant-snow history");
+    }
+    const auto finished = Clock::now();
+    EQUAL(samples, size_t(Footprints * 640), "half-hour history samples");
+    std::cout
+        << Footprints << " polar footprint baselines, "
+        << std::chrono::duration<double, std::milli>(projected - start).count()
+        << " ms direct, "
+        << std::chrono::duration<double, std::milli>(finished - projected)
+               .count()
+        << " ms interval replay\n";
+}
 
 // A 45-degree ramp at the foot of a closed landing. Supplying 0.05125 m3
 // puts a horizontal 5 cm snowline on the landing and clips a 5 cm triangular

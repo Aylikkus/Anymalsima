@@ -65,6 +65,15 @@ FloraRenderer::~FloraRenderer() {
     chunks.removed.disconnect(removedConnection);
 }
 
+void FloraRenderer::snowChanged(const ChunkCoord& coord) {
+    const int reach = 1 + chunks.floraSpecies().maxHeight() / Chunk::SIZE_Y;
+    const int minY = std::max(0, int(coord.y) - reach);
+    for (int y = minY; y <= int(coord.y); ++y)
+        if (const auto found = caches.find({coord.x, unsigned(y), coord.z});
+            found != caches.end())
+            found->second.valid = false;
+}
+
 void FloraRenderer::invalidate(const ChunkCoord& coord) {
     const auto layer = chunks.flora(coord);
     if (!layer || layer->empty()) {
@@ -124,6 +133,23 @@ void FloraRenderer::rebuild(const ChunkCoord& coord, ChunkPlants& cache,
         if (!height) continue;
         plant.y = anchorY + *height;
         const int tx = int(std::floor(plant.x)), tz = int(std::floor(plant.z));
+        const float plantTop = plant.y + floraHeightEstimate(flora) * p.scale();
+        if (skyMap &&
+            skyMap->snowOpaqueTop(tx, tz) >= int(std::floor(plantTop))) {
+            const auto buried = [&](float height) {
+                const int y = int(std::floor(height));
+                const auto slab = chunks.environmentFor(
+                    {unsigned(tx / Chunk::SIZE_X), unsigned(y / Chunk::SIZE_Y),
+                     unsigned(tz / Chunk::SIZE_Z)});
+                if (!slab) return false;
+                const auto cell = slab->find(Chunk::cell(
+                    tx % Chunk::SIZE_X, y % Chunk::SIZE_Y, tz % Chunk::SIZE_Z));
+                return cell != slab->end() &&
+                       cell->second->contains({float(plant.x - tx), height - y,
+                                               float(plant.z - tz)});
+            };
+            if (buried(plant.y + .002f) && buried(plantTop)) continue;
+        }
         // Light of the air tile the plant stands in.
         const float sun =
             foliage_light::sky(chunks, skyMap, tx, anchorY + 1, tz);

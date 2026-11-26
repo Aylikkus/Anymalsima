@@ -256,6 +256,73 @@ TEST(lod_stepped_surface_and_bands) {
         }
     CHECK(mesh.bytes() < TerrainLod::UploadBudget);
 }
+TEST(lod_polar_snow_surface) {
+    test::Assets assets;
+    auto world = worldForLod(16, 16);
+    world.generatorVersion = WorldMeta::PolarPackVersion;
+    for (auto& region : world.regions) {
+        region.temperature_c = -42;
+        region.humidity = .9f;
+    }
+    SurfaceSampler sampler(world, assets);
+    auto exterior = std::make_shared<snow::polar::SurfaceSnapshot>();
+    exterior->block = 3;
+    const int x = 0, z = 16;
+    const int ground = sampler.height(x, z);
+    const float top = ground + 8.25f;
+    auto packEdits = std::make_shared<snow::PackTops>();
+    (*packEdits)[{x, z}] = std::lround(double(top) * snow::UnitsPerCubicMetre);
+    exterior->fixture = TilePos{x, ground + 1, z};
+    (*packEdits)[{x + 1, z}] = 0;  // shaft fully cleared through the pack
+    exterior->edits[{0, 1}] = std::move(packEdits);
+    sampler.setSnow(exterior);
+    EQUAL(sampler.height(x, z), ground, "raw ground stays available");
+    EQUAL(sampler.exteriorHeight(x - sampler.width(), z), top, "wrap");
+    EQUAL(sampler.packTop(x + 1, z), 0.f, "removed run masks fixture stock");
+    CHECK(sampler.exteriorHeight(x - 1, z) > sampler.height(x - 1, z) + 1);
+    EQUAL(TerrainLod::meshHeight({0, 0, 1}, sampler, .5f, z + .5f), top,
+          "stepped cap includes fractional surface");
+    const auto mesh = TerrainLod::build({0, 0, 1}, sampler, running);
+    const auto material = sampler.column(x, z).material;
+    CHECK(std::ranges::any_of(mesh.vertices, [&](const auto& vertex) {
+        return vertex.x == x && vertex.z == z && vertex.y == top &&
+               vertex.ny == 1 && vertex.layer == material;
+    }));
+    // The worker's per-point LOD sampling agrees with the generation
+    // batch on both sides of a chunk boundary.
+    auto natural = std::make_shared<snow::polar::SurfaceSnapshot>();
+    natural->block = 3;
+    sampler.setSnow(natural);
+    snow::polar::Baselines baseline(world);
+    const auto neighborhood =
+        TerrainNeighborhood::capture(world, {0, 0}, assets);
+    TerrainSampler terrain(neighborhood);
+    size_t packed = 0;
+    for (unsigned cx : {0u, 1u}) {
+        const auto columns = terrain.columns(cx, 0);
+        for (int lz = 0; lz < Chunk::SIZE_Z; ++lz)
+            for (int lx = 0; lx < Chunk::SIZE_X; ++lx) {
+                const int tx = int(cx) * Chunk::SIZE_X + lx;
+                const auto& column = columns.columns[lz * Chunk::SIZE_X + lx];
+                if (!column.generatedWet && column.slope < 1)
+                    EQUAL(terrain.snowSlope(tx, lz), column.snowSlope,
+                          "identical grade on both paths");
+                const auto pack = baseline.at(tx, lz, column);
+                packed += bool(pack);
+                const auto expected =
+                    pack ? float(double(snow::projectedPackTop(*pack)) /
+                                 snow::UnitsPerCubicMetre)
+                         : 0.f;
+                EQUAL(sampler.packTop(tx, lz), expected, "chunk and LOD stock");
+            }
+    }
+    CHECK(packed != 0);
+    sampler.setSnow(exterior);
+    const auto bands = TerrainLod::sampleBands(0, 1, sampler);
+    CHECK(bands.ground.minY <= ground / Chunk::SIZE_Y);
+    CHECK(bands.ground.maxY >= int(top) / Chunk::SIZE_Y);
+}
+
 TEST(lod_smooth_skirts_cover_edges) {
     test::Assets assets;
     auto world = worldForLod();
@@ -633,6 +700,27 @@ TEST(lod_detail_survives_refresh) {
     coverage.update({8, 28, 7}, lowered, latest, uploaded, 0, true);
     CHECK(coverage.columns().at({7, 7}) == lowered.front());
 }
+TEST(lod_detail_waits_for_streamed_snow) {
+    TerrainLod::DetailCoverage detail(4);
+    const ChunkCoord focus{2, 12, 2};
+    const std::array candidates{TerrainLod::SurfaceBand{2, 2, 11, 12}};
+    const auto uploaded = [](ChunkCoord) { return true; };
+    snow::ChunkColumns pending{{2, 2}};
+    detail.update(focus, candidates, uploaded, uploaded, 0, true, &pending);
+    CHECK(!detail.contains(2, 2));
+    pending.clear();
+    detail.update(focus, candidates, uploaded, uploaded, 0, true, &pending);
+    CHECK(detail.contains(2, 2));
+    pending.emplace(2, 2);
+    const std::array taller{TerrainLod::SurfaceBand{2, 2, 11, 13}};
+    detail.update(focus, taller, uploaded, uploaded, 0, true, &pending);
+    EQUAL(detail.columns().at({2, 2}).maxY, 12, "keep prior drawable band");
+    pending.clear();
+    detail.update(focus, taller, uploaded, uploaded, 0, true, &pending);
+    EQUAL(detail.columns().at({2, 2}).maxY, 13,
+          "handover includes current cap");
+}
+
 TEST(lod_detail_hysteresis) {
     constexpr std::array radii{4, 6, 8};
     for (size_t i = 0; i < radii.size(); ++i) {

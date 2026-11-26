@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–12 complete · Step 13 pending.**
+**Steps 01–14 complete · Step 15 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -24,8 +24,8 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 10 | Exposure, snowfall and outdoor melt | Complete | |
 | 11 | Unloaded weather history and elapsed-time reconciliation | Complete | D · Shelter and travel |
 | 12 | Regional weather at distance | Complete | E · Weather from afar |
-| 13 | Polar baselines, vertical runs and excavation | Pending | |
-| 14 | Deep-pack LOD, structures and travel | Pending | F · Arctic shelter |
+| 13 | Polar baselines, vertical runs and excavation | Complete | |
+| 14 | Deep-pack LOD, structures and travel | Complete | F · Arctic shelter |
 | 15 | Local heating and cooling from blocks and items | Pending | |
 | 16 | Room air, wall heat storage and local melt | Pending | G · Heated room |
 | 17 | Partial-cell water capacity and connectivity | Pending | |
@@ -132,6 +132,35 @@ Generate established packs for eligible new-world polar terrain using climate, e
 Use deterministic regional snow-depth baselines to initialize undisturbed packs directly. Evaluate how much per-footprint catch-up this avoids, while preserving dated weather changes and sparse records for edits and shelter.
 
 **Verify.** Generate a 16 m fixture with the pack crossing a slab boundary. Excavate the middle of a column and keep the snow above and below. Remove the roof of a buried room and apply new snowfall. A side entrance under a roof stays sheltered. Validate compact storage, excavation across region borders, save/reload and the old-world policy.
+
+Generator 28 samples 08:00 on the first day. Regional depth uses the annual
+temperature and the starting season to estimate retained snow, with humidity
+scaling the available stock. Depth blends between region centres across
+wrapped X. Dry terrain with a full-cube top and a slope below one metre
+per tile can hold the pack. Latitude and slope reduce depth continuously
+to dusting. The initial stock is projected into the open space above the
+generated ground. Nearby solids retain their own tile data. Structure
+coverage and distant silhouettes follow in step 14.
+
+The **16 m** limit is measured from the original pack support, including
+after excavation splits the column. The upper surviving run takes exposed
+snowfall and melt. Cuts remove the picked cell interval and leave the
+remaining runs in place. The initial interval needs no save record. A
+changed footprint stores its cap and surviving intervals in `snow.dat`
+v5, including an empty record if excavation or thaw removed it all; v6 adds
+the footprints that track exact local weather. Loose
+snow settles through gravity between exposed loose-snow receivers.
+Established packs receive new snow through their exposed upper surface.
+Saturation is a closed storage boundary
+for each weather receiver. Excess goes to the accounted snow-volume sink
+at the interval in which it arrived. At the current density, five cm³ of
+sink volume represents one cm³ of water. The sink is a recorded loss from
+the simulation, and melt keeps its existing pending water ledger.
+
+In older worlds, previously applied weather, existing loose deposits and
+pending transfers retain their saved state. A footprint without its own
+weather cursor starts at the recovered saved date with zero initial stock.
+Migration happens once and the new date is saved with the cursors.
 
 ### 14. Carry snow into distant terrain and structures
 
@@ -1393,3 +1422,420 @@ Captures and logs are under `build/weather-distance-v2-check/`.
 
 The maintainer approved the revised result for Playcheck E and confirmed
 that step 12 is complete.
+
+### Step 13 · 2026-11-26
+
+The headless pack fixture uses seed 424242 and a uniform cold, humid
+starting climate. The 16 m run spans Y 12–28, crosses the slab seam at
+Y 16, and covers both sides of the X 127/128 region border and the
+X 255/0 world seam. The storage check projects 1,024 untouched footprints
+with no change to the save payload. Four excavated footprints use 29 bytes
+each for the key, original cap and two surviving intervals. The editor
+check uses a raycast, the versioned piece-removal path and the player
+ground probe on the same projected geometry.
+
+The weather check cuts a side entrance and keeps both room roofs. Snow
+landing on a saturated roof goes to the sink while the floor stays dry.
+Opening the first roof lets 5 cm of new snow reach that floor. A thaw lowers
+the cap to 3.75 cm and credits 2,500 cm³ of meltwater. The adjacent roofed
+floor stays sheltered. The save checks also reopen the edited intervals,
+reject a truncated payload and confirm that an older world's existing
+deposit survives while an unseen footprint starts at the saved date.
+
+A Release CPU comparison resolved 256 undisturbed footprints in about
+0.03 ms without evaluating a weather interval. Reconstructing the same
+16 m per footprint from constant 10 mm/h snowfall took about 12.5 ms and
+163,840 half-hour samples. This measures creation of the initial stock.
+Weather from the start of play still replays in date order, and geometry
+projection is outside this comparison.
+
+```sh
+cmake --build build --target app world_logic_tests --parallel 5
+ctest --test-dir build --output-on-failure --no-tests=error -j 6
+build/tests/world_logic_tests polar_pack_direct_baseline_work
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 5
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/tests-san-clang \
+  --output-on-failure --no-tests=error -j 4 \
+  -R 'polar_pack|snow|weather|environment_snow|compound'
+```
+
+The Release app built and all 461 tests passed. The focused ASan and UBSan
+run passed all 46 cases. LeakSanitizer could not attach in this sandbox,
+so the sanitizer run disabled leak detection.
+
+#### In-game fixture
+
+Run from the repository root with `ANYM_POLAR_SNOW_FIXTURE=1 ./build/src/app/app`.
+Create a separate generator 28 world, then select **Polar pack**. The scene
+uses a 6 × 6 m base that straddles the east border of the selected starting
+region. Its Z coordinate is the centre of the region. The debug panel shows
+the border X, floor Y, first Z and pack top. The base begins four metres
+below a slab boundary and the world starts paused.
+
+Use **Remove Piece** to cut a two-metre opening at floor Y + 2 and + 3.
+Cut across the region border and inspect the remaining floor and roof.
+Cycle **Weather Force** to **Snow** and use **Weather Apply 30M**. With
+the roof intact, the tile inspector reports cover over the floor. Open
+a shaft down to the floor and apply another 30 minutes to see the exposed
+snow cap change. Save with Escape and reopen under the same launch flag
+to see the cuts persist. Layered lighting and distant terrain remain
+part of step 14. The live fixture was not exercised here because the
+sandbox could not access the display.
+
+
+### Step 14 · 2026-11-26
+
+Terrain LOD samples the generator 28 starting pack and the latest published
+weather or excavation caps from the same snow ledger as the detailed chunks.
+An empty edited interval suppresses the starting pack. Distant terrain draws
+the exterior as a height field, so a side tunnel can disappear at distance
+while its roof remains visible. The saved runs retain the exact tunnel and
+its floor. The chunk handover includes the height range from the underlying
+terrain through the snow cap.
+
+Loose deposits on roofs and shaped surfaces use the structure proxy path.
+The proxy clips snow against the terrain and the structure and preserves its
+layer thickness as the horizontal footprint coarsens. After unload it keeps
+the measured cap. Immediately after reload, an unloaded loose deposit uses
+its saved support height and volume over one square metre until the exact
+geometry is available. Detailed collision, picking, and sunlight use the
+clipped cell geometry. Fully buried plants are hidden. Snow opacity also
+feeds local block light and distant sky occlusion. The existing mesh caster
+paths include the resulting snow surfaces.
+
+Replaying weather at 7200× can leave days of work when the clock returns
+to 1×. The simulation keeps that work in date order in the existing ledger.
+Gameplay attempts at most eight advancing footprints per update and at most
+two days per footprint. It checks the 2 ms replay budget between footprints.
+Catch-up runs at most every 100 ms at fast speed and every 500 ms after
+returning to 1×. Nearby updates project only dirty footprints in one chunk
+column per periodic publication. Streaming and explicit edits may request
+other columns. Distant snow geometries use 5 cm height steps, while nearby
+clipping and the save ledger keep the settled height.
+
+#### Playcheck F · Arctic shelter
+
+1. Start a disposable generator 28 world with
+   `ANYM_POLAR_SNOW_FIXTURE=1 ANYM_WEATHER_FIXTURE=1
+   ANYM_WEATHER_DEPOSITION_FIXTURE=1 ./build/src/app/app`. Select
+   **Polar pack**. The debug panel shows the region border **X**, floor **Y**,
+   first row **Z**, and cap height. The fixture runs from X − 3 through X + 2
+   and Z through Z + 5. It opens with the clock paused.
+2. Use **Remove Piece** on the side at Z and cut an entrance at Y + 2 and
+   Y + 3. Extend the room along X on both sides of the border. Place a roof
+   or support, cycle **Weather Force** to **Snow**, and use
+   **Weather Apply 30M**. Check that the room still has headroom and that
+   the floor and upper pack remain distinct.
+3. Fly back beyond detailed chunks while looking at the fixture. Check that
+   the cap, roof and supporting exterior are visible. Approach and inspect
+   the original cuts. Travel at least 384 m, return, exit with Escape, and
+   reopen with the same flags. Check the floor, headroom, snow above the
+   room and any exposed grass or rock again.
+
+#### Fixed-camera performance procedure
+
+From the repository root, build the device harness, create a disposable
+seed-2024 save, and run against the dated folder it prints.
+
+```sh
+cmake --build build --target app world_logic_tests lod_render_smoke --parallel 6
+build/tests/lod_render_smoke /tmp/anym-weather-clock 0 weather_clock_save
+ANYM_POLAR_SNOW_FIXTURE=1 build/tests/lod_render_smoke \
+  /tmp/anym-weather-clock/<dated-save-folder> 0 weather_clock
+```
+
+Use a GPU and an accessible display. The camera stays at X/Y/Z
+1664/550/1215 in a generator 28 world, with the Low detail preset and a
+1280 × 720 window. The harness warms up for 25 seconds, samples 1× for
+10 seconds, switches to 7200× for 15 seconds, then measures two consecutive
+15-second windows back at 1×. It prints end-to-end median and p95 frame
+times, the CPU time for snow replay and projection, the number of replay
+interval lookups and projected chunk columns, and a breakdown for water,
+flora, trees, the seasonal-snow publication, distant terrain and chunk
+streaming. `SMOKE_CAPTURE=<prefix>` writes one TGA per phase;
+`SMOKE_NO_ACCEL=1` omits the 7200× phase as a control. It writes back to the
+disposable save on exit.
+
+
+#### Execution results
+
+The Release app and device harness built successfully, and all 465 CTest
+cases passed. All 69 focused cases passed with AddressSanitizer and
+UndefinedBehaviorSanitizer. The sanitizer run used
+`ASAN_OPTIONS=detect_leaks=0`, as in step 13.
+
+```sh
+ctest --test-dir build --output-on-failure --no-tests=error -j 6
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 5
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build/tests-san-clang \
+  --output-on-failure --no-tests=error -j 4 \
+  -R 'polar_pack|snow|weather|sky_|compound|lod_detail|lod_surface'
+```
+
+The Vulkan run used the fresh `2024_2026-11-26_20-01-28` fixture on a
+Radeon Navi 23 GPU with X11. The camera stayed fixed through all phases.
+The save ended at elapsed day 25.3312 with no leftover temporary or corrupt
+files. CPU times below are totals for each sampling window.
+
+| Phase | Frames | Frame p50 / p95 (ms) | Replay CPU (ms) | Interval lookups | Projection CPU (ms) | Chunk columns projected |
+|---|---:|---:|---:|---:|---:|---:|
+| 1× baseline | 962 | 10.23 / 14.01 | 19.6 | 146 | 25.1 | 35 |
+| 7200× | 1,354 | 10.54 / 17.39 | 130.2 | 93,906 | 168.1 | 90 |
+| First 15 s back at 1× | 1,567 | 9.00 / 12.66 | 34.3 | 3,842 | 42.6 | 57 |
+| Next 15 s back at 1× | 1,563 | 8.99 / 11.93 | 34.6 | 219 | 42.4 | 56 |
+
+The first window back at 1× still replayed weather accumulated at 7200×.
+Frame p95 stayed below the recorded 1× baseline in both return windows.
+The interactive tunnel, roof and travel walkthrough remains Playcheck F.
+
+#### Generated-world follow-up
+
+The maintainer reported that snow disappeared on approach and that steep
+mountains showed tall, isolated snow columns. The High detail reproduction
+used generator 28 seed 5574655516549108312, saved at day 40.4385 and
+X/Y/Z 52875.17/493/38273.49.
+
+A new detailed column now waits until its streamed snow has been projected
+and the current meshes have uploaded. Already drawable columns keep their
+previous meshes during a refresh. Streaming processes the nearest pending
+column first, with at most one publication every 40 ms while nearby
+columns are waiting. Ordinary weather projection retains its 125 ms
+cadence.
+
+Untouched polar packs use the steepest grade in the neighbouring footprints
+to limit starting depth and later accumulation. Broad flat terrain can
+still hold a 16 m pack. Small mountain shelves carry less snow as the
+surrounding grade increases. Existing saved cuts, explicit pack runs and
+loose deposits keep their stored values.
+
+The reported save contained 41 loose deposits whose clipped ramp support
+height had rounded just below zero. New support heights are clamped to
+the cell range. The v5 reader accepts and clamps roundoff within one
+millionth of a metre so those deposits load with their original volumes.
+
+The 96 m forward approach used a disposable copy of this save with the
+clock paused. During the approach the ground mesh at the saved viewpoint
+uploaded while snow was still pending. The terrain proxy retained coverage
+until the snow geometry uploaded. The Vulkan capture showed snow covering
+the detailed foreground after handover. The full Release suite passed
+468 cases, including the streaming gate, the ramp save roundoff and
+agreement between exact and distant pack generation. The focused ASan
+and UBSan suite passed 72 cases.
+
+On a fresh copy of the same save, the fixed-camera benchmark used High
+detail with `SMOKE_TERRAIN=2`. Warm-up projected 328 chunk columns. In the
+measured windows the local replay advanced cursors without publishing new
+snow geometry. Replay CPU times are totals for each window.
+
+| Phase | Frame p50 / p95 (ms) | Replay CPU (ms) | Interval lookups |
+|---|---:|---:|---:|
+| 1× baseline | 4.77 / 7.41 | 3.0 | 15,360 |
+| 7200× | 8.17 / 10.84 | 19.6 | 111,360 |
+| First 15 s back at 1× | 7.71 / 9.42 | 3.9 | 22,272 |
+| Next 15 s back at 1× | 6.29 / 9.25 | 4.2 | 23,040 |
+
+Frame times improved after the switch back to 1× and stayed above their
+initial baseline during this run. Benchmark and visual runs used copied
+saves.
+
+
+#### Generated-world follow-up 2 · 2026-11-26
+
+The maintainer reported three problems on a new generator 28 world: frame
+time still degraded through 1x -> 7200x -> 1x, new snow built up only in a
+band beside the camera, snow borders between regions were straight instead
+of blended, and removing pieces eventually stopped working until reload.
+The reproduction save is `1613076668213318756_2026-11-26_20-30-45` at day
+111.41 and X/Y/Z 14115.55/493/7391.78.
+
+**Dated seasonal stock.** Untouched polar terrain no longer rebuilds its
+pack from a weather cursor. `snow::polar::Baselines::depth` combines the
+generated annual temperature with the current annual curve and adds a
+fine snowline variation at a 48-tile scale. A permanent component rises
+with the annual mean and latitude; a seasonal layer appears below about
+3 C and saturates below about -14 C. The old hard eligibility at
+`|latitude| > 0.72` is gone: a smooth latitude ramp starts at 0.55 and
+reaches full strength at 0.91. Region-centre temperature, humidity and the
+latitude curve are blended bilinearly, so adjacent footprints differ by
+less than 20 cm even where region rows have opposite seasons. Regions
+that are saturated at both seasonal extremes are skipped when the date
+changes. The stock remains continuous through the wrapped X seam.
+
+Exact weather still governs footprints with local history: roofs, tunnels,
+excavations and debug deposits. The first edit records the footprint's date;
+replay stays within two days of the current date, at most two footprints per
+update and only within 33x33 m of the camera. Replay is skipped entirely
+while the clock runs faster than 1x, so abandoning an accelerated clock
+cannot leave a snow backlog. The ordinary terrain's seasonal change is a
+15-game-day step (about 18 real minutes at 1x), published one chunk column
+per 125 ms. Chunk snow is projected before the detailed mesh is allowed to
+hide the terrain proxy, and each newly published column also refreshes the
+distant LOD patch that contains it.
+
+**Edits after travel.** Ordinary piece edits no longer wait for a weather
+catch-up (`prepareSnowEdit` gates only the travel fixture). Removing a
+loose snow piece is now routed to `SnowSettlement::excavateLoose`, which
+removes exactly the free-space interval in the picked cell and books it as
+an accounted sink. Previously only packed snow had a removal path, so
+clicking loose snow returned "invalid" and looked like dead input.
+`trackLocalWeather` does not create an empty pack record any more; a later
+storm starts the pack with a support-relative ceiling, so its saved runs
+round-trip.
+
+#### Final fixed-camera run
+
+A disposable copy of the reproduction save ran with High detail on a
+Radeon Navi 23 through Wayland (X11's window mapping was unresponsive in
+this session). The saved camera and its full old snow ledger were kept.
+The harness used `SMOKE_TERRAIN=2`; startup projected 357 chunk columns.
+CPU columns are totals for each window.
+
+| Phase | Frame p50 / p95 (ms) | Snow replay (ms) | Interval lookups | Projection (ms) | Columns |
+|---|---:|---:|---:|---:|---:|
+| 1x baseline | 15.94 / 17.50 | 2.3 | 0 | 0.2 | 0 |
+| 7200x | 19.65 / 25.28 | 0.05 | 0 | 4.1 | 12 |
+| First 15 s back at 1x | 18.80 / 24.17 | 6.2 | 0 | 96.8 | 109 |
+| Next 15 s back at 1x | 18.22 / 24.81 | 4.7 | 0 | 74.9 | 110 |
+
+A no-acceleration control at the same camera measured 15.48 / 17.33,
+16.36 / 19.87 and 15.94 / 17.14 in its three windows. Snow replay is gone
+at 7200x (0.05 ms total), and the two return windows publish the season
+step rather than backlogged weather. With the snow season disabled for
+comparison, the same run returned to 17.75 / 20.58 and 17.33 / 24.0, so
+most of the residual accelerated frame cost comes from the time-accelerated
+flora, water and presentation updates, not from snow. The old behavior
+(weather replay plus full snowfield reprojection) is no longer on that
+path.
+
+Existing v5 ledgers keep their loose deposits and pack edits. On the
+reproduction save, 8,782 loose columns and 569 pack runs were written by the
+old per-frame replay around the camera; the new seasonal stock governs only
+footprints without an explicit record. A fresh world, a copy without
+`snow.dat`, or an approved one-time rebase is needed to see the clean
+seasonal surface on that save. Nothing is deleted silently.
+
+The full Release suite passed 473 cases, including seasonal continuity,
+the old latitude cutoff, a deep pack with no saved stock, local-weather
+save version 6, weather-created packs above the floor, and loose-snow
+removal through `WorldEditor`. The focused ASan and UBSan run passed 77
+cases. The visual check used a copy of the save without `snow.dat`, so the
+current seasonal stock regenerated from the same world map; a wide capture
+showed the pack following terrain and the slope rule rather than a line at
+the old latitude cutoff. The remaining visible stripes in that capture are
+the generator's one-metre ramps shedding their snow, which is the intended
+45-degree behavior.
+
+
+#### Generated-world follow-up 3 · 2026-11-26
+
+The maintainer reported four remaining issues after the 7200x fix:
+
+- distant snow did not follow the same seasonal state as streamed chunks;
+- ramps stayed bare in otherwise snow-covered terrain;
+- snow in a tunnel appeared in the ledger well before its blocks rendered;
+- thin snow steps produced dark one-pixel side-face noise.
+
+**Season and LOD.** The dated seasonal step is now **5 game days**. A
+season change invalidates only LOD patches whose region sample crosses the
+snowline, and the surface snapshot carries both the pinned pack tops and the
+tops of **ground-resting loose snow**. `SurfaceSampler::packTop` returns the
+larger of the seasonal/pinned pack and the loose top, so local weather snow
+does not vanish when its chunk unloads. Ground loose columns are no longer
+duplicated in `SnowCover`'s roof proxy; the distant height field owns them,
+while the proxy keeps roofs and other elevated supports. A newly streamed
+column is added to the next surface publication, so the height field catches
+it within a second.
+
+**Tunnel snow latency.** Local weather replay now also runs while the clock
+is accelerated. It stays bounded: only footprints with local history, at most
+two footprints per update, and at most two days per update. Applied changes
+publish immediately (`rebuildSnow(2)`), and an edit that changes a covered
+surface republishes its column at once instead of waiting for the periodic
+tick. Untouched terrain still never replays.
+
+**Ramps.** A seasonal stock of at least **5 cm** fills the ramp cell up to the
+adjacent snow surface (the same top a cube receives), so a deep pack buries
+the 45-degree face instead of leaving a square hole. A thinner stock still
+produces only the toe wedge. The stepped LOD skips `shapedColumn` when the
+column has a snow top and draws the same flat snow cap as the nearby chunk.
+The far LOD uses the same pack top, so the hand-over no longer changes the
+ramp silhouette.
+
+**Side-face noise.** The near renderer snaps snow tops to **2 cm** for
+geometry only. The settlement ledger keeps the exact height. Footprints whose
+exact tops differ by millimetres therefore share a face and stop producing
+a dark side pixel at every cell boundary. The block and `terrain_lod`
+programs take `u_material_soft` (snow albedo layer and a side strength):
+vertical snow faces mix toward the top-facing sky and get a small light
+floor. This keeps thin steps from reading as dark contour lines in daylight
+and at night.
+
+A newly streamed column is added to the next surface publication, so its
+ground loose tops reach the height field before the chunk can unload again.
+
+The final device run on a copy of the reproduction save measured
+15.18 / 16.67 ms at 1x, 18.77 / 26.19 ms at 7200x, and 18.51 / 25.24 then
+17.69 / 25.57 ms in the two return windows. The return windows still settle
+that save's 57 old pending transfers and 8,782 loose columns; a copy without
+`snow.dat` returned to 15.5 / 16.6 ms. The release build does not crash on
+the initial surface publication (a null previous snapshot is handled).
+
+The Release suite passed 474 cases, including the new 5-day season, the ramp
+fill and the existing LOD hand-over, pack-round-trip and loose-removal
+checks. The focused ASan/UBSan run passed 78 cases. A wide capture on a copy
+of the reproduction save without `snow.dat` showed snow continuous over the
+ramps and snow-covered hills; a near capture showed the 2 cm snapping removed
+the previous field of dark specks. The existing v5 depreciation caveat still
+applies: old explicit deposits are preserved, so the reproduction save keeps
+its replay-era patches until a new world, a copy without `snow.dat`, or an
+approved rebase.
+
+
+#### Generated-world follow-up 4 · 2026-11-27
+
+The maintainer checked the tunnel fix (snow now appears after returning to
+1x) and reported four remaining visual problems on the latest save.
+
+**Night side light.** The previous snow-side fix added a constant light
+floor, which made side faces glow at night. Snow side faces now take the
+brightness of their own top-facing sky: they match the top by day and stay
+dark at night. The block shader also samples the air cell one step above a
+thin snow side so the side is not lit by the ground cell behind it.
+
+**Ramp columns.** A seasonal ramp no longer fills to a flat one-metre column.
+The near geometry adds a **draped layer above the ramp's upward facets**,
+parallel to the profile and clipped by the cell, using the seasonal depth
+(capped at one cell). The stepped LOD keeps the ramp profile and changes only
+its material to snow, so near and far silhouettes agree and no tower stands
+above the surrounding snow. A shallow stock (< 5 cm) still leaves only a toe
+wedge.
+
+**Ridges.** The near renderer keeps the 2 cm top snapping, and the snow-side
+sky mix now uses the top-facing exposure. The smooth snowfield has only
+faint material transitions; the remaining long lines in a high wide view are
+the stepped terrain LOD's real one-metre terraces, not snow depth contours.
+
+**Snow from nowhere.** Two mismatches caused it. The LOD rejected a pack when
+the *rendered* water/reservoir projection was wet, while a chunk starts its
+pack from the generated water; near a flooded shore or a tundra lake the LOD
+was bare and the loaded chunk snowy. It now uses the generated water. A
+shallow pack also kept the ground-cover overlay in the LOD, so grass showed
+through snow that the chunk hid; any settled snow now hides cover.
+
+The old automatic loose snow is rebased on load for every ledger version:
+all loose columns in a chunk column **with no player edit** are dropped and
+their volume is removed from the accounted input. Columns with a terrain
+edit keep every deposit, so tunnels, roofs and built floors survive; packs
+and explicit cuts are not touched. The reproduction save dropped its 8,782
+old loose columns; a stderr line reports the count. The rebase uses the
+generated surface from the world map, so it does not need loaded chunks and
+a stacked deposit cannot reappear after a later chunk load.
+
+The Release suite passed 475 cases; the focused ASan/UBSan run passed 57.
+A night capture shows snow tops and sides equally dark, and a day capture
+shows the 2 cm snapping removing the dark speck field.
+
+#### Maintainer sign-off · 2026-11-27
+
+The maintainer confirmed the tunnel snow, night lighting, ramp, ridge and
+far/near snow fixes and signed Playcheck F off. Step 14 is complete.

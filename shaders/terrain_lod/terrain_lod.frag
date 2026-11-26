@@ -15,6 +15,8 @@ SAMPLER2D(u_cover_map, 6);
 SAMPLER2D(u_sky_occlusion, 7);
 SAMPLER2D(u_patch_water, 8);
 uniform vec4 u_lod_patch;
+// x = snow albedo layer (-1 disables), y = side-face sky softening.
+uniform vec4 u_material_soft;
 uniform vec4 u_lod_cover;  // x = cover texels per side
 uniform vec4 u_detail_origin;
 #include "../world_surface.sh"
@@ -92,11 +94,11 @@ void main()
     vec3 normal = skirt ? vec3(0.0, 1.0, 0.0) : normalize(v_normal);
     vec3 color;
     vec3 surface = normal;
+    float layer = floor(v_layer + 0.5);
     if (v_layer < -1.5) {
         color = surfaceWaterColor(v_position, normal, v_cover,
                                   v_layer < -2.5, v_color0.a, 1.0 - v_color0.r);
     } else {
-        float layer = floor(v_layer + 0.5);
         if (v_layer < -0.5) {
             vec2 uv = ((skirt ? owner : v_position.xz) - u_lod_patch.xy)
                       / u_lod_patch.z;
@@ -135,7 +137,11 @@ void main()
               * surfaceStructureSky(v_position, normal);
     vec3 far = surfaceFarLight(v_position, surface, normal, 0.0)
              + surfaceLodLight(v_position);
+    float soft = 0.0;
+    if (u_material_soft.x >= 0.0 && v_layer >= -1.5 &&
+        abs(layer - u_material_soft.x) < 0.5)
+        soft = u_material_soft.y;
     color = surfaceLight(normal, surface, color, vec2(sky, 0.0),
-                         vec3_splat(1.0), normal, 0.0, far);
+                         vec3_splat(1.0), normal, 0.0, far, soft);
     gl_FragColor = vec4(surfaceFog(v_position, color), 1.0);
 }

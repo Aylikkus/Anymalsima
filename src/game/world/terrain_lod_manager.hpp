@@ -35,7 +35,8 @@ class TerrainLodManager {
                 std::span<const TileBox> casterDetail = {});
     void render(RenderTarget& target, IRenderer& renderer, ChunkManager& chunks,
                 const Camera& camera, Vec2 viewport,
-                LightVolumeManager* lightVolumes = nullptr);
+                LightVolumeManager* lightVolumes = nullptr,
+                const snow::ChunkColumns* pendingSnow = nullptr);
     ShaderProperty& waterUniform() { return water; }
     uint8_t surfaceFill(TilePos pos, const Tile& tile);
     float lakeMeshOffset(const LakeMeshSurface& surface);
@@ -65,6 +66,8 @@ class TerrainLodManager {
     // Generated structures drawn as voxels at distance (massive trees today;
     // StructureLod::setStructures); ignored without edit tracking (no
     // structure proxies).
+    void setSnow(std::shared_ptr<const snow::polar::SurfaceSnapshot> value,
+                 const snow::ChunkColumns& changed);
     void setStructures(std::vector<structure_voxels::SourcePtr> sources) {
         if (structures) structures->setStructures(std::move(sources));
     }
@@ -167,6 +170,7 @@ class TerrainLodManager {
                    const TerrainLod::Mesh& cpu, IRenderer& renderer);
     void editChanged(uint64_t column);
     void reservoirsChanged(const ReservoirChange& change);
+    void surfaceChanged(const snow::ChunkColumns& columns);
     void invalidatePatches(
         const std::function<bool(const TerrainLod::Patch&)>& touches);
     Signal<const ReservoirChange&>::Connection waterConnection;
@@ -186,7 +190,8 @@ class TerrainLodManager {
     // Not enough budget: select a coarser layout once per selection.
     void pressure();
     void updateCoverage(ChunkManager& chunks, const Camera& camera,
-                        LightVolumeManager* lightVolumes);
+                        LightVolumeManager* lightVolumes,
+                        const snow::ChunkColumns* pendingSnow);
     void uploadCoverage();
     void uploadJoins(IRenderer& renderer);
     size_t budget() const { return quality.gpuBudget - JoinBudget; }
@@ -203,6 +208,8 @@ class TerrainLodManager {
     Signal<uint64_t>::Connection editConnection;
     std::shared_ptr<SurfaceInputCache> inputs;
     SurfaceSampler detailSampler;
+    std::shared_ptr<const snow::polar::SurfaceSnapshot> snowSurface;
+    uint64_t surfaceRevision = 0;
     std::shared_ptr<const ReservoirSnapshot> waterSnapshot;
     // Built structures at distance; present when edits are tracked.
     std::unique_ptr<StructureLod> structures;

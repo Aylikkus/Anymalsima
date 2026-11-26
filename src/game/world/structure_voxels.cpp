@@ -45,6 +45,7 @@ void Slab::erase(uint16_t cell) {
 }
 
 void Slab::merge(const Slab& other) {
+    for (const auto& [cell, layer] : other.snow) snow.try_emplace(cell, layer);
     enclosed |= other.enclosed;
     const auto added = other.bits & ~bits;
     for (const auto& [cell, shape] : other.shapes)

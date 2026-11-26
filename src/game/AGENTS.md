@@ -117,6 +117,22 @@ cover, plant instances or player edits.
 `ANYM_WEATHER_FIXTURE=1` adds session-only time jumps, a presentation force and
 site teleports. `ANYM_WEATHER_DEPOSITION_FIXTURE=1` lets the force drive the
 physical sample as well. The force resets on reload and its deposits persist.
+`polar_snow.hpp` samples the generator 28 starting packs. The snow owner
+reproduces untouched vertical intervals, saves changed runs and completely
+removed footprints in `snow.dat` v5 (v6 adds the footprints with local,
+explicitly tracked weather), and publishes only resident exact
+geometry. `WorldEditor::removePiece` checks the projected cell revision and
+routes pack excavation back to the snow owner. Older worlds start unseen
+footprints at the saved date without generated packs. On load, all loose
+snow columns in chunk columns without a player edit are rebased onto the
+seasonal pack; edited columns keep every deposit, so tunnels, roofs, floors
+and cuts survive. Terrain LOD reads
+immutable pack cap summaries. Loose snow on the ground and roofs uses
+structure proxies with clipped horizontal intervals. Exact geometry stays
+with SnowCover and the ledger stays with SnowSettlement. SkyHeightMap keeps
+the raw terrain top used by snowfall separate from the derived snow opacity
+used by lighting. See steps 13–14 in the
+[weather handoff](../../docs/handoff/weather.md).
 
 ### Trees
 

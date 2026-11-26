@@ -3,14 +3,14 @@
 #include <random>
 
 #include "generation/perlin_noise.hpp"
+#include "items/block.hpp"
 #include "region.hpp"
 #include "world.hpp"
 
-#include "items/block.hpp"
-
 class LayersGenerator {
    public:
-    explicit LayersGenerator(const WorldGenSettings &settings, IAssets *assets)
+    explicit LayersGenerator(const WorldGenSettings &settings,
+                             const IAssets *assets)
         : settings(settings),
           assets(assets),
           rockNoise(settings.feature_seed + 1337) {}
@@ -55,7 +55,6 @@ class LayersGenerator {
                 baseCandidates.push_back(rock);
         }
 
-
         // large-scale blobs
         float field = rockNoise.fbmTileable(
             region.coord.x * 0.01f, region.coord.y * 0.01f,
@@ -90,8 +89,9 @@ class LayersGenerator {
 
             int depth_from_surface = neededDepth - (depth + thickness);
 
-            result.push_back(RegionLayer(RegionLayerType::Rock, blocks.get(base->block_name).id,
-                                         thickness, depth_from_surface, 0, base->id));
+            result.push_back(RegionLayer(
+                RegionLayerType::Rock, blocks.get(base->block_name).id,
+                thickness, depth_from_surface, 0, base->id));
 
             depth += thickness;
         }
@@ -123,8 +123,9 @@ class LayersGenerator {
             if (thickness <= 0) break;
 
             int depth_from_surface = neededDepth - (depth + thickness);
-            result.push_back(RegionLayer(RegionLayerType::Rock, blocks.get(rock->block_name).id,
-                                         thickness, depth_from_surface, 0, rock->id));
+            result.push_back(RegionLayer(
+                RegionLayerType::Rock, blocks.get(rock->block_name).id,
+                thickness, depth_from_surface, 0, rock->id));
             prevRock = rock;
 
             depth += thickness;
@@ -200,7 +201,7 @@ class LayersGenerator {
 
    private:
     const WorldGenSettings &settings;
-    IAssets *assets;
+    const IAssets *assets;
     std::uniform_real_distribution<float> dist{0.0f, 1.0f};
     PerlinNoise rockNoise;
 

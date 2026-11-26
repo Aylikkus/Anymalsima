@@ -12,6 +12,7 @@
 #include "render/frustrum.hpp"
 #include "world/day_night.hpp"
 #include "world/generated_hydrology.hpp"
+#include "world/polar_snow.hpp"
 #include "world/precipitation.hpp"
 #include "world/world_calendar.hpp"
 #include "world/world_climate.hpp"
@@ -70,10 +71,20 @@ std::string pieceEditLabel(CellPieceEdit status) {
 class ChunkSnowTerrain final : public snow::SnowTerrain {
    public:
     ChunkSnowTerrain(ChunkManager& chunks, const World& world,
-                     const SkyHeightMap& sky, const TerrainEdits& edits)
-        : chunks(chunks), world(world), sky(sky), edits(edits) {}
+                     const SkyHeightMap& sky, const TerrainEdits& edits,
+                     std::optional<TilePos> fixture)
+        : chunks(chunks),
+          world(world),
+          sky(sky),
+          edits(edits),
+          polar(world),
+          fixture(fixture) {}
 
-    void resetQueries() { slabs.clear(); }
+    void resetQueries() {
+        slabs.clear();
+        generation.reset();
+        generationKey = UINT64_MAX;
+    }
 
     std::optional<tile_geometry::CellGeometry> cell(
         TilePos pos) const override {
@@ -90,8 +101,47 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
     }
     int minY() const override { return 0; }
     int maxY() const override { return WORLD_HEIGHT_Y; }
+    void setSeason(int day) { season = day; }
+    bool mayHaveInitialPack(int x, int z) const override {
+        // Chunk projection tests both edge rows. The fixture is positioned
+        // on a chunk's first row in Z.
+        return inFixture(x, z) || polar.depth(x, z, season) > 0.;
+    }
+    std::optional<snow::PackRun> initialPack(int x, int z) const override {
+        if (fixture)
+            if (const auto pack =
+                    snow::polar::fixturePack(world, *fixture, x, z))
+                return pack;
+        if (!snow::polar::supported(world)) return std::nullopt;
+        const auto* ground = generationAt(x, z);
+        return ground ? polar.at(x, z, *ground, season) : std::nullopt;
+    }
+    snow::Volume initialPackCapacity(int x, int z) const override {
+        if (inFixture(x, z)) return snow::MaximumVolume;
+        const auto* ground = generationAt(x, z);
+        return ground ? snow::polar::capacity(*ground) : snow::MaximumVolume;
+    }
 
    private:
+    const ColumnGenerationInput* generationAt(int x, int z) const {
+        const unsigned cx = unsigned(x / Chunk::SIZE_X);
+        const unsigned cz = unsigned(z / Chunk::SIZE_Z);
+        const auto key = editKey(cx, cz);
+        if (generationKey != key) {
+            generation = chunks.generatedColumns(cx, cz);
+            generationKey = key;
+        }
+        if (!generation) return nullptr;
+        return &generation->columns[(z % Chunk::SIZE_Z) * Chunk::SIZE_X +
+                                    x % Chunk::SIZE_X];
+    }
+
+    bool inFixture(int x, int z) const {
+        if (!fixture || z < fixture->z || z >= fixture->z + 6) return false;
+        const auto dx = chunks.wrap().deltaTile(x, fixture->x);
+        return dx >= -3 && dx < 3;
+    }
+
     struct Slabs {
         std::array<const Chunk*, Y_CHUNKS> ready{};
         // Zero is uncached, and each cached bound is stored as y + 2.
@@ -112,7 +162,7 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
         auto& [ready, tops, edit] = slab->second;
         auto& cached = tops[sky::Tile::index(lx, lz)];
         if (cached) return int(cached) - 2;
-        const auto known = sky.top(x, z);
+        const auto known = sky.rawTop(x, z);
         if (!known) {
             cached = WORLD_HEIGHT_Y + 1;
             return WORLD_HEIGHT_Y - 1;
@@ -147,7 +197,12 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
     const World& world;
     const SkyHeightMap& sky;
     const TerrainEdits& edits;
+    snow::polar::Baselines polar;
+    int season = 0;
+    std::optional<TilePos> fixture;
     mutable std::map<uint64_t, Slabs> slabs;
+    mutable uint64_t generationKey = UINT64_MAX;
+    mutable std::shared_ptr<const ChunkColumnInputs> generation;
 };
 
 namespace {
@@ -208,6 +263,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     const auto& quality = TerrainLod::Qualities[detail];
     camera.viewDistance = quality.viewDistance;
     worldEye.initVec4("u_world_eye", {0, 0, 0, quality.viewDistance});
+    snowSoft.initVec4("u_material_soft", {-1.f, 0.f, 0.f, 0.f});
     try {
         auto file = save_catalog::readTerrainEdits(slot);
         edits = std::make_unique<TerrainEdits>(std::move(file.columns));
@@ -229,6 +285,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         lightRenderer->appendUniforms(patchLights, LightRenderer::Program::Lod);
         lightRenderer->appendUniforms(blockLights,
                                       LightRenderer::Program::Block);
+        patchLights.push_back(&snowSoft);
+        blockLights.push_back(&snowSoft);
         terrainLod->setExtraUniforms(std::move(patchLights),
                                      std::move(blockLights));
     }
@@ -287,9 +345,14 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                      blocks.items.empty() ? 0 : blocks.items.front().id);
         timberId = id("blocks.oak_timber", 0);
         snowId = id("blocks.snow", 0);
-        if (!snowId)
+        if (snowId) {
+            const auto layer =
+                context.assets->getMaterialAlbedoLayer("materials.snow");
+            snowSoft.setVec4({float(layer), .85f, 0.f, 0.f});
+        } else {
             std::cerr
                 << "blocks.snow is not defined; snow rendering is disabled\n";
+        }
         const auto it = blocks.indexByName.find(TestLightBlock);
         if (it != blocks.indexByName.end())
             testLightId = blocks.items[it->second].id;
@@ -406,6 +469,16 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     setupConstructionFixture();
     setupSnowFixture();
     setupWeatherTravelFixture();
+    setupPolarPackFixture();
+    if (polarPackSite)
+        makeDebugButton({6, 7, 6, 1}, [this] {
+            if (probe) toggleWalk();
+            const auto [x, y, z] = *polarPackSite;
+            camera.position = {x + .5f, y + 6.f, z + 2.5f};
+            camera.yaw = 0;
+            camera.pitch = -.25f;
+            camera.distance = 15.f;
+        })->setText(_("Polar pack"));
     if (const char* fixture = std::getenv("ANYM_WEATHER_DISTANCE_FIXTURE");
         fixture && std::string_view(fixture) == "1" && this->world->width > 1 &&
         this->world->height > 1) {
@@ -463,7 +536,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     }
     if (const char* fixture = std::getenv("ANYM_WEATHER_DEPOSITION_FIXTURE"))
         depositionFixture = std::string_view(fixture) == "1";
-    depositionFixture |= weatherTravelSites.has_value();
+    depositionFixture |=
+        weatherTravelSites.has_value() || polarPackSite.has_value();
 
     // The original inspection controls remain presentation-only. The
     // separate deposition fixture also drives the active physical sample.
@@ -543,13 +617,43 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     }
     skyMap->dirty = false;
     snowTerrain = std::make_unique<ChunkSnowTerrain>(
-        *chunkManager, *this->world, *skyMap, *edits);
+        *chunkManager, *this->world, *skyMap, *edits, polarPackSite);
     snowSettlement = std::make_unique<snow::SnowSettlement>(*snowTerrain);
     snowCover = std::make_unique<snow::SnowCover>();
     save_catalog::readSnow(slot, *snowSettlement);
+    // v5 ledgers can carry the old automatic replay snow on open ground.
+    // Rebase those columns onto the dated seasonal model once. Roofs,
+    // tunnels and cuts keep their records because their support is not the
+    // generated surface.
+    if (this->world->width > 0 && !this->world->regions.empty()) {
+        // The generated surface is available from the world map without
+        // streaming chunks. Untouched columns can only hold automatic snow;
+        // player-edited columns keep every deposit (tunnel, roof, floor).
+        SurfaceSampler surface(*this->world, *context.assets);
+        const auto dropped =
+            snowSettlement->dropGroundLoose([&](int x, int z, int base) {
+                const auto key = editKey(unsigned(x / Chunk::SIZE_X),
+                                         unsigned(z / Chunk::SIZE_Z));
+                if (edits->contains(key)) return false;
+                const auto shape = surface.groundShape(x, z);
+                const int ground =
+                    surface.height(x, z) + (shape.code() ? 0 : 1);
+                return base >= ground;
+            });
+        if (dropped)
+            std::cerr << "Rebased " << dropped
+                      << " old loose snow columns onto the seasonal pack\n";
+    }
     // This projection starts empty. Only streaming notifications should
     // schedule columns restored from the ledger.
-    snowSettlement->takeProjectionChanges();
+    const auto restored = snowSettlement->takeProjectionChanges();
+    snowSettlement->takeFootprintChanges();
+    snowCover->updateLooseExterior(*snowSettlement, restored, snowResident,
+                                   snowId);
+    snowPackChanges = snowSettlement->takePackChanges();
+    // The ledger checkpoint is written before world.json.
+    clock.set(std::max(slot.meta.worldDays, snowSettlement->weatherHorizon()));
+    publishSnowSurface(true);
     savedSnowRevision = snowSettlement->revision();
     // The map covers every chunk column with loaded chunks.
     skyReadyConnection =
@@ -557,15 +661,22 @@ GameplayState::GameplayState(Game& game, UIContext& context,
             skyMap->request(c.x, c.z);
             const snow::ChunkColumn column{c.x, c.z};
             snowResident.insert(column);
-            if (snowSettlement->hasSnowInChunkColumn(column))
+            if (snowSettlement->hasSnowInChunkColumn(column)) {
                 snowDirtyColumns.insert(column);
+                snowFullProjection.insert(column);
+                // Make the ground loose tops visible to the distant height
+                // field before this chunk can unload again.
+                snowPackChanges.insert(column);
+            }
         });
     snowColumnReleased =
         chunkManager->columnReleased.connect([this](uint64_t key) {
             const snow::ChunkColumn column{unsigned(key >> 32), unsigned(key)};
             snowResident.erase(column);
-            if (snowSettlement->hasSnowInChunkColumn(column))
+            if (snowSettlement->hasSnowInChunkColumn(column)) {
                 snowDirtyColumns.insert(column);
+                snowFullProjection.insert(column);
+            }
         });
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
@@ -593,24 +704,40 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     });
     editor = std::make_unique<WorldEditor>(*chunkManager, sunLight.get(),
                                            context.assets->getStorage<Block>());
+    editor->setEnvironmentRemoval([this](TilePos pos, auto id) {
+        snowTerrain->resetQueries();
+        if (!snowSettlement->excavatePack(pos, id) &&
+            !snowSettlement->excavateLoose(pos, id))
+            return false;
+        const snow::ChunkColumn column{unsigned(pos.x / Chunk::SIZE_X),
+                                       unsigned(pos.z / Chunk::SIZE_Z)};
+        collectSnowChanges();
+        snowDirtyColumns.erase(column);
+        publishSnow({column});
+        return true;
+    });
     blockLight->watch(*editor);
     skyMap->watch(*editor);
     snowEditConnection =
         editor->blockChanged.connect([this](const BlockChange& change) {
-            if (snowSettlement->columns().empty()) return;
+            const auto [x, y, z] = change.pos;
+            if (!snowSettlement->columnAt(x, z, snowTerrain->maxY()) &&
+                !snowSettlement->surfacePack(x, z))
+                return;
             snowTerrain->resetQueries();
             snowSettlement->supportChanged(change.pos);
-            if (snowSettlement->columnAt(change.pos.x, change.pos.z,
-                                         snowTerrain->maxY()))
-                snowDirtyColumns.emplace(
-                    unsigned(snowTerrain->wrapX(change.pos.x) / Chunk::SIZE_X),
-                    unsigned(change.pos.z / Chunk::SIZE_Z));
+            const int wx = snowTerrain->wrapX(x);
+            const snow::ChunkColumn column{unsigned(wx / Chunk::SIZE_X),
+                                           unsigned(z / Chunk::SIZE_Z)};
+            snowDirtyColumns.insert(column);
+            snowDirtyFootprints[column].emplace(wx, z);
         });
-    // The snow checkpoint is written before world.json. Recover its date
-    // if a save was interrupted between those two atomic replacements.
-    clock.set(std::max(slot.meta.worldDays, snowSettlement->weatherHorizon()));
-    if (weatherTravelSites || distantWeatherFixture) clock.setSpeed(0);
-    snowSettlement->beginWeather(clock.days());
+    if (weatherTravelSites || distantWeatherFixture || polarPackSite)
+        clock.setSpeed(0);
+    if (slot.meta.generatorVersion < WorldMeta::PolarPackVersion)
+        snowSettlement->migrateUnvisitedWeather(clock.days());
+    else
+        snowSettlement->beginWeather(clock.days());
     snowSettlement->setWeatherForce(clock.days(), 0);
     weatherVisualDays = clock.days();
     floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
@@ -654,6 +781,13 @@ GameplayState::GameplayState(Game& game, UIContext& context,
             chunkManager->generatedSurfaceY(static_cast<unsigned>(centerX),
                                             static_cast<unsigned>(centerZ)) +
             10.0f;
+        if (snow::polar::supported(*this->world)) {
+            const snow::polar::Baselines stock(*this->world);
+            const double depth =
+                stock.depth(int(centerX), int(centerZ),
+                            snow::polar::seasonDay(slot.meta.worldDays));
+            centerY += float(std::min(depth + 1., double(snow::MaximumDepth)));
+        }
 
         camera.position = {centerX, centerY, centerZ};
         camera.pitch = -1.5f;
@@ -678,8 +812,10 @@ GameplayState::GameplayState(Game& game, UIContext& context,
             chunkChanged(c);
             const snow::ChunkColumn column{c.x, c.z};
             if (snowResident.contains(column) &&
-                snowSettlement->hasSnowInChunkColumn(column))
+                snowSettlement->hasSnowInChunkColumn(column)) {
                 snowDirtyColumns.insert(column);
+                snowFullProjection.insert(column);
+            }
         });
 
     const Vec2u startRegion{unsigned(camera.position.x) / 128,
@@ -863,6 +999,48 @@ void GameplayState::applyWeatherOverride(world_weather::Sample& weather) const {
     weather_history::applyOverride(weather, weatherForce, depositionFixture);
 }
 
+void GameplayState::setupPolarPackFixture() {
+    const char* enabled = std::getenv("ANYM_POLAR_SNOW_FIXTURE");
+    if (!enabled || std::string_view(enabled) != "1" || !stoneId || !snowId ||
+        slot.meta.generatorVersion < WorldMeta::PolarPackVersion)
+        return;
+    const auto wrap = world->wrap();
+    const int x = int(
+        wrap.wrapTile((slot.meta.startRegion.x + 1) * WorldWrap::RegionSize));
+    const int z = slot.meta.startRegion.y * WorldWrap::RegionSize +
+                  WorldWrap::RegionSize / 2;
+    std::array<int, 36> ground{};
+    int highest = 0;
+    for (int dz = 0; dz < 6; ++dz)
+        for (int dx = 0; dx < 6; ++dx) {
+            const int px = int(wrap.wrapTile(x + dx - 3));
+            auto& height = ground[dz * 6 + dx];
+            height = chunkManager->generatedSurfaceY(px, z + dz);
+            highest = std::max(highest, height);
+        }
+    // Start four metres below a slab boundary. The deep pack crosses it.
+    const int base =
+        ((highest + 5) / Chunk::SIZE_Y) * Chunk::SIZE_Y + Chunk::SIZE_Y - 4;
+    if (base + snow::MaximumDepth >= WORLD_HEIGHT_Y) return;
+
+    using namespace structure_voxels;
+    Override layout;
+    layout.mode = OverrideMode::Replace;
+    layout.anchorX = x;
+    layout.anchorZ = z;
+    layout.landmark = true;
+    for (int dz = 0; dz < 6; ++dz)
+        for (int dx = 0; dx < 6; ++dx) {
+            const int px = int(wrap.wrapTile(x + dx - 3));
+            for (int y = ground[dz * 6 + dx] + 1; y < base; ++y)
+                layout.voxels[{px, y, z + dz}] = OverrideVoxel(stoneId);
+        }
+    constexpr uint64_t Key = 0xf000000000000013ULL;
+    chunkManager->setGeneratedStructureKinds(applyOverrides(
+        {}, {{"polar_pack_fixture", {{Key, std::move(layout)}}}}));
+    polarPackSite = TilePos{x, base, z};
+}
+
 void GameplayState::setupWeatherTravelFixture() {
     const char* enabled = std::getenv("ANYM_WEATHER_TRAVEL_FIXTURE");
     if (!enabled || std::string_view(enabled) != "1" || !stoneId ||
@@ -1017,26 +1195,156 @@ void GameplayState::cycleWeatherSite() {
     updateWeatherControls();
 }
 
-void GameplayState::rebuildSnow(size_t maxColumns) {
-    if (!snowId) return;
+void GameplayState::startWeatherClockMeasurement(double speed) {
+    clock.setSpeed(speed);
+    measureSnow = true;
+    snowWork = {};
+}
+
+void GameplayState::collectSnowChanges() {
     snowDirtyColumns.merge(snowSettlement->takeProjectionChanges());
-    if (snowDirtyColumns.empty()) return;
+    snowPackChanges.merge(snowSettlement->takePackChanges());
+    for (const auto& [x, z] : snowSettlement->takeFootprintChanges())
+        snowDirtyFootprints[{unsigned(x / Chunk::SIZE_X),
+                             unsigned(z / Chunk::SIZE_Z)}]
+            .emplace(x, z);
+}
+
+void GameplayState::updateSnowSeason() {
+    if (!snowSurface || !snowSurface->initialPacks || depositionFixture ||
+        !snow::polar::supported(*world) || clock.speed() > 1.)
+        return;
+    const int day = snow::polar::seasonDay(clock.days());
+    if (day == snowSurface->day) return;
+
+    const int previous = snowSurface->day;
+    for (const auto& column : snowResident) {
+        const int x = int(column.first) * Chunk::SIZE_X;
+        const int z = int(column.second) * Chunk::SIZE_Z;
+        if (snow::polar::seasonChanges(*world, x, z, x + Chunk::SIZE_X - 1,
+                                       z + Chunk::SIZE_Z - 1, previous, day)) {
+            snowDirtyColumns.insert(column);
+            snowSeasonProjection.insert(column);
+        }
+    }
+    publishSnowSurface();
+}
+
+void GameplayState::publishSnowSurface(bool all) {
+    if (!snowSurface) all = true;
+    const int day = depositionFixture ? 0
+                    : !all && clock.speed() > 1.
+                        ? snowSurface->day
+                        : snow::polar::seasonDay(clock.days());
+    if (!all && snowPackChanges.empty() && day == snowSurface->day) return;
+    auto next =
+        snowSurface && !all
+            ? std::make_shared<snow::polar::SurfaceSnapshot>(*snowSurface)
+            : std::make_shared<snow::polar::SurfaceSnapshot>();
+    next->block = snowId;
+    next->fixture = polarPackSite;
+    next->initialPacks = snowSettlement->initialPacksEnabled();
+    next->day = day;
+    snowTerrain->setSeason(day);
+    for (const auto& column : snowPackChanges) {
+        auto pack = std::make_shared<snow::PackTops>();
+        auto loose = std::make_shared<snow::PackTops>();
+        snowSettlement->updatePackTops(*pack, *loose, column);
+        if (pack->empty())
+            next->edits.erase(column);
+        else
+            next->edits.insert_or_assign(column, std::move(pack));
+        if (loose->empty())
+            next->loose.erase(column);
+        else
+            next->loose.insert_or_assign(column, std::move(loose));
+    }
+    snowSurface = std::move(next);
+    if (polarPackSite && all) {
+        for (int dx : {-3, 2}) {
+            const int x = snowTerrain->wrapX(polarPackSite->x + dx);
+            snowPackChanges.emplace(x / Chunk::SIZE_X,
+                                    polarPackSite->z / Chunk::SIZE_Z);
+        }
+    }
+    terrainLod->setSnow(snowSurface, snowPackChanges);
+    skyMap->setSnowSurface(snowSurface, snowPackChanges);
+    snowPackChanges.clear();
+}
+
+void GameplayState::rebuildSnow(size_t maxColumns, bool streamingOnly) {
+    if (!streamingOnly) {
+        snowProjectionSeconds = 0;
+        if (!snowId) return;
+        collectSnowChanges();
+    }
+    if (!snowId || snowDirtyColumns.empty()) return;
 
     snow::ChunkColumns selected;
+    const int cx = int(camera.position.x) / Chunk::SIZE_X;
+    const int cz = int(camera.position.z) / Chunk::SIZE_Z;
+    const int radius = terrainLod->settings().chunkRadius - 1;
+    std::optional<snow::ChunkColumn> nearest;
+    int best = 2 * radius * radius + 1;
+    const auto findNearest = [&](const snow::ChunkColumns& columns) {
+        for (const auto& column : columns) {
+            if (!snowResident.contains(column)) continue;
+            const int dx = int(world->wrap().deltaChunk(column.first, cx));
+            const int dz = int(column.second) - cz;
+            if (std::abs(dx) > radius || std::abs(dz) > radius) continue;
+            const int distance = dx * dx + dz * dz;
+            if (distance < best) {
+                best = distance;
+                nearest = column;
+            }
+        }
+    };
+    findNearest(snowFullProjection);
+    if (!nearest && !streamingOnly) findNearest(snowSeasonProjection);
+    if (nearest)
+        selected.insert(snowDirtyColumns.extract(*nearest));
+    else if (streamingOnly)
+        return;
+
     while (selected.size() < maxColumns && !snowDirtyColumns.empty()) {
         auto next = snowDirtyColumns.upper_bound(lastSnowProjection);
         if (next == snowDirtyColumns.end()) next = snowDirtyColumns.begin();
         lastSnowProjection = *next;
         selected.insert(snowDirtyColumns.extract(next));
     }
+    publishSnow(selected);
+}
+
+void GameplayState::publishSnow(const snow::ChunkColumns& selected) {
+    if (measureSnow) snowWork.projectedColumns += selected.size();
     snowProjectionSeconds = 0;
     snowTerrain->resetQueries();
     // Geometry and ledger are read on the owner thread between chunk
     // publications. setEnvironment versions the immutable result for meshes.
+    for (const auto& column : selected)
+        if ((snowFullProjection.erase(column) |
+             snowSeasonProjection.erase(column)) != 0)
+            snowDirtyFootprints.erase(column);
     snowCover->rebuild(*snowSettlement, *snowTerrain, snowId, &snowResident,
-                       &selected);
-    if (!snowCover->changedChunks().empty())
-        chunkManager->setEnvironment(snowCover->environment());
+                       &selected, &snowDirtyFootprints);
+    snowCover->updateLooseExterior(*snowSettlement, selected, snowResident,
+                                   snowId, &snowDirtyFootprints);
+    for (const auto& column : selected) snowDirtyFootprints.erase(column);
+    refreshSnowEnvironment();
+}
+
+void GameplayState::refreshSnowEnvironment() {
+    const auto& changed = snowCover->changedChunks();
+    if (changed.empty()) return;
+    chunkManager->setEnvironment(snowCover->environment());
+    snow::ChunkColumns columns;
+    for (const auto& coord : changed) {
+        columns.emplace(coord.x, coord.z);
+        sunLight->markEnvironmentChanged(coord);
+        blockLight->markChunkChanged(coord);
+        floraRenderer->snowChanged(coord);
+    }
+    skyMap->setSnowEnvironment(*snowCover->environment(), columns, snowId);
 }
 
 void GameplayState::skipWeatherTime(double days) {
@@ -1051,9 +1359,16 @@ void GameplayState::clearSnow() {
     if (depositionFixture)
         snowSettlement->setWeatherForce(clock.days(), weatherForce);
     snowDirtyColumns.clear();
+    snowFullProjection.clear();
+    snowSeasonProjection.clear();
+    snowDirtyFootprints.clear();
+    snowPackChanges.clear();
+    snowSettlement->takePackChanges();
+    snowSettlement->takeFootprintChanges();
     snowSettlement->takeProjectionChanges();
+    publishSnowSurface(true);
     snowCover->clear();
-    chunkManager->setEnvironment(snowCover->environment());
+    refreshSnowEnvironment();
     lastBuildAction = _("Snow cleared");
 }
 
@@ -1070,6 +1385,7 @@ bool GameplayState::reconcileSnowAt(int x, int z, double target) {
     const double reached = precipitation::reconcile(
         *snowSettlement, *snowTerrain, x, z, target, !world->regions.empty(),
         [&](int64_t interval) {
+            if (measureSnow) ++snowWork.weatherSamples;
             return snowHistory
                 .at(*world, x, z, interval,
                     snowSettlement->modelForWeatherInterval(interval))
@@ -1080,12 +1396,14 @@ bool GameplayState::reconcileSnowAt(int x, int z, double target) {
             if (y >= WORLD_HEIGHT_Y) return false;
             const auto* tile = chunkManager->tileAt(x, y, z);
             return tile ? std::optional(tile->isLiquid()) : std::nullopt;
-        });
+        },
+        2 * weather_history::IntervalsPerDay);
+    if (measureSnow) ++snowWork.batches;
     return reached >= target;
 }
 
 bool GameplayState::prepareSnowEdit(TilePos pos) {
-    if (!snowId) return true;
+    if (!snowId || !weatherTravelSites) return true;
     snowTerrain->resetQueries();
     if (reconcileSnowAt(pos.x, pos.z, clock.days())) return true;
     snowEditPending = pos;
@@ -1094,11 +1412,35 @@ bool GameplayState::prepareSnowEdit(TilePos pos) {
     return false;
 }
 
+void GameplayState::trackSnowEdit(TilePos pos) {
+    if (!snowId || depositionFixture || !snow::polar::supported(*world)) return;
+    snowTerrain->resetQueries();
+    const int x = snowTerrain->wrapX(pos.x);
+    snowSettlement->trackLocalWeather(x, pos.z, clock.days());
+    const snow::ChunkColumn column{unsigned(x / Chunk::SIZE_X),
+                                   unsigned(pos.z / Chunk::SIZE_Z)};
+    if (!snowResident.contains(column) ||
+        !snowSettlement->hasSnowInChunkColumn(column))
+        return;
+    // An edit that changes a covered surface should show its snow now, not
+    // on the next periodic publication.
+    collectSnowChanges();
+    snowDirtyColumns.erase(column);
+    publishSnow({column});
+}
+
 void GameplayState::advanceSnow(bool throughNow, double maxDays) {
     snowUpdateSeconds = 0;
     if (!snowId) return;
+    const bool seasonal = !depositionFixture && snow::polar::supported(*world);
+    // Untouched terrain follows the dated seasonal stock, so it needs no
+    // replay at any speed. Local history stays bounded by the two-day cap and
+    // still advances during a fast clock, which keeps a roof or tunnel alive.
+    if (seasonal && !snowSettlement->hasLocalWeather() &&
+        !snowSettlement->pendingCount())
+        return;
     snowTerrain->resetQueries();
-    snowSettlement->settle(4096);
+    snowSettlement->settle(512);
 
     // Both resident and returning sites replay the same dated intervals.
     // Edits and debug jumps can also commit a partial current interval.
@@ -1107,7 +1449,8 @@ void GameplayState::advanceSnow(bool throughNow, double maxDays) {
     const double target = throughNow || depositionFixture
                               ? clock.days()
                               : std::min(clock.days(), completedInterval);
-    constexpr int Radius = 4, Side = 2 * Radius + 1, Footprints = Side * Side;
+    const int radius = seasonal ? 16 : 4;
+    const int side = 2 * radius + 1, footprints = side * side;
     const int centreX = int(std::floor(camera.position.x));
     const int centreZ = int(std::floor(camera.position.z));
     const auto deadline =
@@ -1125,22 +1468,29 @@ void GameplayState::advanceSnow(bool throughNow, double maxDays) {
             return;
         }
     }
-    for (int i = 0; i < Footprints; ++i) {
-        const int index = int(snowNextFootprint++ % Footprints);
-        const int x = snowTerrain->wrapX(centreX + index % Side - Radius);
-        const int z = centreZ + index / Side - Radius;
+    for (int i = 0; i < footprints; ++i) {
+        const int index = int(snowNextFootprint++ % footprints);
+        const int x = snowTerrain->wrapX(centreX + index % side - radius);
+        const int z = centreZ + index / side - radius;
         if (!snowTerrain->inBounds(x, z)) continue;
+        if (seasonal && !snowSettlement->tracksLocalWeather(x, z)) continue;
+        // A settled local surface catches recent weather. Old seasons are
+        // represented by the regional stock, without an unbounded edit queue.
+        if (seasonal && snowSettlement->weatherDay(x, z) < target - 2.)
+            snowSettlement->markWeatherApplied(x, z, target - 2.);
         const double start = snowSettlement->weatherDay(x, z);
         if (target <= start) continue;
         reconcileSnowAt(x, z, std::min(target, start + maxDays));
         const double reached = snowSettlement->weatherDay(x, z);
         applied += reached > start;
         snowCatchingUp |= reached > start && reached < target;
-        if (applied == 8 || std::chrono::steady_clock::now() >= deadline) {
+        if (applied == (seasonal ? 2 : 8) ||
+            std::chrono::steady_clock::now() >= deadline) {
             snowCatchingUp |= applied > 0;
             break;
         }
     }
+    if (applied) rebuildSnow(2);
 }
 
 void GameplayState::addSnow(const TileRaycastHit& hit) {
@@ -1153,6 +1503,7 @@ void GameplayState::addSnow(const TileRaycastHit& hit) {
                       ? snow::DepositOutcome::Pending
                       : snow::DepositOutcome::Settled;
     }
+    trackSnowEdit({hit.tx, hit.ty, hit.tz});
     rebuildSnow(4);
     lastBuildAction = fmt::format(
         fmt::runtime(_("Snow +{} cm3 at [{}, {}, {}]: {}")), snowAddVolume,
@@ -1715,8 +2066,29 @@ void GameplayState::renderPlacementPreview(RenderTarget& target,
 }
 
 void GameplayState::useTool(int mouseX, int mouseY) {
-    const auto hit = pickTile(mouseX, mouseY);
-    if (!hit) return;
+    auto hit = pickTile(mouseX, mouseY);
+    if (!hit) {
+        lastBuildAction = _("No loaded piece in reach");
+        return;
+    }
+    const snow::ChunkColumn column{unsigned(hit->tx / Chunk::SIZE_X),
+                                   unsigned(hit->tz / Chunk::SIZE_Z)};
+    if (snowSeasonProjection.contains(column) ||
+        snowFullProjection.contains(column)) {
+        // Project this column before editing. Otherwise the ray can pass
+        // through snow that the still-pending projection would have added
+        // and remove the substrate the player cannot see.
+        collectSnowChanges();
+        snowDirtyColumns.erase(column);
+        publishSnow({column});
+        const auto current = pickTile(mouseX, mouseY);
+        if (!current || current->tx != hit->tx || current->ty != hit->ty ||
+            current->tz != hit->tz || current->pieceId != hit->pieceId) {
+            lastBuildAction = _("Snow cover changed. Select the piece again.");
+            return;
+        }
+        hit = current;
+    }
     if (tool == EditTool::SnowAdd) {
         if (prepareSnowEdit({hit->tx, hit->ty, hit->tz})) addSnow(*hit);
         return;
@@ -1740,6 +2112,8 @@ void GameplayState::useTool(int mouseX, int mouseY) {
         if (!prepareSnowEdit({hit->tx, hit->ty, hit->tz})) return;
         const auto result = editor->removePiece({hit->tx, hit->ty, hit->tz},
                                                 hit->revision, hit->pieceId);
+        if (result == CellPieceEdit::Applied)
+            trackSnowEdit({hit->tx, hit->ty, hit->tz});
         lastBuildAction = result == CellPieceEdit::Applied
                               ? _("Piece removed")
                               : pieceEditLabel(result);
@@ -1766,6 +2140,7 @@ void GameplayState::useTool(int mouseX, int mouseY) {
                     ? editor->placePiece(placement->pos, placement->revision,
                                          placement->piece)
                     : placement->status;
+            if (result == CellPieceEdit::Applied) trackSnowEdit(placement->pos);
             lastBuildAction = result == CellPieceEdit::Applied
                                   ? _("Piece placed")
                                   : pieceEditLabel(result);
@@ -1775,7 +2150,9 @@ void GameplayState::useTool(int mouseX, int mouseY) {
     if (testLightId && hit->placementOffset != TilePos{}) {
         const auto [dx, dy, dz] = hit->placementOffset;
         const TilePos pos{hit->tx + dx, hit->ty + dy, hit->tz + dz};
-        if (prepareSnowEdit(pos)) editor->placeBlock(pos, *testLightId);
+        if (prepareSnowEdit(pos) &&
+            editor->placeBlock(pos, *testLightId) == EditStatus::Applied)
+            trackSnowEdit(pos);
     }
 }
 
@@ -1800,6 +2177,13 @@ void GameplayState::update(Game& game, float dt) {
     locationMgr->update();
     regionStore->update();
     updateAutosave(dt);
+    auto subsystem = std::chrono::steady_clock::now();
+    const auto account = [&](double& total) {
+        const auto now = std::chrono::steady_clock::now();
+        total +=
+            std::chrono::duration<double, std::milli>(now - subsystem).count();
+        subsystem = now;
+    };
     std::vector<structure_voxels::SourcePtr> generatedLandmarks;
     chunkManager->appendStructureLandmarks(generatedLandmarks, camera.eye(),
                                            camera.viewDistance);
@@ -1810,14 +2194,18 @@ void GameplayState::update(Game& game, float dt) {
         source = edits->maskStructure(source, chunkManager->wrap());
     landmarks.insert(landmarks.end(), generatedLandmarks.begin(),
                      generatedLandmarks.end());
+    snowCover->appendLooseExterior(landmarks, chunkManager->wrap(),
+                                   camera.eye(), camera.viewDistance);
     terrainLod->setStructures(std::move(landmarks));
     terrainLod->update(camera, uiContext->getWindowSize(),
                        lightRenderer->shadows().casterDetail());
+    if (measureSnow) account(snowWork.lodMs);
     chunkManager->setFocus(camera.position);
     sunLight->setFocus(camera.position);
     blockLight->setFocus(camera.position);
     requestChunksAroundCamera();
     chunkManager->update(editor.get());
+    if (measureSnow) account(snowWork.chunkMs);
     skyMap->setFocus(camera.position);
     skyMap->update();
     snowTerrain->resetQueries();
@@ -1827,6 +2215,8 @@ void GameplayState::update(Game& game, float dt) {
         source = edits->maskStructure(source, chunkManager->wrap(), true);
     skyLandmarks.insert(skyLandmarks.end(), generatedLandmarks.begin(),
                         generatedLandmarks.end());
+    snowCover->appendLooseExterior(skyLandmarks, chunkManager->wrap(),
+                                   camera.eye(), SkyOcclusionMap::Extent / 2);
     skyMap->updateOcclusion(camera.eye(), std::move(skyLandmarks), *world,
                             *uiContext->assets);
     sunLight->update();
@@ -1835,10 +2225,35 @@ void GameplayState::update(Game& game, float dt) {
     snowUpdateSeconds += dt;
     // Wall time keeps an accelerated clock or a replay backlog from
     // continuously displacing frame work and in-flight mesh completions.
-    if (!weatherTravelHold && snowUpdateSeconds >= (snowCatchingUp ? .1 : 1.))
-        advanceSnow();
+    auto startedSnow = std::chrono::steady_clock::time_point{};
+    if (measureSnow) startedSnow = std::chrono::steady_clock::now();
+    const double snowPeriod =
+        snowCatchingUp ? (clock.speed() > 1 ? .1 : .5) : 1.;
+    if (!weatherTravelHold && snowUpdateSeconds >= snowPeriod) advanceSnow();
+    if (measureSnow) {
+        const auto now = std::chrono::steady_clock::now();
+        snowWork.replayMs +=
+            std::chrono::duration<double, std::milli>(now - startedSnow)
+                .count();
+        startedSnow = now;
+    }
     snowProjectionSeconds += dt;
-    if (snowProjectionSeconds >= .125) rebuildSnow();
+    if (snowProjectionSeconds >= .125)
+        rebuildSnow();
+    else if (snowProjectionSeconds >= .04 && !snowFullProjection.empty())
+        rebuildSnow(1, true);
+    snowSurfaceSeconds += dt;
+    if (snowSurfaceSeconds >= 1.) {
+        updateSnowSeason();
+        publishSnowSurface();
+        snowSurfaceSeconds = 0;
+    }
+    if (measureSnow) account(snowWork.seasonMs);
+    if (measureSnow)
+        snowWork.projectionMs +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - startedSnow)
+                .count();
     const double visualDays = double(dt) * std::min(clock.speed(), 5.0) /
                               WorldClock::DayLengthSeconds;
     weatherVisualDays += visualDays;
@@ -1852,8 +2267,11 @@ void GameplayState::update(Game& game, float dt) {
         windTravelZ += wind.windZ * gameSeconds;
     }
     chunkManager->advanceWater(uint64_t(clock.days() * 86400));
+    if (measureSnow) account(snowWork.waterMs);
     floraSim->update(clock.days());
+    if (measureSnow) account(snowWork.floraMs);
     treeSim->update(clock.days());
+    if (measureSnow) account(snowWork.treeMs);
     saveStructures();
     if (timeButton) {
         const auto date = world_calendar::fromDays(clock.days());
@@ -1888,6 +2306,11 @@ void GameplayState::update(Game& game, float dt) {
         if (snowDropSite) {
             const auto [x, y, z] = *snowDropSite;
             controls += fmt::format("Snow drop ramp [{}, {}, {}]\n", x, y, z);
+        }
+        if (polarPackSite) {
+            const auto [x, y, z] = *polarPackSite;
+            controls += fmt::format("Polar pack border [{}, {}, {}] to Y {}\n",
+                                    x, y, z, y + snow::MaximumDepth);
         }
         if (weatherTravelSites) {
             controls += fmt::format("Travel fixture {} · target day {:.4f}\n",
@@ -1992,8 +2415,9 @@ void GameplayState::update(Game& game, float dt) {
 
             ss << "\n--- Snow ---\n";
             {
+                const auto pack = snowSettlement->surfacePack(hit->tx, hit->tz);
                 const auto surface = precipitation::firstSurface(
-                    *snowTerrain, hit->position.x, hit->position.z);
+                    *snowTerrain, hit->position.x, hit->position.z, pack);
                 ss << "Precipitation: ";
                 if (!surface)
                     ss << "geometry pending";
@@ -2016,6 +2440,11 @@ void GameplayState::update(Game& game, float dt) {
                                           *level, *level - base);
                     }
                 }
+                if (pack)
+                    ss << fmt::format(
+                        "\nPack: {:.3f} m top, {:.3f} m upper run",
+                        double(pack->top) / snow::UnitsPerCubicMetre,
+                        double(pack->volume()) / snow::UnitsPerCubicMetre);
                 ss << fmt::format(
                     "\nWeather through day {:.4f}, world day {:.4f}\n"
                     "Meltwater awaiting routing {:.1f} cm3\n",
@@ -2150,7 +2579,9 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     lightRenderer->update(*lightSources, camera, world->wrap(), now);
     lightRenderer->setSkyOcclusion(skyMap->skyOcclusion());
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
-                       context.getWindowSize(), lightVolumes.get());
+                       context.getWindowSize(), lightVolumes.get(),
+                       &snowFullProjection);
+
     camera.underwater = terrainLod->eyeUnderwater();
     snowTerrain->resetQueries();
     const auto weatherStarted = std::chrono::steady_clock::now();
@@ -2164,7 +2595,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
          std::max(1.f, viewport.x) / std::max(1.f, viewport.y), weatherForce,
          distantWeatherFixture, true,
          snowSettlement->firstCurrentWeatherInterval()},
-        *snowTerrain);
+        *snowTerrain, *snowSettlement);
     if (distantWeatherFixture)
         weatherFrameMs = std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - weatherStarted)
@@ -2231,7 +2662,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
         // Chunk meshes are chunk-local; place them relative to the eye.
         auto transform = relativeTransform(camera, wx, wy, wz);
         std::vector<ShaderProperty*> uniforms{&u_texture_array, &u_normal_array,
-                                              &worldEye, &water};
+                                              &worldEye, &water, &snowSoft};
         lightRenderer->appendUniforms(uniforms, LightRenderer::Program::Block);
         // Without a light volume the chunk would render unlit; skip it.
         if (!lightVolumes->bind(coord, uniforms, wx)) return;
