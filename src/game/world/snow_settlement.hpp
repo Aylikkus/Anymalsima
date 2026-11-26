@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <utility>
 
 #include "serialization/binary_stream.hpp"
@@ -25,13 +26,15 @@
 // connected model until the exposure work in step 10 and room storage in
 // step 16. The X axis follows the world wrap; Z edges are closed and overflow
 // above the world top is recorded as an accounted sink. Bulk snow volume is
-// stored in cubic centimetres; water equivalent is a later conversion.
+// stored in cubic centimetres.
 namespace snow {
 
 // One cubic centimetre of settled snow. Exact volumes avoid cumulative drift
 // between region and world saves.
 using Volume = int64_t;
 inline constexpr Volume UnitsPerCubicMetre = 1'000'000;
+// Settled V1 snow has a fixed density of 200 kg/m³.
+inline constexpr double SnowPerWater = 5;
 
 struct SnowColumn {
     int x = 0;
@@ -40,6 +43,8 @@ struct SnowColumn {
     float baseLocal = 0;
     Volume volume = 0;
 };
+
+using SnowKey = std::tuple<int, int, int>;  // canonical x, z, support cell y
 
 // Terrain queries used by settlement. Cells are one-metre cubes and positions
 // are canonical in X. Returning nullopt closes that side of the world.
@@ -51,6 +56,9 @@ class SnowTerrain {
     virtual bool inBounds(int x, int z) const = 0;
     virtual int minY() const = 0;
     virtual int maxY() const = 0;
+    // Conservative highest occupied cell, inclusive. Overhead air can be
+    // skipped; a missing cell below this bound is still unknown.
+    virtual int top(int, int) const { return maxY() - 1; }
 };
 
 enum class DepositOutcome {
@@ -71,6 +79,11 @@ class SnowSettlement {
     // still counts against the supplied volume until settle() applies it.
     DepositOutcome deposit(int x, int z, int fromY, Volume volume,
                            size_t budget = DefaultWorkBudget);
+    // Restrict active-weather settlement to a local neighbourhood. Debug
+    // deposits retain the ordinary connected-component search.
+    DepositOutcome snowfall(int x, int z, int fromY, Volume volume);
+    Volume melt(SnowKey key, Volume volume);
+    void supportChanged(TilePos pos);
     // Removes every deposit and pending transfer. Debug and fixture use;
     // regular weather removal goes through melt and excavation steps.
     void clear();
@@ -83,15 +96,20 @@ class SnowSettlement {
     Volume volumeAt(int x, int z) const;
     // Snow surface in world metres, or nullopt without a known column.
     std::optional<double> levelAt(int x, int z) const;
+    std::optional<double> level(const SnowColumn& column) const;
+    const SnowColumn* columnAt(int x, int z, int y) const;
 
-    const std::map<std::pair<int, int>, SnowColumn>& columns() const {
-        return columns_;
-    }
+    const std::map<SnowKey, SnowColumn>& columns() const { return columns_; }
 
     Volume storedVolume() const;
     Volume pendingVolume() const;
     Volume sinkVolume() const { return sink_; }
     Volume depositedVolume() const { return deposited_; }
+    double meltwaterCm3() const { return double(melted_) / SnowPerWater; }
+    // Awaiting routing at the former snow support. Every unit is 0.2 cm³
+    // liquid water, so conversion never rounds away a small melt.
+    const std::map<SnowKey, Volume>& meltwater() const { return meltwater_; }
+    uint64_t revision() const { return revision_; }
     size_t pendingCount() const { return pending_.size(); }
 
     // State includes resting columns, pending transfers, accepted input and
@@ -105,6 +123,7 @@ class SnowSettlement {
         int z = 0;
         int fromY = 0;
         Volume volume = 0;
+        int radius = 0;
     };
     using Footprint = std::pair<int, int>;
 
@@ -112,14 +131,17 @@ class SnowSettlement {
 
     ApplyResult tryApply(const PendingDeposit& deposit, size_t budget,
                          size_t* used = nullptr);
+    DepositOutcome submit(PendingDeposit request, size_t budget);
     void queue(const PendingDeposit& deposit);
-    void eraseColumn(int x, int z);
 
     const SnowTerrain& terrain_;
-    std::map<Footprint, SnowColumn> columns_;
-    std::map<Footprint, PendingDeposit> pending_;
+    std::map<SnowKey, SnowColumn> columns_;
+    std::map<SnowKey, PendingDeposit> pending_;
+    std::map<SnowKey, Volume> meltwater_;
     Volume deposited_ = 0;
     Volume sink_ = 0;
+    Volume melted_ = 0;
+    uint64_t revision_ = 0;
 };
 
 }  // namespace snow

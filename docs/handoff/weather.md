@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–09 complete · Step 10 pending.**
+**Steps 01–10 complete · Step 11 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -21,7 +21,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 07 | Visible dusting, toe fill and snow collision | Complete | B · Five-centimetre ramp |
 | 08 | Calendar and seasonal ambient temperature | Complete | |
 | 09 | Regional weather, presentation and inspection | Complete | C · Weather and seasons |
-| 10 | Exposure, snowfall and outdoor melt | Pending | |
+| 10 | Exposure, snowfall and outdoor melt | Complete | |
 | 11 | Unloaded weather history and elapsed-time reconciliation | Pending | D · Shelter and travel |
 | 12 | Regional weather at distance | Pending | E · Weather from afar |
 | 13 | Polar baselines, vertical runs and excavation | Pending | |
@@ -960,3 +960,93 @@ cases passed, and the 6 weather cases passed with ASan and UBSan. The shaders
 were compiled with checked `shaderc` exit status; `weather_particles` replaced
 the old `weather` overlay program. The maintainer confirmed the retest and
 accepted Playcheck C on 2026-11-26.
+
+### Step 10 · 2026-11-26
+
+[Precipitation](../../src/game/world/precipitation.hpp) traces downward to
+the first intercepting solid. The sky heightmap skips the known overhead
+air. Ready slabs also contribute any solids above that bound, including
+zero-opacity pieces and fresh edits. Saved edit slabs can conservatively
+raise the bound while their geometry is pending. Loaded cells use actual
+vertical intervals, so a glass pane intercepts like stone and a ray through a
+shape opening continues downward. Near particles use the same query at
+their position and are discarded if their lower end would fall through the
+surface. Particles in the open beyond a doorway are still visible from
+inside.
+
+The tree fixture follows the world representation. Voxelised trunk and thick
+limb cells intercept precipitation. Instanced leaves and thin branches pass
+it through. Snow settling off a ledge or through the side of a shelter
+continues through the step 06 gravity solver.
+
+Active weather samples a 9 × 9 footprint square around the camera focus
+once per real second. Each square metre uses four equal-area rays. Roof and
+floor deposits at different support cells can coexist in one column. The
+gravity solve considers supports within two horizontal tile steps of each
+input. Before a build tool changes a roof, the current interval is applied to
+its old exposure. Removing a load-bearing piece can then drop its existing
+snow separately. Pausing contributes zero game time. Accelerated intervals
+use up to four chronological midpoint samples per update. The inspection
+fixture's date jumps skip physical simulation. Unloaded history belongs to
+step 11.
+
+The snow rate is the liquid-equivalent precipitation rate multiplied by the
+local snow fraction. A fixed density of 200 kg/m³ converts 1 mm of snow water
+equivalent (SWE) to 5 mm of settled snow on flat ground. Depth over a slope
+comes from the clipped volume. Outdoor melt uses 0.5 mm SWE per positive °C
+per game hour, scaled by the exposed area. One cubic centimetre of bulk snow
+becomes 0.2 cm³ of liquid. Meltwater stays at the former support in a ledger
+for step 18. Weather leaves the original grass and plant data in place.
+
+The world saves deposited snow, pending transfers and meltwater atomically
+to `snow.dat` (SNOW v2). Earlier saves start with an empty ledger. The
+projection is rebuilt as the supporting geometry streams in. For constant
+rates and unchanged exposure, rounding each contribution to the nearest
+bulk cubic centimetre allows a difference of up to 6 cm³ per receiver
+between ten intervals and one combined interval. A separate melt phase has
+the same tolerance. Different sampling dates, a changing snow line or a
+different transfer path can redistribute the same volume.
+
+#### Fixtures
+
+The headless scene uses a one-metre footprint, a floor at Y 2 and an optional
+hatch at Y 7. The roof case adds an optically clear elevated pane and a tall
+cave gap. The edge case puts a half-width roof at Y 6 above a ramp at Y 3,
+with two rays through the opening at wrapped X. These fixtures are
+deterministic and use no seed or save slot.
+
+For an optional in-game check, copy the step 01 seed 2024 comparison save
+into a disposable slot or use the snow fixture on any world.
+
+```bash
+ANYM_WEATHER_DEPOSITION_FIXTURE=1 ANYM_SNOW_FIXTURE=1 ./build/src/app/app
+```
+
+Select **Snow site**, let geometry stream in, then pause the clock. Cycle
+**WEATHER FORCE** to **SNOW** and press **WEATHER APPLY 30M**. This supplies
+2 mm SWE, or 1 cm of equivalent depth on a one-square-metre pad before it
+spreads. The **Snow** panel reports interception height, bulk volume,
+settled level, SWE and stored meltwater. For a hatch, build a thin horizontal
+piece above an exposed pad between two 30-minute intervals. The first
+interval reaches the floor and the second reaches the hatch. Removing the
+hatch may drop snow it has already caught. **RAIN** supplies liquid rain
+with zero snow input. **CLEAR** runs a +5 °C dry melt, uncovering the prior
+surface and adding to the meltwater total. Fixture forcing resets on reload.
+
+#### Execution checks
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 3
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang \
+  -R 'weather_|snow_settlement|snow_cover' --output-on-failure --no-tests=error -j 4
+```
+
+The Release app and test target built. All 440 gameplay tests passed,
+including the five new exposure, hatch, accounting and vegetation cases.
+The 26 focused weather and snow cases passed with ASan and UBSan. Validation
+ran headlessly. The near-particle change has no device capture for this
+step, and the handoff schedules no maintainer playcheck until step 11.

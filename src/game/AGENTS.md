@@ -108,10 +108,15 @@ plane; cloud and particle drift integrate wind on the CPU rather than
 multiplying the current wind by elapsed time, and presentation uses a visual
 clock capped at 5× game speed so debug time acceleration does not spin the sky.
 Cloudiness and precipitation presentation stop when the clock is paused.
-Exposure, roof interception, accumulation and melt are step 10; do not treat
-the current presentation particles as precipitation input.
+`precipitation.hpp` traces down through solid geometry using the sky height
+as an overhead bound. Near particles and active snow share that query. Snow
+uses the physical rate and world clock, feeds `SnowSettlement` and stores its
+bulk volume and unrouted meltwater in `snow.dat`. The geometry projected by
+`SnowCover` belongs to the environment, so it does not overwrite ground
+cover, plant instances or player edits.
 `ANYM_WEATHER_FIXTURE=1` adds session-only time jumps, a presentation force and
-site teleports; the force never changes the sampled ledger or save.
+site teleports. `ANYM_WEATHER_DEPOSITION_FIXTURE=1` lets the force drive the
+physical sample as well. The force resets on reload and its deposits persist.
 
 ### Trees
 

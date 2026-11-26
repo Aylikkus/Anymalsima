@@ -87,11 +87,12 @@ struct Basin {
 std::optional<ColumnInfo> findBase(int x, int z, int fromY,
                                    TerrainCache& cache) {
     const auto& terrain = cache.terrain;
-    const int top = std::min(fromY, terrain.maxY() - 1);
+    const int top = std::min(fromY, terrain.top(x, z));
     for (int y = top; y >= terrain.minY(); --y) {
         if (!cache.budget.spend()) return std::nullopt;
         const auto& cell = cache.at({x, y, z});
         if (!cell) return std::nullopt;
+        if (cell->empty()) continue;
         if (cell->isFull()) {
             const int above = y + 1;
             if (above <= fromY && above < terrain.maxY())
@@ -135,11 +136,14 @@ double capacity(const ColumnInfo& column, double level, TerrainCache& cache) {
         if (!cache.budget.spend()) break;
         const auto& cell = cache.at({column.x, y, column.z});
         if (!cell) break;
-        const double full = cell->freeVolumeBelow(1.f);
-        if (full <= 1e-9) break;  // a closed cap
         const float local = float(std::min(level - double(y), 1.0));
         const float baseLocal = (y == column.baseY) ? column.baseLocal : 0.f;
-        if (local > baseLocal)
+        if (cell->empty())
+            total +=
+                std::max(0.0, std::min(level - double(y), 1.0) - baseLocal);
+        else if (cell->isFull())
+            break;
+        else if (local > baseLocal)
             total +=
                 cell->freeVolumeBelow(local) - cell->freeVolumeBelow(baseLocal);
         if (level <= double(y) + 1) break;
@@ -170,7 +174,17 @@ double levelForVolume(std::span<const int> columns,
 
     // The top of the world is a closed edge; any excess is accounted as sink
     // by the caller. The bracket stays bounded even for very large volumes.
-    double high = double(cache.terrain.maxY());
+    const double ceiling = double(cache.terrain.maxY());
+    const double flat = low + volume / (UnitsPerCubicMetre * columns.size());
+    if (flat <= ceiling &&
+        std::abs(basinCapacityUnits(columns, info, flat, cache) - volume) <=
+            VolumeTolerance)
+        return flat;
+    double high = std::min(ceiling, low + 1);
+    while (high < ceiling && !cache.budget.exhausted() &&
+           basinCapacityUnits(columns, info, high, cache) < volume) {
+        high = std::min(ceiling, low + (high - low) * 2);
+    }
     for (int i = 0; i < LevelIterations && !cache.budget.exhausted(); ++i) {
         const double mid = (low + high) * .5;
         if (basinCapacityUnits(columns, info, mid, cache) >= volume)
@@ -201,17 +215,17 @@ struct Component {
 };
 
 bool discover(const ColumnInfo& seed, TerrainCache& cache, WorkBudget& budget,
-              Component& out) {
+              Component& out, int radius) {
     std::map<Footprint, int> index;
     std::set<std::pair<int, int>> edgeKeys;
-    std::deque<int> queue;
+    std::deque<std::pair<int, int>> queue;
 
     index.emplace(Footprint{seed.x, seed.z}, 0);
     out.info.push_back(seed);
-    queue.push_back(0);
+    queue.emplace_back(0, 0);
 
     while (!queue.empty()) {
-        const int current = queue.front();
+        const auto [current, distance] = queue.front();
         queue.pop_front();
         const ColumnInfo here = out.info[current];
 
@@ -230,7 +244,8 @@ bool discover(const ColumnInfo& seed, TerrainCache& cache, WorkBudget& budget,
                 other = found->second;
                 otherInfo = out.info[other];
             } else {
-                auto base = findBase(nx, nz, cache.terrain.maxY() - 1, cache);
+                if (radius && distance == radius) continue;
+                auto base = findBase(nx, nz, cache.terrain.maxY(), cache);
                 if (!base) {
                     if (budget.exhausted()) return false;
                     continue;
@@ -239,7 +254,7 @@ bool discover(const ColumnInfo& seed, TerrainCache& cache, WorkBudget& budget,
                 otherInfo = *base;
                 index.emplace(Footprint{nx, nz}, other);
                 out.info.push_back(otherInfo);
-                queue.push_back(other);
+                queue.emplace_back(other, distance + 1);
             }
 
             const int lo = std::min(current, other);
@@ -560,14 +575,26 @@ Volume SnowSettlement::pendingVolume() const {
 }
 
 Volume SnowSettlement::volumeAt(int x, int z) const {
-    const auto found = columns_.find(Footprint{terrain_.wrapX(x), z});
-    return found == columns_.end() ? 0 : found->second.volume;
+    const auto* column = columnAt(x, z, terrain_.maxY());
+    return column ? column->volume : 0;
 }
 
 std::optional<double> SnowSettlement::levelAt(int x, int z) const {
-    const auto found = columns_.find(Footprint{terrain_.wrapX(x), z});
-    if (found == columns_.end()) return std::nullopt;
+    const auto* column = columnAt(x, z, terrain_.maxY());
+    return column ? level(*column) : std::nullopt;
+}
+
+const SnowColumn* SnowSettlement::columnAt(int x, int z, int y) const {
+    x = terrain_.wrapX(x);
+    auto found = columns_.upper_bound({x, z, y});
+    if (found == columns_.begin()) return nullptr;
+    --found;
     const auto& column = found->second;
+    return column.x == x && column.z == z ? &column : nullptr;
+}
+
+std::optional<double> SnowSettlement::level(const SnowColumn& column) const {
+    if (!terrain_.cell({column.x, column.baseY, column.z})) return std::nullopt;
     WorkBudget budget{DefaultWorkBudget};
     TerrainCache cache(terrain_, budget);
     const std::vector<ColumnInfo> info{
@@ -579,22 +606,17 @@ std::optional<double> SnowSettlement::levelAt(int x, int z) const {
 void SnowSettlement::clear() {
     columns_.clear();
     pending_.clear();
+    meltwater_.clear();
     deposited_ = 0;
     sink_ = 0;
+    melted_ = 0;
+    ++revision_;
 }
 
 void SnowSettlement::queue(const PendingDeposit& deposit) {
-    const Footprint key{deposit.x, deposit.z};
-    const auto found = pending_.find(key);
-    if (found == pending_.end()) {
-        pending_.emplace(key, deposit);
-    } else {
-        found->second.volume += deposit.volume;
-    }
-}
-
-void SnowSettlement::eraseColumn(int x, int z) {
-    columns_.erase(Footprint{x, z});
+    const SnowKey key{deposit.x, deposit.z, deposit.fromY};
+    auto [found, inserted] = pending_.try_emplace(key, deposit);
+    if (!inserted) found->second.volume += deposit.volume;
 }
 
 SnowSettlement::ApplyResult SnowSettlement::tryApply(
@@ -610,10 +632,12 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
 
     const auto seed = findBase(x, deposit.z, deposit.fromY, cache);
     if (work.exhausted()) return finish(ApplyResult::Retry);
-    if (!seed) return finish(ApplyResult::Blocked);
+    if (!seed)
+        return finish(deposit.radius ? ApplyResult::Retry
+                                     : ApplyResult::Blocked);
 
     Component component;
-    if (!discover(*seed, cache, work, component))
+    if (!discover(*seed, cache, work, component, deposit.radius))
         return finish(work.exhausted() ? ApplyResult::Retry
                                        : ApplyResult::Blocked);
     if (component.info.empty()) return finish(ApplyResult::Blocked);
@@ -625,7 +649,7 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
     std::vector<double> volumes(component.info.size(), 0);
     for (int i = 0; i < int(component.info.size()); ++i) {
         const auto& info = component.info[i];
-        const auto found = columns_.find(Footprint{info.x, info.z});
+        const auto found = columns_.find({info.x, info.z, info.baseY});
         if (found != columns_.end()) volumes[i] = double(found->second.volume);
     }
 
@@ -640,32 +664,79 @@ SnowSettlement::ApplyResult SnowSettlement::tryApply(
 
     // Commit atomically. Every discovered column is replaced; snow in
     // columns outside the component is untouched.
-    std::map<Footprint, SnowColumn> replacements;
     for (int i = 0; i < int(component.info.size()); ++i) {
         const auto found = assigned.find(i);
         const Volume volume = found == assigned.end() ? 0 : found->second;
-        if (volume <= 0) continue;
         const auto& info = component.info[i];
-        replacements.emplace(
-            Footprint{info.x, info.z},
-            SnowColumn{info.x, info.z, info.baseY, info.baseLocal, volume});
+        const SnowKey key{info.x, info.z, info.baseY};
+        if (volume > 0)
+            columns_.insert_or_assign(
+                key,
+                SnowColumn{info.x, info.z, info.baseY, info.baseLocal, volume});
+        else
+            columns_.erase(key);
     }
-    for (const auto& info : component.info) eraseColumn(info.x, info.z);
-    for (auto& [key, column] : replacements) columns_.emplace(key, column);
     sink_ += overflow;
+    ++revision_;
     return finish(ApplyResult::Applied);
 }
 
 DepositOutcome SnowSettlement::deposit(int x, int z, int fromY, Volume volume,
                                        size_t budget) {
-    if (volume <= 0) return DepositOutcome::Settled;
-    deposited_ += volume;
-    PendingDeposit request;
-    request.x = terrain_.wrapX(x);
-    request.z = z;
-    request.fromY = fromY;
-    request.volume = volume;
+    return submit({terrain_.wrapX(x), z, fromY, volume}, budget);
+}
 
+DepositOutcome SnowSettlement::snowfall(int x, int z, int fromY,
+                                        Volume volume) {
+    if (fromY == terrain_.maxY()) {
+        const auto top = terrain_.cell({x, fromY - 1, z});
+        if (volume > 0 && top && top->isFull()) {
+            deposited_ += volume;
+            sink_ += volume;
+            ++revision_;
+            return DepositOutcome::Sink;
+        }
+    }
+    return submit({terrain_.wrapX(x), z, fromY, volume, 2}, DefaultWorkBudget);
+}
+
+void SnowSettlement::supportChanged(TilePos pos) {
+    pos.x = terrain_.wrapX(pos.x);
+    for (const int y : {pos.y, pos.y + 1}) {
+        const auto found = columns_.find({pos.x, pos.z, y});
+        if (found == columns_.end()) continue;
+        const auto column = found->second;
+        WorkBudget work{DefaultWorkBudget};
+        TerrainCache cache(terrain_, work);
+        const auto base = findBase(pos.x, pos.z, y, cache);
+        if (base && base->baseY == y && base->baseLocal == column.baseLocal)
+            continue;
+
+        columns_.erase(found);
+        ++revision_;
+        const PendingDeposit deposit{pos.x, pos.z, y, column.volume, 2};
+        if (tryApply(deposit, DefaultWorkBudget) != ApplyResult::Applied)
+            queue(deposit);
+    }
+}
+
+Volume SnowSettlement::melt(SnowKey key, Volume volume) {
+    const auto found = columns_.find(key);
+    if (found == columns_.end() || volume <= 0) return 0;
+    const Volume removed = std::min(found->second.volume, volume);
+    found->second.volume -= removed;
+    if (found->second.volume == 0) columns_.erase(found);
+    meltwater_[key] += removed;
+    melted_ += removed;
+    ++revision_;
+    return removed;
+}
+
+DepositOutcome SnowSettlement::submit(PendingDeposit request, size_t budget) {
+    if (request.volume <= 0) return DepositOutcome::Settled;
+    const Volume volume = request.volume;
+    deposited_ += volume;
+    ++revision_;
     const ApplyResult result = tryApply(request, budget);
     if (result == ApplyResult::Applied) return DepositOutcome::Settled;
     if (result == ApplyResult::Blocked) {
@@ -683,17 +754,18 @@ size_t SnowSettlement::settle(size_t budget) {
     for (auto it = pending_.begin(); it != pending_.end() && remaining > 0;) {
         size_t used = 0;
         const auto result = tryApply(it->second, remaining, &used);
-        remaining -= std::min(remaining, used);
+        remaining -= std::min(remaining, std::max(size_t(1), used));
         if (result == ApplyResult::Applied) {
             it = pending_.erase(it);
             ++applied;
         } else if (result == ApplyResult::Blocked) {
             sink_ += it->second.volume;
             it = pending_.erase(it);
+            ++revision_;
         } else {
             // The entry could not finish within the supplied budget. Leave
             // it in transit for a later retry or a save/reload.
-            break;
+            ++it;
         }
     }
     return applied;
@@ -702,9 +774,10 @@ size_t SnowSettlement::settle(size_t budget) {
 Bytes SnowSettlement::encode() const {
     BinaryWriter writer;
     writer.writeTag("SNOW");
-    writer.write<uint32_t>(1);
+    writer.write<uint32_t>(2);
     writer.write<uint64_t>(deposited_);
     writer.write<uint64_t>(sink_);
+    writer.write<int64_t>(melted_);
     writer.write<uint32_t>(uint32_t(columns_.size()));
     for (const auto& [key, column] : columns_) {
         (void)key;
@@ -721,6 +794,15 @@ Bytes SnowSettlement::encode() const {
         writer.write<int32_t>(deposit.z);
         writer.write<int32_t>(deposit.fromY);
         writer.write<int64_t>(deposit.volume);
+        writer.write<int32_t>(deposit.radius);
+    }
+    writer.write<uint32_t>(uint32_t(meltwater_.size()));
+    for (const auto& [key, volume] : meltwater_) {
+        const auto [x, z, y] = key;
+        writer.write<int32_t>(x);
+        writer.write<int32_t>(z);
+        writer.write<int32_t>(y);
+        writer.write<int64_t>(volume);
     }
     return writer.take();
 }
@@ -729,13 +811,20 @@ bool SnowSettlement::restore(ByteView bytes) {
     try {
         BinaryReader reader(bytes);
         if (reader.readTag() != "SNOW") return false;
-        if (reader.read<uint32_t>() != 1) return false;
+        const auto version = reader.read<uint32_t>();
+        if (version != 1 && version != 2) return false;
         const auto deposited = reader.read<uint64_t>();
         const auto sink = reader.read<uint64_t>();
+        const Volume melted = version == 2 ? reader.read<int64_t>() : 0;
+        if (deposited > uint64_t(std::numeric_limits<Volume>::max()) ||
+            sink > deposited || melted < 0 ||
+            uint64_t(melted) > deposited - sink)
+            return false;
+        auto remaining = Volume(deposited - sink) - melted;
         const auto columnCount = reader.read<uint32_t>();
         if (columnCount > MaxSerializedColumns) return false;
 
-        std::map<Footprint, SnowColumn> columns;
+        std::map<SnowKey, SnowColumn> columns;
         for (uint32_t i = 0; i < columnCount; ++i) {
             SnowColumn column;
             column.x = reader.read<int32_t>();
@@ -743,33 +832,71 @@ bool SnowSettlement::restore(ByteView bytes) {
             column.baseY = reader.read<int32_t>();
             column.baseLocal = reader.read<float>();
             column.volume = reader.read<int64_t>();
-            if (column.volume <= 0 ||
+            if (column.volume <= 0 || column.volume > remaining ||
+                column.baseY < terrain_.minY() ||
+                column.baseY >= terrain_.maxY() ||
+                !terrain_.inBounds(column.x, column.z) ||
+                column.x != terrain_.wrapX(column.x) ||
                 !(column.baseLocal >= 0 && column.baseLocal <= 1))
                 return false;
-            if (!columns.emplace(Footprint{column.x, column.z}, column).second)
+            remaining -= column.volume;
+            if (!columns
+                     .emplace(SnowKey{column.x, column.z, column.baseY}, column)
+                     .second)
                 return false;
         }
 
         const auto pendingCount = reader.read<uint32_t>();
         if (pendingCount > MaxSerializedPending) return false;
-        std::map<Footprint, PendingDeposit> pending;
+        std::map<SnowKey, PendingDeposit> pending;
         for (uint32_t i = 0; i < pendingCount; ++i) {
             PendingDeposit deposit;
             deposit.x = reader.read<int32_t>();
             deposit.z = reader.read<int32_t>();
             deposit.fromY = reader.read<int32_t>();
             deposit.volume = reader.read<int64_t>();
-            if (deposit.volume <= 0) return false;
-            if (!pending.emplace(Footprint{deposit.x, deposit.z}, deposit)
+            if (version == 2) deposit.radius = reader.read<int32_t>();
+            if (deposit.volume <= 0 || deposit.volume > remaining ||
+                (deposit.radius != 0 && deposit.radius != 2) ||
+                !terrain_.inBounds(deposit.x, deposit.z) ||
+                deposit.x != terrain_.wrapX(deposit.x))
+                return false;
+            remaining -= deposit.volume;
+            if (!pending
+                     .emplace(SnowKey{deposit.x, deposit.z, deposit.fromY},
+                              deposit)
                      .second)
                 return false;
         }
-        if (!reader.atEnd()) return false;
+        if (remaining != 0) return false;
+
+        std::map<SnowKey, Volume> meltwater;
+        auto remainingMelt = melted;
+        if (version == 2) {
+            const auto count = reader.read<uint32_t>();
+            if (count > MaxSerializedColumns) return false;
+            for (uint32_t i = 0; i < count; ++i) {
+                const int x = reader.read<int32_t>();
+                const int z = reader.read<int32_t>();
+                const int y = reader.read<int32_t>();
+                const auto volume = reader.read<int64_t>();
+                if (volume <= 0 || volume > remainingMelt ||
+                    !terrain_.inBounds(x, z) || x != terrain_.wrapX(x) ||
+                    y < terrain_.minY() || y >= terrain_.maxY() ||
+                    !meltwater.emplace(SnowKey{x, z, y}, volume).second)
+                    return false;
+                remainingMelt -= volume;
+            }
+        }
+        if (!reader.atEnd() || remainingMelt != 0) return false;
 
         columns_ = std::move(columns);
         pending_ = std::move(pending);
+        meltwater_ = std::move(meltwater);
         deposited_ = Volume(deposited);
         sink_ = Volume(sink);
+        melted_ = melted;
+        ++revision_;
         return true;
     } catch (const SerializationError&) {
         return false;

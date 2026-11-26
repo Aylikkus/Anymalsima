@@ -12,6 +12,7 @@
 #include "render/frustrum.hpp"
 #include "world/day_night.hpp"
 #include "world/generated_hydrology.hpp"
+#include "world/precipitation.hpp"
 #include "world/world_calendar.hpp"
 #include "world/world_climate.hpp"
 #include "world/world_weather.hpp"
@@ -62,17 +63,25 @@ std::string pieceEditLabel(CellPieceEdit status) {
     return "";
 }
 
+}  // namespace
+
 // Settlement reads the chunk's own solids, never the environmental snow
 // projection that is derived from it.
 class ChunkSnowTerrain final : public snow::SnowTerrain {
    public:
-    ChunkSnowTerrain(ChunkManager& chunks, const World& world)
-        : chunks(chunks), world(world) {}
+    ChunkSnowTerrain(ChunkManager& chunks, const World& world,
+                     const SkyHeightMap& sky, const TerrainEdits& edits)
+        : chunks(chunks), world(world), sky(sky), edits(edits) {}
+
+    void resetQueries() { slabs.clear(); }
 
     std::optional<tile_geometry::CellGeometry> cell(
         TilePos pos) const override {
+        if (pos.y > boundsAt(pos.x, pos.z))
+            return tile_geometry::CellGeometry{};
         return chunks.rawCellGeometryAt(pos);
     }
+    int top(int x, int z) const override { return boundsAt(x, z); }
     int wrapX(int x) const override { return int(chunks.wrap().wrapTile(x)); }
     bool inBounds(int x, int z) const override {
         if (world.width <= 0 || world.height <= 0) return x >= 0 && z >= 0;
@@ -83,9 +92,65 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
     int maxY() const override { return WORLD_HEIGHT_Y; }
 
    private:
+    struct Slabs {
+        std::array<const Chunk*, Y_CHUNKS> ready{};
+        // Zero is uncached, and each cached bound is stored as y + 2.
+        std::array<uint16_t, sky::Tile::Size> tops{};
+        std::shared_ptr<const ColumnEdit> edit;
+    };
+    int boundsAt(int x, int z) const {
+        const unsigned cx = unsigned(x / Chunk::SIZE_X);
+        const unsigned cz = unsigned(z / Chunk::SIZE_Z);
+        const int lx = x % Chunk::SIZE_X, lz = z % Chunk::SIZE_Z;
+        const auto key = editKey(cx, cz);
+        auto [slab, newSlab] = slabs.try_emplace(key);
+        if (newSlab) {
+            slab->second.edit = edits.find(key);
+            for (unsigned cy = 0; cy < Y_CHUNKS; ++cy)
+                slab->second.ready[cy] = chunks.getChunk({cx, cy, cz});
+        }
+        auto& [ready, tops, edit] = slab->second;
+        auto& cached = tops[sky::Tile::index(lx, lz)];
+        if (cached) return int(cached) - 2;
+        const auto known = sky.top(x, z);
+        if (!known) {
+            cached = WORLD_HEIGHT_Y + 1;
+            return WORLD_HEIGHT_Y - 1;
+        }
+
+        int top = std::max(-1, *known);
+        // Inspect Ready slabs above the sky bound for zero-opacity solids
+        // and edits that arrived after the latest sky build.
+        for (int cy = Y_CHUNKS - 1; cy >= 0; --cy) {
+            const int high = (cy + 1) * Chunk::SIZE_Y - 1;
+            if (high <= top) break;
+            const auto* chunk = ready[cy];
+            if (!chunk) {
+                if (edit && edit->slab(uint16_t(cy))) {
+                    top = high;
+                    break;
+                }
+                continue;
+            }
+            for (int y = high; y > top && y / Chunk::SIZE_Y == cy; --y) {
+                if (!chunk->tiles[lz][y % Chunk::SIZE_Y][lx].isSolid())
+                    continue;
+                top = y;
+                break;
+            }
+        }
+        cached = uint16_t(top + 2);
+        return top;
+    }
+
     ChunkManager& chunks;
     const World& world;
+    const SkyHeightMap& sky;
+    const TerrainEdits& edits;
+    mutable std::map<uint64_t, Slabs> slabs;
 };
+
+namespace {
 
 std::string describeShape(TileShape shape) {
     const auto profile = shape.profile();
@@ -260,6 +325,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     timeButton->setFontRole(FontRole::Bold);
     timeButton->setGridPlacement({20, 15, 4, 1});
     timeButton->onClick.connect([this]() {
+        advanceSnow();
         static constexpr double Speeds[] = {0, 1, 60, 720, 7200};
         size_t next = 0;
         for (size_t i = 0; i < std::size(Speeds); ++i)
@@ -297,6 +363,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     });
     snow5mButton->setText(_("SNOW +5 m"));
     snowClearButton = makeDebugButton({18, 11, 6, 1}, [this] {
+        advanceSnow();
         snowSettlement->clear();
         rebuildSnow();
         lastBuildAction = _("Snow cleared");
@@ -342,14 +409,11 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     chunkManager = std::make_unique<ChunkManager>(
         *generator, context.threadPool, mesher.get(), *this->world.get(),
         context.assets, std::move(landmarks));
-    snowTerrain =
-        std::make_unique<ChunkSnowTerrain>(*chunkManager, *this->world);
-    snowSettlement = std::make_unique<snow::SnowSettlement>(*snowTerrain);
-    snowCover = std::make_unique<snow::SnowCover>();
     setupConstructionFixture();
     setupSnowFixture();
     if (constructionSite) {
         auto* button = makeDebugButton({18, 13, 6, 1}, [this] {
+            advanceSnow();
             if (probe) toggleWalk();
             const auto [x, y, z] = *constructionSite;
             camera.position = {x + .5f, y + 1.f, z + .5f};
@@ -361,6 +425,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     }
     if (snowFixtureSite) {
         auto* button = makeDebugButton({18, 10, 6, 1}, [this] {
+            advanceSnow();
             if (probe) toggleWalk();
             const auto [x, y, z] = *snowFixtureSite;
             camera.position = {x + .5f, y + 3.f, z - 3.5f};
@@ -372,6 +437,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     }
     if (snowDropSite) {
         auto* button = makeDebugButton({12, 10, 6, 1}, [this] {
+            advanceSnow();
             if (probe) toggleWalk();
             const auto [x, y, z] = *snowDropSite;
             camera.position = {x + .5f, y + 3.f, z + 2.5f};
@@ -381,29 +447,41 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         });
         button->setText(_("Snow drop"));
     }
-    // Weather inspection and time advance for playcheck C. The force button
-    // only changes presentation; it is never saved and leaves the sampled
-    // temperature and precipitation ledger alone.
+    if (const char* fixture = std::getenv("ANYM_WEATHER_DEPOSITION_FIXTURE"))
+        depositionFixture = std::string_view(fixture) == "1";
+
+    // The original inspection controls remain presentation-only. The
+    // separate deposition fixture also drives the active physical sample.
     if (const char* weatherFixture = std::getenv("ANYM_WEATHER_FIXTURE");
-        weatherFixture && std::string_view(weatherFixture) == "1") {
+        depositionFixture ||
+        (weatherFixture && std::string_view(weatherFixture) == "1")) {
         auto* sixHours = makeDebugButton(
-            {0, 9, 6, 1}, [this] { clock.set(clock.days() + 6.0 / 24.0); });
+            {0, 9, 6, 1}, [this] { skipWeatherTime(6.0 / 24.0); });
         sixHours->setText(_("WEATHER +6H"));
-        auto* oneDay = makeDebugButton(
-            {6, 9, 6, 1}, [this] { clock.set(clock.days() + 1.0); });
+        auto* oneDay =
+            makeDebugButton({6, 9, 6, 1}, [this] { skipWeatherTime(1.0); });
         oneDay->setText(_("WEATHER +1D"));
-        auto* thirtyDays = makeDebugButton(
-            {12, 9, 6, 1}, [this] { clock.set(clock.days() + 30.0); });
+        auto* thirtyDays =
+            makeDebugButton({12, 9, 6, 1}, [this] { skipWeatherTime(30.0); });
         thirtyDays->setText(_("WEATHER +30D"));
-        auto* halfYear = makeDebugButton(
-            {12, 8, 6, 1}, [this] { clock.set(clock.days() + 180.0); });
+        auto* halfYear =
+            makeDebugButton({12, 8, 6, 1}, [this] { skipWeatherTime(180.0); });
         halfYear->setText(_("WEATHER +180D"));
         weatherForceButton = makeDebugButton({18, 9, 6, 1}, [this] {
+            advanceSnow();
             weatherForce = (weatherForce + 1) % 5;
             updateWeatherControls();
         });
         weatherSiteButton =
             makeDebugButton({18, 8, 6, 1}, [this] { cycleWeatherSite(); });
+        if (depositionFixture) {
+            auto* halfHour = makeDebugButton({0, 8, 6, 1}, [this] {
+                advanceSnow();
+                clock.set(clock.days() + .5 / 24);
+                advanceSnow();
+            });
+            halfHour->setText(_("WEATHER APPLY 30M"));
+        }
         updateWeatherControls();
     }
     // World-wide sources must be installed before any chunk is requested.
@@ -434,9 +512,18 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                   << "); starting without overrides\n";
     }
     skyMap->dirty = false;
+    snowTerrain = std::make_unique<ChunkSnowTerrain>(
+        *chunkManager, *this->world, *skyMap, *edits);
+    snowSettlement = std::make_unique<snow::SnowSettlement>(*snowTerrain);
+    snowCover = std::make_unique<snow::SnowCover>();
+    save_catalog::readSnow(slot, *snowSettlement);
+    savedSnowRevision = snowSettlement->revision();
     // The map covers every chunk column with loaded chunks.
-    skyReadyConnection = chunkManager->becameReady.connect(
-        [this](const ChunkCoord& c) { skyMap->request(c.x, c.z); });
+    skyReadyConnection =
+        chunkManager->becameReady.connect([this](const ChunkCoord& c) {
+            skyMap->request(c.x, c.z);
+            if (!snowSettlement->columns().empty()) snowProjectionDirty = true;
+        });
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
         context.threadPool, skyMap.get());
@@ -465,7 +552,19 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                                            context.assets->getStorage<Block>());
     blockLight->watch(*editor);
     skyMap->watch(*editor);
+    snowEditConnection =
+        editor->blockChanged.connect([this](const BlockChange& change) {
+            if (snowSettlement->columns().empty()) return;
+            snowTerrain->resetQueries();
+            const auto revision = snowSettlement->revision();
+            snowSettlement->supportChanged(change.pos);
+            if (snowSettlement->revision() != revision ||
+                snowSettlement->columnAt(change.pos.x, change.pos.z,
+                                         snowTerrain->maxY()))
+                snowProjectionDirty = true;
+        });
     clock.set(slot.meta.worldDays);
+    snowAppliedDays = clock.days();
     weatherVisualDays = clock.days();
     floraSim = std::make_unique<FloraSimulation>(*chunkManager, *context.assets,
                                                  *this->world, *skyMap);
@@ -737,6 +836,10 @@ void GameplayState::applyWeatherOverride(world_weather::Sample& weather) const {
         default:
             break;
     }
+    if (depositionFixture && weatherForce) {
+        weather.temperatureC = weatherForce == 4 ? -5.f : 5.f;
+        weather.temperatureOffsetC = weather.temperatureC - weather.baselineC;
+    }
 }
 
 world_weather::Sample GameplayState::weatherAt(const Vec3& position) const {
@@ -762,6 +865,7 @@ void GameplayState::updateWeatherControls() {
 }
 
 void GameplayState::cycleWeatherSite() {
+    advanceSnow();
     static constexpr const char* SiteNames[] = {
         "START", "NORTH POLE", "EQUATOR", "SOUTH POLE", "X SEAM"};
     constexpr size_t SiteCount = std::size(SiteNames);
@@ -801,11 +905,69 @@ void GameplayState::cycleWeatherSite() {
 
 void GameplayState::rebuildSnow() {
     if (!snowCover || !snowSettlement || !snowTerrain || !snowId) return;
+    snowTerrain->resetQueries();
     snowCover->rebuild(*snowSettlement, *snowTerrain, snowId);
     chunkManager->setEnvironment(snowCover->environment());
+    snowProjectionDirty = false;
+}
+
+void GameplayState::skipWeatherTime(double days) {
+    advanceSnow();
+    clock.set(clock.days() + days);
+    snowAppliedDays = clock.days();
+}
+
+void GameplayState::advanceSnow() {
+    snowUpdateSeconds = 0;
+    const double elapsed = clock.days() - snowAppliedDays;
+    if (elapsed <= 0 || !snowId) return;
+    const double start = snowAppliedDays;
+    snowAppliedDays = clock.days();
+    snowTerrain->resetQueries();
+
+    constexpr int Radius = 4;
+    const int centreX = int(std::floor(camera.position.x));
+    const int centreZ = int(std::floor(camera.position.z));
+    const auto revision = snowSettlement->revision();
+    // At high debug speeds sample multiple points in chronological order.
+    const int steps = int(std::clamp(std::ceil(elapsed * 1440), 1., 4.));
+    const double days = elapsed / steps;
+    const double hours = days * 24;
+    for (int step = 0; step < steps; ++step) {
+        const double sampleDay = start + (step + .5) * days;
+        for (int z = centreZ - Radius; z <= centreZ + Radius; ++z) {
+            for (int dx = -Radius; dx <= Radius; ++dx) {
+                const int x = snowTerrain->wrapX(centreX + dx);
+                if (!snowTerrain->inBounds(x, z)) continue;
+
+                auto weather =
+                    world_weather::at(*world, x + .5, z + .5, sampleDay, 0);
+                if (depositionFixture) applyWeatherOverride(weather);
+                const auto temperatureAt = [&](double height) {
+                    if ((depositionFixture && weatherForce) ||
+                        world->regions.empty())
+                        return weather.temperatureC;
+                    return weather.temperatureC -
+                           float(height) *
+                               world_climate::ElevationLapseCPerMetre;
+                };
+                const auto wetAt = [&](double height) {
+                    const auto* tile = chunkManager->tileAt(
+                        x, int(std::floor(height + .0001)), z);
+                    return tile && tile->isLiquid();
+                };
+                precipitation::applyFootprint(
+                    *snowSettlement, *snowTerrain, x, z, hours,
+                    weather.precipitationRate, temperatureAt, wetAt);
+            }
+        }
+    }
+    snowSettlement->settle(4096);
+    if (snowSettlement->revision() != revision) snowProjectionDirty = true;
 }
 
 void GameplayState::addSnow(const TileRaycastHit& hit) {
+    snowTerrain->resetQueries();
     auto outcome =
         snowSettlement->deposit(hit.tx, hit.tz, hit.ty + 1, snowAddVolume);
     if (outcome == snow::DepositOutcome::Pending) {
@@ -830,6 +992,7 @@ GameplayState::~GameplayState() {
     chunkManager->becameReady.disconnect(skyReadyConnection);
     // The editor is destroyed before the heightmap.
     skyMap->unwatch();
+    editor->blockChanged.disconnect(snowEditConnection);
     try {
         // Capture pending edits while their chunks are still loaded.
         editTracker->update();
@@ -893,12 +1056,17 @@ void GameplayState::updatePlantLabel() {
 }
 
 void GameplayState::writeMeta() {
+    advanceSnow();
     slot.meta.lastPlayed = WorldMeta::now();
     slot.meta.camera = WorldMeta::CameraState{
         probe ? probe->feet() : camera.position, camera.yaw, camera.pitch,
         probe ? orbitDistance : camera.distance};
     slot.meta.worldDays = clock.days();
     try {
+        if (savedSnowRevision != snowSettlement->revision()) {
+            save_catalog::writeSnow(slot, *snowSettlement);
+            savedSnowRevision = snowSettlement->revision();
+        }
         save_catalog::writeMeta(slot);
     } catch (const std::exception& e) {
         std::cerr << "Saving world.json failed: " << e.what() << '\n';
@@ -1367,6 +1535,7 @@ void GameplayState::renderPlacementPreview(RenderTarget& target,
 }
 
 void GameplayState::useTool(int mouseX, int mouseY) {
+    advanceSnow();
     const auto hit = pickTile(mouseX, mouseY);
     if (!hit) return;
     if (tool == EditTool::SnowAdd) {
@@ -1469,6 +1638,7 @@ void GameplayState::update(Game& game, float dt) {
     chunkManager->update(editor.get());
     skyMap->setFocus(camera.position);
     skyMap->update();
+    snowTerrain->resetQueries();
     auto skyLandmarks =
         treeRenderer->landmarkVoxels(chunkManager->woodDay(), false);
     for (auto& source : skyLandmarks)
@@ -1480,6 +1650,9 @@ void GameplayState::update(Game& game, float dt) {
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
+    snowUpdateSeconds += dt;
+    if (snowUpdateSeconds >= 1) advanceSnow();
+    if (snowProjectionDirty) rebuildSnow();
     const double visualDays = double(dt) * std::min(clock.speed(), 5.0) /
                               WorldClock::DayLengthSeconds;
     weatherVisualDays += visualDays;
@@ -1602,21 +1775,32 @@ void GameplayState::update(Game& game, float dt) {
 
             ss << "\n--- Snow ---\n";
             {
-                const auto volume = snowSettlement->volumeAt(hit->tx, hit->tz);
-                const auto level = snowSettlement->levelAt(hit->tx, hit->tz);
-                ss << "volume: " << volume << " cm3";
-                if (level) {
-                    const auto key = std::pair{
-                        int(chunkManager->wrap().wrapTile(hit->tx)), hit->tz};
-                    const auto found = snowSettlement->columns().find(key);
-                    const double base = found == snowSettlement->columns().end()
-                                            ? 0
-                                            : double(found->second.baseY) +
-                                                  found->second.baseLocal;
-                    ss << fmt::format(", level {:.3f} m, depth {:.3f} m",
-                                      *level, *level - base);
-                }
+                const auto surface = precipitation::firstSurface(
+                    *snowTerrain, hit->position.x, hit->position.z);
+                ss << "Precipitation: ";
+                if (!surface)
+                    ss << "geometry pending";
+                else if (surface->height &&
+                         *surface->height > hit->position.y + .001)
+                    ss << fmt::format("covered at {:.2f} m", *surface->height);
+                else
+                    ss << "exposed";
                 ss << "\n";
+                const auto* column =
+                    snowSettlement->columnAt(hit->tx, hit->tz, hit->ty + 1);
+                const auto volume = column ? column->volume : 0;
+                ss << fmt::format("volume: {} cm3, SWE {:.3f} mm", volume,
+                                  volume / snow::SnowPerWater /
+                                      precipitation::Cm3PerMillimetre);
+                if (column) {
+                    if (const auto level = snowSettlement->level(*column)) {
+                        const double base = column->baseY + column->baseLocal;
+                        ss << fmt::format(", level {:.3f} m, depth {:.3f} m",
+                                          *level, *level - base);
+                    }
+                }
+                ss << fmt::format("\nMeltwater awaiting routing {:.1f} cm3\n",
+                                  snowSettlement->meltwaterCm3());
             }
 
             ss << "\n--- Climate ---\n";
@@ -1625,9 +1809,10 @@ void GameplayState::update(Game& game, float dt) {
                 const auto climate = world_climate::at(
                     *world, double(hit->tx) + .5, double(hit->tz) + .5,
                     clock.days(), double(hit->ty) + .5);
-                const auto weather = world_weather::at(
+                auto weather = world_weather::at(
                     *world, double(hit->tx) + .5, double(hit->tz) + .5,
                     clock.days(), double(hit->ty) + .5);
+                if (depositionFixture) applyWeatherOverride(weather);
                 ss << fmt::format("date: D{} M{} Y{}\n", date.day, date.month,
                                   date.year);
                 ss << fmt::format(
@@ -1635,7 +1820,9 @@ void GameplayState::update(Game& game, float dt) {
                     "daily {:+.1f}, elevation {:+.1f})\n",
                     climate.temperatureC, climate.meanC, climate.seasonalC,
                     climate.dailyC, climate.elevationC);
-                if (weatherForce)
+                if (weatherForce && depositionFixture)
+                    ss << _("physical weather forced by fixture\n");
+                else if (weatherForce)
                     ss << _("presentation forced (sample unchanged)\n");
                 ss << fmt::format("weather offset {:+.1f} C\n",
                                   weather.temperatureOffsetC);
@@ -1743,8 +1930,10 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     terrainLod->render(target, *context.renderer, *chunkManager, camera,
                        context.getWindowSize(), lightVolumes.get());
     camera.underwater = terrainLod->eyeUnderwater();
+    snowTerrain->resetQueries();
     weatherRenderer->render(target, camera, weather, weatherVisualDays,
-                            windTravelX, windTravelZ, world->genSettings.seed);
+                            windTravelX, windTravelZ, world->genSettings.seed,
+                            *snowTerrain);
     Camera displayedCamera = camera;
     displayedCamera.viewDistance = terrainLod->visibleDistance();
     context.renderer->setCamera(displayedCamera);

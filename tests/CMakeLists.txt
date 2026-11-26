@@ -167,6 +167,11 @@ set(world_cases
     weather_condition_thresholds
     weather_temperature_and_rate_bounds
     weather_opposite_seasons
+    weather_exposure_closed_roofs_and_cave
+    weather_exposure_roof_edge_above_ramp_and_wrap
+    weather_snow_hatch_timing
+    weather_snow_and_melt_interval_accounting
+    weather_melt_uncovers_vegetation
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision

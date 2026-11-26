@@ -17,6 +17,10 @@ struct SaveSlot {
     WorldMeta meta;
 };
 
+namespace snow {
+class SnowSettlement;
+}
+
 // Discovers, creates, and reads world folders:
 //   saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/
 //     world.json      WorldMeta
@@ -34,6 +38,8 @@ SaveSlot create(const World& world, Vec2u startRegion,
 void writeMeta(const SaveSlot& slot);
 void readReservoirs(const SaveSlot& slot, Reservoirs& reservoirs);
 void writeReservoirs(const SaveSlot& slot, const Reservoirs& reservoirs);
+void readSnow(const SaveSlot& slot, snow::SnowSettlement& snow);
+void writeSnow(const SaveSlot& slot, const snow::SnowSettlement& snow);
 void writeWorldMap(const SaveSlot& slot, const World& world);
 // Loads the world map. Throws on missing or corrupt data.
 std::unique_ptr<World> readWorldMap(const SaveSlot& slot);

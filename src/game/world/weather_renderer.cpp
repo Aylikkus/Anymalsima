@@ -4,6 +4,7 @@
 #include <cmath>
 #include <iterator>
 
+#include "precipitation.hpp"
 #include "render/vertex.hpp"
 
 namespace {
@@ -51,7 +52,8 @@ WeatherRenderer::WeatherRenderer(IRenderer& renderer) : renderer(renderer) {
 void WeatherRenderer::render(RenderTarget& target, const Camera& camera,
                              const world_weather::Sample& weather,
                              double gameDays, double windTravelX,
-                             double windTravelZ, uint64_t seed) {
+                             double windTravelZ, uint64_t seed,
+                             const snow::SnowTerrain& terrain) {
     drawn = 0;
     const float density = std::clamp(weather.visualDensity, 0.f, 1.f);
     if (density <= .001f || camera.underwater) return;
@@ -68,6 +70,7 @@ void WeatherRenderer::render(RenderTarget& target, const Camera& camera,
     if (count == 0) return;
     bgfx::allocInstanceDataBuffer(&instances, count, InstanceStride);
 
+    const auto eye = camera.eye();
     const double seconds = gameDays * 86400.0;
     for (uint32_t i = 0; i < count; ++i) {
         const bool isSnow = i >= rainTarget;
@@ -90,12 +93,17 @@ void WeatherRenderer::render(RenderTarget& target, const Camera& camera,
             isSnow ? .032f + .028f * size : .018f + .014f * size;
         const float halfHeight =
             isSnow ? halfWidth : .26f + .38f * unit(mix64(h ^ 5));
+        const auto surface = precipitation::firstSurface(
+            terrain, double(eye.x) + x, double(eye.z) + z);
+        if (!surface || (surface->height &&
+                         double(eye.y) + y - halfHeight < *surface->height))
+            continue;
         float alpha = isSnow ? .58f + .30f * unit(mix64(h ^ 6))
                              : .22f + .28f * unit(mix64(h ^ 6));
         alpha *= .55f + .45f * density;
 
         float* data = reinterpret_cast<float*>(instances.data +
-                                               size_t(i) * InstanceStride);
+                                               size_t(drawn) * InstanceStride);
         data[0] = x;
         data[1] = y;
         data[2] = z;
@@ -104,8 +112,10 @@ void WeatherRenderer::render(RenderTarget& target, const Camera& camera,
         data[5] = halfHeight;
         data[6] = alpha;
         data[7] = 0;
+        ++drawn;
     }
-    drawn = count;
+    if (!drawn) return;
+    instances.num = drawn;
 
     const float yaw = camera.yaw, pitch = camera.pitch;
     const float cosYaw = std::cos(yaw), sinYaw = std::sin(yaw);

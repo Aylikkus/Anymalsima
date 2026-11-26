@@ -21,7 +21,7 @@ void SnowCover::rebuild(const SnowSettlement& settlement,
     if (snowBlock) {
         for (const auto& [footprint, column] : settlement.columns()) {
             (void)footprint;
-            const auto measured = settlement.levelAt(column.x, column.z);
+            const auto measured = settlement.level(column);
             if (!measured) continue;
             const double base = double(column.baseY) + column.baseLocal;
             double level = *measured;
@@ -38,21 +38,26 @@ void SnowCover::rebuild(const SnowSettlement& settlement,
                 const float localTop =
                     float(std::clamp(level - double(y), 0.0, 1.0));
                 if (!(localTop > localBase + 1e-6f)) continue;
-                const auto cell = terrain.cell({column.x, y, column.z});
-                if (!cell) continue;
-                auto fill = cell->freeSpaceBetween(
-                    localBase, localTop, snowBlock,
-                    EnvironmentPieceBase +
-                        Chunk::cell(column.x % Chunk::SIZE_X, y % Chunk::SIZE_Y,
-                                    column.z % Chunk::SIZE_Z));
-                if (fill.empty()) continue;
+                auto cell = terrain.cell({column.x, y, column.z});
+                if (!cell || cell->isFull()) break;
                 const ChunkCoord coord{unsigned(column.x / Chunk::SIZE_X),
                                        unsigned(y / Chunk::SIZE_Y),
                                        unsigned(column.z / Chunk::SIZE_Z)};
                 const uint16_t index =
                     Chunk::cell(column.x % Chunk::SIZE_X, y % Chunk::SIZE_Y,
                                 column.z % Chunk::SIZE_Z);
-                cells[coord].emplace(
+                auto& chunk = cells[coord];
+                const auto existing = chunk.find(index);
+                if (existing != chunk.end()) cell->append(*existing->second);
+                auto fill = cell->freeSpaceBetween(
+                    localBase, localTop, snowBlock,
+                    EnvironmentPieceBase +
+                        tile_geometry::PieceId(column.baseY) *
+                            Chunk::CellCount +
+                        index);
+                if (fill.empty()) continue;
+                if (existing != chunk.end()) fill.append(*existing->second);
+                chunk.insert_or_assign(
                     index, std::make_shared<const tile_geometry::CellGeometry>(
                                std::move(fill)));
             }
@@ -60,17 +65,18 @@ void SnowCover::rebuild(const SnowSettlement& settlement,
     }
 
     auto next = std::make_shared<EnvironmentMap>();
-    for (auto& [coord, chunk] : cells)
-        next->emplace(
-            coord, std::make_shared<const ChunkEnvironment>(std::move(chunk)));
+    for (auto& [coord, chunk] : cells) {
+        if (!chunk.empty())
+            next->emplace(coord, std::make_shared<const ChunkEnvironment>(
+                                     std::move(chunk)));
+    }
 
     changed_.clear();
     for (const auto& [coord, chunk] : *environment_) {
         (void)chunk;
         if (!next->contains(coord)) changed_.push_back(coord);
     }
-    for (const auto& [coord, chunk] : *next) {
-        (void)chunk;
+    for (auto& [coord, chunk] : *next) {
         if (!environment_->contains(coord)) {
             changed_.push_back(coord);
             continue;
@@ -83,11 +89,14 @@ void SnowCover::rebuild(const SnowSettlement& settlement,
         else
             for (const auto& [index, geometry] : *after)
                 if (const auto found = before->find(index);
-                    found == before->end() || found->second != geometry) {
+                    found == before->end() || *found->second != *geometry) {
                     differs = true;
                     break;
                 }
-        if (differs) changed_.push_back(coord);
+        if (differs)
+            changed_.push_back(coord);
+        else
+            chunk = before;
     }
     // The rebuild can remove a changed entry that the old map also had.
     std::sort(changed_.begin(), changed_.end(),

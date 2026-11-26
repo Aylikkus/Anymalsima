@@ -4,6 +4,7 @@
 #include <tuple>
 
 #include "test.hpp"
+#include "world/precipitation.hpp"
 #include "world/snow_cover.hpp"
 #include "world/snow_settlement.hpp"
 #include "world/tile_piece.hpp"
@@ -24,6 +25,7 @@ struct PosLess {
 
 struct Fixture : snow::SnowTerrain {
     std::map<TilePos, CellGeometry, PosLess> cells;
+    const Chunk* grassChunk = nullptr;
     int periodX = 0;
     int x0 = 0, x1 = 1;
     int z0 = 0, z1 = 1;
@@ -33,6 +35,8 @@ struct Fixture : snow::SnowTerrain {
         pos.x = wrapX(pos.x);
         if (pos.y < lowY || pos.y >= highY || pos.z < z0 || pos.z >= z1)
             return std::nullopt;
+        if (grassChunk && pos == TilePos{0, 2, 0})
+            return grassChunk->solidCellAt(Chunk::cell(0, 2, 0)).geometry();
         const auto found = cells.find(pos);
         return found == cells.end()
                    ? std::optional<CellGeometry>(CellGeometry{})
@@ -53,6 +57,13 @@ CellGeometry cube() {
     CHECK(cell.tryAdd(TilePiece{1, 1, {}, {}, PieceFill::BelowProfile, 1}) ==
           PiecePlacement::Added);
     return cell;
+}
+
+void weather(snow::SnowSettlement& settlement, const Fixture& terrain, int x,
+             int z, double hours, float rate, float temperature) {
+    precipitation::applyFootprint(
+        settlement, terrain, x, z, hours, rate,
+        [=](double) { return temperature; }, [](double) { return false; });
 }
 
 CellGeometry ramp(TileFacing facing = TileFacing::PosZ) {
@@ -441,6 +452,9 @@ TEST(snow_cover_projects_settlement) {
     CHECK(!toe->contains({.5f, .03f, .2f}));
     CHECK(landing->contains({.5f, .01f, .5f}));
     CHECK(!cover.cellAt({0, 9, 0}));  // support stays a chunk solid
+    cover.rebuild(settlement, fixture, 42);
+    CHECK(cover.changedChunks().empty());
+    CHECK(cover.cellAt({0, 10, 0}) == landing);
 
     Fixture dustFixture;
     dustFixture.z0 = 0;
@@ -490,4 +504,134 @@ TEST(snow_settlement_serialization) {
     truncated.resize(encoded.size() - 1);
     CHECK(!restored.restore(truncated));
     CHECK(restored.encode() == before);
+}
+
+TEST(weather_exposure_closed_roofs_and_cave) {
+    Fixture terrain;
+    terrain.x1 = 3;
+    for (int x = 0; x < 3; ++x) solid(terrain, x, 2, 0);
+    solid(terrain, 0, 7, 0);
+    // An optically clear material is still a solid weather barrier.
+    CHECK((terrain.cells[{1, 7, 0}].tryAdd(TilePiece::layer(
+               1, 2, tile_geometry::LayerThickness::Cm5, {0, .5f, 0})) ==
+           PiecePlacement::Added));
+    solid(terrain, 2, 16, 0);
+    solid(terrain, 2, 17, 0);
+
+    EQUAL(*precipitation::firstSurface(terrain, .5, .5)->height, 8.,
+          "solid roof");
+    CHECK(std::abs(*precipitation::firstSurface(terrain, 1.5, .5)->height -
+                   7.55) < 1e-5);
+    EQUAL(*precipitation::firstSurface(terrain, 2.5, .5)->height, 18.,
+          "cave roof even with a tall air gap");
+}
+
+TEST(weather_exposure_roof_edge_above_ramp_and_wrap) {
+    Fixture terrain;
+    terrain.x1 = 2;
+    terrain.periodX = 2;
+    solid(terrain, 1, 2, 0);
+    rampCell(terrain, 1, 3, 0, TileFacing::PosZ);
+    CHECK((terrain.cells[{1, 6, 0}].tryAdd(
+               {1,
+                2,
+                TileShape::make(TileShapeProfile::Wall50),
+                {},
+                PieceFill::BelowProfile,
+                1}) == PiecePlacement::Added));
+    const auto hits = precipitation::footprint(terrain, -1, 0);
+    int roof = 0, ramp = 0;
+    for (const auto& hit : hits) {
+        CHECK(hit && hit->height);
+        roof += hit->cellY == 6;
+        ramp += hit->cellY == 3;
+    }
+    EQUAL(roof, 2, "two rays intercepted by the roof");
+    EQUAL(ramp, 2, "two rays reach the slope through the opening");
+    const auto east = precipitation::footprint(terrain, 1, 0);
+    for (size_t i = 0; i < hits.size(); ++i)
+        EQUAL(*hits[i]->height, *east[i]->height, "wrapped rays agree");
+
+    snow::SnowSettlement snow(terrain);
+    weather(snow, terrain, 1, 0, 1, 4, -5);
+    EQUAL(snow.columnAt(1, 0, 3)->volume, 10000, "half reaches the ramp");
+    EQUAL(snow.columnAt(1, 0, 6)->volume, 10000, "half stops on the roof");
+    conserved(snow);
+}
+
+TEST(weather_snow_hatch_timing) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    snow::SnowSettlement snow(terrain);
+    weather(snow, terrain, 0, 0, .5, 4, -5);
+    solid(terrain, 0, 7, 0);
+    weather(snow, terrain, 0, 0, .5, 4, -5);
+    EQUAL(snow.columnAt(0, 0, 3)->volume, 10000, "half on the open floor");
+    EQUAL(snow.columnAt(0, 0, 8)->volume, 10000, "half on the shut hatch");
+
+    // Open halfway through a separate event. A bare hatch is opened after
+    // measuring its precipitation, so the floor ledger excludes roof fall.
+    snow.clear();
+    weather(snow, terrain, 0, 0, .5, 4, -5);
+    terrain.cells.erase({0, 7, 0});
+    weather(snow, terrain, 0, 0, .5, 4, -5);
+    EQUAL(snow.columnAt(0, 0, 3)->volume, 10000, "half reaches opened hatch");
+    snow.supportChanged({0, 7, 0});
+    EQUAL(snow.columnAt(0, 0, 3)->volume, 20000, "roof snow falls separately");
+    EQUAL(snow.columns().size(), size_t(1), "no floating snow");
+    conserved(snow);
+}
+
+TEST(weather_snow_and_melt_interval_accounting) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    snow::SnowSettlement whole(terrain), parts(terrain);
+    weather(whole, terrain, 0, 0, 0, 4, -5);
+    EQUAL(whole.revision(), uint64_t(0), "pause leaves the ledger alone");
+    weather(whole, terrain, 0, 0, 1, 6, 3);
+    EQUAL(whole.depositedVolume(), 0, "rain adds zero snow");
+
+    weather(whole, terrain, 0, 0, 1, 3.142f, -5);
+    for (int i = 0; i < 10; ++i) weather(parts, terrain, 0, 0, .1, 3.142f, -5);
+    CHECK(std::abs(whole.storedVolume() - parts.storedVolume()) <= 6);
+    const auto before = whole.storedVolume();
+    weather(whole, terrain, 0, 0, 1, 0, 1.256f);
+    for (int i = 0; i < 10; ++i) weather(parts, terrain, 0, 0, .1, 0, 1.256f);
+    CHECK(std::abs(whole.storedVolume() - parts.storedVolume()) <= 12);
+    EQUAL(double(before - whole.storedVolume()) / snow::SnowPerWater,
+          whole.meltwaterCm3(), "bulk snow converts to water equivalent");
+
+    snow::SnowSettlement restored(terrain);
+    CHECK(restored.restore(whole.encode()));
+    EQUAL(restored.storedVolume(), whole.storedVolume(),
+          "bulk volume persists");
+    EQUAL(restored.meltwaterCm3(), whole.meltwaterCm3(), "meltwater persists");
+    CHECK(restored.meltwater() == whole.meltwater());
+}
+
+TEST(weather_melt_uncovers_vegetation) {
+    Fixture terrain;
+    Chunk chunk;
+    terrain.grassChunk = &chunk;
+    auto& grass = chunk.tiles[0][2][0];
+    grass.block_id = 1;
+    grass.cover = 1;
+    const auto original = grass;
+    snow::SnowSettlement snow(terrain);
+    weather(snow, terrain, 0, 0, 1, 10, -5);
+    snow::SnowCover cover;
+    cover.rebuild(snow, terrain, 42);
+    CHECK(cover.cellAt({0, 3, 0}));
+
+    solid(terrain, 0, 7, 0);
+    weather(snow, terrain, 0, 0, 4, 0, 5);
+    EQUAL(snow.storedVolume(), 50000, "sheltered snow survives outdoor melt");
+    terrain.cells.erase({0, 7, 0});
+    weather(snow, terrain, 0, 0, 4, 0, 5);
+    cover.rebuild(snow, terrain, 42);
+    CHECK(!cover.cellAt({0, 3, 0}));
+    EQUAL(snow.meltwaterCm3(), 10000., "50 mm of snow yields 10 mm SWE");
+    CHECK(grass.block_id == original.block_id &&
+          grass.cover == original.cover &&
+          grass.coverState == original.coverState);
 }

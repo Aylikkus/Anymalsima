@@ -91,6 +91,8 @@ namespace tile_geometry {
 struct Plane {
     Vec3 normal;   // outward unit normal
     float offset;  // inside when dot(normal, point) <= offset
+
+    bool operator==(const Plane&) const = default;
 };
 
 struct Polygon {

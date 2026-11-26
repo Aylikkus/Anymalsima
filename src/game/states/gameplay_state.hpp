@@ -40,6 +40,8 @@
 #include "world/world_generation_task.hpp"
 #include "world/world_weather.hpp"
 
+class ChunkSnowTerrain;
+
 class GameplayState : public IGameState {
    public:
     // The camera starts from slot.meta.camera, or above slot.meta.startRegion
@@ -76,13 +78,21 @@ class GameplayState : public IGameState {
     // Snow simulation and its non-persistent environmental projection.
     // snowTerrain reads raw chunk solids, so settlement never sees its own
     // projection. Declared before the settlement that references it.
-    std::unique_ptr<snow::SnowTerrain> snowTerrain;
+    std::unique_ptr<ChunkSnowTerrain> snowTerrain;
     std::unique_ptr<snow::SnowSettlement> snowSettlement;
     std::unique_ptr<snow::SnowCover> snowCover;
     uint8_t snowId = 0;
+    double snowAppliedDays = 0;
+    double snowUpdateSeconds = 0;
+    uint64_t savedSnowRevision = 0;
+    bool snowProjectionDirty = false;
+    Signal<const BlockChange&>::Connection snowEditConnection;
+    bool depositionFixture = false;
     // cm3: the step 06 fixture amount for a 5 cm landing plus a 5 cm toe.
     int64_t snowAddVolume = 51250;
     void rebuildSnow();
+    void advanceSnow();
+    void skipWeatherTime(double days);
     void addSnow(const TileRaycastHit& hit);
     std::unique_ptr<LocationManager> locationMgr;
     std::unique_ptr<ChunkMesher> mesher;

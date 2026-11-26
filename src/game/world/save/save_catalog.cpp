@@ -6,6 +6,7 @@
 #include "serialization/file_io.hpp"
 #include "trees_codec.hpp"
 #include "world/generated_hydrology.hpp"
+#include "world/snow_settlement.hpp"
 #include "world_map_codec.hpp"
 
 namespace save_catalog {
@@ -18,6 +19,7 @@ constexpr const char* LightsFile = "light_sources.dat";
 constexpr const char* StructuresFile = "structures.dat";
 constexpr const char* TreesFile = "trees.dat";
 constexpr const char* SkyFile = "sky.dat";
+constexpr const char* SnowFile = "snow.dat";
 
 std::string folderName(uint64_t seed, const std::string& createdAt) {
     std::string stamp = createdAt;  // YYYY-MM-DDTHH:MM:SS
@@ -139,6 +141,16 @@ sky_codec::File readSky(const SaveSlot& slot) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return {};
     return sky_codec::decode(FileIO::readBytes(path));
+}
+
+void readSnow(const SaveSlot& slot, snow::SnowSettlement& snow) {
+    const auto path = slot.directory / SnowFile;
+    if (std::filesystem::exists(path) && !snow.restore(FileIO::readBytes(path)))
+        throw std::runtime_error("Invalid snow.dat");
+}
+
+void writeSnow(const SaveSlot& slot, const snow::SnowSettlement& snow) {
+    FileIO::writeBytesAtomic(slot.directory / SnowFile, snow.encode());
 }
 
 void writeSky(const SaveSlot& slot, const sky::Overrides& overrides,

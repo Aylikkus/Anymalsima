@@ -7,6 +7,10 @@
 #include "render/renderer_api.hpp"
 #include "world/world_weather.hpp"
 
+namespace snow {
+class SnowTerrain;
+}
+
 // Near precipitation as world-space particles (docs/handoff/weather.md, step
 // 09). Rain streaks and snowflakes live in a small box around the eye, are
 // depth-tested against the loaded world and drift with the sampled wind. The
@@ -28,7 +32,8 @@ class WeatherRenderer {
     // when there is no precipitation or the eye is underwater.
     void render(RenderTarget& target, const Camera& camera,
                 const world_weather::Sample& weather, double gameDays,
-                double windTravelX, double windTravelZ, uint64_t seed);
+                double windTravelX, double windTravelZ, uint64_t seed,
+                const snow::SnowTerrain& terrain);
 
     uint32_t particleCount() const { return drawn; }
 

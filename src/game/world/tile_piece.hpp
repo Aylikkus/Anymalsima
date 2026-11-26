@@ -67,6 +67,7 @@ enum class PiecePlacement { Added, Invalid, Empty, DuplicateId, Overlap };
 // Geometry for one cell. Queries use metres, in [0, 1] on each axis.
 class CellGeometry {
    public:
+    bool operator==(const CellGeometry&) const = default;
     // Face, edge and point contact are allowed. A rejected candidate leaves
     // the cell unchanged.
     PiecePlacement tryAdd(TilePiece piece);
@@ -117,6 +118,8 @@ class CellGeometry {
         PieceId id;
         uint8_t blockId;
         std::vector<std::vector<Plane>> parts;
+
+        bool operator==(const Solid&) const = default;
     };
     std::vector<Solid> solids_;
 };
