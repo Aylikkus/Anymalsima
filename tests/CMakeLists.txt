@@ -167,6 +167,7 @@ set(world_cases
     weather_time_is_continuous
     weather_condition_thresholds
     weather_temperature_and_rate_bounds
+    weather_storms_cover_many_regions
     weather_opposite_seasons
     weather_exposure_closed_roofs_and_cave
     weather_exposure_roof_edge_above_ramp_and_wrap
@@ -179,6 +180,9 @@ set(world_cases
     weather_history_snow_legacy_and_bad_versions
     weather_history_dated_cells_wrap_and_clamp
     weather_history_pending_transfer_survives_checkpoint
+    weather_history_keeps_legacy_model_before_upgrade
+    weather_presentation_fixture_wrap_and_handoff
+    weather_presentation_dated_reload_and_lod_cache
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision

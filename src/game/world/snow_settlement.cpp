@@ -827,9 +827,16 @@ void SnowSettlement::beginWeather(double day) {
 
 void SnowSettlement::resetWeather(double day) {
     weatherEpoch_ = weatherHorizon_ = day;
+    firstCurrentWeatherInterval_ = 0;
     weatherApplied_.clear();
     weatherForces_.clear();
     ++revision_;
+}
+
+int SnowSettlement::modelForWeatherInterval(int64_t interval) const {
+    return interval < firstCurrentWeatherInterval_
+               ? world_weather::LegacyModelVersion
+               : world_weather::ModelVersion;
 }
 
 double SnowSettlement::weatherDay(int x, int z) const {
@@ -886,7 +893,7 @@ void SnowSettlement::recordWeatherMelt(SnowKey key, Volume amount) {
 Bytes SnowSettlement::encode() const {
     BinaryWriter writer;
     writer.writeTag("SNOW");
-    writer.write<uint32_t>(3);
+    writer.write<uint32_t>(4);
     writer.write<uint64_t>(deposited_);
     writer.write<uint64_t>(sink_);
     writer.write<int64_t>(melted_);
@@ -920,6 +927,7 @@ Bytes SnowSettlement::encode() const {
     writer.write<uint32_t>(world_weather::ModelVersion);
     writer.write<double>(weatherEpoch_);
     writer.write<double>(weatherHorizon_);
+    writer.write<int64_t>(firstCurrentWeatherInterval_);
     writer.write<uint32_t>(uint32_t(weatherApplied_.size()));
     for (const auto& [footprint, day] : weatherApplied_) {
         writer.write<int32_t>(footprint.first);
@@ -939,7 +947,7 @@ bool SnowSettlement::restore(ByteView bytes) {
         BinaryReader reader(bytes);
         if (reader.readTag() != "SNOW") return false;
         const auto version = reader.read<uint32_t>();
-        if (version < 1 || version > 3) return false;
+        if (version < 1 || version > 4) return false;
         const auto deposited = reader.read<uint64_t>();
         const auto sink = reader.read<uint64_t>();
         const Volume melted = version >= 2 ? reader.read<int64_t>() : 0;
@@ -1016,11 +1024,15 @@ bool SnowSettlement::restore(ByteView bytes) {
             }
         }
         double epoch = -1, horizon = 0;
+        int64_t firstCurrentInterval = 0;
         std::map<Footprint, double> applied;
         std::map<double, uint8_t> forces;
         if (version >= 3) {
-            if (reader.read<uint32_t>() != weather_history::SimulationVersion ||
-                reader.read<uint32_t>() != world_weather::ModelVersion)
+            if (reader.read<uint32_t>() != weather_history::SimulationVersion)
+                return false;
+            const auto model = reader.read<uint32_t>();
+            if (model != (version == 3 ? world_weather::LegacyModelVersion
+                                       : world_weather::ModelVersion))
                 return false;
             epoch = reader.read<double>();
             horizon = reader.read<double>();
@@ -1030,6 +1042,18 @@ bool SnowSettlement::restore(ByteView bytes) {
                 horizon >= double(std::numeric_limits<int64_t>::max() /
                                   weather_history::IntervalsPerDay))
                 return false;
+            if (version >= 4) {
+                firstCurrentInterval = reader.read<int64_t>();
+                if (firstCurrentInterval < 0 ||
+                    firstCurrentInterval >
+                        weather_history::intervalAt(horizon) + 1)
+                    return false;
+            } else if (epoch >= 0) {
+                // Finish replay with the old model through the checkpoint.
+                // A partially applied interval also keeps its original model.
+                firstCurrentInterval = int64_t(std::ceil(
+                    horizon * weather_history::IntervalsPerDay - 1e-8));
+            }
             const auto validDay = [&](double day) {
                 return epoch >= 0 && day >= epoch && day <= horizon;
             };
@@ -1072,6 +1096,7 @@ bool SnowSettlement::restore(ByteView bytes) {
         melted_ = melted;
         weatherEpoch_ = epoch;
         weatherHorizon_ = horizon;
+        firstCurrentWeatherInterval_ = firstCurrentInterval;
         weatherApplied_ = std::move(applied);
         weatherForces_ = std::move(forces);
         ++revision_;

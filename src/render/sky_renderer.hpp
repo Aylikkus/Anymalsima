@@ -25,5 +25,8 @@ class SkyRenderer {
     bgfx::UniformHandle weatherUniform;
     bgfx::UniformHandle cloudOffsetUniform;
     bgfx::UniformHandle seedUniform;
-    std::array<bgfx::UniformHandle, 2> samplers;
+    bgfx::UniformHandle gridProjection;
+    bgfx::UniformHandle gridLimits;
+    bgfx::UniformHandle gridAnchor;
+    std::array<bgfx::UniformHandle, 3> samplers;
 };

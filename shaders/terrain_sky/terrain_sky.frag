@@ -3,6 +3,7 @@ $input v_ray
 #include <bgfx_shader.sh>
 #include "../sky_colors.sh"
 #include "../water_fog.sh"
+#include "../weather_map.sh"
 
 uniform vec4 u_sky_camera;
 uniform vec4 u_sky_seed;
@@ -173,34 +174,36 @@ float cloudFbm3(vec3 position)
     return value;
 }
 
-// A procedural cumulus shell in the game's flat-shaded palette. Sampling a
-// volume on a sphere avoids the radial projection that made clouds spin and
-// stretch when the camera turned. Coverage follows cloudiness, precipitation
-// darkens it, and wind translates the whole field along the ground plane.
-vec3 skyClouds(vec3 sky, vec3 ray, float day)
+vec3 shadeCloud(vec3 sky, vec3 ray, float day, vec3 p,
+                float humidity, float precip, float opacity)
 {
-    float cover = clamp(max(u_sky_weather.x, u_sky_weather.y * 0.85),
-                        0.0, 1.0);
-    if (cover <= 0.001 || ray.y <= 0.0) return sky;
-
-    vec2 drift = u_sky_cloud_offset.xy;
-    vec3 p = ray * 9.0 + vec3(drift.x, 0.0, drift.y)
-                       + (u_sky_seed.xyz - vec3_splat(0.5)) * 13.0;
-    float shape = cloudFbm3(p * 0.42) * 0.68
-                + cloudFbm3(p * 1.15 + vec3(7.3, 2.7, 4.6)) * 0.32;
-    float threshold = mix(0.72, 0.28, cover);
-    float mask = smoothstep(threshold, threshold + 0.035, shape);
-    mask *= smoothstep(0.0, 0.08, ray.y);
+    float cover = clamp(max(humidity, precip * 0.94), 0.0, 1.0);
+    if (cover <= 0.02) return sky;
+    p += (u_sky_seed.xyz - vec3_splat(0.5)) * 13.0;
+    float shape = cloudFbm3(p * 0.30) * 0.73
+                + cloudNoise3(p * 0.92 + vec3(7.3, 2.7, 4.6)) * 0.23;
+    // Near the horizon small underside details project into narrow rings.
+    // Keep the broad outline and let atmospheric scattering soften detail.
+    float detail = smoothstep(0.035, 0.32, abs(ray.y));
+    shape = mix(0.47, shape, 0.30 + 0.70 * detail);
+    float deck = smoothstep(0.18, 0.83, precip);
+    float threshold = mix(0.72, 0.34, cover) - 0.10 * precip;
+    float mask = smoothstep(threshold - 0.04, threshold + 0.11, shape);
+    // Wet cores have a continuous underside, with noisy contours around
+    // their dryer outskirts.
+    mask = max(mask, deck * (0.56 + 0.42 * shape)) * opacity;
+    mask *= smoothstep(0.13, 0.79, cover);
     if (mask <= 0.001) return sky;
 
     // Three flat tones: shaded body, lit body and a sun-facing crown/rim.
-    float body = smoothstep(threshold + 0.03, threshold + 0.22, shape);
-    float crown = smoothstep(threshold + 0.15, threshold + 0.42, shape);
+    float body = smoothstep(threshold + 0.03, threshold + 0.22, shape)
+                 * (1.0 - 0.36 * deck);
+    float crown = smoothstep(threshold + 0.15, threshold + 0.42, shape)
+                  * (1.0 - 0.68 * deck);
     vec3 sunDir = skySunDirection();
     float facing = clamp(dot(ray, sunDir) * 0.5 + 0.5, 0.0, 1.0);
 
-    float storm = clamp(u_sky_weather.y * 1.6 + u_sky_weather.x * 0.30,
-                        0.0, 1.0);
+    float storm = clamp(precip * 1.6 + humidity * 0.24, 0.0, 1.0);
     vec3 shade = mix(vec3(0.055, 0.085, 0.20),
                      vec3(0.47, 0.59, 0.78), day);
     vec3 middle = mix(vec3(0.09, 0.14, 0.30),
@@ -216,12 +219,48 @@ vec3 skyClouds(vec3 sky, vec3 ray, float day)
 
     vec3 colour = mix(shade, middle, body);
     colour = mix(colour, lit, crown * (0.50 + 0.50 * facing));
-    float rim = (1.0 - smoothstep(threshold + 0.02, threshold + 0.09,
-                                  shape))
-              * smoothstep(0.55, 1.0, facing);
-    colour = mix(colour, lit, rim * 0.55);
     colour *= 1.0 + 0.06 * max(dot(ray, sunDir), 0.0) * day;
     return mix(sky, colour, mask);
+}
+
+vec3 skyClouds(vec3 sky, vec3 ray, float day)
+{
+    if (u_weather_grid.z <= 0.0) {
+        if (ray.y <= 0.0) return sky;
+        vec2 drift = u_sky_cloud_offset.xy;
+        vec3 p = ray * 9.0 + vec3(drift.x, 0.0, drift.y);
+        return shadeCloud(sky, ray, day, p, u_sky_weather.x,
+                          u_sky_weather.y, smoothstep(0.0, 0.08, ray.y));
+    }
+
+    if (abs(ray.y) < 0.001) return sky;
+    float horizon = smoothstep(0.012, 0.12, abs(ray.y));
+    // Sample the world cloud deck at a few elevations. A texel's cloud base
+    // limits the layers it can fill, keeping the clouds over their rain.
+    for (int layer = 0; layer < 6; ++layer) {
+        float order = ray.y > 0.0 ? 5.0 - float(layer) : float(layer);
+        float y = WEATHER_MIN_CLOUD_BASE + 33.0 + order * 102.0;
+        float t = (y - u_weather_grid.w) / ray.y;
+        if (t <= 0.0) continue;
+        vec2 pXZ = ray.xz * t;
+        vec4 weather = weatherAt(pXZ, false);
+        float precipitation = clamp(weather.y + weather.z, 0.0, 1.0);
+        if (weather.x + precipitation <= 0.04) continue;
+        float base = weatherCloudBase(weather.a) + u_weather_grid.w;
+        float vertical = 1.0 - smoothstep(28.0, 105.0, abs(y - base - 49.0));
+        if (vertical <= 0.0) continue;
+
+        // Cylindrical X keeps the cloud noise continuous across the X seam.
+        vec2 world = u_weather_anchor.xy + pXZ - u_sky_cloud_offset.xy * 6.0;
+        float scale = 0.033;
+        float angle = world.x * 6.2831853 / u_weather_anchor.z;
+        float radius = u_weather_anchor.z * scale / 6.2831853;
+        vec3 p = vec3(sin(angle) * radius, cos(angle) * radius,
+                      world.y * scale + y * 0.016);
+        sky = shadeCloud(sky, ray, day, p, weather.x, precipitation,
+                         horizon * vertical * 0.88);
+    }
+    return sky;
 }
 
 void main()

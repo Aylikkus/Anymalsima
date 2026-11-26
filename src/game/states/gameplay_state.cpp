@@ -406,6 +406,25 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     setupConstructionFixture();
     setupSnowFixture();
     setupWeatherTravelFixture();
+    if (const char* fixture = std::getenv("ANYM_WEATHER_DISTANCE_FIXTURE");
+        fixture && std::string_view(fixture) == "1" && this->world->width > 1 &&
+        this->world->height > 1) {
+        distantWeatherFixture = weather_presentation::Fixture{
+            std::max(1, int(slot.meta.startRegion.x)),
+            std::min(this->world->height - 2, int(slot.meta.startRegion.y))};
+        makeDebugButton({0, 7, 6, 1}, [this] {
+            visitDistantWeatherSite(false, false);
+        })->setText(_("Weather ridge"));
+        makeDebugButton({6, 7, 6, 1}, [this] {
+            visitDistantWeatherSite(false, true);
+        })->setText(_("Weather boundary"));
+        makeDebugButton({12, 7, 6, 1}, [this] {
+            visitDistantWeatherSite(true, false);
+        })->setText(_("Weather seam"));
+        makeDebugButton({18, 7, 6, 1}, [this] {
+            visitDistantWeatherSite(true, true);
+        })->setText(_("Weather seam edge"));
+    }
     if (constructionSite) {
         auto* button = makeDebugButton({18, 13, 6, 1}, [this] {
             advanceSnow();
@@ -449,7 +468,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     // The original inspection controls remain presentation-only. The
     // separate deposition fixture also drives the active physical sample.
     if (const char* weatherFixture = std::getenv("ANYM_WEATHER_FIXTURE");
-        depositionFixture ||
+        depositionFixture || distantWeatherFixture ||
         (weatherFixture && std::string_view(weatherFixture) == "1")) {
         auto* sixHours = makeDebugButton(
             {0, 9, 6, 1}, [this] { skipWeatherTime(6.0 / 24.0); });
@@ -463,14 +482,16 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         auto* halfYear =
             makeDebugButton({12, 8, 6, 1}, [this] { skipWeatherTime(180.0); });
         halfYear->setText(_("WEATHER +180D"));
-        weatherForceButton = makeDebugButton({18, 9, 6, 1}, [this] {
-            weatherForce = (weatherForce + 1) % 5;
-            if (depositionFixture)
-                snowSettlement->setWeatherForce(clock.days(), weatherForce);
-            updateWeatherControls();
-        });
-        weatherSiteButton =
-            makeDebugButton({18, 8, 6, 1}, [this] { cycleWeatherSite(); });
+        if (!distantWeatherFixture) {
+            weatherForceButton = makeDebugButton({18, 9, 6, 1}, [this] {
+                weatherForce = (weatherForce + 1) % 5;
+                if (depositionFixture)
+                    snowSettlement->setWeatherForce(clock.days(), weatherForce);
+                updateWeatherControls();
+            });
+            weatherSiteButton =
+                makeDebugButton({18, 8, 6, 1}, [this] { cycleWeatherSite(); });
+        }
         if (depositionFixture) {
             auto* halfHour = makeDebugButton(
                 {0, 8, 6, 1}, [this] { skipWeatherTime(.5 / 24); });
@@ -588,7 +609,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     // The snow checkpoint is written before world.json. Recover its date
     // if a save was interrupted between those two atomic replacements.
     clock.set(std::max(slot.meta.worldDays, snowSettlement->weatherHorizon()));
-    if (weatherTravelSites) clock.setSpeed(0);
+    if (weatherTravelSites || distantWeatherFixture) clock.setSpeed(0);
     snowSettlement->beginWeather(clock.days());
     snowSettlement->setWeatherForce(clock.days(), 0);
     weatherVisualDays = clock.days();
@@ -905,10 +926,41 @@ void GameplayState::visitWeatherTravelSite(size_t site) {
 }
 
 world_weather::Sample GameplayState::weatherAt(const Vec3& position) const {
-    auto weather = world_weather::at(*world, position.x, position.z,
-                                     clock.days(), double(position.y));
-    applyWeatherOverride(weather);
+    auto weather = world_weather::at(
+        *world, position.x, position.z, clock.days(), double(position.y),
+        snowSettlement->modelForWeatherInterval(
+            weather_history::intervalAt(clock.days())));
+    if (distantWeatherFixture) {
+        using namespace weather_presentation;
+        const int x = regionAt(position.x), z = regionAt(position.z);
+        const auto wrap = world->wrap();
+        if (z >= 0 && z < world->height)
+            distantWeatherFixture->apply(weather, wrap, int(wrap.wrapRegion(x)),
+                                         z);
+        else
+            weather_history::applyOverride(weather, 1, false);
+        const float edge = regionWeight(position.x, position.z, x, z);
+        weather.cloudCover = std::lerp(.08f, weather.cloudCover, edge);
+        weather.visualDensity *= edge;
+    } else {
+        applyWeatherOverride(weather);
+    }
     return weather;
+}
+
+void GameplayState::visitDistantWeatherSite(bool seam, bool boundary) {
+    if (probe) toggleWalk();
+    using namespace weather_presentation;
+    auto& fixture = *distantWeatherFixture;
+    fixture.x = seam ? 0 : std::max(1, int(slot.meta.startRegion.x));
+    const int x = fixture.x * RegionSize + (boundary ? 8 : 44);
+    const int z = fixture.z * RegionSize + 98;
+    const int top = chunkManager->generatedSurfaceY(x, z);
+    camera.yaw = boundary ? -bx::kPiHalf : -.76f;
+    camera.pitch = boundary ? -.13f : .14f;
+    camera.distance = 10.f;
+    const Vec3 eye{float(x), float(top) + (boundary ? 8.f : 104.f), float(z)};
+    camera.position = eye + camera.direction() * camera.distance;
 }
 
 void GameplayState::updateWeatherControls() {
@@ -1018,7 +1070,10 @@ bool GameplayState::reconcileSnowAt(int x, int z, double target) {
     const double reached = precipitation::reconcile(
         *snowSettlement, *snowTerrain, x, z, target, !world->regions.empty(),
         [&](int64_t interval) {
-            return snowHistory.at(*world, x, z, interval).weather;
+            return snowHistory
+                .at(*world, x, z, interval,
+                    snowSettlement->modelForWeatherInterval(interval))
+                .weather;
         },
         [&](double height) -> std::optional<bool> {
             const int y = int(std::floor(height + .0001));
@@ -1108,6 +1163,8 @@ void GameplayState::addSnow(const TileRaycastHit& hit) {
 }
 
 GameplayState::~GameplayState() {
+    // The previous camera borrows the weather texture from this state.
+    uiContext->renderer->setCamera(Camera{});
     // Chunk systems outlive the light renderer these listeners use.
     chunkManager->meshUploaded.disconnect(meshConnection);
     chunkManager->removed.disconnect(removedConnection);
@@ -1852,6 +1909,17 @@ void GameplayState::update(Game& game, float dt) {
                     snowSettlement->weatherDay(x + 2, z));
             }
         }
+        if (distantWeatherFixture) {
+            const auto eye = camera.eye();
+            const auto regions = weatherRenderer->regionCount();
+            controls += fmt::format(
+                "Weather eye [{:.1f}, {:.1f}, {:.1f}] day {:.5f}\n"
+                "Curtains {} regions / {} draws · {} summary rebuilds\n"
+                "Near {} particles · weather CPU {:.3f} ms · frame {:.2f} ms\n",
+                eye.x, eye.y, eye.z, clock.days(), regions, int(regions != 0),
+                weatherRenderer->summaryRebuilds(),
+                weatherRenderer->particleCount(), weatherFrameMs, dt * 1000.);
+        }
         if (constructionSite || snowFixtureSite || snowDropSite) {
             const auto& at = camera.position;
             controls += fmt::format("Camera [{:.1f}, {:.1f}, {:.1f}]\n", at.x,
@@ -1963,7 +2031,9 @@ void GameplayState::update(Game& game, float dt) {
                     clock.days(), double(hit->ty) + .5);
                 auto weather = world_weather::at(
                     *world, double(hit->tx) + .5, double(hit->tz) + .5,
-                    clock.days(), double(hit->ty) + .5);
+                    clock.days(), double(hit->ty) + .5,
+                    snowSettlement->modelForWeatherInterval(
+                        weather_history::intervalAt(clock.days())));
                 if (depositionFixture) applyWeatherOverride(weather);
                 ss << fmt::format("date: D{} M{} Y{}\n", date.day, date.month,
                                   date.year);
@@ -2071,7 +2141,7 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                            std::chrono::steady_clock::now() - started)
                            .count();
     camera.sky = skyAtTime(clock.timeOfDay(), world->genSettings.seed);
-    const auto weather = weatherAt(camera.position);
+    const auto weather = weatherAt(camera.eye());
     camera.sky.weather = {weather.cloudCover, weather.visualDensity,
                           weather.snowFraction,
                           float(std::fmod(weatherVisualDays * 24.0, 100000.0))};
@@ -2083,9 +2153,22 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
                        context.getWindowSize(), lightVolumes.get());
     camera.underwater = terrainLod->eyeUnderwater();
     snowTerrain->resetQueries();
-    weatherRenderer->render(target, camera, weather, weatherVisualDays,
-                            windTravelX, windTravelZ, world->genSettings.seed,
-                            *snowTerrain);
+    const auto weatherStarted = std::chrono::steady_clock::now();
+    const float weatherRange = float(2 * terrainLod->settings().chunkRadius *
+                                     weather_presentation::RegionSize);
+    const auto viewport = context.getWindowSize();
+    weatherRenderer->render(
+        target, camera, *world, weather,
+        {clock.days(), weatherVisualDays, windTravelX, windTravelZ,
+         std::min(weatherRange, terrainLod->visibleDistance()),
+         std::max(1.f, viewport.x) / std::max(1.f, viewport.y), weatherForce,
+         distantWeatherFixture, true,
+         snowSettlement->firstCurrentWeatherInterval()},
+        *snowTerrain);
+    if (distantWeatherFixture)
+        weatherFrameMs = std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - weatherStarted)
+                             .count();
     Camera displayedCamera = camera;
     displayedCamera.viewDistance = terrainLod->visibleDistance();
     context.renderer->setCamera(displayedCamera);
@@ -2102,7 +2185,6 @@ void GameplayState::render(RenderTarget& target, UIContext& context) {
     const auto look = eye + camera.direction();
     bx::mtxLookAt(view, {eye.x, eye.y, eye.z}, {look.x, look.y, look.z},
                   {0, 1, 0});
-    const auto viewport = context.getWindowSize();
     bx::mtxProj(proj, 60.f, viewport.x / std::max(1.f, viewport.y),
                 camera.nearPlane, displayedCamera.viewDistance + 512.f,
                 bgfx::getCaps()->homogeneousDepth);

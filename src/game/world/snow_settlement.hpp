@@ -123,6 +123,10 @@ class SnowSettlement {
     void resetWeather(double day);
     double weatherDay(int x, int z) const;
     double weatherHorizon() const { return weatherHorizon_; }
+    int64_t firstCurrentWeatherInterval() const {
+        return firstCurrentWeatherInterval_;
+    }
+    int modelForWeatherInterval(int64_t interval) const;
     void checkpointWeather(double day);
     void markWeatherApplied(int x, int z, double day);
     void setWeatherForce(double day, uint8_t force);
@@ -165,6 +169,7 @@ class SnowSettlement {
     ChunkColumns projectionChanges_;
     double weatherEpoch_ = -1;
     double weatherHorizon_ = 0;
+    int64_t firstCurrentWeatherInterval_ = 0;
     std::map<Footprint, double> weatherApplied_;
     std::map<double, uint8_t> weatherForces_;
 };

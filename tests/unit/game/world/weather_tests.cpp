@@ -2,6 +2,7 @@
 
 #include "test.hpp"
 #include "world/weather_history.hpp"
+#include "world/weather_presentation.hpp"
 #include "world/world.hpp"
 #include "world/world_climate.hpp"
 #include "world/world_weather.hpp"
@@ -188,6 +189,31 @@ TEST(weather_temperature_and_rate_bounds) {
             }
 }
 
+TEST(weather_storms_cover_many_regions) {
+    auto world = makeWorld(96, 96);
+    world.genSettings.seed = 2024;
+    int wet = 0, clear = 0, longest = 0;
+    // Follow several west-to-east tracks at the same time. A storm core
+    // should remain wet for more than a kilometre on at least one track.
+    for (int z = 300; z < 11800; z += 900) {
+        int run = 0;
+        for (int x = 0; x < world.wrap().tiles; x += 128) {
+            const auto sample = world_weather::at(world, x, z, 1. / 3.);
+            if (sample.precipitationRate > 2.f) {
+                CHECK(sample.cloudCover > .5f);
+                ++wet;
+                longest = std::max(longest, ++run);
+            } else {
+                run = 0;
+                clear += sample.condition == world_weather::Condition::Clear;
+            }
+        }
+    }
+    CHECK(longest > 10);
+    CHECK(wet > 200);
+    CHECK(clear > 50);
+}
+
 TEST(weather_opposite_seasons) {
     constexpr int height = 301;
     auto world = makeWorld(4, height, 0.f);
@@ -220,6 +246,88 @@ TEST(weather_history_dated_cells_wrap_and_clamp) {
     CHECK(sameSample(east.weather,
                      world_weather::at(world, 504, 8, (bin + .5) / 48, 0)));
     CHECK(sameSample(west.weather, east.weather));
+    const auto legacy =
+        history.at(world, 511, 0, bin, world_weather::LegacyModelVersion);
+    EQUAL(legacy.model, world_weather::LegacyModelVersion, "legacy cache key");
+    CHECK(sameSample(legacy.weather,
+                     world_weather::at(world, 504, 8, (bin + .5) / 48, 0,
+                                       world_weather::LegacyModelVersion)));
     CHECK(
         !sameSample(east.weather, history.at(world, -1, -5, bin + 48).weather));
+}
+
+TEST(weather_presentation_fixture_wrap_and_handoff) {
+    using namespace weather_presentation;
+    auto world = makeWorld(96, 96, 10.f, 440);
+    world.genSettings.seed = 2024;
+    constexpr Fixture fixture{0, 48};
+    constexpr double date = 1. / 3;
+    Field field;
+    field.begin(world, 36, 6242, date, 512);
+    const auto clear = field.at(world, 0, 48, fixture)->weather;
+    const auto rain = field.at(world, -1, 48, fixture)->weather;
+    const auto snow = field.at(world, 0, 49, fixture)->weather;
+    const auto cloudy = field.at(world, 95, 49, fixture)->weather;
+    CHECK(clear.condition == world_weather::Condition::Clear);
+    CHECK(cloudy.condition == world_weather::Condition::Cloudy);
+    CHECK(clear.visualDensity == 0 && cloudy.visualDensity == 0);
+    CHECK(rain.condition == world_weather::Condition::Rain);
+    CHECK(rain.precipitationRate == 13.f && rain.visualDensity > .8f);
+    CHECK(snow.condition == world_weather::Condition::Snow);
+    CHECK(rain.snowFraction == 0 && snow.snowFraction == 1);
+    CHECK(!field.at(world, 0, -1, fixture));
+    CHECK(!field.at(world, 0, 96, fixture));
+    CHECK(field.rebuilds() == 4);
+
+    // Same paused date, crossing to the other image of the rain region.
+    field.begin(world, world.wrap().tiles - 8, 6242, date, 1024);
+    CHECK(sameSample(rain, field.at(world, 95, 48, fixture)->weather));
+    CHECK(field.rebuilds() == 0);
+    CHECK(regionWeight(-.001, 6242, -1, 48) < .00001f);
+    CHECK(regionWeight(-8, 6242, -1, 48) == 1.f);
+    CHECK(nearWeight(0) == 1.f && nearWeight(18) == 1.f);
+    CHECK(near(nearWeight(22), .5f));
+    CHECK(nearWeight(26) == 0.f && nearWeight(27) == 0.f);
+
+    field.begin(world, 36, 6242, date, 512);
+    const auto window = field.window(world);
+    CHECK(window.x0 < -1 && window.x1 > 0);
+    CHECK(window.z0 < 48 && window.z1 > 49);
+    CHECK((window.x1 - window.x0) * (window.z1 - window.z0) <=
+          int(Field::Capacity));
+    field.begin(world, 36, 0, date, 1024);
+    CHECK(field.window(world).z0 == 0);
+    field.begin(world, 36, world.height * RegionSize - 1, date, 1024);
+    CHECK(field.window(world).z1 == world.height);
+}
+
+TEST(weather_presentation_dated_reload_and_lod_cache) {
+    using namespace weather_presentation;
+    auto world = makeWorld(96, 96, 10.f, 440);
+    world.genSettings.seed = 2024;
+    constexpr int x = 48, z = 48, bin = 28;
+    const double date = (bin + .5) / weather_history::IntervalsPerDay;
+    const double eye = x * RegionSize + .5;
+    Field field;
+    field.begin(world, eye, eye, date, 512);
+    auto actual = field.at(world, x, z)->weather;
+    auto expected =
+        weather_history::sampleCell(world, 48 * 8 + 4, 48 * 8 + 4, bin);
+    expected.baselineC += world_climate::elevationOffsetC(440, 0);
+    CHECK(sameSample(actual, world_weather::derive(expected)));
+    CHECK(field.rebuilds() == 1);
+
+    field.begin(world, eye, eye, date, 1024);
+    CHECK(sameSample(actual, field.at(world, x, z)->weather));
+    CHECK(field.rebuilds() == 0);
+
+    const double jumped = date + 30;
+    field.begin(world, eye, eye, jumped, 768);
+    auto later = field.at(world, x, z)->weather;
+    CHECK(field.rebuilds() == 1);
+    CHECK(!sameSample(actual, later));
+    Field reloaded;
+    reloaded.begin(world, eye, eye, jumped, 768);
+    CHECK(sameSample(later, reloaded.at(world, x, z)->weather));
+    CHECK(reloaded.rebuilds() == 1);
 }

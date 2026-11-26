@@ -1213,7 +1213,7 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
         underwater = WaterSurface{}.submerged(eye.y, -1, tile);
     } else if (y >= 0 && z >= 0 && z < detailSampler.depth() &&
                (periodX > 0 || (x >= 0 && x < detailSampler.width()))) {
-        underwater = detailSampler.submerged(x, z, eye.y);
+        underwater = detailSampler.submerged(x, z, eye.y, true);
     }
     water.setVec4(
         {flowSeconds, underwater ? 1.f : 0.f, debugEdges ? 1.f : 0.f, 0});

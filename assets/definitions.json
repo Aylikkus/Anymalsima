@@ -196,6 +196,7 @@
     "terrain_lod": "assets/shaders/terrain_lod",
     "terrain_sky": "assets/shaders/terrain_sky",
     "text": "assets/shaders/text",
+    "weather_curtains": "assets/shaders/weather_curtains",
     "weather_particles": "assets/shaders/weather_particles"
   },
   "data": [

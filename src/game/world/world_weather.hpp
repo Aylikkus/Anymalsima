@@ -12,20 +12,17 @@
 
 // Regional weather for presentation and later exposure
 // (docs/handoff/weather.md, step 09). The field is deterministic from the world
-// seed, the model version, the world position and world time. It is a sum of
-// long plane waves: spatially coherent over several regions, continuous in
-// time, and periodic in X with the world's wrap period so the seam is
-// invisible. Region-centre samples are then blended bilinearly with the same
-// wrapping convention as world_climate and ground_cover_climate.
+// seed, the model version, the world position and world time. Storm systems
+// drift over the map and wrap in X. Wind and temperature use the original
+// continuous wave fields blended across region centres.
 //
 // Precipitation rate is a physical rain-equivalent rate in millimetres per
 // hour. Visual particle density is a separate 0..1 presentation value; snow is
 // more visible per millimetre than rain, and dry cloud never creates particles.
 namespace world_weather {
 
-// Bump when the field's shape changes so saved/fixture expectations can be
-// identified. It participates in the seed hash and never changes saved data.
-inline constexpr int ModelVersion = 1;
+inline constexpr int LegacyModelVersion = 1;
+inline constexpr int ModelVersion = 2;
 inline constexpr float FreezingPointC = 0.0f;
 // Total width of the reproducible rain/snow transition around freezing.
 inline constexpr float FreezingBandC = 1.0f;
@@ -97,7 +94,7 @@ inline float fieldRank(uint64_t seed, int field, double x, double z,
     for (int i = 0; i < 3; ++i) {
         uint64_t bits =
             mix64(seed ^ (uint64_t(field) << 56 | uint64_t(i) << 48) ^
-                  uint64_t(ModelVersion) * 0x9e3779b97f4a7c15ull);
+                  uint64_t(LegacyModelVersion) * 0x9e3779b97f4a7c15ull);
         // 20 to 119 cycles per world width: roughly 4 to 26 regions per wave
         // in a new 512-region world.
         const double kx = tau * double(20 + bits % 100) / periodX;
@@ -122,12 +119,47 @@ inline float cloudCoverFrom(float rank) { return smooth((rank - .18f) / .70f); }
 
 inline float wetnessFrom(float rank) { return smooth((rank - .30f) / .60f); }
 
+inline float stormNoise(uint64_t seed, double x, double z, double period,
+                        double spacing) {
+    const auto columns = std::max<int64_t>(2, std::llround(period / spacing));
+    x = WorldWrap::modf(x, period) / period * columns;
+    z /= spacing;
+    const int64_t left = int64_t(std::floor(x)), north = int64_t(std::floor(z));
+    const float u = smooth(float(x - left)), v = smooth(float(z - north));
+    const auto rank = [&](int64_t dx, int64_t dz) {
+        const auto col = WorldWrap::mod(left + dx, columns);
+        return float(
+            phaseOf(mix64(seed ^ mix64(uint64_t(col)) ^
+                          (uint64_t(north + dz) * 0x94d049bb133111ebull))));
+    };
+    return std::lerp(std::lerp(rank(0, 0), rank(1, 0), u),
+                     std::lerp(rank(0, 1), rank(1, 1), u), v);
+}
+
+inline float stormRank(uint64_t seed, double x, double z, double days,
+                       double period) {
+    constexpr double tau = 6.28318530717958647692;
+    const double heading = tau * phaseOf(mix64(seed ^ 0x1edf72fb));
+    x -= days * 810. * std::cos(heading);
+    z -= days * 810. * std::sin(heading);
+    return .84f * stormNoise(seed ^ 0x7cf814fb, x, z, period, 3600.) +
+           .16f * stormNoise(seed ^ 0x35bf24c1, x, z, period, 1450.);
+}
+
 }  // namespace detail
 
 inline float snowFractionAt(float temperatureC) {
     const float half = FreezingBandC * .5f;
     return detail::smooth((FreezingPointC + half - temperatureC) /
                           FreezingBandC);
+}
+
+inline float visualDensityFor(float rate, Condition condition) {
+    if (rate < DryPrecipitationRate) return 0.f;
+    // Snowflakes are visible at lower water-equivalent rates than rain.
+    const float scale =
+        condition == Condition::Snow ? 9.f : MaxPrecipitationRate;
+    return std::pow(std::clamp(rate / scale, 0.f, 1.f), .65f);
 }
 
 // Fills derived fields from the raw weather values. Tests feed it directly to
@@ -150,11 +182,8 @@ inline Sample derive(Sample sample) {
     } else {
         sample.condition =
             sample.snowFraction >= .5f ? Condition::Snow : Condition::Rain;
-        // Snowflakes are visible at lower water-equivalent rates than rain.
-        const float scale =
-            sample.condition == Condition::Snow ? 9.f : MaxPrecipitationRate;
-        sample.visualDensity = std::pow(
-            std::clamp(sample.precipitationRate / scale, 0.f, 1.f), .65f);
+        sample.visualDensity =
+            visualDensityFor(sample.precipitationRate, sample.condition);
     }
     return sample;
 }
@@ -163,7 +192,8 @@ inline Sample derive(Sample sample) {
 // sampler. A world without a map still samples the seeded field directly and
 // keeps the mild climate fallback.
 inline Sample at(const World& world, double x, double z, double worldDays,
-                 std::optional<double> localY = std::nullopt) {
+                 std::optional<double> localY = std::nullopt,
+                 int model = ModelVersion) {
     const auto climate = world_climate::at(world, x, z, worldDays, localY);
     Sample sample;
     sample.baselineC = climate.temperatureC;
@@ -171,8 +201,10 @@ inline Sample at(const World& world, double x, double z, double worldDays,
                                ? double(world.width) * WorldWrap::RegionSize
                                : 512.0 * WorldWrap::RegionSize;
     float ranks[5] = {};
+    const bool legacy = model == LegacyModelVersion;
+    const int firstField = legacy ? 0 : 2;
     if (world.regions.empty() || world.width <= 0 || world.height <= 0) {
-        for (int field = 0; field < 5; ++field)
+        for (int field = firstField; field < 5; ++field)
             ranks[field] = detail::fieldRank(world.genSettings.seed, field, x,
                                              z, worldDays, periodX);
     } else {
@@ -188,20 +220,33 @@ inline Sample at(const World& world, double x, double z, double worldDays,
                 const double w = (dx ? tx : 1 - tx) * (dz ? tz : 1 - tz);
                 const double cx = (double(rx) + .5) * size;
                 const double cz = (double(rz) + .5) * size;
-                for (int field = 0; field < 5; ++field)
+                for (int field = firstField; field < 5; ++field)
                     ranks[field] += float(
                         w * detail::fieldRank(world.genSettings.seed, field, cx,
                                               cz, worldDays, periodX));
             }
     }
-    sample.cloudCover = detail::cloudCoverFrom(ranks[0]);
-    const float wetness = detail::wetnessFrom(ranks[1]);
-    // Dry gaps in a broken cloud deck must not drizzle from a nearly clear
-    // sky, so precipitation fades in with the cloud cover itself.
-    const float rainGate = detail::smooth((ranks[0] - .32f) / .34f);
-    sample.precipitationRate = MaxPrecipitationRate *
-                               std::pow(sample.cloudCover, 1.7f) * wetness *
-                               wetness * rainGate;
+    if (legacy) {
+        sample.cloudCover = detail::cloudCoverFrom(ranks[0]);
+        const float wetness = detail::wetnessFrom(ranks[1]);
+        const float rainGate = detail::smooth((ranks[0] - .32f) / .34f);
+        sample.precipitationRate = MaxPrecipitationRate *
+                                   std::pow(sample.cloudCover, 1.7f) * wetness *
+                                   wetness * rainGate;
+    } else {
+        const double stormZ =
+            world.height > 0
+                ? std::clamp(z, 0.,
+                             double(world.height * WorldWrap::RegionSize))
+                : z;
+        const float storm = detail::stormRank(world.genSettings.seed, x, stormZ,
+                                              worldDays, periodX);
+        // A single broad system controls rain and its overlying cloud deck.
+        // The dry skirt of the system has clouds before there is rainfall.
+        sample.cloudCover = detail::smooth((storm - .20f) / .46f);
+        sample.precipitationRate =
+            MaxPrecipitationRate * detail::smooth((storm - .43f) / .39f);
+    }
     sample.temperatureOffsetC = (2.f * ranks[2] - 1.f) * MaxTemperatureOffsetC;
     constexpr float tau = 6.28318530717958647692f;
     const float windAngle = tau * ranks[3];

@@ -19,6 +19,7 @@ enum class DrawLayer {
     // World-space additive glow (light glare): drawn after GAME in its own
     // view, depth-tested against the world but never writing depth.
     GAME_GLOW,
+    GAME_DISTANT_WEATHER,
     // Near weather particles: world-space, depth-tested, alpha blended and
     // never writing depth. Drawn after the world and before glow.
     GAME_WEATHER,

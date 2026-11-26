@@ -111,11 +111,13 @@ void Renderer::beginFrame() {
     bgfx::setViewTransform(RenderViews::Glow, view_g, proj_g);
     bgfx::setViewRect(RenderViews::Glow, 0, 0, (uint16_t)res.x,
                       (uint16_t)res.y);
-    // Near weather particles share the world camera and depth buffer.
-    bgfx::setViewClear(RenderViews::Weather, BGFX_CLEAR_NONE);
-    bgfx::setViewTransform(RenderViews::Weather, view_g, proj_g);
-    bgfx::setViewRect(RenderViews::Weather, 0, 0, (uint16_t)res.x,
-                      (uint16_t)res.y);
+    // Both precipitation passes share the world camera and depth buffer.
+    for (const auto weather :
+         {RenderViews::DistantWeather, RenderViews::Weather}) {
+        bgfx::setViewClear(weather, BGFX_CLEAR_NONE);
+        bgfx::setViewTransform(weather, view_g, proj_g);
+        bgfx::setViewRect(weather, 0, 0, (uint16_t)res.x, (uint16_t)res.y);
+    }
     // Shadow views always run first, whether or not they are used.
     RenderViews::applyOrder(RenderViews::MaxShadowViews);
     if (camera.terrainSky) {
@@ -323,8 +325,11 @@ void Renderer::drawVB(const DrawVertexBufferCmd &cmd) {
             state = BGFX_STATE_WRITE_RGB | BGFX_STATE_DEPTH_TEST_LESS |
                     BGFX_STATE_BLEND_ADD;
             break;
+        case DrawLayer::GAME_DISTANT_WEATHER:
         case DrawLayer::GAME_WEATHER:
-            view = RenderViews::Weather;
+            view = cmd.layer == DrawLayer::GAME_DISTANT_WEATHER
+                       ? RenderViews::DistantWeather
+                       : RenderViews::Weather;
             state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
                     BGFX_STATE_DEPTH_TEST_LESS | BGFX_STATE_BLEND_ALPHA;
             break;

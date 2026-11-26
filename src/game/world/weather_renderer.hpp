@@ -5,16 +5,14 @@
 
 #include "render/render_target.hpp"
 #include "render/renderer_api.hpp"
-#include "world/world_weather.hpp"
+#include "weather_presentation.hpp"
 
 namespace snow {
 class SnowTerrain;
 }
 
-// Near precipitation as world-space particles (docs/handoff/weather.md, step
-// 09). Rain streaks and snowflakes live in a small box around the eye, are
-// depth-tested against the loaded world and drift with the sampled wind. The
-// far view is still the sky's cloud layer; this only supplies the near field.
+// Dated regional curtains and exposed, world-space near particles share the
+// weather field and depth-test against the world.
 class WeatherRenderer {
    public:
     // Particle counts at full visual density. Actual counts scale with
@@ -24,27 +22,56 @@ class WeatherRenderer {
     static constexpr uint32_t InstanceStride = 32;  // two vec4 per particle
 
     explicit WeatherRenderer(IRenderer& renderer);
+    ~WeatherRenderer();
     WeatherRenderer(const WeatherRenderer&) = delete;
     WeatherRenderer& operator=(const WeatherRenderer&) = delete;
 
-    // weather: sampled presentation; gameDays drives deterministic fall and
-    // drift, seed keeps particle placement stable for a world. Does nothing
-    // when there is no precipitation or the eye is underwater.
-    void render(RenderTarget& target, const Camera& camera,
-                const world_weather::Sample& weather, double gameDays,
-                double windTravelX, double windTravelZ, uint64_t seed,
+    struct Frame {
+        double modelDays, visualDays;
+        double windTravelX, windTravelZ;
+        float distance, aspect;
+        int force = 0;
+        std::optional<weather_presentation::Fixture> fixture;
+        bool drawPrecipitation = true;
+        int64_t firstCurrentWeatherInterval = 0;
+    };
+
+    void render(RenderTarget& target, Camera& camera, const World& world,
+                const world_weather::Sample& localWeather, const Frame& frame,
                 const snow::SnowTerrain& terrain);
 
     uint32_t particleCount() const { return drawn; }
+    uint32_t regionCount() const { return farDrawn ? wetRegions : 0; }
+    unsigned summaryRebuilds() const { return field.rebuilds(); }
 
    private:
-    IRenderer& renderer;
+    void updateWeatherMap(Camera& camera, const World& world,
+                          const Frame& frame);
+    void renderDistant(RenderTarget& target, const Camera& camera,
+                       const Frame& frame);
+    Vec2 particleDensity(const Camera& camera, float x, float z) const;
+
     MeshHandle quad;
     ShaderProperty right;
     ShaderProperty up;
     ShaderProperty sun;
     ShaderProperty skyWeather;
+    ShaderProperty curtainFade;
+    ShaderProperty curtainTime;
+    ShaderProperty gridTexture;
+    ShaderProperty gridProjection;
+    ShaderProperty gridLimits;
+    ShaderProperty gridAnchor;
+    bgfx::TextureHandle weatherTexture = BGFX_INVALID_HANDLE;
     bgfx::InstanceDataBuffer instances{};
+    bgfx::InstanceDataBuffer farInstances{};
     std::string shader = "weather_particles";
+    std::string curtainShader = "weather_curtains";
+    weather_presentation::Field field;
+    using WeatherPixel = std::array<uint8_t, 4>;
+    std::array<WeatherPixel, weather_presentation::Field::Capacity> pixels{};
+    uint32_t wetRegions = 0;
+    bool uploaded = false;
     uint32_t drawn = 0;
+    uint32_t farDrawn = 0;
 };

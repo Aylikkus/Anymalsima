@@ -284,8 +284,10 @@ TEST(hydrology_lod_fallback_refines_visible_water) {
     SurfaceSampler exact(world, assets);
     const auto p = center(First);
     CHECK(!preview.waterAt(p.x, p.y).wet());
+    CHECK(!exact.submerged(p.x, p.y, 428.f, true));
     CHECK(!exact.submerged(p.x, p.y, 500.f));
     CHECK(exact.submerged(p.x, p.y, 428.f));
+    CHECK(exact.submerged(p.x, p.y, 428.f, true));
 
     const std::atomic_bool cancelled{false};
     const TerrainLod::Patch patch{p.x - 32, p.y - 32, 2};

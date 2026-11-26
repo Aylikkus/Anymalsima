@@ -32,25 +32,86 @@
 #include "world/location_manager.hpp"
 #include "world/save/save_catalog.hpp"
 #include "world/sky_height_map.hpp"
+#include "world/snow_settlement.hpp"
 #include "world/sunlight_propagator.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/tree_renderer.hpp"
 #include "world/tree_simulation.hpp"
+#include "world/weather_renderer.hpp"
+
+namespace {
+
+World weatherDistanceScene() {
+    auto world = lodScene();
+    world.genSettings = WorldGenSettings::fromSeed(2024);
+    world.genSettings.width = world.width;
+    world.genSettings.height = world.height;
+    world.min_temp_c = world.genSettings.min_temp_c;
+    world.max_temp_c = world.genSettings.max_temp_c;
+    world.generatorVersion = WorldMeta::GeneratorVersion;
+    // Keep the playcheck inland so coastline surveys cannot dominate it.
+    for (auto& region : world.regions) {
+        region.land_height_m = 335 + region.land_height_m / 2;
+        region.land_height_sea_m = region.land_height_m - SEA_LEVEL_Y;
+        region.height = (region.land_height_m - 256) / 256.f;
+    }
+    return world;
+}
+
+// This comparison runs on distant terrain alone. Expose its surface to the
+// near particle query without opening any chunk regions.
+class WeatherSmokeTerrain final : public snow::SnowTerrain {
+   public:
+    WeatherSmokeTerrain(SurfaceSampler& surface, WorldWrap wrap)
+        : surface(surface), wrap(wrap) {
+        solid.tryAdd({1, 1, {}});
+    }
+
+    std::optional<tile_geometry::CellGeometry> cell(TilePos) const override {
+        return solid;
+    }
+    int wrapX(int x) const override { return int(wrap.wrapTile(x)); }
+    bool inBounds(int, int z) const override {
+        return z >= 0 && z < surface.depth();
+    }
+    int minY() const override { return 0; }
+    int maxY() const override { return WORLD_HEIGHT_Y; }
+    int top(int x, int z) const override {
+        return std::max(surface.height(x, z), SEA_LEVEL_Y);
+    }
+
+   private:
+    SurfaceSampler& surface;
+    WorldWrap wrap;
+    tile_geometry::CellGeometry solid;
+};
+
+}  // namespace
 
 int main(int argc, char** argv) {
     const std::string output = argc > 1 ? argv[1] : "build/lod_capture";
     const int maxFrames = argc > 2 ? std::stoi(argv[2]) : 1200;
+    const std::string scenario = argc > 3 ? argv[3] : "mountains";
+    if (scenario == "weather_distance_save") {
+        const auto world = weatherDistanceScene();
+        const auto slot = save_catalog::create(world, {0, 48}, output);
+        std::cout << slot.directory << '\n';
+        return 0;
+    }
     bgfx::Init init{};
     init.type = bgfx::RendererType::Vulkan;
     init.resolution.width = 0;
     init.resolution.height = 0;
     if (!bgfx::init(init)) return 2;
     int result = 0;
-    const std::string scenario = argc > 3 ? argv[3] : "mountains";
     const bool weatherSeam = scenario == "weather_seam";
     const bool weatherWalk = scenario == "weather_walk";
     const bool weather = scenario == "weather" || weatherSeam || weatherWalk;
+    const bool weatherDistance = scenario == "weather_distance";
+    const bool naturalWeather =
+        weatherDistance && std::getenv("SMOKE_WEATHER_NATURAL");
+    const bool dryComparison = std::getenv("SMOKE_WEATHER_DRY");
     const bool riverScene = scenario == "river";
     const char* savedScene = std::getenv("SMOKE_SAVE");
     const bool savedWalk = savedScene && (scenario == "saved_walk" ||
@@ -99,10 +160,11 @@ int main(int argc, char** argv) {
         assets.buildMaterialTextureArrays();
         // Seams need coordinates as large as a full-size world (~64k tiles).
         // Wrap: 128 regions = 16384 tiles, a whole number of LOD roots.
-        auto world = riverScene ? riverLodScene(256)
-                                : lodScene(wrapScene ? 128
-                                           : seams   ? 480
-                                                     : 96);
+        auto world = weatherDistance ? weatherDistanceScene()
+                     : riverScene    ? riverLodScene(256)
+                                     : lodScene(wrapScene ? 128
+                                                : seams   ? 480
+                                                          : 96);
         std::optional<WorldMeta::CameraState> savedCamera;
         if (savedScene) {
             SaveSlot slot{savedScene, {}};
@@ -236,6 +298,9 @@ int main(int argc, char** argv) {
                            : 0,
                        0, TerrainLod::QualityCount - 1);
         auto terrainSettings = TerrainLod::Qualities[terrainQuality];
+        if (weatherDistance)
+            terrainSettings.viewDistance =
+                float(terrainSettings.chunkRadius * 256 + 512);
         if (savedWalk && scenario == "saved_walk")
             terrainSettings.gpuBudget /= 2;
         if (const char* radius = std::getenv("SMOKE_RADIUS"))
@@ -284,8 +349,12 @@ int main(int argc, char** argv) {
             uint16_t n = 0;
             for (uint16_t i = 0; i < shadowViews; ++i)
                 order[n++] = bgfx::ViewId(RenderViews::ShadowBase + i);
-            for (bgfx::ViewId id : {2, 0, 1, 3}) order[n++] = id;
-            for (bgfx::ViewId id = 4; id < RenderViews::ShadowBase; ++id)
+            for (bgfx::ViewId id :
+                 {RenderViews::Sky, RenderViews::World,
+                  RenderViews::DistantWeather, RenderViews::Weather,
+                  bgfx::ViewId(1), bgfx::ViewId(3)})
+                order[n++] = id;
+            for (bgfx::ViewId id = 6; id < RenderViews::ShadowBase; ++id)
                 order[n++] = id;
             bgfx::setViewOrder(0, n, order);
         };
@@ -307,7 +376,9 @@ int main(int argc, char** argv) {
         // View 1: additive glow after the world (RenderViews::Glow in the
         // game). Captures blit in a frame of their own (view 3).
         applyOrder(0);
-        for (bgfx::ViewId view : {0, 1, 2}) {
+        for (bgfx::ViewId view :
+             {RenderViews::World, bgfx::ViewId(1), RenderViews::Sky,
+              RenderViews::DistantWeather, RenderViews::Weather}) {
             bgfx::setViewFrameBuffer(view, framebuffer);
             bgfx::setViewRect(view, 0, 0, 1280, 720);
         }
@@ -324,6 +395,29 @@ int main(int argc, char** argv) {
                 camera = {{6144, 700, 6144}, .7f, -.55f, 40};
         }
         SurfaceSampler surface(world, assets);
+        constexpr double distanceDate = 1. / 3.;
+        const weather_presentation::Fixture distanceFixture{0, 48};
+        std::unique_ptr<WeatherRenderer> distantWeather;
+        WeatherSmokeTerrain distantTerrain(surface, world.wrap());
+        const auto placeWeatherCamera = [&](float x, float above) {
+            constexpr int z = 48 * 128 + 98;
+            const int at = int(world.wrap().wrapTile(int(std::floor(x))));
+            camera = {{float(world.wrap().wrapX(x)),
+                       float(distantTerrain.top(at, z)) + above, float(z)},
+                      -.76f,
+                      .14f,
+                      0};
+        };
+        if (weatherDistance) {
+            distantWeather = std::make_unique<WeatherRenderer>(renderer);
+            placeWeatherCamera(44, 104);
+            skyState = skyAtTime(distanceDate, world.genSettings.seed);
+            if (naturalWeather) {
+                constexpr int x = 9800, z = 10600;
+                camera = {{x, float(distantTerrain.top(x, z)) + 82.f, z},
+                          bx::kPiHalf, .02f, 0};
+            }
+        }
         // The shape scene straddles the X face of a voxel chunk.
         constexpr int ShapeX = 6144, ShapeZ = 6148;
         int shapeY = 0;
@@ -657,6 +751,9 @@ int main(int argc, char** argv) {
             int finishedSpacing = 0;
             const auto perfStart = std::chrono::steady_clock::now();
             std::vector<double> cpuFrames, gpuFrames, lodFrames;
+            std::vector<double> distanceFrames, distanceWeatherMs;
+            unsigned weatherRebuilds = 0, weatherDraws = 0;
+            unsigned peakRegions = 0, peakParticles = 0;
             const auto pctl = [](std::vector<double> values, double q) {
                 if (values.empty()) return 0.0;
                 std::sort(values.begin(), values.end());
@@ -683,6 +780,9 @@ int main(int argc, char** argv) {
                        sunUpdateMs = 0, blockUpdateMs = 0, uploadMs = 0,
                        volumesMs = 0;
                 auto mark = SmokeClock::now();
+                if (weatherDistance && phase == 1)
+                    placeWeatherCamera(44.f - distanceFrames.size(),
+                                       104.f - 1.43f * distanceFrames.size());
                 if (approaching && approach.state == 1) {
                     const double dx = approach.targetX - camera.position.x;
                     const double dz = approach.targetZ - camera.position.z;
@@ -1053,15 +1153,50 @@ int main(int argc, char** argv) {
                 float view[16], projection[16];
                 // Camera-relative world view, as in Renderer: the eye is the
                 // origin and draws carry relativeTransform().
-                bx::mtxLookAt(
-                    view, {0, 0, 0},
-                    {camera.position.x - eye.x, camera.position.y - eye.y,
-                     camera.position.z - eye.z},
-                    {0, 1, 0});
+                const auto direction = camera.direction();
+                bx::mtxLookAt(view, {0, 0, 0},
+                              {direction.x, direction.y, direction.z},
+                              {0, 1, 0});
                 bx::mtxProj(projection, 60.f, 1280.f / 720, 1.f, 4608.f,
                             bgfx::getCaps()->homogeneousDepth);
                 bgfx::setViewTransform(0, view, projection);
                 bgfx::setViewTransform(1, view, projection);
+                double distantMs = 0;
+                if (distantWeather) {
+                    bgfx::setViewTransform(RenderViews::DistantWeather, view,
+                                           projection);
+                    bgfx::setViewTransform(RenderViews::Weather, view,
+                                           projection);
+                    const auto start = SmokeClock::now();
+                    Camera skyCamera = camera;
+                    skyCamera.sky = skyState;
+                    const auto pos = camera.eye();
+                    auto local = world_weather::at(world, pos.x, pos.z,
+                                                   distanceDate, pos.y);
+                    const auto wrap = world.wrap();
+                    const int rx = int(
+                        wrap.wrapRegion(weather_presentation::regionAt(pos.x)));
+                    if (!naturalWeather)
+                        distanceFixture.apply(local, wrap, rx,
+                                              distanceFixture.z);
+                    skyCamera.sky.weather = {
+                        local.cloudCover, local.visualDensity,
+                        local.snowFraction, float(distanceDate * 24)};
+                    camera.underwater = lod.eyeUnderwater();
+                    skyCamera.underwater = camera.underwater;
+                    distantWeather->render(
+                        target, skyCamera, world, local,
+                        {distanceDate, distanceDate, 0, 0,
+                         float(terrainSettings.chunkRadius * 256), 1280.f / 720,
+                         0,
+                         naturalWeather ? std::nullopt
+                                        : std::optional(distanceFixture),
+                         !dryComparison},
+                        distantTerrain);
+                    skyState = skyCamera.sky;
+                    camera.weatherMap = skyCamera.weatherMap;
+                    distantMs = since(start);
+                }
                 // NO_GLARE=1 renders without glare, for image diffs.
                 if (lights && !std::getenv("NO_GLARE"))
                     lightRenderer.drawGlare(target, camera, {1280, 720});
@@ -1092,17 +1227,26 @@ int main(int argc, char** argv) {
                         bgfx::setInstanceDataBuffer(draw.instances);
                     const bool glow = draw.layer == DrawLayer::GAME_GLOW;
                     const bool shadow = draw.layer == DrawLayer::SHADOW;
+                    const bool far =
+                        draw.layer == DrawLayer::GAME_DISTANT_WEATHER;
+                    const bool precip =
+                        far || draw.layer == DrawLayer::GAME_WEATHER;
                     bgfx::setState(
                         glow     ? BGFX_STATE_WRITE_RGB |
                                        BGFX_STATE_DEPTH_TEST_LESS |
                                        BGFX_STATE_BLEND_ADD
                         : shadow ? BGFX_STATE_WRITE_R | BGFX_STATE_WRITE_Z |
                                        BGFX_STATE_DEPTH_TEST_LESS
+                        : precip ? BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
+                                       BGFX_STATE_DEPTH_TEST_LESS |
+                                       BGFX_STATE_BLEND_ALPHA
                                  : BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A |
                                        BGFX_STATE_WRITE_Z |
                                        BGFX_STATE_DEPTH_TEST_LESS);
                     bgfx::submit(glow     ? 1
                                  : shadow ? draw.view
+                                 : far    ? RenderViews::DistantWeather
+                                 : precip ? RenderViews::Weather
                                           : 0,
                                  assets.getProgram(*draw.shader));
                     ++draws;
@@ -1188,7 +1332,7 @@ int main(int argc, char** argv) {
                         output +
                             (travel || structure || seams || wrapScene ||
                                      lights || riverScene || shapeLighting ||
-                                     weather
+                                     weather || weatherDistance
                                  ? "_" + std::to_string(phase)
                                  : "") +
                             (transition ? "_transition" : "") + ".ppm",
@@ -1391,6 +1535,51 @@ int main(int argc, char** argv) {
                 renderer.flush();
                 sections[5] = since(mark);
                 sections[4] = since(frameStart);
+                if (distantWeather) {
+                    const bool measure =
+                        phase == 1 || (phase == 0 && settled > 10);
+                    if (measure) {
+                        distanceFrames.push_back(sections[4]);
+                        distanceWeatherMs.push_back(distantMs);
+                        weatherRebuilds += distantWeather->summaryRebuilds();
+                        const auto regions = distantWeather->regionCount();
+                        weatherDraws += regions != 0;
+                        peakRegions = std::max(peakRegions, regions);
+                        peakParticles = std::max(
+                            peakParticles, distantWeather->particleCount());
+                    }
+                    if (distanceFrames.size() == (phase == 0 ? 32u : 64u)) {
+                        std::cout
+                            << "distance_weather preset=" << terrainQuality
+                            << " phase="
+                            << (phase == 0 ? "stationary" : "crossing")
+                            << " frames=" << distanceFrames.size()
+                            << " summary_rebuilds=" << weatherRebuilds
+                            << " distant_draws=" << weatherDraws
+                            << " peak_regions=" << peakRegions
+                            << " peak_particles=" << peakParticles
+                            << " frame_ms_p50=" << pctl(distanceFrames, .50)
+                            << " frame_ms_p95=" << pctl(distanceFrames, .95)
+                            << " weather_ms_p95="
+                            << pctl(distanceWeatherMs, .95)
+                            << " chunk_work=" << chunks.hasGenerationWork()
+                            << std::endl;
+                        if (chunks.hasGenerationWork() ||
+                            (phase == 0 && weatherRebuilds != 0) ||
+                            (dryComparison ? weatherDraws != 0
+                                           : weatherDraws == 0) ||
+                            (phase == 1 && !dryComparison && !peakParticles))
+                            result = 1;
+                        ++phase;
+                        if (naturalWeather) break;
+                        settled = 0;
+                        distanceFrames.clear();
+                        distanceWeatherMs.clear();
+                        weatherRebuilds = weatherDraws = peakRegions =
+                            peakParticles = 0;
+                    }
+                    if (phase == 2 && settled >= 10) break;
+                }
                 if (weather) {
                     if (phase == 0 && settled == 10) {
                         weatherStart = frame + 1;
@@ -2277,7 +2466,7 @@ int main(int argc, char** argv) {
                 if (savedWalk && frame >= WalkEnd && settled >= 60 &&
                     finishedSpacing == 1)
                     break;
-                if (settled >= 10) {
+                if (settled >= 10 && !weatherDistance) {
                     if (savedScene || weather) continue;
                     if (!travel || phase >= 2) break;
                     ++phase;
@@ -2320,6 +2509,9 @@ int main(int argc, char** argv) {
             }
             if (weather && (!weatherMeasured ||
                             (weatherWalk && (phase != 2 || settled < 10))))
+                result = 1;
+            if (weatherDistance && (naturalWeather ? phase != 1
+                                                   : phase != 2 || settled < 10))
                 result = 1;
             if (riverScene &&
                 (phase < 3 || settled < 10 || !capturedTransition))

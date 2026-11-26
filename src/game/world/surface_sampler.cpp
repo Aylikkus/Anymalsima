@@ -213,7 +213,7 @@ bool SurfaceSampler::hasUnrefinedWater(int x0, int z0, int x1, int z1) const {
            world.hydrology->needsRefinement(x0, z0, x1, z1);
 }
 
-bool SurfaceSampler::submerged(int x, int z, float y) {
+bool SurfaceSampler::submerged(int x, int z, float y, bool preview) {
     if (!editAt(x, z) && (!reservoirs || (reservoirs->cells.empty() &&
                                           reservoirs->pools.empty()))) {
         const int ceiling = world.hydrology
@@ -221,7 +221,8 @@ bool SurfaceSampler::submerged(int x, int z, float y) {
                                 : WaterSurface::SeaBoundary;
         if (y >= ceiling) return false;
     }
-    return waterAt(x, z).submerged(y, height(x, z));
+    const auto water = sampleWater(x, z, preview);
+    return water.wet() && water.submerged(y, height(x, z));
 }
 
 bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
@@ -250,13 +251,21 @@ bool SurfaceSampler::uniformWater(int x0, int z0, int x1, int z1,
 }
 
 WaterSurface SurfaceSampler::waterAt(int x, int z) {
+    return sampleWater(x, z, false);
+}
+
+WaterSurface SurfaceSampler::sampleWater(int x, int z, bool preview) {
     x = wrapX(x);
     z = std::clamp(z, 0, depth() - 1);
     const uint64_t key = (uint64_t(x) << 32) | unsigned(z);
-    if (auto it = waterSamples.find(key); it != waterSamples.end())
-        return it->second;
+    if (!preview)
+        if (auto it = waterSamples.find(key); it != waterSamples.end())
+            return it->second;
     const bool needsHeight = !world.hydrology || world.hydrology->riverAt(x, z);
-    auto result = generatedWater(x, z, needsHeight ? height(x, z) : -1);
+    const int baseGround = needsHeight ? height(x, z) : -1;
+    auto result = preview && world.hydrology
+                      ? world.hydrology->previewWaterAt(x, z, baseGround)
+                      : generatedWater(x, z, baseGround);
     if (reservoirs &&
         (reservoirs->levels.contains(result.body) ||
          reservoirs->riverStages.contains(result.reach) ||
@@ -264,13 +273,20 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
         const int ground = height(x, z);
         // A provisional coastal sample does not prove membership as the
         // ocean recedes. Resolve the actual baseline before applying a level.
-        if (provisionalWater() && world.hydrology &&
+        if (!preview && provisionalWater() &&
             reservoirs->levels.contains(result.body))
             result = world.hydrology->waterAt(x, z, ground);
         const auto body = result.body;
-        result = reservoirs->projectStanding(world.hydrology.get(), x, z,
-                                             ground, result);
-        if (!result.wet())
+        // A lowered standing body may need a new connectivity survey.
+        // Wait for the resident voxel's answer before applying that effect.
+        if (preview && body && !result.reach &&
+            reservoirs->level(body, result.surfaceY) < result.surfaceY)
+            result = {};
+        else
+            result = reservoirs->projectStanding(
+                preview ? nullptr : world.hydrology.get(), x, z, ground,
+                result);
+        if (!preview && !result.wet())
             result = reservoirs->projectLakeInflow(world.hydrology.get(), x, z,
                                                    ground, body);
     }
@@ -284,8 +300,10 @@ WaterSurface SurfaceSampler::waterAt(int x, int z) {
         (reservoirs->poolIntersects(x, z, x + 1, z + 1, width()) ||
          reservoirs->localTop(x, z) >= 0 || reservoirs->streams.contains(key)))
         result = reservoirs->projectLocal(x, z, height(x, z), result);
-    if (waterSamples.size() >= 65536) waterSamples.clear();
-    waterSamples.emplace(key, result);
+    if (!preview) {
+        if (waterSamples.size() >= 65536) waterSamples.clear();
+        waterSamples.emplace(key, result);
+    }
     return result;
 }
 

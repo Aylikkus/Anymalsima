@@ -253,6 +253,10 @@ class GameplayState : public IGameState {
     bool weatherTravelHold = false;
     void setupWeatherTravelFixture();
     void visitWeatherTravelSite(size_t site);
+
+    std::optional<weather_presentation::Fixture> distantWeatherFixture;
+    double weatherFrameMs = 0;
+    void visitDistantWeatherSite(bool seam, bool boundary);
     void updateShapeControls();
     // Weather presentation and the session-scoped test controls (step 09).
     // weatherForce is 0 for the sampled field, then Clear/Cloudy/Rain/Snow.

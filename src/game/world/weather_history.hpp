@@ -43,24 +43,33 @@ struct IntervalSummary {
     int64_t interval;
     int cellX, cellZ;
     world_weather::Sample weather;
-
-    static constexpr int WeatherVersion = world_weather::ModelVersion;
+    int model;
     static constexpr uint32_t SimulationVersion =
         weather_history::SimulationVersion;
 };
+
+// Shared by the replay cache and the bounded regional presentation cache.
+inline world_weather::Sample sampleCell(
+    const World& world, int cellX, int cellZ, int64_t interval,
+    int model = world_weather::ModelVersion) {
+    return world_weather::at(
+        world, (cellX + .5) * CellSize, (cellZ + .5) * CellSize,
+        (double(interval) + .5) / IntervalsPerDay, 0, model);
+}
 
 // Dated weather cells can be queried without streaming voxel chunks. Cache
 // whole days with lazy sampling so a normal update only pays for its interval.
 class Cache {
    public:
-    IntervalSummary at(const World& world, int x, int z, int64_t interval) {
+    IntervalSummary at(const World& world, int x, int z, int64_t interval,
+                       int model = world_weather::ModelVersion) {
         interval = std::max<int64_t>(0, interval);
         const int cx = int(world.wrap().wrapTile(x)) / CellSize;
         const int maxZ = std::max(0, world.height * WorldWrap::RegionSize - 1);
         const int cz =
             (world.height > 0 ? std::clamp(z, 0, maxZ) : z) / CellSize;
         const auto day = interval / IntervalsPerDay;
-        const Key key{cx, cz, day};
+        const Key key{cx, cz, day, model};
         auto found = days.find(key);
         if (found == days.end()) {
             if (days.size() == Capacity) {
@@ -71,15 +80,12 @@ class Cache {
             order.push_back(key);
         }
         auto& sample = found->second[size_t(interval % IntervalsPerDay)];
-        if (!sample)
-            sample = world_weather::at(
-                world, (cx + .5) * CellSize, (cz + .5) * CellSize,
-                (double(interval) + .5) / IntervalsPerDay, 0);
-        return {interval, cx, cz, *sample};
+        if (!sample) sample = sampleCell(world, cx, cz, interval, model);
+        return {interval, cx, cz, *sample, model};
     }
 
    private:
-    using Key = std::tuple<int, int, int64_t>;
+    using Key = std::tuple<int, int, int64_t, int>;
     static constexpr size_t Capacity = 64;
     std::map<Key,
              std::array<std::optional<world_weather::Sample>, IntervalsPerDay>>

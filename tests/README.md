@@ -216,6 +216,41 @@ clouds drift with the sampled wind. Wait for streaming after a site jump. The
 expected results and the step 09 replay are in the
 [weather handoff](../docs/handoff/weather.md#step-09--2026-11-26).
 
+### Weather at distance
+
+`ANYM_WEATHER_DISTANCE_FIXTURE=1` starts gameplay paused and adds four
+camera controls for a clear region beside heavy rain, snow and dry cloud.
+The debug panel shows the eye coordinates, model date, summary rebuilds,
+curtain draw count, particle count and frame time. The
+[Playcheck E instructions](../docs/handoff/weather.md#playcheck-e--weather-from-afar)
+give the save and positions.
+
+On a Vulkan device, capture the paused ridge and seam crossing for every
+terrain detail preset from the repository root.
+
+```bash
+cmake --build build --target lod_render_smoke --parallel 6
+mkdir -p build/weather-distance-v2-check
+for preset in 0 1 2; do
+  SMOKE_TERRAIN="$preset" build/tests/lod_render_smoke \
+    "build/weather-distance-v2-check/preset-$preset" 6500 weather_distance
+done
+SMOKE_TERRAIN=0 SMOKE_WEATHER_DRY=1 build/tests/lod_render_smoke \
+  build/weather-distance-v2-check/dry 6500 weather_distance
+SMOKE_TERRAIN=2 SMOKE_WEATHER_NATURAL=1 build/tests/lod_render_smoke \
+  build/weather-distance-v2-check/natural 6500 weather_distance
+```
+
+The inland smoke scene uses seed 2024 at world day 1/3. It measures 32
+stationary frames and 64 crossing frames, then captures the settled view
+from inside the rain region. The dry run keeps the same regional clouds and
+camera route and removes precipitation for image comparison. The natural
+run looks east from X/Z 9800/10600 at a seeded storm beyond the dry
+foreground. The harness draws distant terrain over the weather range plus
+512 m. It uses a generated-surface query for near particle occlusion so it
+can exercise both passes with zero voxel generation work. Gameplay uses
+the loaded world and checks roofs and shapes.
+
 ## Natural shape budget
 
 `shape_benchmark` reports natural ramp coverage, column and mesh time,

@@ -743,7 +743,9 @@ TEST(weather_history_full_year_skip_visit_order) {
     Fixture terrain;
     terrain.x1 = world.width * WorldWrap::RegionSize;
     terrain.periodX = terrain.x1;
-    terrain.highY = 100;
+    // The stronger storm model can accumulate more than this fixture's old
+    // 39 m of headroom. Exercise replay below the world ceiling.
+    terrain.highY = WORLD_HEIGHT_Y;
     constexpr int A = 1, B = 65;
     solid(terrain, A, 60, 0);
     solid(terrain, B, 60, 0);
@@ -802,7 +804,7 @@ TEST(weather_history_snow_legacy_and_bad_versions) {
     }
     const auto before = snow.encode();
     auto bad = before;
-    bad[44] = std::byte{0xff};  // history simulation version in empty v3
+    bad[44] = std::byte{0xff};  // history simulation version in an empty ledger
     CHECK(!snow.restore(bad));
     CHECK(snow.encode() == before);
 }
@@ -826,6 +828,43 @@ TEST(weather_history_pending_transfer_survives_checkpoint) {
     EQUAL(loaded.volumeAt(0, 0), 47500, "old snow and transfer thaw together");
     EQUAL(loaded.depositedVolume(), 122500, "past snowfall is counted once");
     EQUAL(loaded.pendingVolume(), 0, "transit queue drained");
+}
+
+TEST(weather_history_keeps_legacy_model_before_upgrade) {
+    Fixture terrain;
+    BinaryWriter legacy;
+    legacy.writeTag("SNOW");
+    legacy.write<uint32_t>(3);
+    legacy.write<uint64_t>(0);  // supplied
+    legacy.write<uint64_t>(0);  // sink
+    legacy.write<int64_t>(0);   // melted
+    legacy.write<uint32_t>(0);  // columns
+    legacy.write<uint32_t>(0);  // pending transfers
+    legacy.write<uint32_t>(0);  // meltwater
+    legacy.write<uint32_t>(weather_history::SimulationVersion);
+    legacy.write<uint32_t>(world_weather::LegacyModelVersion);
+    legacy.write<double>(0);     // epoch
+    legacy.write<double>(2.01);  // checkpoint within an interval
+    legacy.write<uint32_t>(1);
+    legacy.write<int32_t>(0);
+    legacy.write<int32_t>(0);
+    legacy.write<double>(2.01);  // applied footprint
+    legacy.write<uint32_t>(0);   // forces
+
+    snow::SnowSettlement upgraded(terrain);
+    CHECK(upgraded.restore(legacy.take()));
+    EQUAL(upgraded.weatherDay(0, 0), 2.01, "keep the applied date");
+    EQUAL(upgraded.weatherDay(1, 0), 0., "keep the start date for new sites");
+    const auto current = weather_history::intervalAt(2.01);
+    EQUAL(upgraded.modelForWeatherInterval(current),
+          world_weather::LegacyModelVersion, "finish the partial interval");
+    EQUAL(upgraded.modelForWeatherInterval(current + 1),
+          world_weather::ModelVersion, "apply the new storm model after it");
+    upgraded.checkpointWeather(3.);
+    snow::SnowSettlement reopened(terrain);
+    CHECK(reopened.restore(upgraded.encode()));
+    EQUAL(reopened.firstCurrentWeatherInterval(),
+          upgraded.firstCurrentWeatherInterval(), "persist the model switch");
 }
 
 TEST(snow_cover_refreshes_only_changed_resident_columns) {

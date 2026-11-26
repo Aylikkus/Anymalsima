@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–11 complete · Step 12 pending.**
+**Steps 01–12 complete · Step 13 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -23,7 +23,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 09 | Regional weather, presentation and inspection | Complete | C · Weather and seasons |
 | 10 | Exposure, snowfall and outdoor melt | Complete | |
 | 11 | Unloaded weather history and elapsed-time reconciliation | Complete | D · Shelter and travel |
-| 12 | Regional weather at distance | Pending | E · Weather from afar |
+| 12 | Regional weather at distance | Complete | E · Weather from afar |
 | 13 | Polar baselines, vertical runs and excavation | Pending | |
 | 14 | Deep-pack LOD, structures and travel | Pending | F · Arctic shelter |
 | 15 | Local heating and cooling from blocks and items | Pending | |
@@ -1236,3 +1236,160 @@ still drops after using x7200. Further optimization is deferred to steps
 13–14. Step 13 will evaluate predefined regional snow depths to reduce
 per-footprint work, and step 14 will repeat the accelerated-clock
 performance check.
+
+### Step 12 · 2026-11-26
+
+Weather presentation selects regions inside the view and the preset's
+512 m, 768 m or 1,024 m range. A fixed cache holds the two surrounding
+Step 11 dated samples from the weather cell nearest each region's centre.
+The installed weather and simulation versions are fixed for that cache's
+lifetime. Interpolation over the dated samples keeps changes continuous.
+Phase is derived at the representative regional terrain height. This is
+a presentation approximation at 128 m resolution. Per-column settlement
+still uses its own geometry, weather cells and replay dates.
+
+One instanced draw submits as many as five depth-tested slices per visible
+wet region. The shader feathers across 8 m at the region edge, tints rain
+with regional cloud cover, and gives snow a lighter, softer veil. The far
+pass fades in from 18 m to 26 m horizontally from the eye while the near
+particle pass fades out using the complementary weight. Near particles
+sample the region they occupy and still check whether solid geometry above
+them intercepts precipitation. The far pass takes world-map metadata and
+dated weather samples. It has no chunk or voxel access. Both passes use
+the camera-relative world depth buffer and the paused visual clock.
+
+#### Playcheck E · Weather from afar
+
+Use the inland seed **2024** fixture at **day 1/3 (08:00)**.
+The save generator runs headless. Keep its working directory separate
+from regular saves.
+
+```bash
+cmake --build build --target app lod_render_smoke --parallel 6
+mkdir -p build/weather-distance-v2-playcheck/saves
+build/tests/lod_render_smoke build/weather-distance-v2-playcheck/saves 0 weather_distance_save
+test -e build/weather-distance-v2-playcheck/assets ||
+  ln -s ../src/app/assets build/weather-distance-v2-playcheck/assets
+(cd build/weather-distance-v2-playcheck && ANYM_WEATHER_DISTANCE_FIXTURE=1 ../src/app/app)
+```
+
+1. Open **Load World** and select the seed 2024 slot. Click **Weather ridge**.
+   The eye is at X/Z **172/6242** at 104 m over the generated surface.
+   Clear is region (1, 48), heavy rain is (0, 48) to the west, snow is
+   (1, 49) ahead to the south, and cloudy/dry is (0, 49). Look left for
+   rain under a dark cloud bank and right for lighter snow under its
+   cloud bank. The foreground and the sky directly overhead should stay clear.
+2. Click **Weather boundary** for X/Z **136/6242**, 8 m above the ground
+   and facing west. Hold **W** briefly to move across X 128 into rain,
+   then **S** to return. Curtains should give way to nearby streaks
+   as you enter, with the foreground clear on the dry side. The debug
+   panel shows both instance counts and the voxel-streaming counters.
+3. Repeat with **Weather seam** at X/Z **44/6242** and **Weather seam edge**
+   at **8/6242**. The west neighbour is now region **(95, 48)**.
+   Cross X 0 and check that the rain stays in the west region through
+   the wrap. Compare Low with Medium or High by changing terrain detail
+   in Settings and reloading the world.
+4. The fixture opens paused. Use the clock button to resume and pause again.
+   The curtains and particles should stop moving while the camera can still
+   cross the boundary. Use Escape and reload the same slot to check its date.
+   Select the same named site again to restore the fixture's layout.
+   The weather force is session-only and leaves physical accumulation on
+   the saved weather model.
+
+#### Initial execution checks
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests lod_render_smoke --parallel 6
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+```
+
+Both Vulkan shader stages compiled, the Release app and device harness
+built, and all 449 gameplay tests passed. The new tests cover the four
+conditions, X wrapping, the Z edges, the near fade, reuse of dated samples
+across presets, and deterministic sampling after a time jump and reload.
+
+The [Vulkan comparison](../../tests/README.md#weather-at-distance) used seed
+2024 at day 1/3 with a 1280 × 720 capture. The stationary eye was at X/Z
+36/6242. The crossing moved it west one metre per frame to X −27, while
+descending toward the surface. Both phases stayed paused. Frame time
+includes terrain LOD work, draw submission and flush, excluding the
+harness sleep and capture. Weather CPU time includes the near exposure
+queries against the generated surface in this harness.
+
+| Preset | Phase | Summary rebuilds | Far draws / frames | Peak wet regions / near particles | Frame p50 / p95 (ms) | Weather CPU p95 (ms) |
+|---|---|---:|---:|---:|---:|---:|
+| Low | Stationary | 0 | 32 / 32 | 2 / 0 | 0.58 / 0.68 | 0.013 |
+| Low | Crossing | 3 | 64 / 64 | 2 / 1,204 | 0.93 / 2.01 | 0.627 |
+| Medium | Stationary | 0 | 32 / 32 | 2 / 0 | 0.46 / 0.62 | 0.016 |
+| Medium | Crossing | 6 | 64 / 64 | 2 / 1,204 | 0.60 / 1.10 | 0.581 |
+| High | Stationary | 0 | 32 / 32 | 2 / 0 | 1.06 / 1.14 | 0.022 |
+| High | Crossing | 5 | 64 / 64 | 2 / 1,204 | 1.10 / 2.32 | 0.549 |
+
+All three runs reported zero voxel generation work. The dry control
+submitted zero precipitation draws and particles. The paused ridge
+capture shows the rain bands to the west and the lighter snow veil
+to the south. The post-wrap capture shows near rain streaks on the wet
+side. Captures and logs are under `build/weather-distance-check/`.
+Medium needed more than 2,000 frames for terrain LOD to settle after
+the crossing. The documented command allows 6,000 frames.
+
+#### Playcheck E follow-up · 2026-11-26
+
+The first playcheck found that the coastal fixture stalled after opening the
+save. A main-thread backtrace showed the first frame waiting for a connected
+ocean survey while checking whether the camera was underwater. Unloaded
+camera cells now use published hydrology previews and resident tiles still
+supply exact water. The replacement fixture uses an inland map to keep the
+weather comparison away from ocean survey costs.
+
+The first pass drew repeated sheets with visible ridges, and the camera's
+local cloud cover could leave blue sky above a neighbouring downpour. The
+sky, distant precipitation and near particles now read the same dated
+weather grid. The cloud shader projects weather at its world position and
+varies the cloud base with the regional terrain. The precipitation pass
+accumulates light attenuation through depth-tested samples without placing
+a curtain at the centre of each region. Natural weather interpolates across
+the grid. The four-condition fixture keeps marked edges to make it easy to
+see where the clear side ends.
+
+Weather model 2 uses moving storm systems with a main scale of 3.6 km and
+weaker detail at 1.45 km. The same system controls both cloud cover and
+physical precipitation. Medium and heavy precipitation form broad areas,
+with cloudy/dry edges and clear gaps between systems. Terrain detail selects
+a precipitation and cloud draw range of 1,024 m, 1,536 m or 2,048 m,
+capped by the visible terrain range and half the world circumference.
+Existing snow saves retain their deposits and replay the original weather
+model through the last saved interval if it was partially applied. The
+switch to the new model is recorded in the snow checkpoint.
+
+The Release app rebuilt with both shader programs, and all 451 gameplay
+tests passed. The new coverage checks broad wet systems, legacy weather
+replay after migration, and preview water before and after an exact
+hydrology result is published. In the app, the inland slot loaded through
+**Load World**, accepted the ridge jump, saved on Escape, and reopened at
+08:00. The old coastal copy could enter gameplay again and accept the ridge
+jump. Its exit did not finish within the test window.
+
+The follow-up Vulkan runs sampled 32 stationary and 64 crossing frames at
+1280 × 720. The paused eye started at X/Z 44/6242 and crossed X 0 to −19.
+The harness draws distant terrain through the weather range plus 512 m.
+Each wet run used one distant weather draw per frame, showed two forced
+wet regions, and peaked at 1,001 near particles on the wet side. The dry
+control retained the same clouds and drew zero precipitation. All runs
+reported zero voxel generation work.
+
+| Preset | Summary rebuilds, stationary / crossing | Frame p95, stationary / crossing (ms) | Weather CPU p95, stationary / crossing (ms) |
+|---|---:|---:|---:|
+| Low | 0 / 19 | 0.66 / 1.91 | 0.194 / 0.559 |
+| Medium | 0 / 27 | 1.01 / 1.95 | 0.204 / 0.739 |
+| High | 0 / 35 | 1.92 / 6.01 | 0.258 / 0.654 |
+
+The natural capture uses the same seed and date from X/Z 9800/10600,
+facing east into a broad storm. A final Low repeat after smoothing the
+cloud detail and wrapping the rain texture passed the seam crossing. Its
+stationary and crossing p95 frame times were 0.85 ms and 1.77 ms.
+Captures and logs are under `build/weather-distance-v2-check/`.
+
+The maintainer approved the revised result for Playcheck E and confirmed
+that step 12 is complete.

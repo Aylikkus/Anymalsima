@@ -95,7 +95,8 @@ class SurfaceSampler {
     // Surface profile after edits, at the column's ground tile.
     TileShape groundShape(int x, int z);
     WaterSurface waterAt(int x, int z);
-    bool submerged(int x, int z, float y);
+    // The render thread can use published water while exact chunks stream in.
+    bool submerged(int x, int z, float y, bool preview = false);
     int channelFloorLevel(int x, int z, int radius) const;
     bool hasChannel(int x0, int z0, int x1, int z1) const;
     bool hasUnrefinedWater(int x0, int z0, int x1, int z1) const;
@@ -126,6 +127,7 @@ class SurfaceSampler {
     TerrainSampler& samplerFor(int x, int z);
     // Edit of the chunk column containing the wrapped/clamped tile, or null.
     const ColumnEdit* editAt(int x, int z);
+    WaterSurface sampleWater(int x, int z, bool preview);
     WaterSurface generatedWater(int x, int z, int groundY) const;
     SurfaceColumn generatedColumn(int x, int z);
     const World& world;

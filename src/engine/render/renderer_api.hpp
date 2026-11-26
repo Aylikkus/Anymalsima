@@ -40,6 +40,14 @@ struct Camera {
     bool underwater = false;
     SkyState sky{};
     float nearPlane = 1.f;
+    struct WeatherMap {
+        bgfx::TextureHandle texture = BGFX_INVALID_HANDLE;
+        // Eye UV, inverse grid width in metres and eye elevation.
+        std::array<float, 4> grid{};
+        // Relative Z map bounds, range and debug fixture mode.
+        std::array<float, 4> limits{};
+        std::array<float, 4> anchor{};  // eye X/Z and world wrap period
+    } weatherMap;
     Vec3 direction() const {
         const float flat = std::cos(pitch);
         return {flat * std::sin(yaw), std::sin(pitch), flat * std::cos(yaw)};
