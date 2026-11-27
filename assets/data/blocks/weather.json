@@ -62,5 +62,15 @@
             "min_delta_c": -30.0,
             "max_delta_c": 60.0
         }
+    },
+    {
+        "name": "blocks.ice",
+        "material": "materials.ice",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 1,
+            "flammable": false,
+            "opacity": 15
+        }
     }
 ]

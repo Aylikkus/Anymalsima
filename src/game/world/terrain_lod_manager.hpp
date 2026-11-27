@@ -67,7 +67,7 @@ class TerrainLodManager {
     // StructureLod::setStructures); ignored without edit tracking (no
     // structure proxies).
     void setSnow(std::shared_ptr<const snow::polar::SurfaceSnapshot> value,
-                 const snow::ChunkColumns& changed);
+                 const snow::ChunkColumns& changed, bool all = false);
     void setStructures(std::vector<structure_voxels::SourcePtr> sources) {
         if (structures) structures->setStructures(std::move(sources));
     }

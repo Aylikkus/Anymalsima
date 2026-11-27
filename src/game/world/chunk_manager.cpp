@@ -99,12 +99,57 @@ StructureSlab decodeStructureBaseline(ByteView blob) {
     return result->bits.any() ? result : nullptr;
 }
 
+size_t applyFeatureIce(Chunk& chunk, const ChunkCoord& coord,
+                       const Region& region, const ChunkColumnInputs& columns,
+                       uint8_t iceBlock, uint8_t snowBlock) {
+    if (!iceBlock) return 0;
+    const bool sheet = region.hasFeature(FeatureMask::ICE_SHEET) ||
+                       region.hasFeature(FeatureMask::GLACIER);
+    if (!sheet && !region.hasFeature(FeatureMask::SEA_ICE)) return 0;
+    const double target = sheet ? 16. : 1.;
+    const int baseY = int(coord.y) * Chunk::SIZE_Y;
+    size_t changed = 0;
+    for (int z = 0; z < Chunk::SIZE_Z; ++z)
+        for (int x = 0; x < Chunk::SIZE_X; ++x) {
+            const auto& column = columns.columns[z * Chunk::SIZE_X + x];
+            if (!column.water.wet()) continue;
+            const double waterline = column.water.height();
+            const double bottom = std::max(0., waterline - target);
+            for (int ly = 0; ly < Chunk::SIZE_Y; ++ly) {
+                const int y = baseY + ly;
+                if (y + 1 <= bottom || y >= waterline) continue;
+                auto& tile = chunk.tiles[z][ly][x];
+                if (chunk.rootEdited(Chunk::cell(x, ly, z)) ||
+                    tile.liquid != LiquidType::Water)
+                    continue;
+                tile.block_id = iceBlock;
+                tile.liquid = LiquidType::None;
+                tile.liquidLevel = 0;
+                ++changed;
+            }
+            if (snowBlock) {
+                const int snowY = int(std::floor(waterline - 1e-4)) + 1;
+                const int ly = snowY - baseY;
+                if (ly >= 0 && ly < Chunk::SIZE_Y) {
+                    auto& tile = chunk.tiles[z][ly][x];
+                    if (!chunk.rootEdited(Chunk::cell(x, ly, z)) &&
+                        !tile.isSolid() && tile.liquid == LiquidType::None) {
+                        tile.block_id = snowBlock;
+                        ++changed;
+                    }
+                }
+            }
+        }
+    return changed;
+}
+
 bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
                            const ChunkColumnInputs& terrain,
                            const Region& region,
                            const std::vector<RegionLayer>& layers,
                            const structure_voxels::Slab* structures,
-                           const GrownBlockSet& grown) {
+                           const GrownBlockSet& grown, uint8_t iceBlock,
+                           uint8_t snowBlock) {
     const int baseY = int(coord.y) * Chunk::SIZE_Y;
     for (int z = 0; z < Chunk::SIZE_Z; ++z)
         for (int x = 0; x < Chunk::SIZE_X; ++x) {
@@ -124,12 +169,33 @@ bool differsFromGeneration(const Chunk& chunk, ChunkCoord coord,
                                    : block ? actual.shape
                                            : TileShape{};
                 const bool ground = worldY <= column.surface_y;
-                const uint8_t expected = ground
-                                             ? LocationGenerator::terrainBlock(
-                                                   region, layers, column.soil,
-                                                   column.surface_y, worldY)
-                                         : structures ? structures->tileAt(cell)
-                                                      : 0;
+                uint8_t expected = ground ? LocationGenerator::terrainBlock(
+                                                region, layers, column.soil,
+                                                column.surface_y, worldY)
+                                   : structures ? structures->tileAt(cell)
+                                                : 0;
+                const bool feature =
+                    region.hasFeature(FeatureMask::ICE_SHEET) ||
+                    region.hasFeature(FeatureMask::GLACIER) ||
+                    region.hasFeature(FeatureMask::SEA_ICE);
+                if (!expected && feature && column.water.wet()) {
+                    const double target =
+                        region.hasFeature(FeatureMask::ICE_SHEET) ||
+                                region.hasFeature(FeatureMask::GLACIER)
+                            ? 16.
+                            : 1.;
+                    const double waterline = column.water.height();
+                    const double iceBottom = waterline - target;
+                    const bool iceCell =
+                        column.water.fills(worldY, column.surface_y) &&
+                        worldY + 1 > iceBottom && worldY < waterline;
+                    const int snowY = int(std::floor(waterline - 1e-4)) + 1;
+                    if (iceCell && iceBlock)
+                        expected = iceBlock;
+                    else if (worldY == snowY && worldY > column.surface_y &&
+                             snowBlock)
+                        expected = snowBlock;
+                }
                 const auto expectedShape =
                     ground ? (worldY == column.surface_y ? column.groundShape
                                                          : TileShape{})
@@ -308,6 +374,15 @@ ChunkManager::ChunkManager(
         world.reservoirs->setProfileQuery(
             [this](TilePos p) { return fluidProfileAt(p); });
     }
+    if (assets) {
+        const auto& blocks = assets->getStorage<Block>();
+        if (const auto it = blocks.indexByName.find("blocks.ice");
+            it != blocks.indexByName.end())
+            iceBlockId = blocks.items[it->second].id;
+        if (const auto it = blocks.indexByName.find("blocks.snow");
+            it != blocks.indexByName.end())
+            snowBlockId = blocks.items[it->second].id;
+    }
     floraTable = assets ? std::make_shared<const FloraSpeciesTable>(*assets)
                         : std::make_shared<const FloraSpeciesTable>();
     floraSeed_ = world.genSettings.feature_seed ^ 0x5f10a7u;
@@ -441,7 +516,8 @@ bool ChunkManager::isEdited(const ChunkCoord& coord) const {
                           .regions[handle.regionCoord.y * terrainWorld.width +
                                    handle.regionCoord.x],
                       regionLayers.at(handle.regionCoord),
-                      handle.structureBaseline.get(), grownBlocks())
+                      handle.structureBaseline.get(), grownBlocks(), iceBlockId,
+                      snowBlockId)
                 : handle.data->hasShapes();
     }
     return *handle.edited;
@@ -690,6 +766,18 @@ std::optional<tile_geometry::CellGeometry> ChunkManager::rawCellGeometryAt(
     return it->second.data->solidCellAt(index).geometry();
 }
 
+std::optional<std::pair<int, WaterSurface>> ChunkManager::projectedWaterAt(
+    int x, int z) {
+    if (!reservoirs()) return std::nullopt;
+    x = int(wrap().wrapTile(x));
+    if (x < 0 || z < 0) return std::nullopt;
+    const auto* column = waterColumnAt({x, 0, z});
+    if (!column) return std::nullopt;
+    const auto surface = reservoirs()->snapshot()->project(
+        terrainWorld.hydrology.get(), x, z, column->surface_y, column->water);
+    return std::pair{column->surface_y, surface};
+}
+
 void ChunkManager::setEnvironment(std::shared_ptr<const EnvironmentMap> value) {
     if (!value) value = std::make_shared<const EnvironmentMap>();
     if (value == environment) return;
@@ -709,6 +797,24 @@ void ChunkManager::setEnvironment(std::shared_ptr<const EnvironmentMap> value) {
     }
     const auto wrapX = wrap();
     auto remesh = affected;
+    // A new solid in the environmental layer changes the free volume and
+    // face openings the water ledger projects into this cell. Reconcile the
+    // visible water before the remesh jobs capture it.
+    if (reservoirs())
+        for (const auto& coord : affected) {
+            const auto key = (uint64_t{coord.x} << 32) | coord.z;
+            const auto it = columnInputs.find(key);
+            if (it == columnInputs.end()) continue;
+            bool changed = false;
+            withChunkLocked(coord, [&](Chunk& chunk) {
+                changed = reconcileWater(chunk, coord, it->second.data.get(),
+                                         false, nullptr);
+            });
+            if (changed) {
+                markDirty(coord, true, true);
+                markLightChanged(coord);
+            }
+        }
     const ChunkEnvironment empty;
     const auto slab = [&](const EnvironmentMap& map,
                           const ChunkCoord& coord) -> const ChunkEnvironment& {
@@ -1541,6 +1647,17 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
     }
     const auto inputs =
         column != columnInputs.end() ? column->second.data : nullptr;
+    if (data.data && inputs && !terrainWorld.regions.empty()) {
+        const unsigned rx = coord.x / CHUNKS_PER_REGION;
+        const unsigned rz = coord.z / CHUNKS_PER_REGION;
+        if (rx < terrainWorld.width && rz < terrainWorld.height) {
+            const auto& region =
+                terrainWorld.regions[size_t(rz) * terrainWorld.width + rx];
+            data.iceApplied =
+                applyFeatureIce(*data.data, coord, region, *inputs, iceBlockId,
+                                snowBlockId) > 0;
+        }
+    }
     if (data.data && reservoirs() && inputs) {
         if (!data.fromDisk) {
             data.data->projectsWater = true;
@@ -1575,7 +1692,8 @@ void ChunkManager::publishGenerated(ChunkCoord coord, uint64_t identity,
         it->second.data = std::move(data.data);
         it->second.state = ChunkState::Ready;
         it->second.persistDirty = !data.fromDisk || data.floraRegrown ||
-                                  data.treesPlaced || data.baselineChanged;
+                                  data.treesPlaced || data.baselineChanged ||
+                                  data.iceApplied;
         it->second.edited = data.edited;
         it->second.structureBaseline = std::move(data.structureBaseline);
         it->second.flora = std::move(data.flora);
@@ -1749,7 +1867,7 @@ void ChunkManager::dispatchGeneration() {
              savedBaseline = info.storedBaseline, terrain, rules = floraTable,
              seed = floraSeed_, day = floraDay, trees, treeRules = treeTable,
              structures, hasOtherKinds = !structureKinds->empty(), terrainAir,
-             stamp] {
+             stamp, ice = iceBlockId, snow = snowBlockId] {
                 // The first worker for this column computes its actual top
                 // before any chunk is published. Sky jobs share the projection.
                 if (!structures->empty()) structures->skyTops();
@@ -1800,10 +1918,11 @@ void ChunkManager::dispatchGeneration() {
                             }
                         }
                         const bool edited =
-                            columns ? differsFromGeneration(
-                                          *result, coord, *columns, region,
-                                          layers, baseline.get(), grown)
-                                    : result->hasShapes();
+                            columns
+                                ? differsFromGeneration(
+                                      *result, coord, *columns, region, layers,
+                                      baseline.get(), grown, ice, snow)
+                                : result->hasShapes();
                         GeneratedChunk out{result, true, edited, nullptr};
                         out.structuresUsed = structures;
                         out.baselineChanged = baselineChanged;
@@ -1893,7 +2012,8 @@ void ChunkManager::dispatchGeneration() {
                 }
                 if (!terrainAir)
                     generator.generateChunk(*result, coord, origin, region,
-                                            layers, soil, columns.get());
+                                            layers, soil, columns.get(), ice,
+                                            snow);
                 if (columns && !terrainAir)
                     applyTreeWoodChanges(
                         *result,

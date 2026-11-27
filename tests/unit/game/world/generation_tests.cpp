@@ -153,3 +153,22 @@ TEST(layers_missing_rock) {
     }
     CHECK(threw);
 }
+
+TEST(generation_feature_ice_and_snow_blocks) {
+    auto region = test::regionAt(SEA_LEVEL_Y - 2);
+    region.addFeature(FeatureMask::SEA_ICE);
+    ChunkColumnInputs columns;
+    for (auto& column : columns.columns) {
+        column.surface_y = SEA_LEVEL_Y - 10;
+        column.water = WaterSurface{SEA_LEVEL_Y + 1};
+    }
+    Chunk chunk;
+    const unsigned cy = SEA_LEVEL_Y / Chunk::SIZE_Y;
+    LocationGenerator{}.generateChunk(chunk, {0, cy, 0}, {}, region, layers, {},
+                                      &columns, 7, 8);
+    const int iceY = SEA_LEVEL_Y - int(cy) * Chunk::SIZE_Y;
+    const int snowY = SEA_LEVEL_Y + 1 - int(cy) * Chunk::SIZE_Y;
+    CHECK(chunk.tiles[0][iceY][0].block_id == 7);
+    CHECK(chunk.tiles[0][iceY][0].liquid == LiquidType::None);
+    CHECK(chunk.tiles[0][snowY][0].block_id == 8);
+}

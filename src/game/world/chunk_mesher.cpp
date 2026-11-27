@@ -785,6 +785,12 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     return &chunk.tiles[zz][y][xx];
                 return neighbour(wx + dx, originY + y, wz + dz).tile;
             };
+            const auto environmentAt = [&](int y) -> EnvironmentCell {
+                if (!environment) return {};
+                const auto found = environment->find(Chunk::cell(x, y, z));
+                return found == environment->end() ? EnvironmentCell{}
+                                                   : found->second;
+            };
             std::pair<int, WaterSurface> generated{-1, {}};
             std::array<std::pair<int, WaterSurface>, 4> adjacent;
             if (waterColumn) generated = waterColumn(wx, wz);
@@ -792,6 +798,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
             for (int y = 0; y < Chunk::SIZE_Y; ++y) {
                 const auto& tile = chunk.tiles[z][y][x];
                 const bool fluid = tile.liquid == LiquidType::Water;
+                const bool iceCovered = bool(environmentAt(y));
                 const auto [ground, water] = generated;
                 const bool river =
                     water.reach && tile.waterOrigin != WaterOrigin::Local;
@@ -851,7 +858,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                                             2 * int(v.z > z + .5f)];
                 };
                 if (fluid && above && above->liquid == LiquidType::None &&
-                    !above->block_id) {
+                    !above->block_id && !iceCovered) {
                     const float top = y + height;
                     if (mesh.waterTops.empty())
                         mesh.waterTops.resize(Chunk::SIZE_X * Chunk::SIZE_Z,
@@ -861,7 +868,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                               tile.waterOrigin == WaterOrigin::Local
                                   ? Vec2{}
                                   : water.flow,
-                              river);
+                              river && !iceCovered);
                     float depth = height;
                     for (int h = y - 1; depth < 6 && h >= -1; --h) {
                         const auto* lower = at(0, h, 0);
@@ -952,7 +959,8 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                         emitWater(x + (dx > 0 || dz > 0) + dx * offset,
                                   y + sheetBottom,
                                   z + (dz > 0 || dx < 0) + dz * offset, 0,
-                                  length, 0, -dz, 0, dx, faces[i], flow, river);
+                                  length, 0, -dz, 0, dx, faces[i], flow,
+                                  river && !iceCovered);
                         if (localTop) {
                             auto side = std::span(mesh.water.vertices).last(4);
                             side[1].y = topAt(side[1]);
@@ -1019,7 +1027,7 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     const Vec3 normal{fd.nx, fd.ny, fd.nz};
                     for (const auto& fragment : fragments)
                         emitWaterPolygon(fragment, normal, faces[i], flow,
-                                         river);
+                                         river && !iceCovered);
                 }
             }
         }

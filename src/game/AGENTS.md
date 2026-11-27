@@ -178,8 +178,23 @@ debit and frozen credit in one snapshot; thaw overflow becomes accounted
 disposal, and `clearLocal` books excavation separately. `adoptLocal` gives
 legacy independent water one ledger owner before a phase change. `RSVR` v11
 persists phases, the removed-ice total, the exact cm³ conversion remainder and
-dated input cursors; older ledgers restore with no ice. Ice projection is not
-written into chunk saves or solid edits until step 19.
+dated input cursors; older ledgers restore with no ice.
+
+Feature `ICE_SHEET`, `GLACIER` and `SEA_ICE` columns are written by
+`LocationGenerator` as ordinary ice blocks with a snow cap (generator 29).
+Older chunks are migrated on publish. `world/surface_ice.hpp` adds the
+remaining seasonal/target surface ice. `SurfaceIceState` names
+its liquid owner (body, reach or local cell), the top water cell, frozen water
+equivalent, signed sub-stage progress, the captured mean waterline, visible
+thickness, the 5/10/25/50/75/100 cm stage and freeze-through/stranded flags.
+`freezeSurface`/`thawSurface` debit or credit the owner and publish ice in one
+snapshot; reach ice is supplied by flow as an accounted input. `RSVR` v12
+appends these records, and v11 or older loads with none. `IceCover` projects
+the ledger through `CellGeometry` into the environment map; chunk meshes skip
+covered water tops and suppress the animated river surface. Distant terrain
+reads the same ledger through `SurfaceSnapshot::ice`, uses the ice block
+material and hides water under the lid. Surface ice is never written into
+ordinary chunk saves or solid edits.
 
 `Reservoirs::applyInput` is the dated weather boundary: a `WaterInput` names a
 local cell, body or reach and is ignored when its key repeats for that
@@ -216,7 +231,7 @@ Each world is a folder `saves/<seed>_<YYYY-MM-DD_HH-MM-SS>/` (see `world/save/sa
 - `world_map.dat`: `world_map_codec` sections `GENS`, `RGNS`, `RIVR`. Preview meshes are not stored.
 - `regions/r.<x>.<z>.dat`: `region_file` sections `CHNK` (one `chunk_codec` blob per chunk, local index `slabY*64 + cz*8 + cx`; v7 stores sparse pieces and generated-piece removals, v6 stores sparse tile shapes and displaced substrate shapes, v5 records reservoir eligibility, v4 stores the shallow root shape and substrate and edit metadata, v1 through v6 still decode), `TOPS` (column ceilings) and `FLOR` (one `flora_codec` blob of plants per saved chunk, same index; a saved chunk without one regrows its generated plants; v3 blobs also carry the chunk's `TreeStamp`, and a chunk without one gets its trees once).
 - `terrain_edits.dat`: `terrain_edits_codec` section `EDIT` v4, the world-wide index of edited chunk columns that distant terrain shows (`world/terrain_edits.hpp`). It includes ground and above-ground structure shapes, generated structure suppression masks and caps for edited reservoir columns. The v1 reader loads additions without masks. The v2 reader restores fixed water summaries. Region files hold the authoritative tiles.
-- `water.dat`: authoritative `RSVR` v11 section with standing volume, local cell credits (absolute volume units, 255 per cubic metre), river holds, the budget clock, certified surface breaches and dams (including their upstream masks and closure times), spring closure and reopening times, detached lake compartments, dug channel paths and arrivals, the partial-cell water flag, freeze/thaw phase state, removed ice, the exact cm³ conversion remainder and dated input cursors. v9 and older restore with partial-cell water off, keeping established whole-cell barriers; v10 and older restore with no ice. Load it before requesting chunks. The chunk codec omits projected water and projected ice. See [water](../../docs/handoff/water.md#5-add-local-finite-volume-flow-and-edited-connections) and step 18 of the [weather handoff](../../docs/handoff/weather.md).
+- `water.dat`: authoritative `RSVR` v12 section with standing volume, local cell credits (absolute volume units, 255 per cubic metre), river holds, the budget clock, certified surface breaches and dams (including their upstream masks and closure times), spring closure and reopening times, detached lake compartments, dug channel paths and arrivals, the partial-cell water flag, freeze/thaw phase state, removed ice, the exact cm³ conversion remainder, dated input cursors and per-column surface-ice records (owner, waterline, thickness, stage, progress and flags). v9 and older restore with partial-cell water off, keeping established whole-cell barriers; v10 and older restore with no ice; v11 and older restore with no surface ice. Load it before requesting chunks. The chunk codec omits projected water and projected ice. See [water](../../docs/handoff/water.md#5-add-local-finite-volume-flow-and-edited-connections) and step 18 of the [weather handoff](../../docs/handoff/weather.md).
 - `light_sources.dat`: `light_sources_codec` section `LITE` (v2: position, block id, open faces), the world-wide index of emissive tiles (see Lighting). Also derived.
 - `thermal_sources.dat`: `thermal_sources_codec` sections `HEAT` v1 (movable item heat/cold sources: position, item definition name, handover key, carried flag) and `ROOM` v1 (significant connected-room air and wall heat stores: representative cell, °C, last-applied day). Block sources are derived from tiles. Emission values and thermostat mode/target come from the definitions on load; rooms that returned to the ground baseline are omitted.
 - `sky.dat`: `sky_codec` section `SKYO` v1, sky heightmap overrides (`SkyHeightMap`, `docs/handoff/sky-light.md`): tile columns whose loaded tiles differ from terrain, trees and `terrain_edits.dat` (holes dug into tree wood). The rest of the heightmap is rebuilt on load. `GameplayState` writes it with `terrain_edits.dat`.

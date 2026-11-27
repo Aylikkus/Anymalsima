@@ -770,9 +770,9 @@ void TerrainLodManager::editChanged(uint64_t column) {
 
 void TerrainLodManager::setSnow(
     std::shared_ptr<const snow::polar::SurfaceSnapshot> value,
-    const snow::ChunkColumns& changed) {
-    const bool all =
-        snowSurface && snowSurface->initialPacks != value->initialPacks;
+    const snow::ChunkColumns& changed, bool forceAll) {
+    const bool all = forceAll || (snowSurface && snowSurface->initialPacks !=
+                                                     value->initialPacks);
     const int before = snowSurface ? snowSurface->day : value->day;
     const int after = value->day;
     const bool seasonal = value->initialPacks && before != after;

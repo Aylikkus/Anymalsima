@@ -44,8 +44,11 @@ struct WorldMeta : ISerializable {
     // 27 cuts diagonal corner ramps where the surface steps down in both
     // horizontal axes. A 26 world keeps its block corners.
     // 28 introduces established polar snow from the starting climate.
+    // 29 writes feature ice and its snow cap directly into generated chunk
+    // columns. Existing worlds migrate those columns as their chunks load.
     static constexpr int PolarPackVersion = 28;
-    static constexpr int GeneratorVersion = PolarPackVersion;
+    static constexpr int FeatureIceVersion = 29;
+    static constexpr int GeneratorVersion = FeatureIceVersion;
     // First generator that selects natural surface shapes. Kept separate from
     // the codec versions: shape payloads are understood by every format that
     // can read the current chunk data.

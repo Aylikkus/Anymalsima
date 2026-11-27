@@ -192,6 +192,9 @@ class ChunkManager {
     // The chunk's own solids without the environmental projection. Used by
     // the snow simulation as its terrain.
     std::optional<tile_geometry::CellGeometry> rawCellGeometryAt(TilePos pos);
+    // Projected water at a loaded column. `ground` is the column's surface
+    // tile. Missing columns return nullopt.
+    std::optional<std::pair<int, WaterSurface>> projectedWaterAt(int x, int z);
     // Environmental solids projected over the world (deposited snow). They
     // participate in meshing and queries but never in saves or edit history.
     void setEnvironment(std::shared_ptr<const EnvironmentMap> environment);
@@ -506,6 +509,7 @@ class ChunkManager {
         // Tree wood was added to a saved chunk: save it.
         bool treesPlaced = false;
         bool baselineChanged = false;
+        bool iceApplied = false;
         // The source snapshot the job used; a replacement makes it stale.
         structure_voxels::ColumnPtr structuresUsed = {};
         std::shared_ptr<const structure_voxels::Slab> structureBaseline = {};
@@ -628,6 +632,8 @@ class ChunkManager {
     const ChunkMesher* mesher;
     LayersGenerator layersGenerator;
     const IAssets* soilAssets;
+    uint8_t iceBlockId = 0;
+    uint8_t snowBlockId = 0;
     uint32_t soilSeed;
     Vec3 focus{0, 0, 0};
     CameraWorkQueue generationQueue;

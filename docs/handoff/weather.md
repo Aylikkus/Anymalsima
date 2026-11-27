@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–18 complete · Step 19 pending.**
+**Steps 01–19 complete · Step 20 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -30,7 +30,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 16 | Room air, wall heat storage, local melt and setpoint heaters | Complete | G · Heated room |
 | 17 | Partial-cell water capacity and connectivity | Complete | |
 | 18 | Water–ice transfers, persistence and meltwater | Complete | |
-| 19 | Surface ice in still and flowing water | Pending | H · Frozen shore |
+| 19 | Surface ice in still and flowing water | Complete | H · Frozen shore |
 | 20 | Load-bearing ice and local break-through | Pending | I · Thin ice |
 | 21 | Migration, extended travel and performance | Pending | J · End-to-end |
 
@@ -222,6 +222,13 @@ Keep ice strength a separate gameplay rule reading thickness, support and applie
 Repeat step 01 with ordinary terrain, a compound village fixture, active snowfall, deep polar terrain, and a freezing river. Record memory, frame times, meshes built, worker backlog, catch-up latency and save growth at the same presets and routes. Separate the cost of a settled scene from active streaming. Investigate regressions against the baseline, especially allocations per ordinary tile, full-world sweeps, remeshing on every temperature sample, and repeated reconstruction of deep packs. Run old-save and malformed-save tests, the full gameplay suite, the relevant device scenes, and exit with background work pending. Update the water, shape and modding guides where their described behaviour or schemas have actually changed.
 
 **Playcheck J.** In a new world, travel from rain to a polar shelter, alter a shore and excavate under the pack. Spend a season away, return and reload. In the disposable pre-feature world, verify the stored date, original buildings, old dam and terrain edits before advancing through its first weather. Record final performance evidence, any accepted approximations, and the maintainer result.
+
+**Carry-over from step 19.** Seasonal ice outside the generated
+`ICE_SHEET`, `GLACIER` and `SEA_ICE` features still lacks the snow cap that
+feature ice receives from generated columns. Step 21 must fix snow on that
+derived seasonal ice using the same partial-cell occupancy treatment that is
+planned for water in partially solid tiles, so the snow sits on the actual
+ice surface rather than on a whole-cell approximation.
 
 ## Execution log
 
@@ -2288,3 +2295,273 @@ sandbox. Acceptance ran headlessly; step 18 schedules no maintainer playcheck.
 - Save order in `GameplayState` writes `water.dat` before `snow.dat`; a crash
   between them leaves the snow entry to be replayed into the deduplicating
   water cursors, while the opposite order cannot occur.
+
+### Step 19 · 2026-11-27
+
+[Surface ice](../../src/game/world/surface_ice.hpp) is a per-water-column
+phase layer. `Reservoirs` gained `SurfaceIceState`: the liquid owner (body,
+reach or local cell), the top water cell, frozen water equivalent, signed
+sub-stage progress, the captured mean waterline, visible thickness, stage,
+freeze-through and stranded flags. `freezeSurface`, `thawSurface` and
+`setSurfaceIce` debit or credit the owner and publish the ice state in one
+immutable snapshot. Reach ice is supplied by flow and booked as an accounted
+`Input`; thawing it reverses that entry. `RSVR` v12 appends the surface-ice
+records; v11 and older ledgers load with no surface ice.
+
+Visible stages are **5, 10, 25, 50, 75 and 100 cm**. A column accumulates
+signed progress in millionths of a water unit per square metre. Still water
+gains 2 mm of ice per game hour per °C below zero; flowing reaches use one
+quarter of that rate. Thaw removes 4 mm per hour per °C. Ice starts at the
+fractional mean waterline (`WaterSurface::height`, which excludes the wave
+displacement), grows down into the available water, and stops at the bed or
+the 1 m stage. A column shallower than its next stage freezes through first.
+Progress at the cap is clamped so a long cold spell cannot make the later
+thaw take years. Frozen-through columns remain in the ledger when their
+liquid surface disappears, so they thaw back into the same local cell.
+
+`IceCover` projects ice through the shared `CellGeometry`, using
+`freeSpaceBetween` in each affected cell and a dedicated `blocks.ice` block.
+The resulting solids join the snow environment in `GameplayState`; unchanged
+chunk slabs share their immutable pointers through a merge cache. Chunk
+meshes skip a water top face where the environment already covers it and mark
+covered flowing faces as non-animated, so a lid suppresses the river wave.
+Walking, picking and sunlight use the environment geometry. The tile panel
+reports the ice stage, thickness, mean waterline, remaining liquid depth and
+frozen water equivalent.
+
+For distant terrain the same ledger publishes ice tops into
+`snow::polar::SurfaceSnapshot::ice`. `SurfaceSampler` takes the higher of
+snow/loose/ice tops, uses `materials.ice` for the column, and hides the water
+surface under the lid. Ice on unloaded columns therefore keeps its broad
+footprint without requesting voxels. Ice is not written into ordinary chunk
+saves; only the water ledger owns it.
+
+Assets added `blocks.ice` after the existing weather blocks and
+`materials.ice` with a cool-tinted albedo and normal derived from the snow
+textures. `generate_assets.py` ran with the configured `shaderc` path; the
+existing block file order is unchanged.
+
+#### Fixture and checks
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -R 'surface_ice_' --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -R 'surface_ice_' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The Release app and logic tests built and all 516 gameplay cases passed.
+The headless fixtures are synthetic one-column waters and need no seed or
+save. `surface_ice_stage_progression_and_balance` checks successive stages,
+the initial debit and the liquid + ice balance. The shallow-bank case checks
+freeze-through before the deep pool reaches 5 cm and thaw back into the
+frozen-through cell. The thaw case checks sub-stage reversal, reload and a
+full body thaw. The reach case checks the quarter freezing rate. The
+projection case checks a fractional waterline, the distant top and the
+clipped ice geometry. The sanitizer run is recorded below.
+
+The focused ASan/UBSan run passed the six surface-ice cases together with
+the three water phase and legacy-ledger cases. Leak detection
+was disabled for the sandbox. The full Release CTest run passed 521 cases
+(516 gameplay, including the feature-target, ledger-free projection and generated-block cases).
+
+#### Playcheck H · Frozen shore
+
+Use a disposable world. Launch from the repository root with the ice and
+weather fixtures so the same scene has time controls:
+
+```bash
+ANYM_ICE_FIXTURE=1 ANYM_WEATHER_FIXTURE=1 ./build/src/app/app
+```
+
+Create or load a world, then click **ICE SITE**. The fixture builds a stone
+basin at the northern pole region (world X/Z near 4/4). The camera moves
+above it. **ICE COLD** clamps the sampled temperature of nearby surface
+water to −12 °C for the session; it is not saved. **ICE CLEAR** removes the
+local water and ice; **WEATHER +6H** and **WEATHER +1D** advance the same
+clock.
+
+| Feature | Position relative to the printed site |
+| --- | --- |
+| Deep pool | X 0–2, Z 0–5, floor +1, top cell half full |
+| Divider wall | X 3 |
+| Shallow bank | X 4–6, Z 0–5, 2 cm deep |
+| Basin walls | X −1 and +7, Z −1 and +6 |
+
+1. Click **ICE SITE** and let chunks stream. Click **ICE COLD**, then
+   **WEATHER +6H** twice. The shallow bank should freeze through first; the
+   deep pool should form its first lid at the fractional mean waterline.
+   Inspect both from above and from a low orbit angle.
+2. Watch the deep pool grow through 5, 10, 25, 50, 75 and 100 cm stages.
+   The liquid below the lid should remain visible at the edges and the
+   reported frozen/liquid balance should conserve water equivalent.
+3. Click **ICE CLEAR**, refill with **ICE SITE**, then compare the still
+   pool with a moving reach. Keep **ICE COLD** on and visit any generated
+   river reach in the same world (or the step 01 seed-2024 river scene).
+   A reach forms ice at one quarter of the still rate on the same clock.
+4. While the deep pool is partially frozen, toggle **ICE COLD** off and use
+   **WEATHER +1D** to warm it. Reload midway through the thaw. The saved
+   thickness, sub-stage progress and remaining liquid should resume.
+5. Fly far enough that the basin becomes distant terrain, then return. The
+   distant height field should show the same lid footprint and hide the
+   water surface; near chunks should hand back to the clipped ice layer
+   without a double surface. Inspect the opening after **ICE CLEAR** or a
+   full thaw and confirm the reported liquid/ice volume balance.
+
+Expected result: the shallow bank freezes through before the deeper pool,
+the first lid sits at a non-integer waterline, cold water across the
+streamed view shares the broad lid, still water grows faster than a reach,
+a reload preserves the partial lid, and the near ice and distant ice
+footprint agree. The 100 cm stage is the planned V1 maximum; later growth
+stops there rather than stacking another layer.
+
+#### Deviations
+
+- V1 models the surface lid per column and uses the mean stage; it does not
+  model ice rafting, pressure ridges or a separate ice strength rule (step
+  20).
+- Reach ice is supplied by flowing water and booked as an accounted input,
+  not debited from a reach store. A closed reach therefore cannot freeze.
+- The distant summary combines the ledger's current frozen columns with the
+  five-day feature/seasonal target grid. New territory gets the broad
+  footprint (up to 16 m for ice sheets and 1 m for sea ice) immediately;
+  local sub-stage history takes over once its columns are loaded and seeded.
+- Ice is opaque in V1. Sub-surface liquid is visible around the lid and at
+  the shore, not through the ice material.
+
+#### Startup crash follow-up · 2026-11-27
+
+The first fixture launch crashed in the `GameplayState` constructor before
+the world appeared. The constructor moves its `world` parameter into the
+member, but the initial surface-ice rebuild read the moved-from parameter
+(`world->reservoirs`). It now reads `this->world`. The Release app starts and
+survives the fixture launch window; the interactive **ICE SITE** click remains
+part of Playcheck H. All 516 gameplay cases still pass.
+
+#### Breadth and accelerated-clock follow-up · 2026-11-27
+
+The first in-game check found that ice stayed only in the camera chunk and
+that returning from 7200x to 1x left the frame rate low.
+
+- Ice work per update is now bounded. The detailed simulation consumes at
+  most 1.2 game hours (`0.05` days) per 0.5 s tick, so a fast clock cannot
+  queue hours of stage growth for the return to 1x. Excess accelerated time
+  is deliberately not replayed; this V1 approximation is recorded here.
+- Sub-stage progress is held in the simulation and written to `water.dat`
+  only when a visible stage changes, the ice loses/gains support, or the
+  progress moves by 1 cm. This removes the per-tick reservoir snapshot
+  churn that cleared LOD water caches every half second.
+- `IceCover` now rebuilds only the chunk columns that changed, reusing every
+  other environment slab. The merged snow/ice map is likewise updated per
+  changed chunk instead of rebuilding the whole resident map.
+- Loaded chunk columns are seeded from the current regional temperature one
+  column per tick: each cold water column gets a starting lid of 2 cm per
+  degree below zero, capped at 1 m. The detailed local simulation then
+  refines it. This makes cold water across the streamed view freeze, not
+  only the column under the camera.
+- `SurfaceSampler` gives unloaded cold water the same broad fallback lid
+  from the dated regional weather, so distant terrain shows the frozen
+  footprint without requesting its chunks. Explicit ledger ice always wins.
+- Ice temperature is sampled on a 4 m lattice per update, so one weather and
+  source query serves a small patch of columns. Step 19 seeds lakes, reaches
+  and local pools; the sea is left to a later regional summary because
+  per-column ocean records would dominate the save.
+
+The Release and debug apps start with the fixture, and all 516 gameplay
+cases pass. The remaining visual check is the
+**ICE SITE** walkthrough below.
+
+#### Feature-driven seasonal ice · 2026-11-27
+
+The 60x stall came from running the per-column thermal refinement over a
+large visited area every half second. The broad ice field is now driven by
+the generated region features and a five-day seasonal target:
+
+- `surface_ice::Regional` samples the region grid and produces a target ice
+  thickness in metres. `ICE_SHEET` and `GLACIER` regions target **16 m**;
+  `SEA_ICE` targets **1 m**; ordinary water uses the seasonal temperature
+  and the existing 1 m cap. Targets are blended bilinearly across region
+  centres, so an ice sheet hands over smoothly to one-metre sea ice instead
+  of stepping at a region border.
+- Targets are recomputed only when the five-game-day step changes, and
+  only at 1x. At 60x/7200x a five-day step would arrive every few frames
+  and force a full LOD refresh, so target changes are deferred until the
+  clock returns to 1x.
+- `ICE_SHEET`, `GLACIER` and `SEA_ICE` regions write ice and a snow block
+  directly into generated chunk columns. The ice is an ordinary solid block
+  from the first frame, so there is no water flash. Old saved chunks are
+  migrated on publish and marked dirty for saving. Ordinary seasonal lake
+  and river ice still uses the target-derived environment projection.
+- Dirty projection chunks are processed nearest-camera first, up to four per
+  tick, so a teleport fills visible ordinary ice first and a long fast run
+  leaves a bounded queue for later ticks. Feature chunks carry blocks and do
+  not need that scan.
+- The detailed thermal pass still runs at `1x`, but only for local/fixture
+  targets and existing legacy ledger states. It skips all regionally
+  targeted columns; at 60x and above it is disabled entirely.
+- The target grid is part of `SurfaceSnapshot`, so distant LOD water reads
+  the same target without a weather query or chunk request. Feature targets
+  carry a matching snow-cap top. A five-day target change refreshes the
+  distant patches; SEA_ICE and ICE_SHEET regions are drawn as continuous
+  cover rather than per-column noise.
+- Feature sea ice is booked as an accounted input where a legacy record is
+  thawed, rather than a debit on the global sea body, so a 16 m sheet cannot
+  drain the ocean.
+
+Release and debug builds start with the fixture, and all **516 gameplay**
+cases (**521** total) pass, including the regional feature-target case.
+
+#### Snow-on-ice, picking and streaming follow-up · 2026-11-27
+
+- Feature chunks now contain a generated snow block above the ice, so the
+  cap is present immediately. `ChunkSnowTerrain` also appends legacy ice
+  environment to its support query, so precipitation and `SnowSettlement`
+  see any remaining projected lid as ground.
+- Near ice geometry changes no longer invalidate distant LOD patches. LOD
+  already reads the seasonal target grid; moving across an ice region only
+  remeshes the affected near chunks. The environment change also skips the
+  full-chunk local-water refresh when no local credit or reservoir cell is
+  involved.
+- `Remove Piece` removes generated feature ice as an ordinary block edit,
+  which persists through the chunk save. Legacy projected ice still uses the
+  session-local cut path. Step 20 owns the ice-strength rule, refreeze and
+  the final cut persistence.
+- Dirty regional chunks are processed nearest-camera first and remain
+  bounded, so crossing many ice chunks does not rebuild the whole resident
+  set in one frame.
+
+Release and debug builds start with the fixture; all **516 gameplay** cases
+(**521** total) pass, including the cut-survival and generated-block cases.
+
+#### Generated feature columns · 2026-11-27
+
+`LocationGenerator` now writes feature ice and a one-block snow cap directly
+into `ICE_SHEET`, `GLACIER` and `SEA_ICE` chunk columns (generator **29**).
+The first generated mesh therefore contains ice and snow; there is no water
+frame or asynchronous environment fill. `ChunkManager` applies the same
+conversion when an older saved chunk is published and marks it for saving,
+so existing worlds migrate as their columns load.
+
+The regional environment projection is now limited to ordinary seasonal
+lake/river targets. Feature chunks carry no per-column ice ledger, and their
+chunk loads no longer enqueue regional projection work. `Remove Piece`
+removes the generated ice as a normal block edit; the existing cut summary
+still handles legacy projected ice. A removed generated block is skipped by
+the migration pass because it is no longer liquid water.
+
+Snow on generated feature ice is present immediately and is also visible to
+`SnowSettlement`. Weather snow thereafter settles on the same block cap.
+Release and debug builds start with the fixture; all **516 gameplay** cases
+(**521** total) pass, including the generated ice/snow column fixture.
+
+#### Maintainer sign-off · 2026-11-27
+
+The maintainer accepted the in-game result and marked step 19 complete.
+Snow on seasonal ice outside the generated ice features is recorded as a
+step 21 carry-over; it is to be fixed with the same partial-cell treatment
+as water in partially solid tiles.

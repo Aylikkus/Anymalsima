@@ -98,12 +98,29 @@ struct SurfaceSnapshot {
     // pack, so the LOD keeps weather snow after its chunk unloads without
     // freezing the seasonal baseline beneath it.
     std::map<ChunkColumn, std::shared_ptr<const PackTops>> loose;
+    // Surface ice tops in the same millionths-of-a-metre units. The distant
+    // height field reads them so a frozen lake keeps its lid after unload.
+    uint8_t iceBlock = 0;
+    std::map<ChunkColumn, std::shared_ptr<const PackTops>> ice;
+    // Exact world day used by the regional ice fallback for unloaded water.
+    double weatherDay = 0;
+    // Seasonal feature-aware target thickness in metres, one value per
+    // region. Distant water samples this instead of running a thermal query.
+    std::shared_ptr<const std::vector<float>> iceTargets;
+    std::shared_ptr<const std::vector<uint8_t>> iceFeature;
+    int iceTargetWidth = 0;
+    int iceTargetHeight = 0;
+    // Session-local openings cut into regional ice.
+    std::shared_ptr<const std::set<std::pair<int, int>>> iceCuts;
 
     std::optional<int32_t> editedTop(int x, int z) const {
         return lookup(edits, x, z);
     }
     std::optional<int32_t> looseTop(int x, int z) const {
         return lookup(loose, x, z);
+    }
+    std::optional<int32_t> iceTop(int x, int z) const {
+        return lookup(ice, x, z);
     }
 
    private:

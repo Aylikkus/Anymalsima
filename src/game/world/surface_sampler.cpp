@@ -57,6 +57,57 @@ void SurfaceSampler::setSnow(
     std::shared_ptr<const snow::polar::SurfaceSnapshot> value) {
     snow = std::move(value);
     packHeights.clear();
+    waterSamples.clear();
+    columns.clear();
+    regionalIceTops.clear();
+}
+
+float SurfaceSampler::regionalIceTop(int x, int z) {
+    if (!snow || !snow->iceBlock) return 0;
+    x = wrapX(x);
+    z = std::clamp(z, 0, depth() - 1);
+    if (snow->iceTop(x, z)) return 0;
+    if (snow->iceCuts && snow->iceCuts->contains({x, z})) return 0;
+    const int ground = height(x, z);
+    const auto water = generatedWater(x, z, ground);
+    if (!water.wet()) return 0;
+    if (!snow->iceTargets || snow->iceTargetWidth <= 0 ||
+        snow->iceTargetHeight <= 0)
+        return 0;
+    constexpr double regionSize = WorldWrap::RegionSize;
+    const double fx = (x + .5) / regionSize - .5;
+    const double fz = (z + .5) / regionSize - .5;
+    const int gx = int(std::floor(fx)), gz = int(std::floor(fz));
+    const double tx = fx - gx, tz = fz - gz;
+    double target = 0;
+    for (int dz = 0; dz < 2; ++dz) {
+        const int rz = std::clamp(gz + dz, 0, snow->iceTargetHeight - 1);
+        for (int dx = 0; dx < 2; ++dx) {
+            const int rx = int(WorldWrap::mod(gx + dx, snow->iceTargetWidth));
+            const auto& values = *snow->iceTargets;
+            target += values[size_t(rz) * snow->iceTargetWidth + rx] *
+                      (dx ? tx : 1. - tx) * (dz ? tz : 1. - tz);
+        }
+    }
+    bool feature = false;
+    if (snow->iceFeature && snow->iceTargetWidth > 0 &&
+        snow->iceTargetHeight > 0) {
+        constexpr double regionSize = WorldWrap::RegionSize;
+        const int rx = int(WorldWrap::mod(
+            int(std::floor((x + .5) / regionSize - .5)), snow->iceTargetWidth));
+        const int rz = std::clamp(int(std::floor((z + .5) / regionSize - .5)),
+                                  0, snow->iceTargetHeight - 1);
+        feature =
+            (*snow->iceFeature)[size_t(rz) * snow->iceTargetWidth + rx] != 0;
+    }
+    const bool sea =
+        !water.reach && water.body && water.body <= GeneratedHydrology::Sea;
+    if (sea) {
+        if (target < .75) return 0;
+        return water.height() + (feature ? 1.f : 0.f);
+    }
+    if (target < .01) return 0;
+    return water.height() + (feature ? 1.f : 0.f);
 }
 
 float SurfaceSampler::packTop(int x, int z) {
@@ -70,6 +121,10 @@ float SurfaceSampler::packTop(int x, int z) {
         top = seasonalTop(x, z);
     if (const auto loose = snow->looseTop(x, z))
         top = std::max(top, double(*loose) / snow::UnitsPerCubicMetre);
+    if (const auto ice = snow->iceTop(x, z))
+        top = std::max(top, double(*ice) / snow::UnitsPerCubicMetre);
+    else if (const auto regional = regionalIceTop(x, z); regional > 0)
+        top = std::max(top, double(regional));
     return float(top);
 }
 
@@ -225,16 +280,24 @@ SurfaceColumn SurfaceSampler::column(int x, int z) {
         }
     }
     const float top = packTop(x, z);
+    const auto ice = snow
+                         ? snow->iceTop(wrapX(x), std::clamp(z, 0, depth() - 1))
+                         : std::nullopt;
+    const bool iceSurface =
+        ice && snow->iceBlock &&
+        double(*ice) / snow::UnitsPerCubicMetre >= double(top) - .001;
     if (top > result.surfaceY + 1) {
         result.snowTop = top;
+        const auto block = iceSurface ? snow->iceBlock : snow->block;
         result.material = assets.getMaterialAlbedoLayer(
-            assets.getStorage<Block>().get(snow->block).material);
+            assets.getStorage<Block>().get(block).material);
     } else if (top > result.surfaceY + .005f) {
         // A layer thinner than one block stays at the terrain height but must
-        // still read as snow. Otherwise sparse tundra packs are white nearby
+        // still read as snow or ice. Otherwise sparse packs look white nearby
         // and bare in the LOD.
+        const auto block = iceSurface ? snow->iceBlock : snow->block;
         result.material = assets.getMaterialAlbedoLayer(
-            assets.getStorage<Block>().get(snow->block).material);
+            assets.getStorage<Block>().get(block).material);
     }
     return result;
 }
@@ -379,6 +442,14 @@ WaterSurface SurfaceSampler::sampleWater(int x, int z, bool preview) {
         (reservoirs->poolIntersects(x, z, x + 1, z + 1, width()) ||
          reservoirs->localTop(x, z) >= 0 || reservoirs->streams.contains(key)))
         result = reservoirs->projectLocal(x, z, height(x, z), result);
+    // A frozen lid hides the liquid below it from the distant water pass.
+    // The ice itself is drawn by the height field above the waterline.
+    if (snow && snow->iceBlock)
+        if (const auto ice = snow->iceTop(x, z);
+            ice &&
+            (!result.wet() ||
+             double(*ice) / snow::UnitsPerCubicMetre + .01 >= result.height()))
+            result = {};
     if (!preview) {
         if (waterSamples.size() >= 65536) waterSamples.clear();
         waterSamples.emplace(key, result);

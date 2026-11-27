@@ -21,7 +21,8 @@ class LocationGenerator {
                        const Region& region,
                        const std::vector<RegionLayer>& layers,
                        const SoilProfile& soil = {},
-                       const ChunkColumnInputs* columns = nullptr) const;
+                       const ChunkColumnInputs* columns = nullptr,
+                       uint8_t iceBlock = 0, uint8_t snowBlock = 0) const;
 
     // The generated substrate material at a solid terrain cell.
     static uint8_t terrainBlock(const Region& region,
@@ -42,5 +43,6 @@ class LocationGenerator {
                         const Region& region,
                         const std::vector<RegionLayer>& layers,
                         const SoilColumn& soil, int surfaceY,
-                        WaterSurface water, TileShape shape = {}) const;
+                        WaterSurface water, TileShape shape = {},
+                        uint8_t iceBlock = 0, uint8_t snowBlock = 0) const;
 };

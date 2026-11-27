@@ -3,5 +3,10 @@
         "name": "materials.snow",
         "texture_albedo": "weather.snow",
         "texture_normal": "weather.snow_normal"
+    },
+    {
+        "name": "materials.ice",
+        "texture_albedo": "weather.ice",
+        "texture_normal": "weather.ice_normal"
     }
 ]

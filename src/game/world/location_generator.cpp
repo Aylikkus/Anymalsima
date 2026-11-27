@@ -30,8 +30,21 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
                                        int chunkBaseY, const Region& region,
                                        const std::vector<RegionLayer>& layers,
                                        const SoilColumn& soil, int surfaceY,
-                                       WaterSurface water,
-                                       TileShape shape) const {
+                                       WaterSurface water, TileShape shape,
+                                       uint8_t iceBlock,
+                                       uint8_t snowBlock) const {
+    const bool feature =
+        region.hasFeature(FeatureMask::ICE_SHEET) ||
+        region.hasFeature(FeatureMask::GLACIER) ||
+        region.hasFeature(FeatureMask::SEA_ICE);
+    const double target =
+        region.hasFeature(FeatureMask::ICE_SHEET) ||
+                region.hasFeature(FeatureMask::GLACIER)
+            ? 16.
+            : 1.;
+    const double waterline = water.height();
+    const double iceBottom = waterline - target;
+    const int snowY = int(std::floor(waterline - 1e-4)) + 1;
     for (int localY = 0; localY < Chunk::SIZE_Y; ++localY) {
         const int tileY = chunkBaseY + localY;
         Tile& tile = chunk.tiles[localZ][localY][localX];
@@ -49,11 +62,20 @@ void LocationGenerator::generateColumn(Chunk& chunk, int localX, int localZ,
             if (tileY == surfaceY && shape.code())
                 chunk.setCell(Chunk::cell(localX, localY, localZ), tile, shape);
 
+        } else if (feature && iceBlock && water.fills(tileY, surfaceY) &&
+                   tileY + 1 > iceBottom && tileY < waterline) {
+            tile.block_id = iceBlock;
+            tile.liquid = LiquidType::None;
+            tile.liquidLevel = 0;
         } else if (water.fills(tileY, surfaceY)) {
             tile.block_id = 0;
             tile.liquid = water.kind();
             tile.liquidLevel = water.fillAt(tileY, surfaceY);
-
+        } else if (feature && snowBlock && tileY == snowY &&
+                   tileY > surfaceY) {
+            tile.block_id = snowBlock;
+            tile.liquid = LiquidType::None;
+            tile.liquidLevel = 0;
         } else {
             tile.block_id = 0;
             tile.liquid = LiquidType::None;
@@ -67,7 +89,9 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
                                       const Region& region,
                                       const std::vector<RegionLayer>& layers,
                                       const SoilProfile& soil,
-                                      const ChunkColumnInputs* columns) const {
+                                      const ChunkColumnInputs* columns,
+                                      uint8_t iceBlock,
+                                      uint8_t snowBlock) const {
     chunk.clearSolidStorage();
     chunk.rootTerrain.reset();
     chunk.legacyRootTerrain = false;
@@ -91,7 +115,8 @@ void LocationGenerator::generateChunk(Chunk& chunk, const ChunkCoord& coord,
             generateColumn(chunk, localX, localZ, chunkBaseY, region, layers,
                            cover, ground,
                            column ? column->water : WaterSurface::sea(ground),
-                           column ? column->groundShape : TileShape{});
+                           column ? column->groundShape : TileShape{},
+                           iceBlock, snowBlock);
         }
 }
 

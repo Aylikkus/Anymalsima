@@ -616,13 +616,16 @@ The first proxy shows only certified ocean: deep connected regions or
 ready shoreline masks. Low ground in a pending coastal survey stays dry
 until connectivity is known.
 
-`RSVR` v11 adds freeze/thaw phase entries (frozen water equivalent, residual
-progress and last applied day), the removed-ice total, a dated input cursor
-map and the exact cm³ conversion remainder. v10 and older restore with no ice
-and no cursors. v10 adds the partial-cell water flag and reinterprets local
-fill as absolute volume (255 units per cubic metre). v9 and older restore with
-partial-cell water off, so every partial solid stays a whole-cell barrier and
-a saved dam cannot drain through a newly recognised side gap. v9 adds the dam
+`RSVR` v12 adds per-column surface ice (owner, top water cell, frozen water
+equivalent, signed sub-stage progress, mean waterline, visible thickness,
+stage and freeze-through/stranded flags). v11 adds freeze/thaw phase entries
+(frozen water equivalent, residual progress and last applied day), the
+removed-ice total, a dated input cursor map and the exact cm³ conversion
+remainder. v10 and older restore with no ice and no cursors. v10 adds the
+partial-cell water flag and reinterprets local fill as absolute volume (255
+units per cubic metre). v9 and older restore with partial-cell water off, so
+every partial solid stays a whole-cell barrier and a saved dam cannot drain
+through a newly recognised side gap. v9 adds the dam
 closure time. v8 stores the surveyed upstream side of dams. v7 adds the time of spring reopening so a save preserves
 the recovery front. v6 adds
 surface-runoff certificates and the clock time of each spring seal. Older
@@ -762,9 +765,11 @@ detail cannot both apply a transfer. A full body keeps the surplus in
 overflow is booked as `Disposal`. `addMeltwater` and `addRain` convert bulk
 snow and liquid centimetres through an exact remainder
 (`InputRemainderDenominator = 5,000,000`). The cursors and remainder live in
-`RSVR` v11 beside freeze/thaw phase state; projected ice is not written into
-chunks. Rain is routed only where an exposure ray already hits liquid. Bare
-ground runoff, flood envelopes and unloaded inhabitants remain future work.
+`RSVR` v12 beside freeze/thaw phase state and per-column surface ice. Surface
+ice is projected from the waterline into the shared environment map and is
+not written into chunks. Rain is routed only where an exposure ray already
+hits liquid. Bare ground runoff, flood envelopes and unloaded inhabitants
+remain future work.
 
 ## Verification and open decisions
 

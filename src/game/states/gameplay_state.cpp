@@ -85,14 +85,30 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
         generation.reset();
         generationKey = UINT64_MAX;
     }
+    void setIceQuery(std::function<tile_geometry::CellGeometry(TilePos)> query,
+                     std::function<int(int, int)> top) {
+        iceQuery = std::move(query);
+        iceTop = std::move(top);
+    }
 
     std::optional<tile_geometry::CellGeometry> cell(
         TilePos pos) const override {
-        if (pos.y > boundsAt(pos.x, pos.z))
-            return tile_geometry::CellGeometry{};
-        return chunks.rawCellGeometryAt(pos);
+        const auto ice =
+            iceQuery ? iceQuery(pos) : tile_geometry::CellGeometry{};
+        if (pos.y > boundsAt(pos.x, pos.z)) {
+            if (ice.empty()) return tile_geometry::CellGeometry{};
+            return ice;
+        }
+        auto raw = chunks.rawCellGeometryAt(pos);
+        if (!raw && ice.empty()) return std::nullopt;
+        auto result = raw.value_or(tile_geometry::CellGeometry{});
+        if (!ice.empty()) result.append(ice);
+        return result;
     }
-    int top(int x, int z) const override { return boundsAt(x, z); }
+    int top(int x, int z) const override {
+        const int ice = iceTop ? iceTop(x, z) : INT_MIN;
+        return std::max(boundsAt(x, z), ice);
+    }
     int wrapX(int x) const override { return int(chunks.wrap().wrapTile(x)); }
     bool inBounds(int x, int z) const override {
         if (world.width <= 0 || world.height <= 0) return x >= 0 && z >= 0;
@@ -123,6 +139,9 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
     }
 
    private:
+    std::function<tile_geometry::CellGeometry(TilePos)> iceQuery;
+    std::function<int(int, int)> iceTop;
+
     const ColumnGenerationInput* generationAt(int x, int z) const {
         const unsigned cx = unsigned(x / Chunk::SIZE_X);
         const unsigned cz = unsigned(z / Chunk::SIZE_Z);
@@ -203,6 +222,42 @@ class ChunkSnowTerrain final : public snow::SnowTerrain {
     mutable std::map<uint64_t, Slabs> slabs;
     mutable uint64_t generationKey = UINT64_MAX;
     mutable std::shared_ptr<const ChunkColumnInputs> generation;
+};
+
+// Surface ice reads the projected waterline and raw solids, not the snow
+// environment that may sit above it.
+class ChunkIceTerrain final : public surface_ice::Terrain {
+   public:
+    ChunkIceTerrain(ChunkManager& chunks, const World& world)
+        : chunks(chunks), world(world) {}
+
+    std::optional<surface_ice::Column> column(int x, int z) const override {
+        const auto sample = chunks.projectedWaterAt(x, z);
+        if (!sample) return std::nullopt;
+        return surface_ice::Column{sample->first, sample->second};
+    }
+    std::optional<tile_geometry::CellGeometry> cell(
+        TilePos pos) const override {
+        if (pos.y < 0 || pos.y >= WORLD_HEIGHT_Y) return std::nullopt;
+        return chunks.rawCellGeometryAt(pos);
+    }
+    int wrapX(int x) const override { return int(chunks.wrap().wrapTile(x)); }
+    bool inBounds(int x, int z) const override {
+        if (world.width <= 0 || world.height <= 0) return x >= 0 && z >= 0;
+        return x >= 0 && x < chunks.wrap().tiles && z >= 0 &&
+               z < world.height * CHUNKS_PER_REGION * Chunk::SIZE_Z;
+    }
+    int maxY() const override { return WORLD_HEIGHT_Y; }
+
+   private:
+    ChunkManager& chunks;
+    const World& world;
+};
+
+struct GameplayState::EnvironmentMergeCache {
+    std::map<std::pair<const ChunkEnvironment*, const ChunkEnvironment*>,
+             std::shared_ptr<const ChunkEnvironment>>
+        chunks;
 };
 
 namespace {
@@ -354,6 +409,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                      blocks.items.empty() ? 0 : blocks.items.front().id);
         timberId = id("blocks.oak_timber", 0);
         snowId = id("blocks.snow", 0);
+        iceId = id("blocks.ice", 0);
         heaterBlockId = id("blocks.heater", 0);
         coolerBlockId = id("blocks.cooler", 0);
         thermostatBlockId = id("blocks.thermostat", 0);
@@ -480,6 +536,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         context.assets, std::move(landmarks));
     setupConstructionFixture();
     setupSnowFixture();
+    setupIceFixture();
     setupThermalFixture();
     setupWeatherTravelFixture();
     setupPolarPackFixture();
@@ -547,6 +604,19 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         });
         button->setText(_("Snow drop"));
     }
+    if (iceFixtureSite) {
+        makeDebugButton({0, 5, 6, 1}, [this] {
+            visitIceSite();
+        })->setText(_("ICE SITE"));
+        makeDebugButton({6, 5, 6, 1}, [this] {
+            iceFixtureCold = !iceFixtureCold;
+            lastBuildAction =
+                iceFixtureCold ? _("Ice cold spell") : _("Ice ambient");
+        })->setText(_("ICE COLD"));
+        makeDebugButton({12, 5, 6, 1}, [this] {
+            clearIceFixture();
+        })->setText(_("ICE CLEAR"));
+    }
     if (const char* fixture = std::getenv("ANYM_WEATHER_DEPOSITION_FIXTURE"))
         depositionFixture = std::string_view(fixture) == "1";
     depositionFixture |=
@@ -555,7 +625,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     // The original inspection controls remain presentation-only. The
     // separate deposition fixture also drives the active physical sample.
     if (const char* weatherFixture = std::getenv("ANYM_WEATHER_FIXTURE");
-        depositionFixture || distantWeatherFixture ||
+        depositionFixture || distantWeatherFixture || iceFixtureSite ||
         (weatherFixture && std::string_view(weatherFixture) == "1")) {
         auto* sixHours = makeDebugButton(
             {0, 9, 6, 1}, [this] { skipWeatherTime(6.0 / 24.0); });
@@ -722,6 +792,21 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         *chunkManager, *this->world, *skyMap, *edits, polarPackSite);
     snowSettlement = std::make_unique<snow::SnowSettlement>(*snowTerrain);
     snowCover = std::make_unique<snow::SnowCover>();
+    iceTerrain = std::make_unique<ChunkIceTerrain>(*chunkManager, *this->world);
+    iceSimulation = std::make_unique<surface_ice::Simulation>();
+    iceCover = std::make_unique<surface_ice::IceCover>();
+    iceRegional = std::make_unique<surface_ice::Regional>(*this->world);
+    snowTerrain->setIceQuery(
+        [this](TilePos pos) {
+            const auto cell =
+                iceCover ? iceCover->cellAt(pos) : EnvironmentCell{};
+            return cell ? *cell : tile_geometry::CellGeometry{};
+        },
+        [this](int x, int z) {
+            return iceCover ? iceCover->iceTop(x, z) : INT_MIN;
+        });
+    environmentCache = std::make_unique<EnvironmentMergeCache>();
+    lastIceDay = slot.meta.worldDays;
     save_catalog::readSnow(slot, *snowSettlement);
     // v5 ledgers can carry the old automatic replay snow on open ground.
     // Rebase those columns onto the dated seasonal model once. Roofs,
@@ -755,6 +840,13 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     snowPackChanges = snowSettlement->takePackChanges();
     // The ledger checkpoint is written before world.json.
     clock.set(std::max(slot.meta.worldDays, snowSettlement->weatherHorizon()));
+    lastIceDay = clock.days();
+    if (iceRegional) iceRegional->update(clock.days());
+    if (this->world->reservoirs && iceRegional)
+        this->world->reservoirs->clearSurfaceIceWhere(
+            [this](int x, int z) { return iceRegional->featureAt(x, z); });
+    if (iceId && this->world->reservoirs)
+        iceCover->rebuild(*this->world->reservoirs, *iceTerrain, iceId);
     publishSnowSurface(true);
     savedSnowRevision = snowSettlement->revision();
     routeSnowMeltwater();
@@ -771,6 +863,11 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                 // field before this chunk can unload again.
                 snowPackChanges.insert(column);
             }
+            if (iceId && this->world->reservoirs &&
+                (!iceRegional || !iceRegional->featureAt(
+                                     int(column.first) * Chunk::SIZE_X + 8,
+                                     int(column.second) * Chunk::SIZE_Z + 8)))
+                iceDirtyColumns.insert(column);
         });
     snowColumnReleased =
         chunkManager->columnReleased.connect([this](uint64_t key) {
@@ -780,6 +877,8 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                 snowDirtyColumns.insert(column);
                 snowFullProjection.insert(column);
             }
+            if (iceId && this->world->reservoirs)
+                iceDirtyColumns.insert(column);
         });
     sunLight = std::make_unique<SunLightPropagator>(
         *chunkManager.get(), context.assets->getStorage<Block>(),
@@ -810,8 +909,19 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     editor->setEnvironmentRemoval([this](TilePos pos, auto id) {
         snowTerrain->resetQueries();
         if (!snowSettlement->excavatePack(pos, id) &&
-            !snowSettlement->excavateLoose(pos, id))
-            return false;
+            !snowSettlement->excavateLoose(pos, id)) {
+            if (!iceCover || !iceCover->cut(pos)) return false;
+            const auto& changed = iceCover->changedChunks();
+            refreshEnvironment(changed);
+            const snow::ChunkColumn column{unsigned(pos.x / Chunk::SIZE_X),
+                                           unsigned(pos.z / Chunk::SIZE_Z)};
+            snowSettlement->supportChanged(pos);
+            snowDirtyColumns.insert(column);
+            publishSnow({column});
+            publishSnowSurface(true);
+            lastBuildAction = _("Ice cut");
+            return true;
+        }
         const snow::ChunkColumn column{unsigned(pos.x / Chunk::SIZE_X),
                                        unsigned(pos.z / Chunk::SIZE_Z)};
         collectSnowChanges();
@@ -847,6 +957,12 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     snowEditConnection =
         editor->blockChanged.connect([this](const BlockChange& change) {
             const auto [x, y, z] = change.pos;
+            const bool removedIce = iceId && change.before.block_id == iceId &&
+                                    change.after.block_id != iceId;
+            if (removedIce && iceCover) {
+                iceCover->cutColumn(x, z);
+                publishSnowSurface(true);
+            }
             if (!snowSettlement->columnAt(x, z, snowTerrain->maxY()) &&
                 !snowSettlement->surfacePack(x, z))
                 return;
@@ -1119,6 +1235,125 @@ void GameplayState::setupSnowFixture() {
     snowDropSite = TilePos{x, groundY + 1, z + 6};
     chunkManager->setGeneratedStructureKinds(
         applyOverrides({}, {{"snow_fixture", {{Key, std::move(layout)}}}}));
+}
+
+// A shallow bank beside a deeper pool, both in a stone basin at the northern
+// pole region. Surface ice starts at each column's fractional waterline, so
+// the bank freezes through first while the pool forms successive lids.
+void GameplayState::setupIceFixture() {
+    const char* enabled = std::getenv("ANYM_ICE_FIXTURE");
+    if (!enabled || std::string_view(enabled) != "1" || !stoneId ||
+        world->width <= 0 || world->height <= 0)
+        return;
+    // Region row zero is the northern pole. Keep the fixture away from the
+    // wrapped X seam so its two compartments cannot alias.
+    const int x = 4;
+    const int z = 4;
+    int maxTop = 0;
+    for (int dz = -2; dz <= 10; ++dz)
+        for (int dx = -2; dx <= 10; ++dx)
+            maxTop = std::max(maxTop,
+                              chunkManager->generatedSurfaceY(x + dx, z + dz));
+    const int groundY = maxTop + 1;
+    if (groundY + 9 >= WORLD_HEIGHT_Y) return;
+
+    using namespace structure_voxels;
+    constexpr uint64_t Key = 0xf000000000000009ULL;
+    Override layout;
+    layout.mode = OverrideMode::Replace;
+    layout.anchorX = x;
+    layout.anchorZ = z;
+    layout.landmark = true;
+    const auto solid = [&](int px, int py, int pz) {
+        layout.voxels[{px, py, pz}] = OverrideVoxel(stoneId);
+    };
+    const auto support = [&](int px, int pz) {
+        const int top = chunkManager->generatedSurfaceY(px, pz);
+        for (int y = top + 1; y <= groundY; ++y) solid(px, y, pz);
+    };
+    // Interior is 7 x 6: three deep columns, a divider, three shallow ones.
+    for (int px = x - 1; px <= x + 7; ++px)
+        for (int pz = z - 1; pz <= z + 6; ++pz) {
+            support(px, pz);
+            solid(px, groundY, pz);
+        }
+    for (int py = groundY + 1; py <= groundY + 6; ++py) {
+        for (int px = x - 1; px <= x + 7; ++px) {
+            solid(px, py, z - 1);
+            solid(px, py, z + 6);
+        }
+        for (int pz = z; pz <= z + 5; ++pz) {
+            solid(x - 1, py, pz);
+            solid(x + 7, py, pz);
+            solid(x + 3, py, pz);
+        }
+    }
+    chunkManager->setGeneratedStructureKinds(
+        applyOverrides({}, {{"ice_fixture", {{Key, std::move(layout)}}}}));
+
+    iceFixtureSite = TilePos{x + 1, groundY + 1, z};
+    iceFixtureFillPending = true;
+}
+
+void GameplayState::applyIceFixtureWater() {
+    if (!iceFixtureSite || !world->reservoirs || !iceFixtureFillPending) return;
+    const auto [x, y, z] = *iceFixtureSite;
+    const int groundY = y - 1;
+    // Wait for the basin floor to stream in before crediting water.
+    if (!chunkManager->getChunk({unsigned(x / Chunk::SIZE_X),
+                                 unsigned(groundY / Chunk::SIZE_Y),
+                                 unsigned(z / Chunk::SIZE_Z)}))
+        return;
+    if (!chunkManager->tileAt(x, groundY + 1, z)) return;
+    const auto clear = [&](int px, int pz, int py) {
+        world->reservoirs->clearLocal({px, py, pz});
+        world->reservoirs->clearSurfaceIce({px, pz});
+    };
+    for (int py = groundY + 1; py <= groundY + 4; ++py)
+        for (int px = x; px <= x + 2; ++px)
+            for (int pz = z; pz <= z + 5; ++pz) clear(px, pz, py);
+    for (int px = x + 4; px <= x + 6; ++px)
+        for (int pz = z; pz <= z + 5; ++pz) clear(px, pz, groundY + 1);
+    for (int py = groundY + 1; py <= groundY + 4; ++py)
+        for (int px = x; px <= x + 2; ++px)
+            for (int pz = z; pz <= z + 5; ++pz)
+                world->reservoirs->creditLocal({px, py, pz},
+                                               py == groundY + 4 ? 128 : 255,
+                                               ReservoirExchange::Input);
+    for (int px = x + 4; px <= x + 6; ++px)
+        for (int pz = z; pz <= z + 5; ++pz)
+            world->reservoirs->creditLocal({px, groundY + 1, pz}, 5,
+                                           ReservoirExchange::Input);
+    iceFixtureFillPending = false;
+    iceFullRebuild = true;
+    lastBuildAction = _("Ice fixture filled");
+}
+
+void GameplayState::clearIceFixture() {
+    if (!iceFixtureSite || !world->reservoirs) return;
+    const auto [x, y, z] = *iceFixtureSite;
+    const int groundY = y - 1;
+    for (int py = groundY + 1; py <= groundY + 5; ++py)
+        for (int px = x; px <= x + 6; ++px)
+            for (int pz = z; pz <= z + 5; ++pz) {
+                world->reservoirs->clearLocal({px, py, pz});
+                world->reservoirs->clearSurfaceIce({px, pz});
+            }
+    iceFixtureFillPending = false;
+    iceFullRebuild = true;
+    lastBuildAction = _("Ice cleared");
+}
+
+void GameplayState::visitIceSite() {
+    if (!iceFixtureSite) return;
+    if (probe) toggleWalk();
+    const auto [x, y, z] = *iceFixtureSite;
+    camera.position = {float(x + 5), float(y + 8), float(z - 5)};
+    camera.yaw = 0;
+    camera.pitch = -.5f;
+    camera.distance = 16.f;
+    iceFixtureFillPending = true;
+    lastBuildAction = _("Ice site");
 }
 
 // A reproducible step 15/16 scene: a stone pad carrying a small sealed room
@@ -1613,6 +1848,47 @@ void GameplayState::publishSnowSurface(bool all) {
         else
             next->loose.insert_or_assign(column, std::move(loose));
     }
+    next->iceBlock = iceId;
+    next->weatherDay = clock.days();
+    if (iceCover) {
+        next->iceCuts = std::make_shared<const std::set<std::pair<int, int>>>(
+            iceCover->cutColumns());
+    }
+    if (iceRegional) {
+        next->iceTargetWidth = iceRegional->width;
+        next->iceTargetHeight = iceRegional->height;
+        if (all || iceRegionalRevision != iceRegional->revision()) {
+            next->iceTargets = std::make_shared<const std::vector<float>>(
+                iceRegional->targets());
+            next->iceFeature = std::make_shared<const std::vector<uint8_t>>(
+                iceRegional->features());
+            iceRegionalRevision = iceRegional->revision();
+        }
+    }
+    if (iceCover && iceId) {
+        if (all) {
+            next->ice.clear();
+            std::map<snow::ChunkColumn, snow::PackTops> grouped;
+            for (const auto& [pos, top] : iceCover->tops())
+                grouped[{unsigned(pos.first / Chunk::SIZE_X),
+                         unsigned(pos.second / Chunk::SIZE_Z)}][pos] = top;
+            for (auto& [column, tops] : grouped)
+                next->ice.insert_or_assign(
+                    column,
+                    std::make_shared<const snow::PackTops>(std::move(tops)));
+        } else {
+            for (const auto& column : snowPackChanges) {
+                snow::PackTops tops;
+                iceCover->fillTops(column.first, column.second, tops);
+                if (tops.empty())
+                    next->ice.erase(column);
+                else
+                    next->ice.insert_or_assign(
+                        column, std::make_shared<const snow::PackTops>(
+                                    std::move(tops)));
+            }
+        }
+    }
     snowSurface = std::move(next);
     if (polarPackSite && all) {
         for (int dx : {-3, 2}) {
@@ -1621,9 +1897,138 @@ void GameplayState::publishSnowSurface(bool all) {
                                     polarPackSite->z / Chunk::SIZE_Z);
         }
     }
-    terrainLod->setSnow(snowSurface, snowPackChanges);
+    const bool allSurface = all || iceSurfaceAll;
+    iceSurfaceAll = false;
+    terrainLod->setSnow(snowSurface, snowPackChanges, allSurface);
     skyMap->setSnowSurface(snowSurface, snowPackChanges);
     snowPackChanges.clear();
+}
+
+void GameplayState::updateIce() {
+    if (!world->reservoirs) {
+        lastIceDay = clock.days();
+        return;
+    }
+    const double now = clock.days();
+    // Bound accelerated-clock work. Skipping the excess is deliberate: the
+    // V1 surface lid is a presentation/gameplay approximation, and replaying
+    // hours of ice growth after returning to 1x would displace frame work.
+    constexpr double MaxIceStepDays = .05;
+    const double dt = std::min(now - lastIceDay, MaxIceStepDays);
+    lastIceDay = now;
+    if (dt <= 0 || !iceId) return;
+    // Ice is a regional surface; a 4 m temperature lattice avoids one full
+    // weather/source query per water column while still letting a local
+    // heater melt a patch.
+    std::unordered_map<uint64_t, float> temperatureCache;
+    const auto temperature = [this, &temperatureCache](
+                                 int x, int z, double waterline, double day) {
+        if (!thermalQuery) return 0.f;
+        const int qx = int(std::floor(double(x) / 4.));
+        const int qz = int(std::floor(double(z) / 4.));
+        const int qy = int(std::floor(waterline));
+        const uint64_t key = (uint64_t(uint32_t(qx)) << 32) |
+                             (uint64_t(uint32_t(qz)) << 16) |
+                             uint32_t(qy & 0xFFFF);
+        if (const auto found = temperatureCache.find(key);
+            found != temperatureCache.end())
+            return found->second;
+        auto value =
+            thermalQuery
+                ->at({double(x) + .5, waterline + .05, double(z) + .5}, day)
+                .temperatureC;
+        if (iceFixtureCold) value = std::min(value, -12.f);
+        temperatureCache.emplace(key, value);
+        return value;
+    };
+    const auto fixtureColumn = [this](int x, int z) {
+        if (!iceFixtureSite) return false;
+        const auto [sx, sy, sz] = *iceFixtureSite;
+        (void)sy;
+        return std::abs(x - sx) <= 10 && std::abs(z - sz) <= 10;
+    };
+    // Recompute the seasonal target only at 1x. At 60x/7200x a five-day step
+    // would arrive every few frames and force a full LOD refresh.
+    const bool regionalChanged =
+        clock.speed() <= 1.0 && iceRegional->update(now);
+    // A fast clock only updates the seasonal target field. The detailed
+    // thermal pass is a 1x refinement; running it at 60x/7200x was the main
+    // source of the stall once the camera had visited a lot of water.
+    surface_ice::UpdateStats stats;
+    if (clock.speed() <= 1.0)
+        stats = iceSimulation->update(
+            *world->reservoirs, *iceTerrain, temperature, now, dt,
+            int(std::floor(camera.position.x)),
+            int(std::floor(camera.position.z)), 24, 4096,
+            [this, &fixtureColumn](int x, int z) {
+                return !fixtureColumn(x, z) &&
+                       iceRegional->targetAt(x, z) >= .01f;
+            });
+
+    std::set<snow::ChunkColumn> dirty;
+    // Bound the rebuild after a long fast run: the rest of the notified
+    // columns stay queued for the following ticks instead of rebuilding the
+    // whole visited area in one frame. The camera column goes first so a
+    // teleport shows its feature ice immediately.
+    const snow::ChunkColumn cameraColumn{
+        unsigned(int(camera.position.x) / Chunk::SIZE_X),
+        unsigned(int(camera.position.z) / Chunk::SIZE_Z)};
+    if (auto it = iceDirtyColumns.find(cameraColumn);
+        it != iceDirtyColumns.end()) {
+        dirty.insert(*it);
+        iceDirtyColumns.erase(it);
+    }
+    while (!iceDirtyColumns.empty() && dirty.size() < 4) {
+        auto nearest = iceDirtyColumns.begin();
+        int best = INT_MAX;
+        for (auto it = iceDirtyColumns.begin(); it != iceDirtyColumns.end();
+             ++it) {
+            const int dx = int(world->wrap().deltaChunk(
+                it->first, unsigned(int(camera.position.x) / Chunk::SIZE_X)));
+            const int dz =
+                int(it->second) - int(camera.position.z) / Chunk::SIZE_Z;
+            const int distance = dx * dx + dz * dz;
+            if (distance < best) {
+                best = distance;
+                nearest = it;
+            }
+        }
+        dirty.insert(*nearest);
+        iceDirtyColumns.erase(nearest);
+    }
+    for (const auto& key : stats.changedColumns)
+        dirty.insert(
+            {unsigned(key.x / Chunk::SIZE_X), unsigned(key.z / Chunk::SIZE_Z)});
+    if (stats.frozen <= 0 && stats.thawed <= 0 && dirty.empty() &&
+        !iceFullRebuild && !regionalChanged)
+        return;
+    const std::function<float(int, int)> regionalTarget =
+        [this, &fixtureColumn](int x, int z) {
+            return fixtureColumn(x, z) || iceRegional->featureAt(x, z)
+                       ? 0.f
+                       : iceRegional->targetAt(x, z);
+        };
+    if (iceFullRebuild) {
+        iceCover->rebuild(*world->reservoirs, *iceTerrain, iceId);
+        iceFullRebuild = false;
+        for (const auto& column : snowResident) iceDirtyColumns.insert(column);
+    } else if (!dirty.empty()) {
+        iceCover->rebuild(*world->reservoirs, *iceTerrain, iceId, &dirty,
+                          &regionalTarget);
+    }
+    const auto& changed = iceCover->changedChunks();
+    // Near ice geometry does not change the distant target field. Refreshing
+    // LOD patches here made every ice chunk crossing rebuild several distant
+    // patches; only a seasonal target change or an explicit cut publishes.
+    refreshEnvironment(changed);
+    if (regionalChanged) {
+        iceSurfaceAll = true;
+        for (const auto& column : snowResident)
+            if (!iceRegional->featureAt(int(column.first) * Chunk::SIZE_X + 8,
+                                        int(column.second) * Chunk::SIZE_Z + 8))
+                iceDirtyColumns.insert(column);
+        publishSnowSurface(true);
+    }
 }
 
 void GameplayState::rebuildSnow(size_t maxColumns, bool streamingOnly) {
@@ -1688,17 +2093,84 @@ void GameplayState::publishSnow(const snow::ChunkColumns& selected) {
 }
 
 void GameplayState::refreshSnowEnvironment() {
-    const auto& changed = snowCover->changedChunks();
+    refreshEnvironment(snowCover->changedChunks());
+}
+
+void GameplayState::refreshEnvironment(const std::vector<ChunkCoord>& changed) {
     if (changed.empty()) return;
-    chunkManager->setEnvironment(snowCover->environment());
+    const auto& snow = *snowCover->environment();
+    const auto& ice = *iceCover->environment();
+    std::vector<ChunkCoord> work(changed.begin(), changed.end());
+    if (!mergedEnvironment ||
+        (mergedEnvironment->empty() && (!snow.empty() || !ice.empty()))) {
+        mergedEnvironment = std::make_shared<EnvironmentMap>();
+        std::unordered_set<ChunkCoord> seen;
+        for (const auto& [coord, chunk] : snow) {
+            (void)chunk;
+            if (seen.insert(coord).second) work.push_back(coord);
+        }
+        for (const auto& [coord, chunk] : ice) {
+            (void)chunk;
+            if (seen.insert(coord).second) work.push_back(coord);
+        }
+    }
+    // Copy the small map of shared chunk pointers, then touch only the
+    // chunks named by this update. Merging every resident chunk on each ice
+    // stage would otherwise dominate the frame.
+    auto merged = std::make_shared<EnvironmentMap>(*mergedEnvironment);
+    for (const auto& coord : work) {
+        const auto s = snow.find(coord);
+        const auto i = ice.find(coord);
+        const auto* snowChunk = s == snow.end() ? nullptr : s->second.get();
+        const auto* iceChunk = i == ice.end() ? nullptr : i->second.get();
+        if (!snowChunk && !iceChunk) {
+            merged->erase(coord);
+            continue;
+        }
+        if (!snowChunk) {
+            merged->insert_or_assign(coord, i->second);
+            continue;
+        }
+        if (!iceChunk) {
+            merged->insert_or_assign(coord, s->second);
+            continue;
+        }
+        const auto key = std::pair{snowChunk, iceChunk};
+        auto& cache = environmentCache->chunks;
+        auto found = cache.find(key);
+        if (found == cache.end()) {
+            auto combined = std::make_shared<ChunkEnvironment>(*snowChunk);
+            for (const auto& [index, geometry] : *iceChunk) {
+                if (!geometry) continue;
+                const auto existing = combined->find(index);
+                if (existing == combined->end()) {
+                    combined->insert_or_assign(index, geometry);
+                    continue;
+                }
+                auto cell = std::make_shared<tile_geometry::CellGeometry>(
+                    *existing->second);
+                cell->append(*geometry);
+                combined->insert_or_assign(index, std::move(cell));
+            }
+            if (cache.size() > 8192) cache.clear();
+            found = cache
+                        .emplace(key, std::make_shared<const ChunkEnvironment>(
+                                          std::move(*combined)))
+                        .first;
+        }
+        merged->insert_or_assign(coord, found->second);
+    }
+    mergedEnvironment = merged;
+    chunkManager->setEnvironment(mergedEnvironment);
     snow::ChunkColumns columns;
-    for (const auto& coord : changed) {
+    for (const auto& coord : work) {
         columns.emplace(coord.x, coord.z);
         sunLight->markEnvironmentChanged(coord);
         blockLight->markChunkChanged(coord);
         floraRenderer->snowChanged(coord);
     }
-    skyMap->setSnowEnvironment(*snowCover->environment(), columns, snowId);
+    skyMap->setSnowEnvironment(*mergedEnvironment, columns,
+                               snowId ? snowId : iceId);
 }
 
 void GameplayState::skipWeatherTime(double days) {
@@ -2659,6 +3131,12 @@ void GameplayState::update(Game& game, float dt) {
         roomUpdateSeconds = 0;
     }
     snowUpdateSeconds += dt;
+    iceUpdateSeconds += dt;
+    if (iceUpdateSeconds >= .5) {
+        if (iceFixtureFillPending) applyIceFixtureWater();
+        updateIce();
+        iceUpdateSeconds = 0;
+    }
     // Wall time keeps an accelerated clock or a replay backlog from
     // continuously displacing frame work and in-flight mesh completions.
     auto startedSnow = std::chrono::steady_clock::time_point{};
@@ -2926,6 +3404,37 @@ void GameplayState::update(Game& game, float dt) {
                     "Meltwater awaiting routing {:.1f} cm3\n",
                     snowSettlement->weatherDay(hit->tx, hit->tz), clock.days(),
                     snowSettlement->meltwaterCm3());
+            }
+
+            ss << "\n--- Ice ---\n";
+            {
+                const auto* ice =
+                    world->reservoirs
+                        ? world->reservoirs->surfaceIceAt(hit->tx, hit->tz)
+                        : nullptr;
+                if (!ice || ice->frozen <= 0) {
+                    ss << "no surface ice\n";
+                } else {
+                    double liquid = 0;
+                    if (const auto sample =
+                            chunkManager->projectedWaterAt(hit->tx, hit->tz)) {
+                        const double bottom = sample->first + 1;
+                        const double waterline = sample->second.wet()
+                                                     ? sample->second.height()
+                                                     : double(ice->waterline);
+                        const double iceBottom =
+                            double(ice->waterline) - ice->thickness;
+                        liquid = std::max(
+                            0., std::min(waterline, iceBottom) - bottom);
+                    }
+                    ss << fmt::format(
+                        "thickness: {:.3f} m (stage {}), waterline {:.3f} m\n"
+                        "liquid below: {:.3f} m, frozen {:.0f} water units\n",
+                        ice->thickness, unsigned(ice->stage), ice->waterline,
+                        liquid, double(ice->frozen));
+                    if (ice->through) ss << "frozen through to the bed\n";
+                    if (ice->stranded) ss << "stranded above the liquid\n";
+                }
             }
 
             ss << "\n--- Climate ---\n";

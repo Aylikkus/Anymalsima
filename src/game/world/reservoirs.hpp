@@ -102,6 +102,48 @@ struct PhaseState {
     double appliedDay = 0;   // last dated application
 };
 
+// Surface ice is owned per water column so a shallow bank can freeze through
+// before a deeper pool forms its first lid. The liquid it converts stays in
+// the body, reach or local cell named here; `frozen` is the water equivalent
+// already removed from that owner.
+struct SurfaceKey {
+    int32_t x = 0;
+    int32_t z = 0;
+    bool operator==(const SurfaceKey&) const = default;
+    bool operator<(const SurfaceKey& other) const {
+        return std::tie(x, z) < std::tie(other.x, other.z);
+    }
+};
+
+struct SurfaceIceState {
+    uint32_t body = 0;   // standing body, or zero
+    uint32_t reach = 0;  // flowing reach, or zero
+    int16_t cellY = 0;   // top water tile, for local conversion and walking
+    WaterVolume frozen = 0;
+    int64_t progress = 0;
+    double appliedDay = 0;
+    float waterline = 0;    // ice top at first formation
+    float thickness = 0;    // visible ice thickness in metres
+    uint8_t stage = 0;      // 0 none, 1..6 stage thickness, 7 freeze-through
+    bool through = false;   // ice reaches the bed
+    bool stranded = false;  // liquid has fallen below a fixed ice sheet
+};
+
+// Metadata written with one surface freeze/thaw step. The volume itself is
+// applied by the same immutable snapshot, so liquid debit and ice credit
+// never disagree.
+struct SurfaceIceInput {
+    uint32_t body = 0;
+    uint32_t reach = 0;
+    int16_t cellY = 0;
+    float waterline = 0;
+    float thickness = 0;
+    uint8_t stage = 0;
+    int64_t progress = 0;
+    bool through = false;
+    bool stranded = false;
+};
+
 struct ReservoirSnapshot {
     std::map<uint32_t, int> levels;
     std::map<uint32_t, uint8_t> surfaceFills;
@@ -162,9 +204,13 @@ struct ReservoirSnapshot {
     std::unordered_map<uint64_t, StreamColumn> streams;
     // Authoritative freeze state, published with the water volume it changes.
     std::map<PhaseKey, PhaseState> phases;
+    // Per-column surface ice, keyed by the water column it covers.
+    std::map<SurfaceKey, SurfaceIceState> surfaceIce;
 
     const PhaseState* phase(const PhaseKey& key) const;
+    const SurfaceIceState* surfaceIceAt(int x, int z) const;
     WaterVolume frozen(const PhaseKey& key) const;
+    WaterVolume frozenSurfaceTotal() const;
 
     int level(uint32_t body, int generated) const;
     int localTop(int x, int z) const;
@@ -197,6 +243,8 @@ struct ReservoirChange {
     std::vector<TilePos> locals;
     // Phase owners whose ice or progress changed without a liquid top change.
     std::vector<PhaseKey> phaseOwners;
+    // Water columns whose surface ice changed.
+    std::vector<SurfaceKey> surfaceOwners;
     // Pool IDs referenced by this change, for footprint lookups without a
     // snapshot. The owner fills it from poolFootprints at publish time.
     std::shared_ptr<const std::map<uint32_t, std::vector<Vec2i>>> pools;
@@ -265,6 +313,20 @@ class Reservoirs {
     WaterVolume thaw(uint32_t body, WaterVolume amount, double day = -1);
     WaterVolume freezeLocal(TilePos cell, WaterVolume amount, double day = -1);
     WaterVolume thawLocal(TilePos cell, WaterVolume amount, double day = -1);
+    // Per-column surface ice. The owner (body, reach or local cell) is debited
+    // or credited in the same snapshot as the ice state. Reach ice is supplied
+    // by flowing water and is booked as an accounted input.
+    WaterVolume freezeSurface(const SurfaceKey& key, WaterVolume amount,
+                              const SurfaceIceInput& input, double day = -1);
+    WaterVolume thawSurface(const SurfaceKey& key, WaterVolume amount,
+                            const SurfaceIceInput& input, double day = -1);
+    bool setSurfaceIce(const SurfaceKey& key, const SurfaceIceInput& input,
+                       double day = -1);
+    bool clearSurfaceIce(const SurfaceKey& key);
+    // Drop surface ice records matching a predicate in one immutable
+    // snapshot. Used when generated feature ice takes over a region.
+    size_t clearSurfaceIceWhere(const std::function<bool(int, int)>& predicate);
+    const SurfaceIceState* surfaceIceAt(int x, int z) const;
     // Legacy independent water lives in chunk tiles with no ledger owner.
     // Adopt it before a phase change so the conversion cannot lose or
     // duplicate the cell. Adoption is not an external input.

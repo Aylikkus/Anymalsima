@@ -15,6 +15,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/tile_piece.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/snow_settlement.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/snow_cover.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/surface_ice.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/grounded_probe.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/chunk_mesher.cpp
@@ -81,6 +82,7 @@ add_executable(world_logic_tests
     unit/game/world/tile_piece_tests.cpp
     unit/game/world/snow_settlement_tests.cpp
     unit/game/world/fluid_cell_tests.cpp
+    unit/game/world/surface_ice_tests.cpp
     unit/game/world/climate_tests.cpp
     unit/game/world/weather_tests.cpp
     unit/game/world/thermal_tests.cpp
@@ -178,6 +180,13 @@ set(world_cases
     snow_cover_projects_settlement
     snow_cover_refreshes_only_changed_resident_columns
     snow_settlement_serialization
+    surface_ice_stage_progression_and_balance
+    surface_ice_shallow_bank_freezes_through_first
+    surface_ice_thaw_restores_liquid_and_substage_progress
+    surface_ice_flowing_reach_forms_ice_slower
+    surface_ice_projects_a_fractional_lid_and_distant_top
+    surface_ice_regional_features_supply_deep_and_sea_ice
+    surface_ice_feature_cover_projects_without_a_ledger_record
     climate_calendar_dates
     climate_year_curve_continuous
     climate_opposite_seasons_and_latitude
@@ -234,6 +243,7 @@ set(world_cases
     tile_classification
     generation_surface_layers
     generation_sea_level
+    generation_feature_ice_and_snow_blocks
     generation_chunk_seam
     generation_reused_chunk
     generation_repeatable

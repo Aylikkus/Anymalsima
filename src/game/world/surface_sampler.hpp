@@ -136,6 +136,9 @@ class SurfaceSampler {
     // Edit of the chunk column containing the wrapped/clamped tile, or null.
     const ColumnEdit* editAt(int x, int z);
     WaterSurface sampleWater(int x, int z, bool preview);
+    // Broad cold-water lid for unloaded terrain, derived from the dated
+    // regional weather. Explicit ledger ice always wins.
+    float regionalIceTop(int x, int z);
     WaterSurface generatedWater(int x, int z, int groundY) const;
     SurfaceColumn generatedColumn(int x, int z);
     const World& world;
@@ -155,6 +158,7 @@ class SurfaceSampler {
     std::unordered_map<uint64_t, int> heights;
     std::unordered_map<uint64_t, WaterSurface> waterSamples;
     std::unordered_map<uint64_t, SurfaceColumn> columns;
+    std::unordered_map<uint64_t, float> regionalIceTops;
     uint16_t material(const RegionInput& data, const SurfaceColumn& column,
                       int y) const;
 };

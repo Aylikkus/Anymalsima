@@ -76,6 +76,20 @@ WaterVolume ReservoirSnapshot::frozen(const PhaseKey& key) const {
     return state ? state->frozen : 0;
 }
 
+const SurfaceIceState* ReservoirSnapshot::surfaceIceAt(int x, int z) const {
+    const auto it = surfaceIce.find(SurfaceKey{x, z});
+    return it == surfaceIce.end() ? nullptr : &it->second;
+}
+
+WaterVolume ReservoirSnapshot::frozenSurfaceTotal() const {
+    WaterVolume total = 0;
+    for (const auto& [key, state] : surfaceIce) {
+        (void)key;
+        total = std::max<WaterVolume>(0, total + state.frozen);
+    }
+    return total;
+}
+
 void PoolFootprint::add(Vec2i tile, int period, int anchorX, int floor,
                         int sill) {
     columns.emplace(ReservoirSnapshot::columnKey(tile.x, tile.y),
@@ -400,6 +414,8 @@ bool ReservoirChange::affects(const GeneratedHydrology* hydrology, int x0,
             return true;
         }
     }
+    for (const auto& key : surfaceOwners)
+        if (contains(TilePos{key.x, 0, key.z})) return true;
     if (hydrology && !reaches.empty() &&
         hydrology->hasChannel(x0, z0, x1, z1, reaches))
         return true;
@@ -944,6 +960,208 @@ WaterVolume Reservoirs::thawLocal(TilePos cell, WaterVolume amount,
     return available;
 }
 
+WaterVolume Reservoirs::freezeSurface(const SurfaceKey& key, WaterVolume amount,
+                                      const SurfaceIceInput& input,
+                                      double day) {
+    if (amount <= 0 || key.x < 0 || key.z < 0) return 0;
+    if (input.body && input.reach) return 0;
+    const auto current = snapshot();
+    WaterVolume accepted = 0;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    ReservoirChange change;
+    if (input.body <= GeneratedHydrology::Sea && input.body != 0) {
+        // Feature sea ice (SEA_ICE/ICE_SHEET) is a generated cover, not a
+        // conversion of the single global sea body. Booking it as input
+        // avoids draining the ocean by the ice thickness.
+        accepted = amount;
+        totals[size_t(ReservoirExchange::Input)] =
+            add(totals[size_t(ReservoirExchange::Input)], accepted);
+    } else if (input.body) {
+        const auto* shape = curve(input.body);
+        if (!shape) return 0;
+        const auto before = volume(input.body);
+        accepted = std::min(amount, before);
+        if (accepted <= 0) return 0;
+        stores[input.body] = before - accepted;
+        updateLevel(*next, *shape, input.body, change);
+    } else if (input.reach) {
+        if (!springRates.contains(input.reach)) return 0;
+        accepted = amount;
+        totals[size_t(ReservoirExchange::Input)] =
+            add(totals[size_t(ReservoirExchange::Input)], accepted);
+    } else {
+        const TilePos cell{key.x, input.cellY, key.z};
+        if (cell.y < 0 || cell.y >= WORLD_HEIGHT_Y) return 0;
+        const int fill = current->cells.fill(cell);
+        accepted = std::min<WaterVolume>(amount, fill);
+        if (accepted <= 0) return 0;
+        next->cells.set(cell, uint8_t(fill - accepted));
+        change.local = cell;
+        change.locals.push_back(cell);
+    }
+    auto& state = next->surfaceIce[key];
+    state.body = input.body;
+    state.reach = input.reach;
+    state.cellY = input.cellY;
+    state.frozen = add(state.frozen, accepted);
+    state.progress = input.progress;
+    state.waterline = input.waterline;
+    state.thickness = input.thickness;
+    state.stage = input.stage;
+    state.through = input.through;
+    state.stranded = input.stranded;
+    if (day >= 0) state.appliedDay = day;
+    change.surfaceOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return accepted;
+}
+
+WaterVolume Reservoirs::thawSurface(const SurfaceKey& key, WaterVolume amount,
+                                    const SurfaceIceInput& input, double day) {
+    if (amount <= 0 || key.x < 0 || key.z < 0) return 0;
+    const auto current = snapshot();
+    const auto found = current->surfaceIce.find(key);
+    if (found == current->surfaceIce.end() || found->second.frozen <= 0)
+        return 0;
+    const auto available = std::min(amount, found->second.frozen);
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    auto& state = next->surfaceIce[key];
+    WaterVolume accepted = 0;
+    bool supplied = false;
+    ReservoirChange change;
+    if (state.body && state.body <= GeneratedHydrology::Sea) {
+        supplied = true;
+        totals[size_t(ReservoirExchange::Input)] =
+            add(totals[size_t(ReservoirExchange::Input)], -available);
+    } else if (state.body) {
+        const auto* shape = curve(state.body);
+        if (!shape) return 0;
+        const auto before = volume(state.body);
+        accepted = std::max<WaterVolume>(
+            0, std::min(available, shape->capacity() - before));
+        if (accepted > 0) {
+            stores[state.body] = before + accepted;
+            updateLevel(*next, *shape, state.body, change);
+        }
+    } else if (state.reach) {
+        accepted = available;
+        totals[size_t(ReservoirExchange::Input)] =
+            add(totals[size_t(ReservoirExchange::Input)], -accepted);
+    } else {
+        const TilePos cell{key.x, state.cellY, key.z};
+        if (cell.y < 0 || cell.y >= WORLD_HEIGHT_Y) return 0;
+        ProfileView profiles(profileQuery,
+                             generated ? generated->periodX() : 0);
+        const int fill = next->cells.fill(cell);
+        accepted = std::max<WaterVolume>(
+            0,
+            std::min<WaterVolume>(available, profiles.capacity(cell) - fill));
+        if (accepted > 0) {
+            next->cells.set(cell, uint8_t(fill + accepted));
+            change.local = cell;
+            change.locals.push_back(cell);
+        }
+    }
+    const auto overflow = available - accepted;
+    state.frozen -= available;
+    state.progress = input.progress;
+    state.thickness = input.thickness;
+    state.stage = input.stage;
+    state.through = input.through;
+    state.stranded = input.stranded;
+    if (day >= 0) state.appliedDay = day;
+    if (overflow > 0 && !supplied)
+        totals[size_t(ReservoirExchange::Disposal)] =
+            add(totals[size_t(ReservoirExchange::Disposal)], -overflow);
+    if (state.frozen <= 0 && state.progress == 0) next->surfaceIce.erase(key);
+    change.surfaceOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return available;
+}
+
+bool Reservoirs::setSurfaceIce(const SurfaceKey& key,
+                               const SurfaceIceInput& input, double day) {
+    if (key.x < 0 || key.z < 0 || (input.body && input.reach)) return false;
+    const auto current = snapshot();
+    const auto found = current->surfaceIce.find(key);
+    if (found == current->surfaceIce.end()) {
+        if (input.progress == 0) return false;
+    } else {
+        const auto& state = found->second;
+        const bool unchanged =
+            state.body == input.body && state.reach == input.reach &&
+            state.cellY == input.cellY && state.progress == input.progress &&
+            state.waterline == input.waterline &&
+            state.thickness == input.thickness && state.stage == input.stage &&
+            state.through == input.through && state.stranded == input.stranded;
+        if (unchanged && (day < 0 || state.appliedDay == day)) return false;
+        if (state.frozen <= 0 && input.progress == 0) {
+            auto next = std::make_shared<ReservoirSnapshot>(*current);
+            next->surfaceIce.erase(key);
+            ReservoirChange change;
+            change.surfaceOwners.push_back(key);
+            ++serial;
+            publish(std::move(next), change);
+            return true;
+        }
+    }
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    auto& state = next->surfaceIce[key];
+    state.body = input.body;
+    state.reach = input.reach;
+    state.cellY = input.cellY;
+    state.progress = input.progress;
+    state.waterline = input.waterline;
+    state.thickness = input.thickness;
+    state.stage = input.stage;
+    state.through = input.through;
+    state.stranded = input.stranded;
+    if (day >= 0) state.appliedDay = day;
+    ReservoirChange change;
+    change.surfaceOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return true;
+}
+
+size_t Reservoirs::clearSurfaceIceWhere(
+    const std::function<bool(int, int)>& predicate) {
+    const auto current = snapshot();
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    size_t removed = 0;
+    for (auto it = next->surfaceIce.begin(); it != next->surfaceIce.end();) {
+        if (!predicate(it->first.x, it->first.z)) {
+            ++it;
+            continue;
+        }
+        it = next->surfaceIce.erase(it);
+        ++removed;
+    }
+    if (!removed) return 0;
+    ReservoirChange change;
+    ++serial;
+    publish(std::move(next), change);
+    return removed;
+}
+
+bool Reservoirs::clearSurfaceIce(const SurfaceKey& key) {
+    const auto current = snapshot();
+    if (!current->surfaceIce.contains(key)) return false;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->surfaceIce.erase(key);
+    ReservoirChange change;
+    change.surfaceOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return true;
+}
+
+const SurfaceIceState* Reservoirs::surfaceIceAt(int x, int z) const {
+    return snapshot()->surfaceIceAt(x, z);
+}
+
 WaterVolume Reservoirs::adoptLocal(TilePos cell, uint8_t fill) {
     if (!fill || cell.x < 0 || cell.z < 0 || cell.y < 0 ||
         cell.y >= WORLD_HEIGHT_Y)
@@ -970,11 +1188,12 @@ WaterVolume Reservoirs::frozenLocal(TilePos cell) const {
 
 WaterVolume Reservoirs::frozenTotal() const {
     WaterVolume total = 0;
-    for (const auto& [key, state] : snapshot()->phases) {
+    const auto current = snapshot();
+    for (const auto& [key, state] : current->phases) {
         (void)key;
         total = add(total, state.frozen);
     }
-    return total;
+    return add(total, current->frozenSurfaceTotal());
 }
 
 WaterVolume Reservoirs::liquidTotal() const {
@@ -1051,6 +1270,10 @@ bool Reservoirs::clearLocal(TilePos cell) {
     auto next = std::make_shared<ReservoirSnapshot>(*current);
     next->cells.set(cell, 0);
     next->phases.erase(key);
+    if (const auto surface = next->surfaceIce.find({cell.x, cell.z});
+        surface != next->surfaceIce.end() && surface->second.body == 0 &&
+        surface->second.cellY == cell.y)
+        next->surfaceIce.erase(surface);
     if (fill)
         totals[size_t(ReservoirExchange::Disposal)] =
             add(totals[size_t(ReservoirExchange::Disposal)], -fill);
@@ -3140,15 +3363,33 @@ Bytes Reservoirs::encode() const {
         out.write(key.kind);
         out.write(interval);
     }
+    // v12 adds per-column surface ice. Its owner and presentation metadata
+    // travel with the frozen water equivalent.
+    out.write<uint32_t>(phaseSnapshot->surfaceIce.size());
+    for (const auto& [key, state] : phaseSnapshot->surfaceIce) {
+        out.write(key.x);
+        out.write(key.z);
+        out.write(state.body);
+        out.write(state.reach);
+        out.write(state.cellY);
+        out.write(state.frozen);
+        out.write(state.progress);
+        out.write(state.appliedDay);
+        out.write(state.waterline);
+        out.write(state.thickness);
+        out.write(state.stage);
+        out.write(state.through);
+        out.write(state.stranded);
+    }
     SectionContainer file;
-    file.put("RSVR", 11, out.take());
+    file.put("RSVR", 12, out.take());
     return file.encode();
 }
 
 void Reservoirs::restore(ByteView bytes) {
     const auto file = SectionContainer::decode(bytes);
     const auto* section = file.find("RSVR");
-    if (!section || section->version > 11 || !section->version)
+    if (!section || section->version > 12 || !section->version)
         throw SerializationError("Unsupported reservoir ledger");
     BinaryReader in(section->data);
     const auto savedStep = in.read<uint64_t>();
@@ -3435,6 +3676,7 @@ void Reservoirs::restore(ByteView bytes) {
     WaterVolume savedRemovedIce = 0;
     std::map<PhaseKey, PhaseState> savedPhases;
     std::map<InputKey, int64_t> savedCursors;
+    std::map<SurfaceKey, SurfaceIceState> savedSurface;
     if (section->version >= 11) {
         savedRemainder = in.read<int64_t>();
         savedRemovedIce = in.read<WaterVolume>();
@@ -3477,6 +3719,37 @@ void Reservoirs::restore(ByteView bytes) {
                 (key.body && key.reach) ||
                 !savedCursors.emplace(key, interval).second)
                 throw SerializationError("Invalid water input cursor");
+        }
+        if (section->version >= 12) {
+            const auto surfaceCount = in.read<uint32_t>();
+            if (surfaceCount > (1u << 21))
+                throw SerializationError("Invalid surface ice count");
+            for (uint32_t i = 0; i < surfaceCount; ++i) {
+                SurfaceKey key;
+                key.x = in.read<int32_t>();
+                key.z = in.read<int32_t>();
+                SurfaceIceState state;
+                state.body = in.read<uint32_t>();
+                state.reach = in.read<uint32_t>();
+                state.cellY = in.read<int16_t>();
+                state.frozen = in.read<WaterVolume>();
+                state.progress = in.read<int64_t>();
+                state.appliedDay = in.read<double>();
+                state.waterline = in.read<float>();
+                state.thickness = in.read<float>();
+                state.stage = in.read<uint8_t>();
+                state.through = in.read<uint8_t>() != 0;
+                state.stranded = in.read<uint8_t>() != 0;
+                if (key.x < 0 || key.z < 0 || (state.body && state.reach) ||
+                    state.cellY < 0 || state.cellY >= WORLD_HEIGHT_Y ||
+                    state.frozen < 0 || !std::isfinite(state.appliedDay) ||
+                    state.appliedDay < 0 || !std::isfinite(state.waterline) ||
+                    !std::isfinite(state.thickness) || state.thickness < 0 ||
+                    state.stage > 8 ||
+                    (state.body && !savedCurve(state.body)) ||
+                    !savedSurface.emplace(key, state).second)
+                    throw SerializationError("Invalid surface ice");
+            }
         }
     }
     if (!in.atEnd()) throw SerializationError("Trailing reservoir data");
@@ -3541,6 +3814,7 @@ void Reservoirs::restore(ByteView bytes) {
     for (const auto reach : stagedReaches)
         updateRiverStage(reach, next, change);
     next->phases = std::move(savedPhases);
+    next->surfaceIce = std::move(savedSurface);
     inputCursors = std::move(savedCursors);
     inputRemainder_ = savedRemainder;
     removedIce_ = savedRemovedIce;

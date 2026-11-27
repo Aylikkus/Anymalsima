@@ -32,6 +32,7 @@
 #include "world/sky_height_map.hpp"
 #include "world/snow_cover.hpp"
 #include "world/sunlight_propagator.hpp"
+#include "world/surface_ice.hpp"
 #include "world/terrain_edit_tracker.hpp"
 #include "world/terrain_lod_manager.hpp"
 #include "world/thermal_source_tracker.hpp"
@@ -47,6 +48,7 @@
 #include "world/world_weather.hpp"
 
 class ChunkSnowTerrain;
+class ChunkIceTerrain;
 
 class GameplayState : public IGameState {
    public:
@@ -124,6 +126,31 @@ class GameplayState : public IGameState {
     uint64_t savedSnowRevision = 0;
     Signal<const BlockChange&>::Connection snowEditConnection;
     bool depositionFixture = false;
+    // Surface ice: the simulation names water columns, the cover projects
+    // them onto the same environment map as snow.
+    std::unique_ptr<ChunkIceTerrain> iceTerrain;
+    std::unique_ptr<surface_ice::Simulation> iceSimulation;
+    std::unique_ptr<surface_ice::IceCover> iceCover;
+    std::unique_ptr<surface_ice::Regional> iceRegional;
+    uint64_t iceRegionalRevision = UINT64_MAX;
+    uint8_t iceId = 0;
+    double iceUpdateSeconds = 0;
+    double lastIceDay = 0;
+    std::set<snow::ChunkColumn> iceDirtyColumns;
+    bool iceFullRebuild = false;
+    bool iceSurfaceAll = false;
+    std::optional<TilePos> iceFixtureSite;
+    bool iceFixtureFillPending = false;
+    bool iceFixtureCold = false;
+    void setupIceFixture();
+    void applyIceFixtureWater();
+    void clearIceFixture();
+    void visitIceSite();
+    void updateIce();
+    void refreshEnvironment(const std::vector<ChunkCoord>& changed);
+    std::shared_ptr<const EnvironmentMap> mergedEnvironment;
+    struct EnvironmentMergeCache;
+    std::unique_ptr<EnvironmentMergeCache> environmentCache;
     // cm3: the step 06 fixture amount for a 5 cm landing plus a 5 cm toe.
     int64_t snowAddVolume = 51250;
     void rebuildSnow(size_t maxColumns = 1, bool streamingOnly = false);

@@ -2009,11 +2009,12 @@ TEST(hydrology_partial_cell_legacy_flag_round_trips) {
     CHECK(section);
     auto legacy = section->data;
     // v10 appends the partial-cell flag; v11 appends the conversion
-    // remainder, removed-ice total, phase entries and input cursors. An
-    // empty v11 ledger therefore carries 1 + 8 + 8 + 4 + 4 extra bytes.
-    constexpr size_t v11Tail = 25;
-    CHECK(legacy.size() >= v11Tail);
-    legacy.resize(legacy.size() - v11Tail);
+    // remainder, removed-ice total, phase entries and input cursors; v12
+    // appends the empty surface-ice count. An empty v11 ledger therefore
+    // carries 1 + 8 + 8 + 4 + 4 extra bytes, and v12 adds four more.
+    constexpr size_t v12Tail = 29;
+    CHECK(legacy.size() >= v12Tail);
+    legacy.resize(legacy.size() - v12Tail);
     container.put("RSVR", 9, legacy);
     Reservoirs migrated(nullptr);
     migrated.restore(container.encode());
@@ -2199,10 +2200,10 @@ TEST(hydrology_water_phase_legacy_ledger_has_no_ice) {
     const auto* section = container.find("RSVR");
     CHECK(section);
     // Keep the v10 partial-cell flag and strip the v11 remainder, removed
-    // ice, phase count and cursor count.
-    constexpr size_t v11Tail = 24;
-    CHECK(section->data.size() >= v11Tail);
-    Bytes legacyBytes(section->data.begin(), section->data.end() - v11Tail);
+    // ice, phase count and cursor count plus the v12 surface count.
+    constexpr size_t v12Tail = 28;
+    CHECK(section->data.size() >= v12Tail);
+    Bytes legacyBytes(section->data.begin(), section->data.end() - v12Tail);
     container.put("RSVR", 10, std::move(legacyBytes));
     Reservoirs legacy(nullptr);
     legacy.define(lake, StorageCurve::constantArea(1, 400, 401));
