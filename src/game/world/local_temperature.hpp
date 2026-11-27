@@ -47,13 +47,45 @@ struct RegionalHeat {
     float offsetAt(double distance) const;
 };
 
+// Simulated connected room air at a point. The room owner fills this from its
+// lumped air/wall model (world/room_air.hpp). `airC` already includes heat
+// from registered sources and wall exchange, so a query must not add the
+// detailed source offsets a second time.
+struct RoomSample {
+    bool indoors = false;
+    float airC = 0;
+    float wallC = 0;
+    float groundC = 0;         // annual-mean baseline at the room
+    int volume = 0;            // connected air cells, one cubic metre each
+    int wallFaces = 0;         // solid contact faces
+    int leakFaces = 0;         // faces to outdoor, water or unloaded air
+    bool approximate = false;  // a leak lies on an unloaded scan boundary
+    size_t sources = 0;
+    float commandC = 0;
+    bool saturated = false;
+};
+
+using RoomProvider =
+    std::function<bool(std::array<double, 3>, double, RoomSample&)>;
+
 struct Sample {
     float ambientC = 0;      // dated outdoor weather at the point
     float detailedC = 0;     // sum of local registered sources
     float regionalC = 0;     // sum of active dated regional entries
-    float temperatureC = 0;  // ambient + detailed + regional
+    float temperatureC = 0;  // ambient + detailed + regional, or room air
     size_t detailedSources = 0;
     size_t regionalSources = 0;
+    bool indoors = false;
+    float roomC = 0;
+    float wallC = 0;
+    float roomGroundC = 0;
+    int roomVolume = 0;
+    int roomWallFaces = 0;
+    int roomLeakFaces = 0;
+    bool roomApproximate = false;
+    size_t roomSources = 0;
+    float roomCommandC = 0;
+    bool roomSaturated = false;
 };
 
 class Query {
@@ -72,6 +104,11 @@ class Query {
         return at(position, worldDays).temperatureC;
     }
 
+    // Installed by the room owner. While a point belongs to a connected room,
+    // its simulated air temperature replaces the outdoor-plus-source sum.
+    void setRoomProvider(RoomProvider value) { room = std::move(value); }
+    void clearRoomProvider() { room = {}; }
+
     // Session/owner-scoped dated contributions. They are not saved here; the
     // owning future system persists its own summary and calls this interface.
     void setRegional(std::vector<RegionalHeat> value);
@@ -85,6 +122,7 @@ class Query {
     const ThermalSourceRegistry& sources;
     BarrierFn barrier;
     std::vector<RegionalHeat> regional_;
+    RoomProvider room;
 };
 
 // Builds a barrier probe from loaded voxel geometry. Unloaded cells are

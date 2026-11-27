@@ -57,6 +57,23 @@ class Assets final : public IAssets {
         };
         thermal(8, "heater", 20.f, 8.f);
         thermal(9, "cooler", -15.f, 5.f);
+        {
+            Block block;
+            block.id = 10;
+            block.name = "thermostat";
+            block.material = "quartzite";
+            block.properties.opacity = 15;
+            block.thermal = ThermalEmission{};
+            block.thermal->mode = ThermalMode::Target;
+            block.thermal->deltaC = 0;
+            block.thermal->radius = 8.f;
+            block.thermal->falloff = 1.f;
+            block.thermal->targetC = 21.f;
+            block.thermal->gain = 60.f;
+            block.thermal->maxDeltaC = 60.f;
+            blocks->indexByName[block.name] = blocks->items.size();
+            blocks->items.push_back(block);
+        }
         dataStorages[Block::TypeName] = std::move(blocks);
         auto rocks = std::make_unique<DataStorage<Rock>>();
         Rock rock{};

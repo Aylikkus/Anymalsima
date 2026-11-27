@@ -439,7 +439,8 @@ TEST(seasonal_snow_fills_deep_ramps) {
     CHECK(deep->top <= (ground.surface_y + 1) * snow::UnitsPerCubicMetre);
     EQUAL(deep->bottom, ground.surface_y * snow::UnitsPerCubicMetre,
           "snow fills from the ramp cell floor");
-    CHECK(snow::polar::capacity(ground) == snow::Volume{snow::UnitsPerCubicMetre});
+    CHECK(snow::polar::capacity(ground) ==
+          snow::Volume{snow::UnitsPerCubicMetre});
     for (auto& region : terrain.world.regions) region.temperature_c = 12;
     const auto warm = terrain.baselines.at(127, 0, ground, 180);
     CHECK(!warm || warm->volume() < snow::UnitsPerCubicMetre);
@@ -487,8 +488,8 @@ TEST(v5_ground_snow_rebases_on_load) {
     snow::SnowSettlement loaded(terrain);
     CHECK(loaded.restore(bytes));
     CHECK(loaded.needsGroundRebase());
-    const auto dropped = loaded.dropGroundLoose(
-        [](int, int, int base) { return base == 10; });
+    const auto dropped =
+        loaded.dropGroundLoose([](int, int, int base) { return base == 10; });
     EQUAL(dropped, size_t(1), "the ground footprint rebased");
     CHECK(!loaded.levelAt(0, 0));
     conserved(loaded);
@@ -1080,6 +1081,41 @@ TEST(weather_snow_and_melt_interval_accounting) {
           "bulk volume persists");
     EQUAL(restored.meltwaterCm3(), whole.meltwaterCm3(), "meltwater persists");
     CHECK(restored.meltwater() == whole.meltwater());
+}
+
+TEST(weather_melt_uses_local_temperature_offset) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    const auto seed = [&](snow::SnowSettlement& snow) {
+        weather(snow, terrain, 0, 0, 4, 4, -5);
+    };
+    const auto melt = [&](snow::SnowSettlement& snow, double localOffset) {
+        const double target = snow.weatherDay(0, 0) + 1. / 24;
+        precipitation::reconcile(
+            snow, terrain, 0, 0, target, false,
+            [](int64_t) {
+                world_weather::Sample sample;
+                sample.temperatureC = 0;
+                sample.precipitationRate = 0;
+                return sample;
+            },
+            [](double) { return std::optional(false); },
+            [localOffset](double) { return localOffset; });
+    };
+
+    snow::SnowSettlement cold(terrain), warm(terrain);
+    seed(cold);
+    seed(warm);
+    EQUAL(cold.storedVolume(), warm.storedVolume(), "same starting snow");
+    melt(cold, 0);
+    melt(warm, 20);
+    // Melt is 0.5 mm SWE per positive °C per hour. The extra 20 °C over one
+    // game hour melts 10 mm SWE, or 50 mm of bulk snow over this footprint.
+    CHECK(warm.storedVolume() < cold.storedVolume());
+    EQUAL(cold.storedVolume() - warm.storedVolume(), 50'000,
+          "the local offset drives additional melt");
+    EQUAL(cold.meltwaterCm3(), 0., "no melt at 0 C");
+    CHECK(warm.meltwaterCm3() > 0.);
 }
 
 TEST(weather_melt_uncovers_vegetation) {

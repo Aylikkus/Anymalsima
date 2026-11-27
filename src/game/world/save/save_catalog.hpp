@@ -61,6 +61,11 @@ thermal_sources_codec::File readThermalSources(const SaveSlot& slot);
 void writeThermalSources(const SaveSlot& slot,
                          std::vector<thermal_sources_codec::Record> records,
                          const SectionContainer& extra = {});
+// Also writes the significant room heat stores and their timestamps.
+void writeThermalSources(const SaveSlot& slot,
+                         std::vector<thermal_sources_codec::Record> records,
+                         std::vector<thermal_sources_codec::RoomRecord> rooms,
+                         const SectionContainer& extra = {});
 // sky.dat (sky heightmap overrides): empty when the file does not exist
 // yet. Throws on corrupt data.
 sky_codec::File readSky(const SaveSlot& slot);

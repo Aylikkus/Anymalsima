@@ -33,6 +33,17 @@ struct ThermalSource {
     ThermalEmission emission;
     std::array<double, 3> position{0, 0, 0};  // world metres
     uint64_t key = 0;  // stable coarse/detailed handover key
+    // Effective output. Fixed sources keep this equal to emission.deltaC;
+    // the room simulation updates a target (thermostat) source from the
+    // measured room air temperature. Runtime-only, but persisted indirectly
+    // by the room state that reproduces it on the next tick.
+    float commandDeltaC = 0;
+    bool thermostatSaturated = false;
+
+    float effectiveDeltaC() const { return commandDeltaC; }
+    float offsetAt(float distance) const {
+        return emission.offsetAt(distance, commandDeltaC);
+    }
 };
 
 // Main-thread index of thermal sources, bucketed by 32 tiles so a local query
@@ -46,6 +57,9 @@ class ThermalSourceRegistry {
     void remove(Id id);
     // Moves an item source. Block sources are re-registered from their tile.
     void place(Id id, std::array<double, 3> position);
+    // Sets a thermostat's current output. Fixed sources keep theirs from the
+    // definition. The room simulation calls this once per update.
+    void setCommand(Id id, float deltaC, bool saturated);
     const ThermalSource* find(Id id) const;
 
     // Block sources are owned by the tiles in loaded chunks.

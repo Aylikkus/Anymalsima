@@ -6,6 +6,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <type_traits>
 
 #include "snow_settlement.hpp"
 #include "weather_history.hpp"
@@ -91,10 +92,17 @@ inline double meltVolume(float temperatureC, double hours) {
 // surviving snow through gravity once per support. Isolated supports give the
 // same depth as interval-by-interval gravity, and the water ledger accounts
 // for snow that melted before we needed to project it.
-template <typename SampleAt, typename Wet>
+// localOffsetAt optionally supplies an additional °C offset for the receiving
+// support (the same local temperature used by the room and source query). It
+// is added to the sampled weather temperature before melt and snow-fraction
+// calculations, so a warm room or a heater melts and precipitates like the
+// surrounding measured air. Historical replay uses the owner's current room
+// state; that approximation is documented in the weather handoff.
+template <typename SampleAt, typename Wet,
+          typename LocalOffset = std::nullptr_t>
 double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
                  int x, int z, double target, bool lapse, SampleAt sampleAt,
-                 Wet wetAt,
+                 Wet wetAt, LocalOffset localOffsetAt = LocalOffset{},
                  int batchIntervals = weather_history::MaxBatchIntervals) {
     using namespace weather_history;
     x = terrain.wrapX(x);
@@ -186,10 +194,14 @@ double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
         auto sample = sampleAt(interval);
         applyOverride(sample, force, true);
         const auto temperatureAt = [&](double height) {
+            double local = 0;
+            if constexpr (!std::is_same_v<LocalOffset, std::nullptr_t>)
+                local = double(localOffsetAt(height));
             return sample.temperatureC -
                    (!force && lapse
                         ? float(height) * world_climate::ElevationLapseCPerMetre
-                        : 0);
+                        : 0) +
+                   float(local);
         };
         const auto advance = [&](Receiver& receiver) {
             const auto melt =

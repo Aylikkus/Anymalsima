@@ -152,6 +152,15 @@ void writeThermalSources(const SaveSlot& slot,
         thermal_sources_codec::encode(std::move(records), extra));
 }
 
+void writeThermalSources(const SaveSlot& slot,
+                         std::vector<thermal_sources_codec::Record> records,
+                         std::vector<thermal_sources_codec::RoomRecord> rooms,
+                         const SectionContainer& extra) {
+    FileIO::writeBytesAtomic(slot.directory / ThermalFile,
+                             thermal_sources_codec::encode(
+                                 std::move(records), std::move(rooms), extra));
+}
+
 sky_codec::File readSky(const SaveSlot& slot) {
     const auto path = slot.directory / SkyFile;
     std::error_code ec;

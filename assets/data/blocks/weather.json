@@ -40,5 +40,27 @@
             "radius": 5.0,
             "falloff": 1.5
         }
+    },
+    {
+        "name": "blocks.thermostat",
+        "material": "materials.quartzite",
+        "render_category": "Terrain Rock",
+        "properties": {
+            "hardness": 2,
+            "flammable": false,
+            "opacity": 15
+        },
+        "thermal": {
+            "enabled": true,
+            "delta_c": 0.0,
+            "radius": 8.0,
+            "falloff": 1.2,
+            "mode": "target",
+            "target_c": 21.0,
+            "deadband_c": 0.5,
+            "gain": 60.0,
+            "min_delta_c": -30.0,
+            "max_delta_c": 60.0
+        }
     }
 ]

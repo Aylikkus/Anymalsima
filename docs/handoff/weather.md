@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–15 complete · Step 16 pending.**
+**Steps 01–16 complete · Step 17 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -27,7 +27,7 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 13 | Polar baselines, vertical runs and excavation | Complete | |
 | 14 | Deep-pack LOD, structures and travel | Complete | F · Arctic shelter |
 | 15 | Local heating and cooling from blocks and items | Complete | |
-| 16 | Room air, wall heat storage, local melt and setpoint heaters | Pending | G · Heated room |
+| 16 | Room air, wall heat storage, local melt and setpoint heaters | Complete | G · Heated room |
 | 17 | Partial-cell water capacity and connectivity | Pending | |
 | 18 | Water–ice transfers, persistence and meltwater | Pending | |
 | 19 | Surface ice in still and flowing water | Pending | H · Frozen shore |
@@ -1919,3 +1919,200 @@ a shelter wall at Z+2 relative to the reported site. **HEATER ITEM** and
 sources. Walking across the wrapped X seam moves the carried source with the
 player; reloading restores dropped and carried sources. The local °C panel is
 the acceptance readout.
+
+### Step 16 · 2026-11-27
+
+`items/thermal_emission.hpp` now carries an optional thermostat. `mode` is
+`fixed` (default) or `target`; target mode adds `target_c`, `deadband_c`,
+`gain`, `min_delta_c` and `max_delta_c`. The room owner recalculates the
+effective `delta_c` as
+`clamp(gain * (target_c - room_temperature), min_delta_c, max_delta_c)`, with
+a zero command inside the deadband for hysteresis and the clamp as the
+anti-windup limit. Fixed sources keep their step 15 open-loop offset. The
+schema and effective constants are documented in
+[`docs/modding/temperature.md`](../../docs/modding/temperature.md).
+
+`world/room_air.hpp` detects connected indoor air in a bounded window around
+the camera. A cell belongs to a room when it is non-solid and has a solid
+ceiling within twelve metres. Outdoor, liquid and unloaded faces become
+leakage; solid faces exchange heat with one finite wall store. A flood fill
+stops at its work budget; the remaining boundary is counted as an
+approximate leak and the panel reports it. Geometry changes invalidate the
+scan, and rescans are coalesced to the room cadence. Inputs are the dated
+outdoor sample, the region's annual ground mean at local elevation, and the
+nearby fixed or target sources. Air relaxes toward `outdoor + source offset`
+through a source coupling, and the wall exchanges heat with the air and the
+insulated ground baseline. Thermostat commands are recalculated at every
+substep, so an accelerated clock cannot leave a step wide enough to make the
+controller oscillate.
+
+`world/local_temperature.hpp` gained a room provider. Inside a connected room
+the query returns the simulated room air instead of outdoor plus detailed
+sources, so a source is not counted twice. The tile panel shows room air,
+wall and ground temperature, air volume, wall and leak faces, the bounded
+scan flag, the target command and saturation. The same local °C is passed
+into `precipitation::reconcile` as an additive offset, so indoor snowmelts
+against room air and outdoor snow near a heater sees its contribution.
+Historical replay uses the current room state; that is the recorded bounded
+approximation.
+
+`thermal_sources.dat` gained a `ROOM` v1 section beside `HEAT` v1. It stores
+the representative cell, air and wall °C, and the last-applied day for rooms
+that differ from the ground baseline. A room at the baseline is omitted and
+starts there. Thermostat mode and target are data, so they survive a reload;
+the runtime command and hysteresis are recomputed on the next tick.
+
+`assets/data/blocks/weather.json` appends `blocks.thermostat` (+21 °C, gain
+60, max +60, −30 … +60 clamp) after the existing blocks, preserving saved
+numeric block IDs. `assets/data/items/thermal.json` appends `items.thermostat`
+with the same settings. `generate_assets.py` ran with the configured shaderc
+path; no texture or material manifest changed. The asset copy was refreshed by
+the app build.
+
+```bash
+python3 generate_assets.py
+cmake --build build --target app world_logic_tests --parallel 5
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 3
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -j 4 --output-on-failure \
+  --no-tests=error -R 'room_air|thermal_|weather_melt_uses_local'
+```
+
+The headless cases build synthetic one-chunk rooms and use the deterministic
+weather map; no seed or save is required. The in-game room is generated around
+the loaded world's start region and its coordinates are reported by the HUD.
+The Release app and logic tests built. All 490 gameplay cases passed. The 20
+focused room, thermal and local-melt cases passed under ASan and UBSan with
+leak detection disabled for the sandbox. The new cases cover thermostat
+parsing and clamping, deadband hysteresis, saturation, a sealed room, a
+doorway leak, a removed roof cell, wall heat remaining above the ground
+baseline after the source is removed, faster air loss through an open door,
+room-query handover without double counting, thermostat recovery after a
+door closes, room-record round-trip, malformed room records, and the extra
+melt from a local temperature offset. Acceptance ran headlessly; the visual
+and interactive result is Playcheck G.
+
+#### Deviations
+
+- V1 uses one lumped air temperature and one lumped wall temperature per
+  connected room, not a per-cell airflow field. The wall face count sets its
+  capacity and conductance.
+- A room is limited to cells with a ceiling within twelve metres. Taller
+  halls are outside V1.
+- The bounded scan treats an unloaded boundary as an approximate leak. Rooms
+  wholly outside the active window are not simulated; a loaded record cools
+  toward the documented approximation when it is rediscovered.
+- Historical snow replay uses the current room temperature rather than a
+  dated room-temperature history.
+- Controller state is runtime-only; the configured mode, target and measured
+  room/wall heat are saved. A reload starts the controller on its next tick.
+
+#### Playcheck G · Heated room
+
+From the repository root:
+
+```bash
+ANYM_THERMAL_FIXTURE=1 ANYM_WEATHER_DEPOSITION_FIXTURE=1 \
+  ./build/src/app/app
+```
+
+Load or create a world, click **Heat site**, and let the room and the
+surrounding chunks stream in. The HUD prints `Thermal site [x, y, z]`. The
+room is the 3 x 3 interior around that air cell, with the floor one metre
+below and the roof three metres above. Relative to the site:
+
+| Feature | Offset (X, Y, Z) |
+| --- | --- |
+| Room centre / panel sample | 0, 0, 0 |
+| Doorway (lower / upper) | 0, 0, −2 / 0, +1, −2 |
+| Roof test cell | 0, +3, 0 |
+| Fixed heater | −2, 0, 0 |
+| Thermostat | +2, 0, 0 |
+| Cooler | 0, 0, +2 |
+
+1. Start with **FIXED HEAT** on, **TARGET HEAT** and **COOLER** off, and the
+   door and roof closed. Hover the room centre. After the room cadence has
+   run, the **Temperature** section reports a connected room, a wall
+   temperature above the ground baseline and the fixed source command. Read
+   the local °C at the same camera position with the door and roof open; it
+   should be much closer to ambient.
+2. Close the door and roof and resume time. Watch the room air and wall warm.
+   Turn **FIXED HEAT** off. The air falls first; the wall stays above the
+   ground baseline and releases heat. Open **ROOM DOOR** and confirm the leak
+   face count rises and the air cools faster. Remove the roof cell during a
+   forced **SNOW** period and confirm exposure and additional heat loss.
+3. Repeat with **COOLER** on and the heater off. The room air should fall
+   below ambient and the wall should follow more slowly on removal.
+4. With a warm wall, press Escape and reload the same slot. The panel should
+   restore a warm room/wall; the room continues toward the ground baseline
+   using the stored last-applied day.
+5. Turn **FIXED HEAT** off and **TARGET HEAT** on. With the door closed, the
+   room should settle around **21 °C** and the command should leave saturation.
+   Open **ROOM DOOR** during cold weather: the command should rise to
+   `max_delta_c` and the panel should mark it saturated. Close the door and
+   confirm the measured room returns to the deadband. Compare the fixed
+   heater, which keeps its open-loop offset and does not track the target.
+   Reload and confirm the target, measured room and wall survive.
+6. Inspect a snow patch beside the warm wall and another farther away. The
+   nearer patch should melt faster through the same local °C. Use the
+   **Snow** panel's deposit and meltwater readouts.
+
+Expected result: the sealed room warms and cools more slowly than open air,
+the wall outlasts the air, an open door shows leakage and cools the air faster,
+a removed roof exposes the room, snow melts against the measured local
+temperature, and a 21 °C thermostat saturates through an open door and settles
+inside the deadband after it closes.
+
+#### Follow-up · 2026-11-27
+
+The first in-game check reported that selecting the heater jumped the panel to
+about 16 °C immediately, while opening the roof or closing the door appeared
+not to change the temperature. Three things caused it.
+
+- The tile panel sampled the picked solid cell itself. A heater or wall tile
+  is not room air, so the query fell back to `outdoor + fixed offset`, which
+  looks like an instant jump. It now samples the air on the picked face and,
+  when that is outdoors, searches the six neighbouring cells for a connected
+  room. The no-tile panel and the tile panel also report the nearest scanned
+  room (within 24 m and 16 m) when the camera or picked tile is outside one.
+- The room's source coupling was applied even with no contributing source.
+  It pulled the air toward `outdoor + 0` at the same conductance as a heater,
+  masking wall storage and doorway leakage. With no source (or a thermostat
+  commanding zero inside the deadband) there is now no such coupling.
+- The fixture's interior was one square metre wide, so removing its only roof
+  cell deleted the whole room. It is now a 3 x 3 interior, matching the
+  playcheck table. Removing one roof cell leaves a covered ring around the
+  hole.
+
+The room constants were also made observable in play: `60 kJ/K` air per
+cubic metre, `120 kJ/K` wall per square metre, `25 W/K` air-to-wall,
+`1500 W/K` per open face, `5 W/K` to deep ground and a `120 s` source
+coupling. Commands and air/wall states are integrated in at most `5 s` game
+steps (capped at 4,096 per update), with source geometry and barriers cached
+once per room update.
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 5
+ctest --test-dir build -L gameplay -j 6 --output-on-failure --no-tests=error
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 3
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -j 4 --output-on-failure \
+  --no-tests=error -R 'room_air|thermal_|weather_melt_uses_local'
+```
+
+The Release app and logic tests built. All 490 gameplay cases passed; the 20
+focused cases passed under ASan and UBSan. The door test now uses a synthetic
+valley with a colder outdoor sample, so an open door measurably cools the room
+instead of matching the ground baseline. The sign-off below covers the
+corrected 3 x 3-room Playcheck G.
+
+#### Maintainer sign-off · 2026-11-27
+
+The maintainer confirmed the corrected behaviour in walk mode: inside the
+room, opening the door lowers the air temperature and closing it raises the
+temperature again, as expected. The earlier orbit-camera reading was taken
+next to the doorway, where the panel correctly sampled the outside air; the
+fixture itself was not inverted. Step 16 is complete. Playcheck G is signed
+off, and step 17 is the next pending step.

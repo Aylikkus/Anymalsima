@@ -24,6 +24,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/thermal_sources.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/thermal_source_tracker.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/local_temperature.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/room_air.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/lod_light_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_occlusion_map.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/sky_column.cpp
@@ -81,6 +82,7 @@ add_executable(world_logic_tests
     unit/game/world/climate_tests.cpp
     unit/game/world/weather_tests.cpp
     unit/game/world/thermal_tests.cpp
+    unit/game/world/room_air_tests.cpp
     unit/game/world/chunk_piece_tests.cpp
     unit/game/world/tile_interaction_tests.cpp
     unit/game/world/generation_tests.cpp
@@ -209,6 +211,13 @@ set(world_cases
     thermal_x_wrap
     thermal_tracker_block_lifecycle
     thermal_carried_source_save_roundtrip
+    thermal_target_controller_schema_and_hysteresis
+    room_air_detects_sealed_and_leaky_rooms
+    room_air_walls_store_heat_and_door_leakage_cools_air
+    room_air_thermostat_saturates_with_an_open_door
+    room_air_store_roundtrip
+    room_air_records_reject_bad_room_sections
+    weather_melt_uses_local_temperature_offset
     chunk_piece_storage
     chunk_piece_border_snapshot
     chunk_piece_mesh_revision

@@ -65,15 +65,127 @@ player position, drops it, picks it up again or removes it. Dropped and
 carried item sources are saved in `thermal_sources.dat`; the emission itself
 is read from this definition when the world loads.
 
-## Setpoint mode (planned for step 16)
+## Setpoint mode
 
-The step 15 definition is open-loop: `delta_c` is a fixed offset. Step 16 will
-add an optional thermostat mode for blocks and items that hold a connected
-room at a requested temperature. The planned schema adds a `mode` (`fixed` by
-default, or `target`) plus `target_c`, `deadband_c`, `gain`, `min_delta_c` and
-`max_delta_c`. The effective `delta_c` is recalculated from the measured room
-air temperature, with hysteresis and saturation. Fixed-mode sources keep the
-existing behaviour and need no migration.
+A source is open-loop by default: `delta_c` is a fixed offset. Add
+`"mode": "target"` to make it a thermostat that holds its connected room at a
+requested air temperature:
+
+```json
+{
+    "name": "blocks.thermostat",
+    "material": "materials.quartzite",
+    "thermal": {
+        "enabled": true,
+        "delta_c": 0.0,
+        "radius": 8.0,
+        "falloff": 1.2,
+        "mode": "target",
+        "target_c": 21.0,
+        "deadband_c": 0.5,
+        "gain": 60.0,
+        "min_delta_c": -30.0,
+        "max_delta_c": 60.0
+    }
+}
+```
+
+| Field | Unit | Default | Range | Meaning |
+| --- | --- | --- | --- | --- |
+| `mode` | — | `fixed` | `fixed`, `target` | thermostat when `target` |
+| `target_c` | °C | `21` | −200 … 200 | requested room air temperature |
+| `deadband_c` | °C | `0.5` | 0 … 20 | hysteresis half-width around the target |
+| `gain` | °C/°C | `3` | (0, 100] | command per degree of error |
+| `min_delta_c` | °C | `-20` | ±500 | lower command clamp |
+| `max_delta_c` | °C | `40` | ±500 | upper command clamp |
+
+Each room simulation step measures the connected room air temperature and
+sets the source's effective offset to:
+
+```text
+command = 0                              when |room - target| <= deadband
+command = clamp(gain * (target - room),
+                min_delta_c, max_delta_c) otherwise
+```
+
+The zero-command deadband is the hysteresis. The clamp is the anti-windup
+limit: an open door can make the controller saturate at `max_delta_c`, but it
+cannot accumulate an unbounded command. `min_delta_c` allows a cooling
+thermostat to work symmetrically. Fixed-mode sources keep their configured
+`delta_c` and need no migration.
+
+The loop is proportional, so a large fabric loss leaves a steady-state droop.
+Increase `gain` when a room must hold its target against cold weather, and use
+`max_delta_c` for the maximum heating or cooling effort. The shipped
+`blocks.thermostat` uses `gain: 60` and a `-30 … 60 °C` clamp.
+
+The target is data, so it survives a reload even though the runtime command is
+recomputed. A source outside any connected room uses the outdoor weather at its
+position as its measured temperature. The inspection panel shows the target,
+measured room air, current command and whether the command is saturated.
+
+## Room air and wall heat storage
+
+A room is a connected set of non-solid cells that each have a solid ceiling
+within twelve metres. Exposed air, liquid and unloaded cells are not part of
+the room. The faces between room air and those cells become leakage; solid
+faces become wall contact. If a flood fill reaches the scan budget, the
+remaining boundary is counted as an approximate leak. Geometry changes
+invalidate the rooms and the active scan is bounded to the window around the
+camera.
+
+Each room has a lumped air temperature and one lumped wall temperature. The
+wall is a finite store, so it heats and cools more slowly than the air:
+
+- air capacity: `60 kJ/K` per cubic metre (including furnishings);
+- wall capacity: `120 kJ/K` per square metre of solid face;
+- air-to-wall conductance: `25 W/K` per square metre;
+- open-face leakage: `1500 W/K` per square metre;
+- wall-to-deep-ground conductance: `5 W/K` per square metre;
+- source coupling time: `120 s`.
+
+The deep-ground baseline is the region's annual mean at the local elevation.
+That is the insulated baseline for sheltered caves; the small ground
+conductance is why a sealed wall can stay warm for a long time. A thermostat
+or fixed source supplies an effective offset, and the air relaxes toward
+`outdoor + offset` through that source coupling. With no contributing source
+(or a thermostat commanding zero inside its deadband) the coupling is absent,
+so removing a heater lets the air settle with its walls instead of continuing
+to ventilate toward the outdoor sample.
+
+Rooms are integrated at the room cadence (several times per real second), not
+every frame. Time jumps and unloaded rooms are subdivided into bounded steps,
+and a room's elapsed gap is integrated on rediscovery. Significant air and
+wall heat, with the room key and last-applied day, are saved in
+`thermal_sources.dat` (`ROOM` v1). A room that has returned to the ground
+baseline is omitted and starts there on load. Rows and columns outside the
+loaded area are preserved; the local approximation only covers the active
+scan.
+
+The same measured local temperature is used by snowmelt: an indoor snow
+receiver melts against its room air, and an outdoor receiver near a source
+uses that source's contribution. Historical replay uses the owner's current
+room state, which is the recorded bounded approximation.
+
+## Debug fixture
+
+Launch with `ANYM_THERMAL_FIXTURE=1` and click **Heat site**. The scene places
+a sealed stone room on a pad:
+
+- **ROOM DOOR** opens or closes the two-block doorway on the near wall.
+- **ROOM ROOF** removes or replaces one roof cell.
+- **FIXED HEAT** places or removes the fixed `+20 °C` heater on the west wall.
+- **TARGET HEAT** places or removes the `21 °C` thermostat on the east wall.
+- **COOLER** places or removes the `−15 °C` cooler on the back wall.
+- **HEATER ITEM** / **COOLER ITEM**, **THERMAL DROP**, **THERMAL TAKE** and
+  **CLEAR HEAT ITEMS** control the movable debug items.
+
+The tile panel reports the room air and wall temperatures, volume, wall and
+leak faces, whether the scan was bounded, and the source command, target and
+saturation. It samples the air on the picked face and falls back to the
+nearest room, so hovering a room boundary from outside is useful. The no-tile
+panel reports the camera position, which may be outside the building; use walk
+mode to read the true indoor value when standing in the room.
 
 ## Dated regional contributions
 

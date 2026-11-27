@@ -55,6 +55,11 @@ void ThermalSourceRegistry::unlink(Id id, const ThermalSource& source) {
 ThermalSourceRegistry::Id ThermalSourceRegistry::add(ThermalSource source) {
     const Id id = next++;
     if (source.key == 0) source.key = id;
+    // A thermostat starts at zero output until the room simulation measures
+    // its room; a fixed source is simply its configured offset.
+    source.commandDeltaC =
+        source.emission.thermostat() ? 0.f : source.emission.deltaC;
+    source.thermostatSaturated = false;
     const auto& stored = sources.emplace(id, std::move(source)).first->second;
     link(id, stored);
     if (stored.owner == ThermalSource::Owner::Item) {
@@ -97,6 +102,19 @@ const ThermalSource* ThermalSourceRegistry::find(Id id) const {
     return it == sources.end() ? nullptr : &it->second;
 }
 
+void ThermalSourceRegistry::setCommand(Id id, float deltaC, bool saturated) {
+    const auto it = sources.find(id);
+    if (it == sources.end()) return;
+    auto& source = it->second;
+    if (!source.emission.thermostat()) return;
+    if (source.commandDeltaC == deltaC &&
+        source.thermostatSaturated == saturated)
+        return;
+    source.commandDeltaC = deltaC;
+    source.thermostatSaturated = saturated;
+    ++revision;
+}
+
 void ThermalSourceRegistry::setBlockThermal(TilePos tile, uint8_t block,
                                             const ThermalEmission& emission) {
     if (!emission.emits()) {
@@ -108,10 +126,18 @@ void ThermalSourceRegistry::setBlockThermal(TilePos tile, uint8_t block,
         if (source.block == block &&
             source.emission.deltaC == emission.deltaC &&
             source.emission.radius == emission.radius &&
-            source.emission.falloff == emission.falloff)
+            source.emission.falloff == emission.falloff &&
+            source.emission.mode == emission.mode &&
+            source.emission.targetC == emission.targetC &&
+            source.emission.deadbandC == emission.deadbandC &&
+            source.emission.gain == emission.gain &&
+            source.emission.minDeltaC == emission.minDeltaC &&
+            source.emission.maxDeltaC == emission.maxDeltaC)
             return;
         source.block = block;
         source.emission = emission;
+        source.commandDeltaC = emission.thermostat() ? 0.f : emission.deltaC;
+        source.thermostatSaturated = false;
         source.key = blockKey(tile);
         ++revision;
         return;
@@ -122,6 +148,7 @@ void ThermalSourceRegistry::setBlockThermal(TilePos tile, uint8_t block,
     source.block = block;
     source.emission = emission;
     source.position = {tile.x + 0.5, tile.y + 0.5, tile.z + 0.5};
+    source.commandDeltaC = emission.thermostat() ? 0.f : emission.deltaC;
     source.key = blockKey(tile);
     add(std::move(source));
 }

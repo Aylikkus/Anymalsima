@@ -120,24 +120,39 @@ Sample Query::at(std::array<double, 3> position, double worldDays) const {
 
     const auto wrap = world.wrap();
     const double x = position[0], y = position[1], z = position[2];
-    sources.forEachNear(
-        x, z, ThermalEmission::MaxRadius, wrap.tiles,
-        [&](ThermalSourceRegistry::Id, const ThermalSource& source) {
-            if (!source.emission.emits()) return;
-            const double dx = wrap.deltaX(source.position[0], x);
-            const double dy = source.position[1] - y;
-            const double dz = source.position[2] - z;
-            const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (distance >= source.emission.radius) return;
-            float value = source.emission.offsetAt(float(distance));
-            if (barrier) {
-                const std::array<double, 3> from{x + dx, y + dy, z + dz};
-                const double blocked = barrier(from, position);
-                value *= float(std::exp(-blocked / BarrierEfoldMetres));
-            }
-            sample.detailedC += value;
-            ++sample.detailedSources;
-        });
+    RoomSample roomSample;
+    if (room && room(position, worldDays, roomSample) && roomSample.indoors) {
+        sample.indoors = true;
+        sample.roomC = roomSample.airC;
+        sample.wallC = roomSample.wallC;
+        sample.roomGroundC = roomSample.groundC;
+        sample.roomVolume = roomSample.volume;
+        sample.roomWallFaces = roomSample.wallFaces;
+        sample.roomLeakFaces = roomSample.leakFaces;
+        sample.roomApproximate = roomSample.approximate;
+        sample.roomSources = roomSample.sources;
+        sample.roomCommandC = roomSample.commandC;
+        sample.roomSaturated = roomSample.saturated;
+    } else {
+        sources.forEachNear(
+            x, z, ThermalEmission::MaxRadius, wrap.tiles,
+            [&](ThermalSourceRegistry::Id, const ThermalSource& source) {
+                if (!source.emission.emits()) return;
+                const double dx = wrap.deltaX(source.position[0], x);
+                const double dy = source.position[1] - y;
+                const double dz = source.position[2] - z;
+                const double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (distance >= source.emission.radius) return;
+                float value = source.offsetAt(float(distance));
+                if (barrier) {
+                    const std::array<double, 3> from{x + dx, y + dy, z + dz};
+                    const double blocked = barrier(from, position);
+                    value *= float(std::exp(-blocked / BarrierEfoldMetres));
+                }
+                sample.detailedC += value;
+                ++sample.detailedSources;
+            });
+    }
 
     for (const auto& regional : regional_) {
         if (!regional.activeAt(worldDays)) continue;
@@ -151,7 +166,9 @@ Sample Query::at(std::array<double, 3> position, double worldDays) const {
         ++sample.regionalSources;
     }
 
-    sample.temperatureC = sample.ambientC + sample.detailedC + sample.regionalC;
+    sample.temperatureC =
+        (sample.indoors ? sample.roomC : sample.ambientC + sample.detailedC) +
+        sample.regionalC;
     return sample;
 }
 

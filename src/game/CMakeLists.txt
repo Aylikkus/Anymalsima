@@ -32,6 +32,7 @@ add_library(game
     world/thermal_sources.cpp
     world/thermal_source_tracker.cpp
     world/local_temperature.cpp
+    world/room_air.cpp
     world/light_renderer.cpp
     world/light_shadows.cpp
     world/lod_light_map.cpp

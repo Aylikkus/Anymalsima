@@ -26,6 +26,7 @@
 #include "world/local_temperature.hpp"
 #include "world/location_generator.hpp"
 #include "world/location_manager.hpp"
+#include "world/room_air.hpp"
 #include "world/save/region_store.hpp"
 #include "world/save/save_catalog.hpp"
 #include "world/sky_height_map.hpp"
@@ -168,14 +169,28 @@ class GameplayState : public IGameState {
     // listeners are destroyed first.
     std::unique_ptr<ThermalSourceRegistry> thermalSources;
     std::unique_ptr<ThermalSourceTracker> thermalTracker;
+    // Connected room air and wall heat storage (step 16). It owns the thermal
+    // query's room provider and listens to geometry changes; declared after
+    // the tracker and editor so it disconnects first.
+    std::unique_ptr<room::RoomAir> roomAir;
     std::unique_ptr<thermal::Query> thermalQuery;
     SectionContainer thermalExtra;
+    std::vector<thermal_sources_codec::RoomRecord> pendingRoomRecords;
     std::future<void> thermalWrite;
-    uint8_t heaterBlockId = 0, coolerBlockId = 0;
+    uint8_t heaterBlockId = 0, coolerBlockId = 0, thermostatBlockId = 0;
     uint8_t heaterItemId = 0, coolerItemId = 0;
     std::optional<ThermalSourceRegistry::Id> carriedThermalItem;
     bool thermalItemCarried = false;
     std::optional<TilePos> thermalFixtureSite;
+    std::optional<TilePos> thermalDoorSite;
+    std::optional<TilePos> thermalRoofSite;
+    std::optional<TilePos> thermalHeaterSite;
+    bool thermalDoorOpen = false;
+    bool thermalRoofOpen = false;
+    bool thermalHeaterOn = true;
+    bool thermalThermostatOn = false;
+    bool thermalCoolerOn = false;
+    double roomUpdateSeconds = 0;
     void setupThermalFixture();
     void spawnThermalItem(uint8_t itemId);
     void updateThermalItem();

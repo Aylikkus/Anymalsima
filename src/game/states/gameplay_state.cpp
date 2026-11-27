@@ -356,6 +356,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
         snowId = id("blocks.snow", 0);
         heaterBlockId = id("blocks.heater", 0);
         coolerBlockId = id("blocks.cooler", 0);
+        thermostatBlockId = id("blocks.thermostat", 0);
         if (snowId) {
             const auto layer =
                 context.assets->getMaterialAlbedoLayer("materials.snow");
@@ -628,6 +629,65 @@ GameplayState::GameplayState(Game& game, UIContext& context,
                 camera.pitch = -.28f;
                 camera.distance = 12.f;
             })->setText(_("Heat site"));
+            if (thermalDoorSite) {
+                makeDebugButton({0, 5, 6, 1}, [this] {
+                    if (!editor || !stoneId) return;
+                    thermalDoorOpen = !thermalDoorOpen;
+                    const uint8_t block = thermalDoorOpen ? 0 : stoneId;
+                    editor->setBlock(*thermalDoorSite, block);
+                    editor->setBlock(
+                        {thermalDoorSite->x, thermalDoorSite->y + 1,
+                         thermalDoorSite->z},
+                        block);
+                    lastBuildAction =
+                        thermalDoorOpen ? _("Door opened") : _("Door closed");
+                })->setText(_("ROOM DOOR"));
+            }
+            if (thermalRoofSite) {
+                makeDebugButton({6, 5, 6, 1}, [this] {
+                    if (!editor || !stoneId) return;
+                    thermalRoofOpen = !thermalRoofOpen;
+                    editor->setBlock(*thermalRoofSite,
+                                     thermalRoofOpen ? 0 : stoneId);
+                    lastBuildAction =
+                        thermalRoofOpen ? _("Roof opened") : _("Roof closed");
+                })->setText(_("ROOM ROOF"));
+            }
+            if (thermalHeaterSite) {
+                makeDebugButton({12, 5, 6, 1}, [this] {
+                    if (!editor || !heaterBlockId) return;
+                    thermalHeaterOn = !thermalHeaterOn;
+                    editor->setBlock(*thermalHeaterSite,
+                                     thermalHeaterOn ? heaterBlockId : 0);
+                    lastBuildAction =
+                        thermalHeaterOn ? _("Heater on") : _("Heater off");
+                })->setText(_("FIXED HEAT"));
+            }
+            if (thermostatBlockId) {
+                makeDebugButton({18, 5, 6, 1}, [this] {
+                    if (!editor || !stoneId) return;
+                    thermalThermostatOn = !thermalThermostatOn;
+                    const TilePos site{thermalFixtureSite->x + 2,
+                                       thermalFixtureSite->y,
+                                       thermalFixtureSite->z};
+                    editor->setBlock(site, thermalThermostatOn
+                                               ? thermostatBlockId
+                                               : stoneId);
+                    lastBuildAction = thermalThermostatOn
+                                          ? _("Thermostat on (21 C)")
+                                          : _("Thermostat off");
+                })->setText(_("TARGET HEAT"));
+            }
+            makeDebugButton({0, 4, 6, 1}, [this] {
+                if (!editor || !coolerBlockId) return;
+                thermalCoolerOn = !thermalCoolerOn;
+                const TilePos site{thermalFixtureSite->x, thermalFixtureSite->y,
+                                   thermalFixtureSite->z + 2};
+                editor->setBlock(site,
+                                 thermalCoolerOn ? coolerBlockId : stoneId);
+                lastBuildAction =
+                    thermalCoolerOn ? _("Cooler on") : _("Cooler off");
+            })->setText(_("COOLER"));
         }
     }
     // World-wide sources must be installed before any chunk is requested.
@@ -764,6 +824,24 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     thermalTracker->watch(*editor);
     thermalQuery = std::make_unique<thermal::Query>(
         *this->world, *thermalSources, thermal::voxelBarrier(*chunkManager));
+    roomAir = std::make_unique<room::RoomAir>(
+        *this->world, *chunkManager, *thermalSources,
+        thermal::voxelBarrier(*chunkManager));
+    {
+        std::vector<room::Record> records;
+        records.reserve(pendingRoomRecords.size());
+        for (const auto& record : pendingRoomRecords)
+            records.push_back({record.x, record.y, record.z, record.airC,
+                               record.wallC, record.lastDay});
+        roomAir->loadRecords(records);
+    }
+    pendingRoomRecords.clear();
+    roomAir->watch(*editor);
+    thermalQuery->setRoomProvider([this](std::array<double, 3> position,
+                                         double worldDays,
+                                         thermal::RoomSample& out) {
+        return roomAir->sample(position, worldDays, out);
+    });
     skyMap->watch(*editor);
     snowEditConnection =
         editor->blockChanged.connect([this](const BlockChange& change) {
@@ -1042,9 +1120,11 @@ void GameplayState::setupSnowFixture() {
         applyOverrides({}, {{"snow_fixture", {{Key, std::move(layout)}}}}));
 }
 
-// A reproducible step 15 scene: a stone pad with a heater block, a cooler
-// block and a short wall for shelter. The movable debug item is spawned from
-// the Heat site controls; neither is required for the headless checks.
+// A reproducible step 15/16 scene: a stone pad carrying a small sealed room
+// with a doorway, a roof, a fixed heater, an optional thermostat and an
+// optional cooler. The movable debug item is spawned from the Heat site
+// controls. The room-air model reads the same blocks, so opening the door or
+// removing the roof changes its leakage and heat loss.
 void GameplayState::setupThermalFixture() {
     const char* enabled = std::getenv("ANYM_THERMAL_FIXTURE");
     if (!enabled || std::string_view(enabled) != "1" || !stoneId ||
@@ -1058,7 +1138,7 @@ void GameplayState::setupThermalFixture() {
             maxTop = std::max(maxTop,
                               chunkManager->generatedSurfaceY(x + dx, z + dz));
     const int groundY = maxTop + 1;
-    if (groundY + 6 >= WORLD_HEIGHT_Y) return;
+    if (groundY + 7 >= WORLD_HEIGHT_Y) return;
 
     using namespace structure_voxels;
     constexpr uint64_t Key = 0xf000000000000015ULL;
@@ -1077,14 +1157,35 @@ void GameplayState::setupThermalFixture() {
             support(x + dx, z + dz);
             layout.voxels[{x + dx, groundY, z + dz}] = OverrideVoxel(stoneId);
         }
-    layout.voxels[{x - 2, groundY + 1, z}] = OverrideVoxel(heaterBlockId);
-    layout.voxels[{x + 2, groundY + 1, z}] = OverrideVoxel(coolerBlockId);
-    // A wall on the far side: the same tile has open air on the near side.
-    for (int dy = 1; dy <= 4; ++dy)
-        for (int dx = -1; dx <= 1; ++dx)
-            layout.voxels[{x + dx, groundY + dy, z + 2}] =
+    // Three-metre-high walls around a 3 x 3 interior. The two lower blocks on
+    // the near wall stay open as a doorway.
+    for (int dy = 1; dy <= 3; ++dy)
+        for (int dz = -2; dz <= 2; ++dz)
+            for (int dx = -2; dx <= 2; ++dx) {
+                const bool boundary =
+                    dx == -2 || dx == 2 || dz == -2 || dz == 2;
+                if (!boundary) continue;
+                if (dz == -2 && dx == 0 && dy <= 2) continue;
+                layout.voxels[{x + dx, groundY + dy, z + dz}] =
+                    OverrideVoxel(stoneId);
+            }
+    // Roof above the interior and the wall tops.
+    for (int dz = -2; dz <= 2; ++dz)
+        for (int dx = -2; dx <= 2; ++dx)
+            layout.voxels[{x + dx, groundY + 4, z + dz}] =
                 OverrideVoxel(stoneId);
+    // Fixed heater on the west wall; thermostat and cooler sites stay empty
+    // until their debug controls place them.
+    layout.voxels[{x - 2, groundY + 1, z}] = OverrideVoxel(heaterBlockId);
+    thermalHeaterSite = TilePos{x - 2, groundY + 1, z};
+    thermalDoorSite = TilePos{x, groundY + 1, z - 2};
+    thermalRoofSite = TilePos{x, groundY + 4, z};
     thermalFixtureSite = TilePos{x, groundY + 1, z};
+    thermalDoorOpen = false;
+    thermalRoofOpen = false;
+    thermalHeaterOn = true;
+    thermalThermostatOn = false;
+    thermalCoolerOn = false;
     chunkManager->setGeneratedStructureKinds(
         applyOverrides({}, {{"thermal_fixture", {{Key, std::move(layout)}}}}));
 }
@@ -1168,6 +1269,7 @@ void GameplayState::loadThermalSources(const DataStorage<ThermalItem>& items) {
     try {
         auto file = save_catalog::readThermalSources(slot);
         thermalExtra = std::move(file.extra);
+        pendingRoomRecords = std::move(file.rooms);
         for (const auto& record : file.records) {
             const auto found = items.indexByName.find(record.item);
             if (found == items.indexByName.end()) {
@@ -1210,8 +1312,10 @@ void GameplayState::saveThermalSources(bool wait) {
             thermalSources->dirty = true;
         }
     }
-    if (!thermalSources->dirty) return;
+    const bool roomsDirty = roomAir && roomAir->dirty();
+    if (!thermalSources->dirty && !roomsDirty) return;
     thermalSources->dirty = false;
+    if (roomAir) roomAir->clearDirty();
     const auto& items = uiContext->assets->getStorage<ThermalItem>();
     std::vector<thermal_sources_codec::Record> records;
     thermalSources->forEachItem([&](ThermalSourceRegistry::Id id,
@@ -1221,9 +1325,16 @@ void GameplayState::saveThermalSources(bool wait) {
                            source.key,
                            carriedThermalItem && *carriedThermalItem == id});
     });
+    std::vector<thermal_sources_codec::RoomRecord> rooms;
+    if (roomAir) {
+        for (const auto& record : roomAir->saveRecords())
+            rooms.push_back({record.x, record.y, record.z, record.airC,
+                             record.wallC, record.lastDay});
+    }
     auto write = [target = slot, records = std::move(records),
-                  extra = thermalExtra]() mutable {
-        save_catalog::writeThermalSources(target, std::move(records), extra);
+                  rooms = std::move(rooms), extra = thermalExtra]() mutable {
+        save_catalog::writeThermalSources(target, std::move(records),
+                                          std::move(rooms), extra);
     };
     if (!wait) {
         thermalWrite = uiContext->threadPool.submit_task(std::move(write));
@@ -1638,6 +1749,17 @@ bool GameplayState::reconcileSnowAt(int x, int z, double target) {
             if (y >= WORLD_HEIGHT_Y) return false;
             const auto* tile = chunkManager->tileAt(x, y, z);
             return tile ? std::optional(tile->isLiquid()) : std::nullopt;
+        },
+        [&](double height) {
+            // Same measured local °C as the tile panel and the room model:
+            // an indoor receiver uses its connected room air, an outdoor one
+            // still sees nearby sources. Historical replay uses the current
+            // room state (the bounded approximation documented in the
+            // handoff).
+            if (!thermalQuery) return 0.;
+            const auto local = thermalQuery->at(
+                {double(x) + .5, height + .5, double(z) + .5}, clock.days());
+            return double(local.temperatureC - local.ambientC);
         },
         2 * weather_history::IntervalsPerDay);
     if (measureSnow) ++snowWork.batches;
@@ -2468,6 +2590,16 @@ void GameplayState::update(Game& game, float dt) {
     sunLight->update();
     blockLight->update();
     clock.advance(dt);
+    // Rooms advance on their own cadence rather than every frame. Thermostat
+    // commands and wall stores therefore change at a stable rate while the
+    // camera can still move and stream chunks freely.
+    roomUpdateSeconds += dt;
+    if (roomAir && roomUpdateSeconds >= .25) {
+        roomAir->update({double(camera.position.x), double(camera.position.y),
+                         double(camera.position.z)},
+                        clock.days());
+        roomUpdateSeconds = 0;
+    }
     snowUpdateSeconds += dt;
     // Wall time keeps an accelerated clock or a replay backlog from
     // continuously displacing frame work and in-flight mesh completions.
@@ -2644,6 +2776,29 @@ void GameplayState::update(Game& game, float dt) {
                     "{:+.1f}, regional {:+.1f}, {} nearby)\n",
                     local.temperatureC, local.ambientC, local.detailedC,
                     local.regionalC, local.detailedSources);
+                if (local.indoors) {
+                    localLine += fmt::format(
+                        "room air {:.1f} C, wall {:.1f} C, {} m3, leak {} "
+                        "faces{}, {} sources, command {:+.1f} C{}\n",
+                        local.roomC, local.wallC, local.roomVolume,
+                        local.roomLeakFaces,
+                        local.roomApproximate ? _(" (bounded)") : "",
+                        local.roomSources, local.roomCommandC,
+                        local.roomSaturated ? _(" saturated") : "");
+                } else if (roomAir) {
+                    const auto near = roomAir->nearest(
+                        {double(camera.position.x), double(camera.position.y),
+                         double(camera.position.z)},
+                        24.);
+                    if (near.valid)
+                        localLine += fmt::format(
+                            "nearby room air {:.1f} C, wall {:.1f} C, {} m3, "
+                            "leak {} faces{}, command {:+.1f} C{}\n",
+                            near.airC, near.wallC, near.volume, near.leakFaces,
+                            near.approximateFaces ? _(" (bounded)") : "",
+                            near.commandC,
+                            near.saturated ? _(" saturated") : "");
+                }
             }
             tileDebugText->setText(
                 controls + climateLine + weatherLine + localLine +
@@ -2761,15 +2916,74 @@ void GameplayState::update(Game& game, float dt) {
 
             ss << "\n--- Temperature ---\n";
             if (thermalQuery) {
-                const auto local = thermalQuery->at(
-                    {double(hit->tx) + .5, double(hit->ty) + .5,
-                     double(hit->tz) + .5},
+                const auto& [ox, oy, oz] = hit->placementOffset;
+                auto local = thermalQuery->at(
+                    {double(hit->tx) + .5 + ox, double(hit->ty) + .5 + oy,
+                     double(hit->tz) + .5 + oz},
                     clock.days());
+                // A picked solid tile is not itself room air. Prefer a
+                // connected room in any of its six neighbours, so hovering a
+                // wall, floor, roof or heater shows the room it bounds.
+                if (!local.indoors) {
+                    static constexpr int Neighbours[6][3] = {
+                        {1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                        {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+                    for (const auto& d : Neighbours) {
+                        const auto candidate =
+                            thermalQuery->at({double(hit->tx) + .5 + d[0],
+                                              double(hit->ty) + .5 + d[1],
+                                              double(hit->tz) + .5 + d[2]},
+                                             clock.days());
+                        if (candidate.indoors) {
+                            local = candidate;
+                            break;
+                        }
+                    }
+                }
                 ss << fmt::format(
                     "ambient {:.1f} C\nsources {:+.1f} C ({} nearby)\n"
                     "regional {:+.1f} C ({} dated)\nlocal {:.1f} C\n",
                     local.ambientC, local.detailedC, local.detailedSources,
                     local.regionalC, local.regionalSources, local.temperatureC);
+                if (local.indoors)
+                    ss << fmt::format(
+                        "room air {:.1f} C (wall {:.1f} C, ground {:.1f} C)\n"
+                        "volume {} m3, wall {} faces, leak {} faces{}\n"
+                        "thermostat command {:+.1f} C{}, {} sources\n",
+                        local.roomC, local.wallC, local.roomGroundC,
+                        local.roomVolume, local.roomWallFaces,
+                        local.roomLeakFaces,
+                        local.roomApproximate ? _(" (bounded)") : "",
+                        local.roomCommandC,
+                        local.roomSaturated ? _(" saturated") : "",
+                        local.roomSources);
+                else if (roomAir) {
+                    const auto near = roomAir->nearest(
+                        {double(hit->tx) + .5, double(hit->ty) + .5,
+                         double(hit->tz) + .5},
+                        16.);
+                    if (near.valid)
+                        ss << fmt::format(
+                            "nearby room air {:.1f} C (wall {:.1f} C, ground "
+                            "{:.1f} C)\nvolume {} m3, wall {} faces, leak {} "
+                            "faces{}, command {:+.1f} C{}, {} sources\n",
+                            near.airC, near.wallC, near.groundC, near.volume,
+                            near.wallFaces, near.leakFaces,
+                            near.approximateFaces ? _(" (bounded)") : "",
+                            near.commandC,
+                            near.saturated ? _(" saturated") : "",
+                            near.sources);
+                }
+            }
+            if (const auto* source =
+                    thermalSources->blockThermal({hit->tx, hit->ty, hit->tz})) {
+                ss << fmt::format(
+                    "source {} command {:+.1f} C, target {}, deadband {}, "
+                    "radius {:.1f} m{}\n",
+                    source->emission.thermostat() ? _("target") : _("fixed"),
+                    source->commandDeltaC, source->emission.targetC,
+                    source->emission.deadbandC, source->emission.radius,
+                    source->thermostatSaturated ? _(" saturated") : "");
             }
             if (carriedThermalItem) {
                 if (const auto* source =
