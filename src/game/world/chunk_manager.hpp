@@ -116,6 +116,9 @@ class ChunkManager {
     WaterVolume divertWater(uint32_t body, TilePos recipient,
                             WaterVolume amount);
     size_t flowWater(size_t cellBudget);
+    // The standing body or reach owning a loaded reservoir water cell. The
+    // dated weather input boundary uses it to route rain and meltwater.
+    std::optional<Reservoirs::Sink> waterSinkAt(TilePos pos);
     // Recheck edited faces against live tiles before moving any water.
     void waterBlockEdited(TilePos pos);
     void commitWaterEdits();
@@ -538,9 +541,11 @@ class ChunkManager {
                         const std::bitset<Chunk::SIZE_X * Chunk::SIZE_Z>*
                             dirty = nullptr) const;
     Reservoirs::CellAccess waterAccess(TilePos pos);
+    // Geometry of a cell that needs sub-cell water capacity. Nullopt means a
+    // uniform open cell (full 1 m capacity).
+    std::optional<fluid::Profile> fluidProfileAt(TilePos pos);
     // The standing body or reach owning a loaded reservoir water cell.
     WaterSurface waterSourceAt(TilePos pos);
-    std::optional<Reservoirs::Sink> waterSinkAt(TilePos pos);
     // Certifies dug channels whose local water links a standing body to a
     // lower receiver; bounded per call.
     void surveyChannels(Reservoirs& water, size_t mouths);

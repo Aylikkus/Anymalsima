@@ -1219,6 +1219,10 @@ std::optional<SnowColumn> SnowSettlement::weatherSupport(int x, int z,
     return SnowColumn{x, z, base->baseY, base->baseLocal, 0};
 }
 
+void SnowSettlement::eraseMeltwater(const SnowKey& key) {
+    if (meltwater_.erase(key)) ++revision_;
+}
+
 void SnowSettlement::recordWeatherMelt(SnowKey key, Volume amount) {
     if (amount <= 0) return;
     deposited_ += amount;

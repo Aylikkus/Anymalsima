@@ -79,6 +79,16 @@ air can dry a film too. The evaporation debit is recorded in the ledger.
 Mesh workers share unchanged rows of local water between snapshots, so
 a transfer copies only rows it touches.
 
+Partial solids share their cell with liquid in new worlds. A local cell's
+fill is absolute volume (255 units per cubic metre); the shared geometry
+supplies the free volume below a head, the bottom run's sealed ceiling and
+the opening on each face. Flow compares water levels, checks the shared
+opening and refuses a fully closed face. Old ledgers keep the whole-cell
+barrier rule through the `RSVR` v10 migration flag, and a player-placed
+partial solid remains a barrier until it carries a local credit. Sealed
+upper pockets and the exact distant query for local partial cells are V1
+limitations; loaded chunk projection and near meshing use the geometry.
+
 ## Shared data and ownership
 
 - Define one CPU sampling interface over immutable hydrology snapshots.
@@ -606,8 +616,14 @@ The first proxy shows only certified ocean: deep connected regions or
 ready shoreline masks. Low ground in a pending coastal survey stays dry
 until connectivity is known.
 
-`RSVR` v9 adds the dam closure time. v8 stores the surveyed upstream
-side of dams. v7 adds the time of spring reopening so a save preserves
+`RSVR` v11 adds freeze/thaw phase entries (frozen water equivalent, residual
+progress and last applied day), the removed-ice total, a dated input cursor
+map and the exact cm³ conversion remainder. v10 and older restore with no ice
+and no cursors. v10 adds the partial-cell water flag and reinterprets local
+fill as absolute volume (255 units per cubic metre). v9 and older restore with
+partial-cell water off, so every partial solid stays a whole-cell barrier and
+a saved dam cannot drain through a newly recognised side gap. v9 adds the dam
+closure time. v8 stores the surveyed upstream side of dams. v7 adds the time of spring reopening so a save preserves
 the recovery front. v6 adds
 surface-runoff certificates and the clock time of each spring seal. Older
 seals are treated as past their recession period.
@@ -734,6 +750,21 @@ unloaded. Assert that only the connected site floods, its inhabitants
 relocate once via a passable route, and a reload or receding flood preserves
 the outcome. Include a blocked-route case and compare rendered shoreline
 extent against the flood query.
+
+### Implemented weather input boundary
+
+Step 18 of the [weather handoff](weather.md) installs the first V1 slice of
+this step. `Reservoirs::applyInput` accepts a `WaterInput` naming a local
+cell, standing body or reach, a kind and a dated once-only key. A repeated key
+for the same receiver is ignored, so a remote catch-up replay and nearby
+detail cannot both apply a transfer. A full body keeps the surplus in
+`pendingInflow`; a reach keeps it in its delivery hold; an unresolved or local
+overflow is booked as `Disposal`. `addMeltwater` and `addRain` convert bulk
+snow and liquid centimetres through an exact remainder
+(`InputRemainderDenominator = 5,000,000`). The cursors and remainder live in
+`RSVR` v11 beside freeze/thaw phase state; projected ice is not written into
+chunks. Rain is routed only where an exposure ray already hits liquid. Bare
+ground runoff, flood envelopes and unloaded inhabitants remain future work.
 
 ## Verification and open decisions
 

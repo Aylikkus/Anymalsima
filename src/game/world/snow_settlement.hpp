@@ -161,6 +161,8 @@ class SnowSettlement {
     // Awaiting routing at the former snow support. Every unit is 0.2 cm³
     // liquid water, so conversion never rounds away a small melt.
     const std::map<SnowKey, Volume>& meltwater() const { return meltwater_; }
+    // Called after the water ledger has accepted or accounted one entry.
+    void eraseMeltwater(const SnowKey& key);
     uint64_t revision() const { return revision_; }
     bool hasSnowInChunkColumn(ChunkColumn column) const;
     ChunkColumns takeProjectionChanges();

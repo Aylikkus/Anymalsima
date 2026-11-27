@@ -9,6 +9,7 @@
 #include "test.hpp"
 #include "world/polar_snow.hpp"
 #include "world/precipitation.hpp"
+#include "world/reservoirs.hpp"
 #include "world/snow_cover.hpp"
 #include "world/snow_settlement.hpp"
 #include "world/tile_piece.hpp"
@@ -1116,6 +1117,70 @@ TEST(weather_melt_uses_local_temperature_offset) {
           "the local offset drives additional melt");
     EQUAL(cold.meltwaterCm3(), 0., "no melt at 0 C");
     CHECK(warm.meltwaterCm3() > 0.);
+}
+
+TEST(weather_snowmelt_converts_into_the_water_ledger) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    snow::SnowSettlement snow(terrain);
+    CHECK(snow.deposit(0, 0, 3, 100'000) == snow::DepositOutcome::Settled);
+    CHECK(!snow.columns().empty());
+    const auto key = snow.columns().begin()->first;
+    EQUAL(snow.melt(key, 100'000), 100'000, "melt the deposited snow");
+    EQUAL(snow.storedVolume(), 0, "the snow is gone");
+    EQUAL(snow.meltwater().size(), 1u, "one meltwater entry");
+
+    Reservoirs water(nullptr);
+    constexpr uint32_t body = 9;
+    water.define(body, StorageCurve::constantArea(10, 400, 410));
+    EQUAL(water.transfer(body, -1000, ReservoirExchange::Disposal), -1000,
+          "leave room in the receiving body");
+    const auto initial = water.volume(body);
+    int64_t bulk = 0;
+    for (const auto& [entry, amount] : snow.meltwater()) {
+        (void)entry;
+        bulk += amount;
+    }
+    EQUAL(bulk, 100'000, "bulk snow water equivalent");
+    EQUAL(water.addMeltwater({0, 3, 0}, body, 0, bulk, 1), 5,
+          "100,000 bulk cm3 is 20,000 liquid cm3 and five water units");
+    EQUAL(water.volume(body), initial + 5, "the body receives the melt");
+    EQUAL(water.inputRemainder(), 500'000, "the fractional unit is retained");
+    const double units =
+        double(water.volume(body) - initial) +
+        double(water.inputRemainder()) / Reservoirs::InputRemainderDenominator;
+    CHECK(std::abs(units - 5.1) < 1e-9);
+}
+
+TEST(weather_rain_on_liquid_reaches_the_water_boundary) {
+    Fixture terrain;
+    solid(terrain, 0, 2, 0);
+    snow::SnowSettlement snow(terrain);
+    snow.beginWeather(0);
+    double rain = 0;
+    int calls = 0;
+    precipitation::reconcile(
+        snow, terrain, 0, 0, 1. / 24, false,
+        [](int64_t) {
+            world_weather::Sample sample;
+            sample.precipitationRate = 10;
+            sample.temperatureC = 5;
+            return sample;
+        },
+        [](double) { return std::optional(true); }, [](double) { return 0.; },
+        weather_history::MaxBatchIntervals,
+        [&](int x, int z, double height, double cm3, int64_t) {
+            EQUAL(x, 0, "rain column x");
+            EQUAL(z, 0, "rain column z");
+            EQUAL(height, 3.0, "rain lands on the liquid surface");
+            CHECK(cm3 > 0);
+            rain += cm3;
+            ++calls;
+        });
+    EQUAL(calls, 8, "four rays across two half-hour intervals");
+    EQUAL(std::llround(rain), 10'000,
+          "10 mm/h for one hour over a one-square-metre footprint");
+    EQUAL(snow.storedVolume(), 0, "water does not become snow");
 }
 
 TEST(weather_melt_uncovers_vegetation) {

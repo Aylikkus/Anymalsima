@@ -757,6 +757,7 @@ GameplayState::GameplayState(Game& game, UIContext& context,
     clock.set(std::max(slot.meta.worldDays, snowSettlement->weatherHorizon()));
     publishSnowSurface(true);
     savedSnowRevision = snowSettlement->revision();
+    routeSnowMeltwater();
     // The map covers every chunk column with loaded chunks.
     skyReadyConnection =
         chunkManager->becameReady.connect([this](const ChunkCoord& c) {
@@ -1735,6 +1736,9 @@ bool GameplayState::reconcileSnowAt(int x, int z, double target) {
             return z == site.z && (x == site.x - 2 || x == site.x + 2);
         }))
         return true;
+    // Rain that the exposure rays find on a liquid surface is aggregated per
+    // cell and weather interval before it crosses the water input boundary.
+    std::map<std::tuple<int, int, int, int64_t>, double> rainInputs;
     const double reached = precipitation::reconcile(
         *snowSettlement, *snowTerrain, x, z, target, !world->regions.empty(),
         [&](int64_t interval) {
@@ -1761,7 +1765,23 @@ bool GameplayState::reconcileSnowAt(int x, int z, double target) {
                 {double(x) + .5, height + .5, double(z) + .5}, clock.days());
             return double(local.temperatureC - local.ambientC);
         },
-        2 * weather_history::IntervalsPerDay);
+        2 * weather_history::IntervalsPerDay,
+        [&](int rx, int rz, double height, double cm3, int64_t interval) {
+            const int y = int(std::floor(height + .0001));
+            if (y < 0 || y >= WORLD_HEIGHT_Y) return;
+            rainInputs[std::tuple{rx, y, rz, interval}] += cm3;
+        });
+    if (world->reservoirs) {
+        for (const auto& [key, cm3] : rainInputs) {
+            const auto [rx, ry, rz, interval] = key;
+            const TilePos cell{rx, ry, rz};
+            Reservoirs::Sink target;
+            if (const auto sink = chunkManager->waterSinkAt(cell))
+                target = *sink;
+            world->reservoirs->addRain(cell, target.body, target.reach,
+                                       std::llround(cm3), interval);
+        }
+    }
     if (measureSnow) ++snowWork.batches;
     return reached >= target;
 }
@@ -1801,8 +1821,10 @@ void GameplayState::advanceSnow(bool throughNow, double maxDays) {
     // replay at any speed. Local history stays bounded by the two-day cap and
     // still advances during a fast clock, which keeps a roof or tunnel alive.
     if (seasonal && !snowSettlement->hasLocalWeather() &&
-        !snowSettlement->pendingCount())
+        !snowSettlement->pendingCount()) {
+        routeSnowMeltwater();
         return;
+    }
     snowTerrain->resetQueries();
     snowSettlement->settle(512);
 
@@ -1829,6 +1851,7 @@ void GameplayState::advanceSnow(bool throughNow, double maxDays) {
         snowCatchingUp = snowEditPending && applied;
         if (std::chrono::steady_clock::now() >= deadline) {
             snowCatchingUp |= applied > 0;
+            routeSnowMeltwater();
             return;
         }
     }
@@ -1855,6 +1878,41 @@ void GameplayState::advanceSnow(bool throughNow, double maxDays) {
         }
     }
     if (applied) rebuildSnow(2);
+    routeSnowMeltwater();
+}
+
+void GameplayState::routeSnowMeltwater() {
+    if (!snowSettlement || !world->reservoirs) return;
+    if (snowSettlement->meltwater().empty()) return;
+    std::vector<snow::SnowKey> routed;
+    for (const auto& [key, bulk] : snowSettlement->meltwater()) {
+        if (bulk <= 0) {
+            routed.push_back(key);
+            continue;
+        }
+        const auto [x, z, baseY] = key;
+        const TilePos cell{x, baseY + 1, z};
+        // A streamed chunk decides whether this receiver is air, liquid or a
+        // partial solid. Leave the entry pending until it is resident. Melt
+        // at the world top has no receiver and is booked as outflow.
+        if (cell.y < WORLD_HEIGHT_Y &&
+            !chunkManager->tileAt(cell.x, cell.y, cell.z))
+            continue;
+        Reservoirs::Sink target;
+        if (cell.y < WORLD_HEIGHT_Y)
+            if (const auto sink = chunkManager->waterSinkAt(cell))
+                target = *sink;
+        // Use the exact applied day as the once-only key. Unlike a weather
+        // interval, this distinguishes two partial catch-up batches that end
+        // inside the same half-hour, while a reload of the same batch still
+        // produces the same key.
+        const auto dateKey = std::max<int64_t>(
+            0, std::llround(snowSettlement->weatherDay(x, z) * 1'000'000.0));
+        world->reservoirs->addMeltwater(cell, target.body, target.reach, bulk,
+                                        dateKey);
+        routed.push_back(key);
+    }
+    for (const auto& key : routed) snowSettlement->eraseMeltwater(key);
 }
 
 void GameplayState::addSnow(const TileRaycastHit& hit) {

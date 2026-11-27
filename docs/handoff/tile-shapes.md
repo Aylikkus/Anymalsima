@@ -45,10 +45,11 @@ Existing payloads imply cubes.
 
 Shape changes use the existing save dirtiness, topology revision, border
 remesh, and lighting notifications. The enclosed-slab shortcuts require
-cube coverage. A partial solid still occupies the entire fluid cell,
-including for projection, river barriers, and face culling. Flora and tree
-support checks currently require full cube support. Device validation
-begins with shape meshing in step 3.
+cube coverage. A partial solid occupies the whole fluid cell in ledgers
+saved before weather step 17; newer worlds give water the geometry's free
+volume and side openings (see [water](water.md)). Flora and tree support
+checks currently require full cube support. Device validation begins with
+shape meshing in step 3.
 
 The Release app and logic-test targets built. All 366 CTest cases passed.
 The 20 focused ASan/UBSan cases passed with leak detection disabled. They

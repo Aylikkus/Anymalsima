@@ -1,12 +1,15 @@
 #include <filesystem>
+#include <map>
 #include <queue>
 #include <set>
 
 #include "lod_scene.hpp"
 #include "serialization/file_io.hpp"
+#include "serialization/section_container.hpp"
 #include "test.hpp"
 #include "test_assets.hpp"
 #include "world/chunk_mesher.hpp"
+#include "world/fluid_cell.hpp"
 #include "world/generated_hydrology.hpp"
 #include "world/location_generator.hpp"
 #include "world/save/chunk_codec.hpp"
@@ -105,6 +108,31 @@ class WaterEditFixture {
     ChunkManager chunks;
     WorldEditor editor;
 };
+
+bool near(float a, float b, float epsilon = .01f) {
+    return std::abs(a - b) <= epsilon;
+}
+
+fluid::Profile partialProfile(TileShape shape) {
+    tile_geometry::CellGeometry geometry;
+    tile_geometry::TilePiece piece;
+    piece.id = 1;
+    piece.blockId = 1;
+    piece.shape = shape;
+    CHECK(geometry.tryAdd(piece) == tile_geometry::PiecePlacement::Added);
+    auto profile = fluid::Profile::make(geometry);
+    return profile;
+}
+
+fluid::Profile partialLayer(std::optional<Vec3> offset = std::nullopt,
+                            tile_geometry::LayerThickness thickness =
+                                tile_geometry::LayerThickness::Cm50) {
+    tile_geometry::CellGeometry geometry;
+    CHECK(geometry.tryAdd(tile_geometry::TilePiece::layer(
+              1, 1, thickness, offset.value_or(Vec3{}))) ==
+          tile_geometry::PiecePlacement::Added);
+    return fluid::Profile::make(geometry);
+}
 }  // namespace
 
 TEST(hydrology_basin_outlets_and_wrap) {
@@ -1832,6 +1860,356 @@ TEST(hydrology_local_flow_falls_across_slab_and_wrap) {
     const auto after = water.snapshot();
     EQUAL(int(after->cells.at({31, 15, 2})) + int(after->cells.at({0, 15, 2})),
           255, "wrapped transfer conserves the cell");
+}
+
+TEST(hydrology_partial_cell_local_flow_uses_geometry_capacity) {
+    Reservoirs water(nullptr);
+    const TilePos source{4, 20, 4};
+    const TilePos slab{5, 20, 4};
+    std::map<TilePos, fluid::Profile, TilePosLess> profiles;
+    profiles.emplace(slab, partialLayer());
+    water.setProfileQuery([&](TilePos p) -> std::optional<fluid::Profile> {
+        const auto it = profiles.find(p);
+        return it == profiles.end() ? std::nullopt
+                                    : std::optional<fluid::Profile>(it->second);
+    });
+    const auto access = [&](TilePos p) {
+        return p == source || p == slab ? Reservoirs::CellAccess::Open
+                                        : Reservoirs::CellAccess::Blocked;
+    };
+    EQUAL(water.creditLocal(source, 255, ReservoirExchange::Input), 255,
+          "the uniform source accepts a full block");
+    for (int i = 0; i < 8; ++i) water.flow(1, access);
+    const auto state = water.snapshot();
+    // Volume units are absolute: the two cells conserve the original block,
+    // and the slab cell tops out at its own free capacity.
+    CHECK(state->cells.contains(source));
+    CHECK(state->cells.contains(slab));
+    EQUAL(int(state->cells.at(source)) + state->cells.at(slab), 255,
+          "partial-cell flow conserves volume");
+    CHECK(state->cells.at(slab) <= 128);
+    const auto level = profiles.at(slab).levelForUnits(state->cells.at(slab));
+    CHECK(near(level, state->cells.at(source) / 255.f, .03f));
+    // A fresh credit is capped by the free half-cell capacity.
+    EQUAL(water.creditLocal(slab, 255, ReservoirExchange::Input),
+          int(128 - state->cells.at(slab)),
+          "a partial cell stops at its free volume");
+}
+
+TEST(hydrology_partial_cell_closed_face_blocks_local_flow) {
+    for (const int side : {-1, 1}) {
+        Reservoirs water(nullptr);
+        const TilePos source{4, 20, 4};
+        const TilePos wall{4, 20, 4 + side};
+        const auto profile = partialProfile(
+            TileShape::make(TileShapeProfile::Wall25, TileFacing::PosZ));
+        water.setProfileQuery([&](TilePos p) -> std::optional<fluid::Profile> {
+            return p == wall ? std::optional<fluid::Profile>(profile)
+                             : std::nullopt;
+        });
+        const auto access = [&](TilePos p) {
+            return p == source || p == wall ? Reservoirs::CellAccess::Open
+                                            : Reservoirs::CellAccess::Blocked;
+        };
+        EQUAL(water.creditLocal(source, 255, ReservoirExchange::Input), 255,
+              "the uniform source accepts a full block");
+        for (int i = 0; i < 8; ++i) water.flow(1, access);
+        const auto state = water.snapshot();
+        if (side < 0) {
+            // The source is on the wall's closed +Z face.
+            EQUAL(int(state->cells.at(source)), 255,
+                  "a fully closed shared face holds the source");
+            CHECK(!state->cells.contains(wall));
+        } else {
+            // The source is on the open -Z face; water enters the gap.
+            CHECK(state->cells.contains(wall));
+            EQUAL(int(state->cells.at(source)) + state->cells.at(wall), 255,
+                  "the side gap conserves volume");
+        }
+    }
+}
+
+TEST(hydrology_partial_cell_sealed_upper_pocket_stays_dry) {
+    Reservoirs water(nullptr);
+    const TilePos source{4, 20, 4};
+    const TilePos cavity{5, 20, 4};
+    const auto profile =
+        partialLayer(Vec3{0, .5f, 0}, tile_geometry::LayerThickness::Cm25);
+    water.setProfileQuery([&](TilePos p) -> std::optional<fluid::Profile> {
+        return p == cavity ? std::optional<fluid::Profile>(profile)
+                           : std::nullopt;
+    });
+    const auto access = [&](TilePos p) {
+        return p == source || p == cavity ? Reservoirs::CellAccess::Open
+                                          : Reservoirs::CellAccess::Blocked;
+    };
+    EQUAL(water.creditLocal(source, 255, ReservoirExchange::Input), 255,
+          "the uniform source accepts a full block");
+    for (int i = 0; i < 8; ++i) water.flow(1, access);
+    const auto state = water.snapshot();
+    CHECK(state->cells.contains(cavity));
+    CHECK(state->cells.at(cavity) <= 127);
+    const auto level = profile.levelForUnits(state->cells.at(cavity));
+    CHECK(level <= profile.ceiling + .001f);
+    CHECK(near(profile.volumeAt(1.f), profile.capacity));
+}
+
+TEST(hydrology_partial_cell_projection_uses_geometry) {
+    auto world = basinWorld();
+    world.hydrology = GeneratedHydrology::build(world, {}, false);
+    world.reservoirs = std::make_shared<Reservoirs>(world.hydrology);
+    WaterEditFixture f(world);
+    const auto site = center(0);
+    const TilePos slab{site.x, 520, site.y};
+    f.load(slab);
+    const auto shape = TileShape::make(TileShapeProfile::Slab);
+    CHECK(f.editor.placeBlock(slab, 1, shape) == EditStatus::Applied);
+    // A local credit fills the free half above the slab. The voxel surface
+    // follows the geometry, not a whole-cell fraction.
+    EQUAL(world.reservoirs->creditLocal(slab, 32, ReservoirExchange::Input), 32,
+          "the slab cell accepts a partial credit");
+    const auto* tile = f.chunks.tileAt(slab.x, slab.y, slab.z);
+    CHECK(tile);
+    CHECK(tile->liquid == LiquidType::Water);
+    CHECK(tile->waterOrigin == WaterOrigin::Local);
+    CHECK(near(tile->liquidLevel / 255.f, .626f, .02f));
+
+    // A whole cube owns its cell and accepts no local water.
+    const TilePos cube{site.x + 1, 520, site.y};
+    f.load(cube);
+    CHECK(f.editor.placeBlock(cube, 1) == EditStatus::Applied);
+    EQUAL(world.reservoirs->creditLocal(cube, 100, ReservoirExchange::Input), 0,
+          "a full cube is a fluid barrier");
+    const auto* dry = f.chunks.tileAt(cube.x, cube.y, cube.z);
+    CHECK(dry && dry->liquid == LiquidType::None);
+
+    // A legacy ledger keeps the partial cell sealed even when it is asked to
+    // accept a new local credit.
+    world.reservoirs->setPartialCellWater(false);
+    EQUAL(world.reservoirs->creditLocal(slab, 32, ReservoirExchange::Input), 0,
+          "legacy partial solids remain whole-cell barriers");
+}
+
+TEST(hydrology_partial_cell_legacy_flag_round_trips) {
+    Reservoirs water(nullptr);
+    CHECK(water.partialCellWater());
+    water.setPartialCellWater(false);
+    const auto bytes = water.encode();
+    Reservoirs restored(nullptr);
+    CHECK(restored.partialCellWater());
+    restored.restore(bytes);
+    CHECK(!restored.partialCellWater());
+    CHECK(restored.snapshot()->cells.empty());
+
+    // A v9 ledger has no partial-cell flag. Opening its saved partial
+    // barriers would drain an established body, so the whole-cell rule is
+    // retained after migration.
+    auto container = SectionContainer::decode(water.encode());
+    const auto* section = container.find("RSVR");
+    CHECK(section);
+    auto legacy = section->data;
+    // v10 appends the partial-cell flag; v11 appends the conversion
+    // remainder, removed-ice total, phase entries and input cursors. An
+    // empty v11 ledger therefore carries 1 + 8 + 8 + 4 + 4 extra bytes.
+    constexpr size_t v11Tail = 25;
+    CHECK(legacy.size() >= v11Tail);
+    legacy.resize(legacy.size() - v11Tail);
+    container.put("RSVR", 9, legacy);
+    Reservoirs migrated(nullptr);
+    migrated.restore(container.encode());
+    CHECK(!migrated.partialCellWater());
+}
+
+TEST(hydrology_water_phase_freeze_thaw_balance) {
+    Reservoirs water(nullptr);
+    constexpr uint32_t lake = 42;
+    water.define(lake, StorageCurve::constantArea(1, 400, 410));
+    const auto capacity = water.volume(lake);
+    EQUAL(capacity, WaterUnitsPerBlock * 10, "one square metre, ten blocks");
+
+    EQUAL(water.freeze(lake, 1000, 4.5), 1000, "freeze debits the body");
+    EQUAL(water.volume(lake), capacity - 1000, "liquid debit");
+    EQUAL(water.frozen(lake), 1000, "frozen credit");
+    EQUAL(water.liquidTotal() + water.frozenTotal(), capacity,
+          "freeze conserves water equivalent");
+
+    EQUAL(water.thaw(lake, 400, 5.0), 400, "thaw credits the body");
+    EQUAL(water.volume(lake), capacity - 600, "liquid restored");
+    EQUAL(water.frozen(lake), 600, "frozen remainder");
+    const auto* state = water.snapshot()->phase(PhaseKey{lake});
+    CHECK(state);
+    EQUAL(state->appliedDay, 5.0, "last phase application is dated");
+
+    const TilePos cell{8, 10, 8};
+    EQUAL(water.creditLocal(cell, 200, ReservoirExchange::Input), 200,
+          "local credit");
+    EQUAL(water.freezeLocal(cell, 120, 5.1), 120, "local freeze");
+    EQUAL(water.snapshot()->cells.fill(cell), 80, "local liquid debit");
+    EQUAL(water.frozenLocal(cell), 120, "local frozen credit");
+    EQUAL(water.thawLocal(cell, 50, 5.2), 50, "local thaw");
+    EQUAL(water.snapshot()->cells.fill(cell), 130, "local liquid restored");
+    EQUAL(water.frozenLocal(cell), 70, "local frozen remainder");
+
+    // A legacy independent tile is adopted before conversion; adoption is
+    // not counted as a new external input.
+    const TilePos legacy{9, 10, 8};
+    EQUAL(water.adoptLocal(legacy, 90), 90, "legacy water adopts one owner");
+    EQUAL(water.exchanged(ReservoirExchange::Input), 200,
+          "adoption does not invent input");
+    EQUAL(water.freezeLocal(legacy, 90, 5.3), 90, "adopted water freezes");
+    EQUAL(water.frozenLocal(legacy), 90, "adopted ice is owned");
+
+    CHECK(water.clearLocal(cell));
+    EQUAL(water.snapshot()->cells.fill(cell), 0, "excavated cell is empty");
+    EQUAL(water.removedIce(), 70, "excavated ice is booked separately");
+    EQUAL(water.frozenTotal(), 690, "body and adopted ice survive excavation");
+    EQUAL(water.exchanged(ReservoirExchange::Disposal), -130,
+          "excavated liquid is accounted as disposal");
+
+    // initial capacity + the one local input = liquid + ice + removed ice
+    // + accounted outflow.
+    EQUAL(water.liquidTotal() + water.frozenTotal() + water.removedIce() -
+              water.exchanged(ReservoirExchange::Disposal),
+          capacity + water.exchanged(ReservoirExchange::Input) + 90,
+          "closed phase audit balances");
+}
+
+TEST(hydrology_water_input_once_and_remainder) {
+    Reservoirs water(nullptr);
+    constexpr uint32_t lake = 7;
+    water.define(lake, StorageCurve::constantArea(4, 400, 410));
+    EQUAL(water.transfer(lake, -1000, ReservoirExchange::Disposal), -1000,
+          "leave room for the incoming weather");
+    const auto before = water.volume(lake);
+    const TilePos cell{16, 400, 16};
+
+    // 5,000,000 bulk snow cm3 is exactly 1,000,000 liquid cm3 and 255
+    // water units, so the first conversion has no remainder.
+    EQUAL(water.addMeltwater(cell, lake, 0, 5'000'000, 32), 255,
+          "bulk meltwater credits whole units");
+    EQUAL(water.volume(lake), before + 255, "body receives the melt");
+    EQUAL(water.inputRemainder(), 0, "exact conversion has no remainder");
+    EQUAL(water.addMeltwater(cell, lake, 0, 5'000'000, 32), 0,
+          "the same weather interval is applied once");
+    EQUAL(water.volume(lake), before + 255, "a replay adds nothing");
+
+    // A sub-unit melt carries its exact remainder instead of rounding away.
+    EQUAL(water.addMeltwater(cell, lake, 0, 1'000, 33), 0,
+          "a sub-unit melt is held");
+    EQUAL(water.inputRemainder(), 255'000, "fractional volume is retained");
+    EQUAL(water.addRain(cell, lake, 0, 1'000'000, 34), 255,
+          "one million liquid cm3 is 255 units");
+    EQUAL(water.volume(lake), before + 510, "rain is credited");
+    EQUAL(water.freeze(lake, 100, 40), 100, "freeze before the unloaded save");
+
+    Reservoirs restored(nullptr);
+    restored.define(lake, StorageCurve::constantArea(4, 400, 410));
+    restored.restore(water.encode());
+    EQUAL(restored.volume(lake), water.volume(lake), "liquid survives reload");
+    EQUAL(restored.frozen(lake), 100,
+          "frozen phase survives an unloaded regional reload");
+    EQUAL(restored.inputRemainder(), water.inputRemainder(),
+          "the conversion remainder survives reload");
+    EQUAL(restored.addMeltwater(cell, lake, 0, 5'000'000, 32), 0,
+          "a saved cursor rejects a replayed input");
+    EQUAL(restored.addRain(cell, lake, 0, 1'000'000, 34), 0,
+          "the rain cursor also survives reload");
+    EQUAL(restored.volume(lake), water.volume(lake),
+          "remote catch-up cannot apply a transfer twice");
+
+    // Progress is part of the phase record and survives the snapshot.
+    restored.setPhaseProgress(PhaseKey{lake}, -750, 12.0);
+    Reservoirs reloaded(nullptr);
+    reloaded.define(lake, StorageCurve::constantArea(4, 400, 410));
+    reloaded.restore(restored.encode());
+    const auto* state = reloaded.snapshot()->phase(PhaseKey{lake});
+    CHECK(state);
+    EQUAL(state->progress, -750, "phase progress survives reload");
+    EQUAL(state->appliedDay, 12.0, "phase date survives reload");
+}
+
+TEST(hydrology_water_input_full_destination_and_two_receivers) {
+    Reservoirs water(nullptr);
+    constexpr uint32_t small = 11, other = 12;
+    water.define(small, StorageCurve::constantArea(1, 400, 401));
+    water.define(other, StorageCurve::constantArea(2, 400, 401));
+    EQUAL(water.transfer(small, -200, ReservoirExchange::Disposal), -200,
+          "leave one fifth of a block of freeboard");
+    const TilePos source{4, 400, 4};
+    const auto result = water.addRain(source, small, 0, 2'000'000, 60);
+    EQUAL(result, WaterUnitsPerBlock - 55, "only the freeboard is accepted");
+    EQUAL(water.volume(small), WaterUnitsPerBlock, "the destination is full");
+    EQUAL(water.pendingTransfers(), 510 - (WaterUnitsPerBlock - 55),
+          "the surplus is a pending transfer, not lost");
+
+    // One source column can feed two receivers in the same dated interval;
+    // each receiver has its own once-only cursor.
+    EQUAL(water.transfer(other, -200, ReservoirExchange::Disposal), -200,
+          "make room in the second receiver");
+    const auto first = water.addRain(source, other, 0, 500'000, 61);
+    const auto second = water.addRain(source, other, 0, 500'000, 61);
+    CHECK(first > 0);
+    EQUAL(second, 0, "the second receiver's repeat is ignored");
+    EQUAL(water.addRain(source, small, 0, 500'000, 60), 0,
+          "the earlier interval on the first receiver is also ignored");
+
+    // A changed head: ice thawed into a body that was refilled to its old
+    // top no longer fits and becomes accounted outflow.
+    EQUAL(water.freeze(small, 100, 61), 100, "freeze some of the body");
+    EQUAL(water.volume(small), WaterUnitsPerBlock - 100, "liquid is debited");
+    EQUAL(water.transfer(small, 100, ReservoirExchange::Input), 100,
+          "refill the freed volume");
+    EQUAL(water.volume(small), WaterUnitsPerBlock, "the body is full again");
+    EQUAL(water.thaw(small, 255, 62), 100, "all ice melts");
+    EQUAL(water.volume(small), WaterUnitsPerBlock, "a full body cannot refill");
+    EQUAL(water.exchanged(ReservoirExchange::Disposal), -200 - 200 - 100,
+          "thaw overflow joins the accounted outflow");
+
+    Reservoirs restored(nullptr);
+    restored.define(small, StorageCurve::constantArea(1, 400, 401));
+    restored.define(other, StorageCurve::constantArea(2, 400, 401));
+    restored.restore(water.encode());
+    EQUAL(restored.volume(small), water.volume(small), "small body reloads");
+    EQUAL(restored.volume(other), water.volume(other), "other body reloads");
+    EQUAL(restored.pendingTransfers(), water.pendingTransfers(),
+          "pending transfer reloads");
+    EQUAL(restored.exchanged(ReservoirExchange::Disposal),
+          water.exchanged(ReservoirExchange::Disposal),
+          "accounted outflow reloads");
+}
+
+TEST(hydrology_water_input_reaches_a_river_reach) {
+    const auto world = basinWorld();
+    const auto hydrology = GeneratedHydrology::build(world);
+    Reservoirs water(hydrology);
+    CHECK(!hydrology->riverReaches().empty());
+    const auto reach = hydrology->riverReaches().front().id;
+    EQUAL(water.addRain({0, 500, 0}, 0, reach, 1'000'000, 5), 255,
+          "a reach accepts the dated water input");
+    CHECK(water.pendingTransfers() >= 255);
+    EQUAL(water.addRain({0, 500, 0}, 0, reach, 1'000'000, 5), 0,
+          "the reach cursor is once-only");
+}
+
+TEST(hydrology_water_phase_legacy_ledger_has_no_ice) {
+    Reservoirs water(nullptr);
+    constexpr uint32_t lake = 3;
+    water.define(lake, StorageCurve::constantArea(1, 400, 401));
+    auto container = SectionContainer::decode(water.encode());
+    const auto* section = container.find("RSVR");
+    CHECK(section);
+    // Keep the v10 partial-cell flag and strip the v11 remainder, removed
+    // ice, phase count and cursor count.
+    constexpr size_t v11Tail = 24;
+    CHECK(section->data.size() >= v11Tail);
+    Bytes legacyBytes(section->data.begin(), section->data.end() - v11Tail);
+    container.put("RSVR", 10, std::move(legacyBytes));
+    Reservoirs legacy(nullptr);
+    legacy.define(lake, StorageCurve::constantArea(1, 400, 401));
+    legacy.restore(container.encode());
+    EQUAL(legacy.frozenTotal(), 0, "a v10 ledger starts without ice");
+    EQUAL(legacy.liquidTotal(), WaterUnitsPerBlock,
+          "the older liquid ledger is unchanged");
 }
 
 TEST(hydrology_local_flow_prefers_nearest_drop) {

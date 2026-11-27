@@ -12,6 +12,7 @@ add_library(game
     world/terrain_sampler.cpp
     world/natural_shape.cpp
     world/reservoirs.cpp
+    world/fluid_cell.cpp
     world/generated_hydrology.cpp
     world/generated_rivers.cpp
     world/surface_sampler.cpp

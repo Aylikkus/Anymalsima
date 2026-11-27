@@ -6,6 +6,7 @@ add_library(world_logic_cpu STATIC
     ${PROJECT_SOURCE_DIR}/src/game/world/terrain_sampler.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/natural_shape.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/reservoirs.cpp
+    ${PROJECT_SOURCE_DIR}/src/game/world/fluid_cell.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_hydrology.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/generated_rivers.cpp
     ${PROJECT_SOURCE_DIR}/src/game/world/surface_sampler.cpp
@@ -79,6 +80,7 @@ add_executable(world_logic_tests
     unit/game/world/tile_shape_tests.cpp
     unit/game/world/tile_piece_tests.cpp
     unit/game/world/snow_settlement_tests.cpp
+    unit/game/world/fluid_cell_tests.cpp
     unit/game/world/climate_tests.cpp
     unit/game/world/weather_tests.cpp
     unit/game/world/thermal_tests.cpp
@@ -195,6 +197,8 @@ set(world_cases
     weather_snow_hatch_timing
     weather_snow_and_melt_interval_accounting
     weather_melt_uncovers_vegetation
+    weather_snowmelt_converts_into_the_water_ledger
+    weather_rain_on_liquid_reaches_the_water_boundary
     weather_history_shelter_travel_and_reload
     weather_history_dated_exposure_change
     weather_history_full_year_skip_visit_order
@@ -620,13 +624,29 @@ target_include_directories(tree_benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/su
 target_compile_definitions(tree_benchmark PRIVATE
     SOIL_CONTENT_DIR="${PROJECT_SOURCE_DIR}/assets/data")
 
-foreach(case hydrology_reservoir_reconciles_saved_and_unloaded_water
+foreach(case fluid_profile_bottom_slab_capacity_and_openings
+             fluid_profile_elevated_lid_seals_the_upper_pocket
+             fluid_profile_middle_slab_distinguishes_disconnected_pockets
+             fluid_profile_closed_face_and_side_gap
+             fluid_profile_ramp_shoreline_is_submerged_up_to_the_head
+             fluid_profile_open_cell_is_uniform
+             hydrology_reservoir_reconciles_saved_and_unloaded_water
              hydrology_valley_spills_to_river_until_plugged
              hydrology_draining_lake_mesh_heights
              hydrology_lake_seep_and_coastal_pool
              hydrology_still_local_pool_wakes_on_excavation
              hydrology_exposed_film_dries_after_supply_stops
              hydrology_local_flow_conserves_and_freezes_unknown_boundary
+             hydrology_partial_cell_local_flow_uses_geometry_capacity
+             hydrology_partial_cell_closed_face_blocks_local_flow
+             hydrology_partial_cell_sealed_upper_pocket_stays_dry
+             hydrology_partial_cell_projection_uses_geometry
+             hydrology_partial_cell_legacy_flag_round_trips
+             hydrology_water_phase_freeze_thaw_balance
+             hydrology_water_input_once_and_remainder
+             hydrology_water_input_full_destination_and_two_receivers
+             hydrology_water_input_reaches_a_river_reach
+             hydrology_water_phase_legacy_ledger_has_no_ice
              hydrology_local_flow_falls_across_slab_and_wrap
              hydrology_local_flow_prefers_nearest_drop
              hydrology_local_flow_settles_saved_suspended_water

@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <climits>
+#include <cmath>
 #include <functional>
 #include <map>
 #include <memory>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "core/signal.hpp"
+#include "fluid_cell.hpp"
 #include "local_water_cells.hpp"
 #include "serialization/binary_stream.hpp"
 #include "tile_pos.hpp"
@@ -24,6 +26,16 @@ class GeneratedHydrology;
 
 using WaterVolume = int64_t;
 inline constexpr WaterVolume WaterUnitsPerBlock = 255;
+// V1 keeps phase volume as water equivalent. Ice only needs the expansion
+// factor when step 19 turns a frozen equivalent into a visible thickness.
+inline constexpr double IceSpecificGravity = 0.917;
+inline double iceThicknessMetres(WaterVolume frozenWater) {
+    return double(frozenWater) / WaterUnitsPerBlock / IceSpecificGravity;
+}
+inline WaterVolume frozenWaterForIceMetres(double metres) {
+    return WaterVolume(
+        std::llround(metres * IceSpecificGravity * WaterUnitsPerBlock));
+}
 
 class StorageCurve {
    public:
@@ -66,6 +78,28 @@ struct PoolState {
     std::shared_ptr<const PoolFootprint> footprint;
     uint32_t parent = 0;   // a detached lake compartment masks its old owner
     int closedCrest = -1;  // no suspended spill sheet after a wall opens
+};
+
+// One phase owner: a standing body, or a single local cell. Frozen volume is
+// always stored as water equivalent in the same 255-per-cubic-metre units as
+// liquid, so a freeze/thaw pair never loses volume to a density conversion.
+struct PhaseKey {
+    uint32_t body = 0;  // zero for a local cell
+    int32_t x = 0;
+    int16_t y = 0;
+    int32_t z = 0;
+    bool local() const { return body == 0; }
+    bool operator==(const PhaseKey&) const = default;
+    bool operator<(const PhaseKey& other) const {
+        return std::tie(body, x, y, z) <
+               std::tie(other.body, other.x, other.y, other.z);
+    }
+};
+
+struct PhaseState {
+    WaterVolume frozen = 0;  // water equivalent
+    int64_t progress = 0;    // signed residual phase progress
+    double appliedDay = 0;   // last dated application
 };
 
 struct ReservoirSnapshot {
@@ -126,6 +160,11 @@ struct ReservoirSnapshot {
         Vec2 flow;
     };
     std::unordered_map<uint64_t, StreamColumn> streams;
+    // Authoritative freeze state, published with the water volume it changes.
+    std::map<PhaseKey, PhaseState> phases;
+
+    const PhaseState* phase(const PhaseKey& key) const;
+    WaterVolume frozen(const PhaseKey& key) const;
 
     int level(uint32_t body, int generated) const;
     int localTop(int x, int z) const;
@@ -156,6 +195,8 @@ struct ReservoirChange {
     std::vector<uint32_t> reaches;
     std::optional<TilePos> local;
     std::vector<TilePos> locals;
+    // Phase owners whose ice or progress changed without a liquid top change.
+    std::vector<PhaseKey> phaseOwners;
     // Pool IDs referenced by this change, for footprint lookups without a
     // snapshot. The owner fills it from poolFootprints at publish time.
     std::shared_ptr<const std::map<uint32_t, std::vector<Vec2i>>> pools;
@@ -163,13 +204,44 @@ struct ReservoirChange {
                  int z1, int period) const;
 };
 
+// A dated precipitation or meltwater input. `interval` is a monotonic dated
+// key: a weather interval index for rain, or the exact applied day in
+// microseconds for meltwater. A repeated key for the same receiver is ignored,
+// so a catch-up replay and the local path cannot both apply it.
+struct WaterInput {
+    enum class Kind : uint8_t { Rain, Meltwater, Runoff };
+    int64_t interval = 0;
+    TilePos cell{};
+    uint32_t body = 0;
+    uint32_t reach = 0;
+    WaterVolume amount = 0;  // liquid water units (255 per cubic metre)
+    Kind kind = Kind::Rain;
+};
+
+struct WaterInputResult {
+    WaterVolume accepted = 0;
+    WaterVolume overflow = 0;
+    bool duplicate = false;
+};
+
 // Owner-thread ledger. Workers use the immutable projection snapshot.
 class Reservoirs {
    public:
     enum class CellAccess { Open, Blocked, Unknown };
     using CellQuery = std::function<CellAccess(TilePos)>;
+    // A cell's free-space profile. Partial solids return a reduced capacity
+    // and per-face openings; ordinary open cells may return nullopt (uniform)
+    // and fully solid cells are reported as Blocked by the CellQuery.
+    using ProfileQuery = std::function<std::optional<fluid::Profile>(TilePos)>;
     explicit Reservoirs(std::shared_ptr<const GeneratedHydrology> generated,
                         uint64_t initialStep = 0);
+    void setProfileQuery(ProfileQuery query) {
+        profileQuery = std::move(query);
+    }
+    // Old ledgers treated every partial solid as a whole-cell fluid barrier.
+    // Keep that rule on migration so opening a saved dam cannot drain it.
+    bool partialCellWater() const { return partialCells; }
+    void setPartialCellWater(bool enabled) { partialCells = enabled; }
 
     std::shared_ptr<const ReservoirSnapshot> snapshot() const {
         return view.load();
@@ -185,6 +257,46 @@ class Reservoirs {
                             ReservoirExchange reason);
     WaterVolume exchanged(ReservoirExchange reason) const;
     uint64_t revision() const { return serial; }
+
+    // Liquid/ice conversions. A body's frozen volume is debited from its
+    // store and credited to the phase entry in one published revision. Thaw
+    // that cannot fit back into a full body or cell is an accounted outflow.
+    WaterVolume freeze(uint32_t body, WaterVolume amount, double day = -1);
+    WaterVolume thaw(uint32_t body, WaterVolume amount, double day = -1);
+    WaterVolume freezeLocal(TilePos cell, WaterVolume amount, double day = -1);
+    WaterVolume thawLocal(TilePos cell, WaterVolume amount, double day = -1);
+    // Legacy independent water lives in chunk tiles with no ledger owner.
+    // Adopt it before a phase change so the conversion cannot lose or
+    // duplicate the cell. Adoption is not an external input.
+    WaterVolume adoptLocal(TilePos cell, uint8_t fill);
+    WaterVolume frozen(uint32_t body) const;
+    WaterVolume frozenLocal(TilePos cell) const;
+    WaterVolume frozenTotal() const;
+    // Sum of liquid in defined bodies (stored or at capacity) and local
+    // cells. Intended for closed-basin audits.
+    WaterVolume liquidTotal() const;
+    // Volume waiting in reservoir and reach transfers.
+    WaterVolume pendingTransfers() const;
+    // Ice removed by excavation. Kept separate from liquid outflow so the
+    // phase audit can show where the frozen volume went.
+    WaterVolume removedIce() const { return removedIce_; }
+    void setPhaseProgress(const PhaseKey& key, int64_t progress,
+                          double day = -1);
+    bool clearPhase(const PhaseKey& key);
+    // Remove a local cell and its phase state after excavation. The liquid
+    // becomes disposal and the ice becomes removedIce().
+    bool clearLocal(TilePos cell);
+
+    // Dated input boundary for rain and credited snowmelt. Amounts are in
+    // liquid water units; addMeltwater/addRain perform the exact conversion
+    // from centimetres and keep the fractional remainder in the ledger.
+    static constexpr int64_t InputRemainderDenominator = 5'000'000;
+    WaterInputResult applyInput(const WaterInput& input);
+    WaterVolume addMeltwater(TilePos cell, uint32_t body, uint32_t reach,
+                             int64_t bulkSnowCm3, int64_t interval);
+    WaterVolume addRain(TilePos cell, uint32_t body, uint32_t reach,
+                        int64_t liquidCm3, int64_t interval);
+    int64_t inputRemainder() const { return inputRemainder_; }
 
     // Pass zero to close a reach. A receiver override is a confirmed standing
     // outlet. Flow held at a closed reach is credited only after it leaves.
@@ -387,6 +499,8 @@ class Reservoirs {
                      ReservoirChange& change);
 
     std::shared_ptr<const GeneratedHydrology> generated;
+    ProfileQuery profileQuery;
+    bool partialCells = true;
     // Reach IDs come from saved paths. Short or rejected paths leave gaps,
     // and generation order is independent of ID order.
     std::unordered_map<uint32_t, WaterVolume> springRates;
@@ -432,6 +546,26 @@ class Reservoirs {
     std::map<uint32_t, std::vector<Vec2i>> poolFootprints;
     std::shared_ptr<const std::map<uint32_t, std::vector<Vec2i>>>
         publishedFootprints;
+    // Dated input deduplication: the last applied interval for one receiver
+    // and kind. Catching up and nearby detail share the same cursor.
+    struct InputKey {
+        int32_t x = 0;
+        int32_t z = 0;
+        uint32_t body = 0;
+        uint32_t reach = 0;
+        uint8_t kind = 0;
+        bool operator<(const InputKey& other) const {
+            return std::tie(x, z, body, reach, kind) <
+                   std::tie(other.x, other.z, other.body, other.reach,
+                            other.kind);
+        }
+    };
+    std::map<InputKey, int64_t> inputCursors;
+    // Exact units denominator for cm3 -> water units. One bulk snow cm3 is
+    // 0.2 liquid cm3, and one water unit is 1e6/255 cm3.
+    int64_t inputRemainder_ = 0;
+    WaterVolume removedIce_ = 0;
+    WaterVolume acceptInput(const WaterInput& input, WaterVolume amount);
     std::vector<Route> order;
     Totals totals{};
     uint64_t serial = 0;

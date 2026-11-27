@@ -12,6 +12,8 @@
 // Workers keep immutable snapshots while the world thread moves water. A
 // copied ledger shares untouched X rows. Within a row (Z, Y) ordering keeps
 // each vertical column contiguous for surface and rectangular LOD queries.
+// Values are absolute volume units: 255 units is one cubic metre. A cell
+// whose partial solid leaves less free space therefore tops out below 255.
 class LocalWaterCells {
     using Key = std::pair<int, int>;
     using Row = std::map<Key, uint8_t>;

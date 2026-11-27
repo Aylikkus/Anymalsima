@@ -300,11 +300,14 @@ ChunkManager::ChunkManager(
       layersGenerator(world.genSettings, assets),
       soilAssets(assets),
       soilSeed(world.genSettings.feature_seed) {
-    if (world.reservoirs)
+    if (world.reservoirs) {
         reservoirConnection = world.reservoirs->changed.connect(
             [this](const ReservoirChange& change) {
                 reservoirChanged(change);
             });
+        world.reservoirs->setProfileQuery(
+            [this](TilePos p) { return fluidProfileAt(p); });
+    }
     floraTable = assets ? std::make_shared<const FloraSpeciesTable>(*assets)
                         : std::make_shared<const FloraSpeciesTable>();
     floraSeed_ = world.genSettings.feature_seed ^ 0x5f10a7u;
@@ -2421,10 +2424,38 @@ Reservoirs::CellAccess ChunkManager::waterAccess(TilePos p) {
     if (!chunk) return Access::Unknown;
     const auto& tile = chunk->tiles[p.z % Chunk::SIZE_Z][p.y % Chunk::SIZE_Y]
                                    [p.x % Chunk::SIZE_X];
-    if (tile.isSolid() ||
-        (tile.isLiquid() && tile.waterOrigin != WaterOrigin::Local))
+    // A reservoir- or independent-liquid cell freezes local flow until the
+    // owner reconciles it. Local credits may share a partially solid cell.
+    if (tile.isLiquid() && tile.waterOrigin != WaterOrigin::Local)
         return Access::Blocked;
+    if (tile.isSolid()) {
+        if (!reservoirs() || !reservoirs()->partialCellWater())
+            return Access::Blocked;
+        const auto index = Chunk::cell(p.x % Chunk::SIZE_X, p.y % Chunk::SIZE_Y,
+                                       p.z % Chunk::SIZE_Z);
+        if (!chunk->hasCompoundAt(index) &&
+            chunk->shapeAt(index) == TileShape{})
+            return Access::Blocked;
+        const auto geometry = chunk->solidCellAt(index).geometry();
+        return geometry.isFull() ? Access::Blocked : Access::Open;
+    }
     return Access::Open;
+}
+
+std::optional<fluid::Profile> ChunkManager::fluidProfileAt(TilePos p) {
+    if (!reservoirs()) return std::nullopt;
+    const auto cell = solidCellAt(p);
+    if (!cell) return std::nullopt;
+    // An older ledger keeps every partial solid as a whole-cell barrier.
+    if (!reservoirs()->partialCellWater())
+        return cell->cell.hasSolid()
+                   ? std::optional<fluid::Profile>(fluid::Profile::closed())
+                   : std::nullopt;
+    if (!cell->cell.usesGeometry())
+        return cell->cell.hasSolid()
+                   ? std::optional<fluid::Profile>(fluid::Profile::closed())
+                   : std::nullopt;
+    return fluid::Profile::make(cell->cell.geometry());
 }
 
 WaterSurface ChunkManager::waterSourceAt(TilePos p) {
@@ -3597,38 +3628,75 @@ bool ChunkManager::reconcileWater(
                     c.water.body);
             for (int y = 0; y < Chunk::SIZE_Y; ++y) {
                 auto& tile = chunk.tiles[z][y][x];
+                const auto index = Chunk::cell(x, y, z);
+                EnvironmentCell environmentCell;
+                if (environment)
+                    if (const auto byChunk = environment->find(coord);
+                        byChunk != environment->end())
+                        if (const auto cell = byChunk->second->find(index);
+                            cell != byChunk->second->end())
+                            environmentCell = cell->second;
+                const bool partial =
+                    bool(environmentCell) ||
+                    (tile.isSolid() && (chunk.hasCompoundAt(index) ||
+                                        chunk.shapeAt(index) != TileShape{}));
                 const bool oldProjectedRiver =
                     hasReservoir && c.water.reach &&
                     c.water.fills(y0 + y, c.surface_y) &&
                     tile.liquid == LiquidType::Water &&
-                    tile.liquidLevel == 255 &&
-                    !chunk.rootEdited(Chunk::cell(x, y, z));
-                if (tile.isSolid() ||
-                    (tile.isLiquid() &&
-                     tile.waterOrigin == WaterOrigin::Independent &&
-                     !oldProjectedRiver))
+                    tile.liquidLevel == 255 && !chunk.rootEdited(index);
+                if (!partial &&
+                    (tile.isSolid() ||
+                     (tile.isLiquid() &&
+                      tile.waterOrigin == WaterOrigin::Independent &&
+                      !oldProjectedRiver)))
                     continue;
+                std::optional<fluid::Profile> profile;
+                if (partial) {
+                    if (!reservoirs()->partialCellWater()) continue;
+                    auto solid = chunk.solidCellAt(index);
+                    solid.environment = environmentCell;
+                    profile = fluid::Profile::make(solid.geometry());
+                    if (!profile || profile->capacity <= 1e-6f) continue;
+                }
                 const auto local = snapshot->cells.fill({wx, y0 + y, wz});
-                uint8_t fill = 0;
+                // A player-placed partial solid stays a barrier for projected
+                // water until it carries a local credit. This preserves saved
+                // dams and the old whole-cell edit rule; generated ramps and
+                // shoreline pieces are not edited and take part in partial
+                // capacity.
+                if (partial && chunk.rootEdited(index) && !local) continue;
+                float level = 0;
                 if (c.water.reach || c.water.body > GeneratedHydrology::Sea ||
-                    !chunk.rootEdited(Chunk::cell(x, y, z)))
-                    fill = standing.fillAt(y0 + y, c.surface_y);
+                    !chunk.rootEdited(index))
+                    level = standing.fillAt(y0 + y, c.surface_y) / 255.f;
                 if (pool.body) {
                     // The pool's storage starts above the river's top
                     // voxel. Submerging it also covers its partial top.
-                    if (fill && y0 + y == poolGround &&
+                    if (level > 0 && y0 + y == poolGround &&
                         pool.surfaceY > poolGround + 1)
-                        fill = 255;
-                    fill = std::max(fill, pool.fillAt(y0 + y, poolGround));
+                        level = 1;
+                    level = std::max(level,
+                                     pool.fillAt(y0 + y, poolGround) / 255.f);
                 }
                 if (stream != snapshot->streams.end() &&
                     y0 + y >= stream->second.bottom &&
                     y0 + y <= stream->second.top)
-                    fill = std::max<uint8_t>(
-                        fill, y0 + y == stream->second.top ? 64 : 255);
+                    level = std::max(
+                        level,
+                        (y0 + y == stream->second.top ? 64 : 255) / 255.f);
                 // A submerged local credit still belongs to the ledger,
-                // but the voxel's surface is the higher of the two fills.
-                fill = std::max(fill, local);
+                // but the voxel's surface is the higher of the two.
+                if (local)
+                    level = std::max(level,
+                                     profile ? profile->levelFor(local / 255.f)
+                                             : local / 255.f);
+                if (profile) {
+                    level = std::min(level, profile->ceiling);
+                    if (profile->volumeAt(level) <= 1e-6f) level = 0;
+                }
+                const auto fill = uint8_t(
+                    std::clamp<int>(int(std::lround(level * 255)), 0, 255));
                 const auto origin = local  ? WaterOrigin::Local
                                     : fill ? WaterOrigin::Reservoir
                                            : WaterOrigin::Independent;

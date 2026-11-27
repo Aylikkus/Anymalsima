@@ -1,6 +1,6 @@
 # Weather, temperature, snow and ice
 
-**Steps 01–16 complete · Step 17 pending.**
+**Steps 01–18 complete · Step 19 pending.**
 
 The first playable target is a snow-covered landing at the foot of a stone ramp. A light snowfall slides down the 45° face. When the standing depth on the landing reaches 5 cm, snow fills the bottom 5 cm of open space at the toe and the upper rock stays bare. The same tile can hold stone and snow. Later a builder can use that capability for stone and timber, and a lake can have a walkable ice lid with liquid below it.
 
@@ -28,8 +28,8 @@ Take the first pending step in order. Mark it **In progress**. Implement its del
 | 14 | Deep-pack LOD, structures and travel | Complete | F · Arctic shelter |
 | 15 | Local heating and cooling from blocks and items | Complete | |
 | 16 | Room air, wall heat storage, local melt and setpoint heaters | Complete | G · Heated room |
-| 17 | Partial-cell water capacity and connectivity | Pending | |
-| 18 | Water–ice transfers, persistence and meltwater | Pending | |
+| 17 | Partial-cell water capacity and connectivity | Complete | |
+| 18 | Water–ice transfers, persistence and meltwater | Complete | |
 | 19 | Surface ice in still and flowing water | Pending | H · Frozen shore |
 | 20 | Load-bearing ice and local break-through | Pending | I · Thin ice |
 | 21 | Migration, extended travel and performance | Pending | J · End-to-end |
@@ -487,7 +487,7 @@ the grounded probe query the actual solid surfaces and clearances.
 Distant structure levels 1 and 2 still simplify to coarse voxels. The coarse
 GPU sky map uses opaque heights on its existing four-metre grid. The exact
 heightmap and level-zero handover are used to check the one-metre beam
-opening. Per-piece water capacity is deferred to step 17.
+opening. Per-piece water capacity arrives in step 17.
 
 #### Execution checks
 
@@ -2115,4 +2115,176 @@ room, opening the door lowers the air temperature and closing it raises the
 temperature again, as expected. The earlier orbit-camera reading was taken
 next to the doorway, where the panel correctly sampled the outside air; the
 fixture itself was not inverted. Step 16 is complete. Playcheck G is signed
-off, and step 17 is the next pending step.
+off. Step 17 follows below.
+
+### Step 17 · 2026-11-27
+
+[FluidCell](../../src/game/world/fluid_cell.hpp) derives sub-cell water
+capacity from the same `CellGeometry` used by meshing, collision and picking.
+A profile stores cumulative free volume in 64 height samples, the lowest
+full-width horizontal solid (the sealed ceiling of the bottom free run), and
+the open area and lowest point of each cell face. `freeVolumeBelow` is exact
+for slabs, layers, ramps and compound pieces. Free volume is converted to the
+ledger's units as **255 units per cubic metre**, so a half-free cell tops out
+at 128 rather than 255. Old full-cell water keeps its saved 0–255 values.
+
+Local flow now compares free volume and water level instead of raw fill.
+Transfers are limited so unequal capacities cannot overshoot the equal level,
+and every horizontal or vertical move checks the shared face opening. A
+closed face holds its volume; a side gap passes only water above the gap; a
+bottom slab cannot feed the cell below. The same capacity and opening checks
+apply to reservoir cut-filling and river-intake filling.
+
+`ChunkManager` installs a profile query on the reservoir ledger. A partially
+solid cell is `Open` only when its actual geometry has free volume, and the
+cell's solid geometry is queried through `solidCellAt`, so pieces and
+environmental solids share the same occupancy rule. Chunk projection sets
+`liquidLevel` from the geometry level, not from a whole-cell fraction.
+Snow-filled cells have no water capacity. The near mesher clips exposed water
+side quads against both cells' boundary openings, and camera submersion tests
+the actual solid geometry.
+
+`water.dat` (`RSVR`) is v10 with an explicit partial-cell flag. A v9 or older
+ledger restores with the flag off: every partial solid remains a whole-cell
+barrier, preserving an old dam or reservoir wall that would otherwise drain
+through a newly recognised gap. New worlds start with the flag on. A
+player-placed partial solid inside projected water also stays a barrier until
+it carries a local credit, which keeps existing dam edits and the old
+whole-cell edit rule intact.
+
+#### Fixtures and checks
+
+The profile fixtures are synthetic one-cell geometries: a bottom slab, an
+elevated lid, a sealed middle slab, a full cube, a 25 cm wall and a ramp. The
+local-flow fixtures use explicit profile maps, so they are deterministic and
+need no seed or save. The projection fixture places a slab in a loaded chunk,
+credits local water and checks the reported level; the same chunk places a
+whole cube and verifies that it accepts no local water.
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -L water -j 6 --output-on-failure --no-tests=error
+ctest --test-dir build -L gameplay -j 8 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang -j 4 --output-on-failure \
+  --no-tests=error -R 'fluid_|hydrology_|snow|weather|compound'
+```
+
+The Release app and logic tests built. All 58 water cases and all 501 gameplay
+cases passed. The focused sanitizer run passed 112 cases with leak detection
+disabled for the sandbox. The first sanitizer pass exposed a dangling pointer
+in the per-operation profile cache; the cache now returns the stored optional
+rather than a local one. Existing river, lake, drawdown, dam and save/load
+cases remain green, including the unchanged full-cube river barrier.
+
+#### Deviations
+
+- V1 tracks one water body per cell and fills the bottom free run. Water that
+  would sit in a sealed upper pocket, entering from a side opening above a
+  full-width slab, is not represented until a later step. The profile still
+  reports the pocket as sealed so a bottom-fed cell cannot fill it.
+- Face connectivity uses open area and the lowest opening, not a full
+  horizontal polygon intersection. Complementary pieces with the same area
+  but disjoint extents can pass a conservative overlap test.
+- `ReservoirSnapshot::projectLocal` and distant local-water queries still use
+  the cell top and a volume fraction for partial cells because the ledger
+  snapshot does not carry chunk geometry. Loaded chunk projection is exact.
+  Distant weather and ice summaries do not consume this path yet.
+- The water top quad in a partially solid cell is not clipped to the free
+  cross-section at the waterline; side faces are clipped. Ramp shorelines
+  therefore draw a full-footprint top at the measured level. Ice and the
+  visual shoreline pass in step 19 will refine this.
+- Old ledgers keep the whole-cell barrier rule. Rebasing a pre-step-17 world
+  onto partial-cell water is a deliberate migration, not automatic.
+
+### Step 18 · 2026-11-27
+
+[Reservoirs](../../src/game/world/reservoirs.hpp) now owns the water phase
+ledger beside the liquid it changes. A `PhaseKey` identifies a standing body
+or one local cell. Each `PhaseState` stores frozen water equivalent in the
+same 255-per-cubic-metre units as liquid, signed residual phase progress and
+the last applied day. `freeze`, `thaw`, `freezeLocal` and `thawLocal` debit
+the liquid and credit the ice in one immutable snapshot, so a partial write
+cannot split the two sides. Thaw clamps to the receiver's capacity; surplus
+becomes an accounted outflow. `setPhaseProgress` carries the step 19 progress
+without changing the liquid. `clearLocal` routes excavation volume to the
+disposal and removed-ice ledgers, and `adoptLocal` gives legacy independent
+water one ledger owner before it can freeze.
+
+`RSVR` v11 appends the exact conversion remainder, removed-ice total, phase
+entries and dated input cursors after the v10 partial-cell flag. v10 and older
+ledgers restore with no ice and no cursors, keeping their liquid and barrier
+rules unchanged. The phase map is part of the immutable `ReservoirSnapshot`.
+Projected ice is not written into chunks or ordinary solid edits; step 19 adds
+its geometry and distant summaries.
+
+`Reservoirs::applyInput` is the weather boundary. A `WaterInput` carries the
+receiver (local cell, body or reach), a kind, a dated once-only key and an
+amount in water units. A repeated key for the same receiver is ignored, so a
+remote catch-up replay and local detail cannot both apply a transfer. A full
+body keeps its surplus in `pendingInflow`, a reach keeps it in its delivery
+hold, and an unresolved or local overflow becomes `Disposal`. `addMeltwater`
+converts bulk snow centimetres at 0.2 liquid cm³ per bulk cm³ and `addRain`
+converts liquid centimetres; both use `InputRemainderDenominator = 5,000,000`
+so small events accumulate instead of rounding to zero. The remainder and all
+cursors are saved in the same atomic `water.dat` replacement.
+
+`precipitation::reconcile` gained an optional rain callback that fires only
+for exposure rays that hit existing liquid, using the same measured
+temperature as the snow fraction. `GameplayState` aggregates those amounts per
+cell and weather interval and sends them through `addRain`. It also routes
+`SnowSettlement::meltwater` through `addMeltwater` after each bounded replay.
+Meltwater waits while its receiver chunk is unloaded; melt at the world top is
+booked as outflow. The meltwater date key is the exact applied day in
+microseconds, so two partial catch-up batches ending inside one half-hour are
+distinct while a reload of the same batch remains a duplicate.
+
+#### Verification
+
+The new headless cases use synthetic constant-area bodies and local cells; no
+seed or save slot is required. They cover a full freeze/thaw cycle, local
+conversion and excavation, legacy ownership adoption, a closed-basin audit,
+sub-unit melt and rain remainders, reload with frozen state, duplicate
+catch-up, a full destination, a changed body head, two receivers from one
+source, a river reach, a v10 ledger without ice, a combined snow-water-
+equivalent audit across the meltwater boundary, and rain reaching that
+boundary only on existing liquid.
+
+```bash
+cmake --build build --target app world_logic_tests --parallel 6
+ctest --test-dir build -R 'hydrology_water_|weather_(rain|snowmelt)' \
+  --output-on-failure --no-tests=error -j 4
+ctest --test-dir build -L gameplay -j 8 --output-on-failure --no-tests=error
+
+cmake --build build/tests-san-clang --target world_logic_tests --parallel 4
+ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 \
+  ctest --test-dir build/tests-san-clang \
+  -R 'hydrology_water_|weather_(rain|snowmelt)' \
+  --output-on-failure --no-tests=error -j 4
+```
+
+The Release app and logic tests built. All 8 focused water-phase and
+rain/melt boundary cases passed. All 508 gameplay cases passed. The same 8
+cases passed with ASan and UBSan, with leak detection disabled for the
+sandbox. Acceptance ran headlessly; step 18 schedules no maintainer playcheck.
+
+#### Deviations
+
+- V1 stores ice as water equivalent only. The 0.917 ice-expansion factor,
+  visible 5/10/25/50/75/100 cm stages and the projected ice surface belong to
+  step 19.
+- Rain is routed only where an exposure ray already hits liquid. Rain on bare
+  ground and its surface-runoff path remain future consumers.
+- The audit helper `liquidTotal` sums defined body curves and local cells. A
+  lazily untouched generated body is not forced into the curve cache.
+- The exact cm³ remainder is ledger-wide rather than per receiver. It
+  conserves total volume; the eventual whole water unit is credited to the
+  receiver that crosses the boundary.
+- The input cursor is a high-water key per receiver and kind. Replaying an
+  older key is ignored rather than tracked as a set, which keeps saves bounded
+  and matches the date-ordered replay order of step 11.
+- Save order in `GameplayState` writes `water.dat` before `snow.dat`; a crash
+  between them leaves the snow entry to be replayed into the deduplicating
+  water cursors, while the opposite order cannot occur.

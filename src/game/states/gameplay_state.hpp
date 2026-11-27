@@ -129,6 +129,7 @@ class GameplayState : public IGameState {
     void rebuildSnow(size_t maxColumns = 1, bool streamingOnly = false);
     void publishSnow(const snow::ChunkColumns& selected);
     void advanceSnow(bool throughNow = false, double maxDays = 7);
+    void routeSnowMeltwater();
     bool reconcileSnowAt(int x, int z, double target);
     bool prepareSnowEdit(TilePos pos);
     void clearSnow();

@@ -755,6 +755,22 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                 vertex.v = flow.y;
             }
     };
+    // General water polygon, clipped against partial solids. Vertices are in
+    // chunk-local space, like the quads above.
+    const auto emitWaterPolygon = [&](std::span<const Vec3> polygon,
+                                      Vec3 normal, Face face, Vec2 flow,
+                                      bool movingRiver) {
+        if (polygon.size() < 3) return;
+        const size_t base = mesh.water.vertices.size();
+        emitPolygon(mesh.water, polygon, normal, false, {}, TileShape{},
+                    {nullptr, UINT16_MAX, NeutralTint}, climate);
+        for (size_t i = base; i < mesh.water.vertices.size(); ++i) {
+            auto& vertex = mesh.water.vertices[i];
+            vertex.layer = movingRiver ? -3 : -4;
+            vertex.u = flow.x;
+            vertex.v = flow.y;
+        }
+    };
     static constexpr std::array<Vec2i, 4> sides{
         {{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
     static constexpr std::array<Face, 4> faces{Face::PosX, Face::NegX,
@@ -775,15 +791,14 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
             bool sampled = false;
             for (int y = 0; y < Chunk::SIZE_Y; ++y) {
                 const auto& tile = chunk.tiles[z][y][x];
-                const bool fluid =
-                    tile.liquid == LiquidType::Water && !tile.block_id;
+                const bool fluid = tile.liquid == LiquidType::Water;
                 const auto [ground, water] = generated;
                 const bool river =
                     water.reach && tile.waterOrigin != WaterOrigin::Local;
                 const int wy = originY + y;
                 // A generated sheet can run down the lip's exposed rock
                 // underneath the upstream water cells.
-                const bool cliff = water.reach && wy <= ground &&
+                const bool cliff = !fluid && water.reach && wy <= ground &&
                                    wy < water.surfaceY && tile.block_id;
                 if (!fluid && !cliff) continue;
                 if (tile.waterOrigin != WaterOrigin::Reservoir || cliff)
@@ -883,10 +898,14 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     const auto [dx, dz] = sides[i];
                     const auto [bank, lower] = adjacent[i];
                     const Tile* other = at(dx, y, dz);
-                    if (other && (other->block_id ||
-                                  (other->waterOrigin == WaterOrigin::Local &&
-                                   joinsLocal(lower))))
+                    if (other && other->waterOrigin == WaterOrigin::Local &&
+                        joinsLocal(lower))
                         continue;
+                    const auto nbr = getNeighbour(x + dx, y, z + dz);
+                    const bool neighborFullSolid =
+                        other && other->block_id && nbr.tile &&
+                        !nbr.isCompound() && !nbr.shape.code();
+                    if (neighborFullSolid) continue;
                     const bool drop = water.wet() && wy < water.surfaceY &&
                                       wy >= water.dropBottom(lower, bank);
                     // Any air beside a water cell exposes a face: a lower
@@ -925,15 +944,82 @@ ChunkMesh ChunkMesher::build(const Chunk& chunk, const ChunkCoord& coord,
                     // Match the outward winding of FACES.
                     // Move the sheet just in front of the solid face.
                     const float offset = cliff && drop ? 2 * SeamOverlap : 0.f;
-                    emitWater(x + (dx > 0 || dz > 0) + dx * offset,
-                              y + sheetBottom,
-                              z + (dz > 0 || dx < 0) + dz * offset, 0, length,
-                              0, -dz, 0, dx, faces[i], flow, river);
-                    if (localTop) {
-                        auto side = std::span(mesh.water.vertices).last(4);
-                        side[1].y = topAt(side[1]);
-                        side[2].y = topAt(side[2]);
+                    const bool sourcePartial = tile.block_id != 0;
+                    const bool neighborPartial =
+                        other && other->block_id && nbr.tile &&
+                        (nbr.isCompound() || nbr.shape.code());
+                    if (!sourcePartial && !neighborPartial) {
+                        emitWater(x + (dx > 0 || dz > 0) + dx * offset,
+                                  y + sheetBottom,
+                                  z + (dz > 0 || dx < 0) + dz * offset, 0,
+                                  length, 0, -dz, 0, dx, faces[i], flow, river);
+                        if (localTop) {
+                            auto side = std::span(mesh.water.vertices).last(4);
+                            side[1].y = topAt(side[1]);
+                            side[2].y = topAt(side[2]);
+                        }
+                        continue;
                     }
+                    // Clip the exposed sheet against both cells' actual open
+                    // area. A partial wall keeps water behind its solid part
+                    // while a side gap still shows the sheet.
+                    const auto& fd = FACES[uint8_t(faces[i])];
+                    const int cornerA =
+                        faces[i] == Face::PosX || faces[i] == Face::NegX ? 0
+                                                                         : 1;
+                    const int cornerB =
+                        faces[i] == Face::PosX || faces[i] == Face::NegX ? 3
+                                                                         : 0;
+                    const auto cellCorner = [&](int corner, float yy) {
+                        return Vec3{float(x) + fd.corners[corner][0], yy,
+                                    float(z) + fd.corners[corner][2]};
+                    };
+                    const float low = y + sheetBottom;
+                    const float high = y + height;
+                    std::vector<std::vector<Vec3>> fragments{
+                        {cellCorner(cornerA, low), cellCorner(cornerA, high),
+                         cellCorner(cornerB, high), cellCorner(cornerB, low)}};
+                    const auto clipAgainst =
+                        [&](const tile_geometry::CellGeometry& geometry,
+                            Face side, int ox, int oy, int oz) {
+                            std::vector<std::vector<Vec3>> next;
+                            for (auto& fragment : fragments) {
+                                const auto openings =
+                                    geometry.boundaryOpenings(side);
+                                if (openings.empty()) continue;
+                                for (const auto& opening : openings) {
+                                    std::vector<Vec3> shifted = opening;
+                                    for (auto& point : shifted) {
+                                        point.x += ox;
+                                        point.y += oy;
+                                        point.z += oz;
+                                    }
+                                    auto clipped = tile_geometry::clipToFace(
+                                        fragment, shifted,
+                                        Vec3{fd.nx, fd.ny, fd.nz});
+                                    if (clipped.size() >= 3)
+                                        next.push_back(std::move(clipped));
+                                }
+                            }
+                            fragments = std::move(next);
+                        };
+                    if (sourcePartial) {
+                        const auto solid =
+                            chunk.solidCellAt(Chunk::cell(x, y, z));
+                        if (solid.usesGeometry())
+                            clipAgainst(solid.geometry(), faces[i], x, y, z);
+                    }
+                    if (neighborPartial)
+                        clipAgainst(
+                            nbr.isCompound()
+                                ? geometryOf(nbr.tile,
+                                             [&] { return *nbr.solidCell(); })
+                                : nbr.solidCell()->geometry(),
+                            opposite(faces[i]), x + dx, y, z + dz);
+                    const Vec3 normal{fd.nx, fd.ny, fd.nz};
+                    for (const auto& fragment : fragments)
+                        emitWaterPolygon(fragment, normal, faces[i], flow,
+                                         river);
                 }
             }
         }

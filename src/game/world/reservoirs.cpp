@@ -66,6 +66,16 @@ uint64_t ReservoirSnapshot::columnKey(int x, int z) {
     return (uint64_t(uint32_t(x)) << 32) | uint32_t(z);
 }
 
+const PhaseState* ReservoirSnapshot::phase(const PhaseKey& key) const {
+    const auto it = phases.find(key);
+    return it == phases.end() ? nullptr : &it->second;
+}
+
+WaterVolume ReservoirSnapshot::frozen(const PhaseKey& key) const {
+    const auto* state = phase(key);
+    return state ? state->frozen : 0;
+}
+
 void PoolFootprint::add(Vec2i tile, int period, int anchorX, int floor,
                         int sill) {
     columns.emplace(ReservoirSnapshot::columnKey(tile.x, tile.y),
@@ -382,6 +392,14 @@ bool ReservoirChange::affects(const GeneratedHydrology* hydrology, int x0,
     if ((local && contains(*local)) ||
         std::any_of(locals.begin(), locals.end(), contains))
         return true;
+    for (const auto& owner : phaseOwners) {
+        if (owner.local()) {
+            if (contains(TilePos{owner.x, owner.y, owner.z})) return true;
+        } else if (hydrology &&
+                   hydrology->mayContainBody(owner.body, x0, z0, x1, z1)) {
+            return true;
+        }
+    }
     if (hydrology && !reaches.empty() &&
         hydrology->hasChannel(x0, z0, x1, z1, reaches))
         return true;
@@ -507,7 +525,7 @@ void Reservoirs::publish(std::shared_ptr<ReservoirSnapshot> next,
     }
     view.store(std::move(next));
     if (!emitted.bodies.empty() || !emitted.reaches.empty() || emitted.local ||
-        !emitted.locals.empty()) {
+        !emitted.locals.empty() || !emitted.phaseOwners.empty()) {
         if (!emitted.pools && !emitted.bodies.empty() &&
             !poolFootprints.empty()) {
             if (!publishedFootprints)
@@ -557,8 +575,15 @@ WaterVolume Reservoirs::divert(uint32_t body, TilePos recipient,
     const auto current = snapshot();
     const auto fill = current->cells.fill(recipient);
     const auto before = volume(body);
-    const auto accepted = std::min({amount, before, WaterUnitsPerBlock - fill});
-    if (!accepted) return 0;
+    int capacity = WaterUnitsPerBlock;
+    if (profileQuery)
+        if (const auto profile = profileQuery(recipient))
+            capacity = std::clamp(
+                int(std::lround(profile->capacity * WaterUnitsPerBlock)), 0,
+                int(WaterUnitsPerBlock));
+    const auto accepted = std::min<WaterVolume>(
+        {amount, before, std::max(0, capacity - int(fill))});
+    if (accepted <= 0) return 0;
     auto next = std::make_shared<ReservoirSnapshot>(*snapshot());
     next->cells.set(recipient, uint8_t(fill + accepted));
     stores[body] = before - accepted;
@@ -571,13 +596,81 @@ WaterVolume Reservoirs::divert(uint32_t body, TilePos recipient,
 }
 
 namespace {
-template <typename Capacity>
+
+// Per-operation profile cache. Query results are bounded by the cells the
+// solver visits, and geometry is rebuilt only for partial solids.
+class ProfileView {
+   public:
+    ProfileView(const Reservoirs::ProfileQuery& query, int period)
+        : query(query), periodX(period) {}
+
+    const fluid::Profile* at(TilePos p) {
+        if (!query) return nullptr;
+        const auto key = (uint64_t(uint32_t(p.x)) << 32) ^ uint32_t(p.z);
+        const auto id = (key << 8) ^ uint16_t(p.y);
+        const auto found = cache.find(id);
+        if (found != cache.end())
+            return found->second ? &*found->second : nullptr;
+        const auto inserted = cache.emplace(id, query(p)).first;
+        return inserted->second ? &*inserted->second : nullptr;
+    }
+
+    int capacity(TilePos p) {
+        const auto* profile = at(p);
+        if (!profile) return WaterUnitsPerBlock;
+        return std::clamp(
+            int(std::lround(profile->capacity * WaterUnitsPerBlock)), 0,
+            int(WaterUnitsPerBlock));
+    }
+
+    int unitsAt(TilePos p, float level) {
+        const auto* profile = at(p);
+        if (!profile)
+            return std::clamp(int(std::lround(level * WaterUnitsPerBlock)), 0,
+                              int(WaterUnitsPerBlock));
+        return profile->unitsAt(level);
+    }
+
+    float levelOf(TilePos p, int fill) {
+        const auto* profile = at(p);
+        if (!profile) return float(fill) / WaterUnitsPerBlock;
+        return profile->levelForUnits(fill);
+    }
+
+    std::optional<float> opening(TilePos a, TilePos b) {
+        const auto* pa = at(a);
+        const auto* pb = at(b);
+        static const fluid::Profile open = fluid::Profile::open();
+        const auto& first = pa ? *pa : open;
+        const auto& second = pb ? *pb : open;
+        int dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+        if (periodX > 0) dx = int(WorldWrap::delta(b.x, a.x, periodX));
+        Face face = Face::PosX;
+        if (dx)
+            face = dx > 0 ? Face::PosX : Face::NegX;
+        else if (dy)
+            face = dy > 0 ? Face::PosY : Face::NegY;
+        else if (dz)
+            face = dz > 0 ? Face::PosZ : Face::NegZ;
+        else
+            return std::nullopt;
+        return fluid::sharedOpening(first, second, face);
+    }
+
+   private:
+    const Reservoirs::ProfileQuery& query;
+    int periodX = 0;
+    std::unordered_map<uint64_t, std::optional<fluid::Profile>> cache;
+};
+
+template <typename Capacity, typename Connected>
 WaterVolume fillCut(const ReservoirSnapshot& current,
                     std::shared_ptr<ReservoirSnapshot>& next,
                     ReservoirChange& change, TilePos mouth,
                     WaterVolume remaining, uint64_t distanceLimit,
                     size_t cellLimit, const Reservoirs::CellQuery& access,
-                    int periodX, const Capacity& capacity) {
+                    int periodX, const Capacity& capacity,
+                    const Connected& connected) {
     // Fill low ground first. Only a full cell can feed the cell above, and
     // only up to the source head. Unknown voxels have no receiving capacity.
     using Node = std::tuple<int, int, int, int>;
@@ -602,7 +695,7 @@ WaterVolume fillCut(const ReservoirSnapshot& current,
     const auto survey = [&](TilePos p, int distance) {
         p = canonical(p);
         if (p.x < 0 || p.z < 0 || p.y < 0 || p.y >= WORLD_HEIGHT_Y ||
-            surveyed.size() >= cellLimit || !capacity(p.y, 0) ||
+            surveyed.size() >= cellLimit || !capacity(p, 0) ||
             surveyed.contains(p) || access(p) != Reservoirs::CellAccess::Open)
             return;
         surveyed.insert(p);
@@ -614,14 +707,17 @@ WaterVolume fillCut(const ReservoirSnapshot& current,
          ++i) {
         const auto [p, distance] = frontier[i];
         if (uint64_t(distance + 1) >= distanceLimit) continue;
-        for (const auto q : faces(p)) survey(q, distance + 1);
+        for (const auto q : faces(p)) {
+            if (!connected(p, q)) continue;
+            survey(q, distance + 1);
+        }
     }
     std::unordered_set<TilePos> seen;
     WaterVolume moved = 0;
     const auto enqueue = [&](TilePos p, int distance) {
         p = canonical(p);
         if (uint64_t(distance) >= distanceLimit || !surveyed.contains(p) ||
-            !capacity(p.y, moved) || !seen.insert(p).second)
+            !capacity(p, moved) || !seen.insert(p).second)
             return false;
         pending.emplace(p.y, distance, p.z, p.x);
         return true;
@@ -633,23 +729,23 @@ WaterVolume fillCut(const ReservoirSnapshot& current,
         const TilePos p{x, y, z};
         // Let a newly discovered drop fill before its downspout.
         const TilePos below{x, y - 1, z};
-        if (enqueue(below, distance + 1)) {
+        if (connected(p, below) && enqueue(below, distance + 1)) {
             pending.emplace(y, distance, z, x);
             continue;
         }
         for (const auto q : {TilePos{x - 1, y, z}, TilePos{x + 1, y, z},
                              TilePos{x, y, z - 1}, TilePos{x, y, z + 1}})
-            enqueue(q, distance + 1);
+            if (connected(p, q)) enqueue(q, distance + 1);
         const auto& cells = next ? next->cells : current.cells;
         const int fill = cells.fill(p);
         auto accepted =
-            std::clamp<WaterVolume>(capacity(y, moved) - fill, 0, remaining);
+            std::clamp<WaterVolume>(capacity(p, moved) - fill, 0, remaining);
         // A finite source may recede during this very transfer.
-        if (accepted && fill + accepted > capacity(y, moved + accepted)) {
+        if (accepted && fill + accepted > capacity(p, moved + accepted)) {
             WaterVolume low = 0, high = accepted;
             while (low < high) {
                 const auto mid = (low + high + 1) / 2;
-                if (fill + mid <= capacity(y, moved + mid))
+                if (fill + mid <= capacity(p, moved + mid))
                     low = mid;
                 else
                     high = mid - 1;
@@ -663,7 +759,7 @@ WaterVolume fillCut(const ReservoirSnapshot& current,
             remaining -= accepted;
             moved += accepted;
         }
-        if (fill + accepted == WaterUnitsPerBlock)
+        if (fill + accepted >= capacity(p, moved))
             enqueue({x, y + 1, z}, distance + 1);
     }
     return moved;
@@ -682,17 +778,25 @@ WaterVolume Reservoirs::drainCut(uint32_t body, TilePos mouth, uint64_t elapsed,
         generated && (body == GeneratedHydrology::Sea || generated->basin(body))
             ? shape->levelAt(shape->capacity()) - 1
             : -1;
-    const auto capacity = [&](int y, WaterVolume moved) -> int {
+    ProfileView profiles(profileQuery, periodX);
+    const auto capacity = [&](TilePos p, WaterVolume moved) -> int {
         // Water that has already crossed the sill can fall even as the
         // reservoir runs dry. Below the sill there is no head constraint.
-        if (y < mouth.y) return WaterUnitsPerBlock;
+        const int y = p.y;
+        if (y < mouth.y) return profiles.capacity(p);
         const auto left = before - moved;
         if (left <= shape->volumeAt(y)) return 0;
         const int fill =
             left >= shape->volumeAt(y + 1) ? 255 : shape->fillAtSurface(left);
-        return y == restingLayer
-                   ? std::max(1, fill * WaterSurface::RestingFill / 255)
-                   : fill;
+        const auto level =
+            float(y == restingLayer
+                      ? std::max(1, fill * WaterSurface::RestingFill / 255)
+                      : fill) /
+            255.f;
+        return profiles.unitsAt(p, level);
+    };
+    const auto connected = [&](TilePos a, TilePos b) {
+        return profiles.opening(a, b).has_value();
     };
     const auto current = snapshot();
     const int fill = current->cells.fill(mouth);
@@ -702,14 +806,14 @@ WaterVolume Reservoirs::drainCut(uint32_t body, TilePos mouth, uint64_t elapsed,
         current->cells.fill({mouth.x, mouth.y - 1, mouth.z}) == 255;
     const auto distanceLimit =
         elapsed == 1 &&
-                (backedUp || fill >= std::max(1, capacity(mouth.y, 0) - 1))
+                (backedUp || fill >= std::max(1, capacity(mouth, 0) - 1))
             ? MaxVolume
             : elapsed;
     std::shared_ptr<ReservoirSnapshot> next;
     ReservoirChange change;
-    const auto moved =
-        fillCut(*current, next, change, mouth, available, distanceLimit,
-                elapsed == 1 ? 512 : 4096, access, periodX, capacity);
+    const auto moved = fillCut(*current, next, change, mouth, available,
+                               distanceLimit, elapsed == 1 ? 512 : 4096, access,
+                               periodX, capacity, connected);
     if (!moved) return 0;
     stores[body] = before - moved;
     ++serial;
@@ -724,9 +828,11 @@ WaterVolume Reservoirs::creditLocal(TilePos recipient, WaterVolume amount,
         recipient.y < 0 || recipient.y >= WORLD_HEIGHT_Y || recipient.z < 0)
         return 0;
     const auto current = snapshot();
+    ProfileView profiles(profileQuery, 0);
     const int fill = current->cells.fill(recipient);
-    const auto accepted = std::min<WaterVolume>(amount, 255 - fill);
-    if (!accepted) return 0;
+    const auto accepted =
+        std::min<WaterVolume>(amount, profiles.capacity(recipient) - fill);
+    if (accepted <= 0) return 0;
     auto next = std::make_shared<ReservoirSnapshot>(*current);
     next->cells.set(recipient, uint8_t(fill + accepted));
     totals[size_t(reason)] = add(totals[size_t(reason)], accepted);
@@ -735,6 +841,357 @@ WaterVolume Reservoirs::creditLocal(TilePos recipient, WaterVolume amount,
     change.local = recipient;
     publish(std::move(next), change);
     return accepted;
+}
+
+WaterVolume Reservoirs::freeze(uint32_t body, WaterVolume amount, double day) {
+    if (!body || amount <= 0) return 0;
+    const auto* shape = curve(body);
+    if (!shape) return 0;
+    const auto before = volume(body);
+    const auto accepted = std::min(amount, before);
+    if (accepted <= 0) return 0;
+    stores[body] = before - accepted;
+    auto next = std::make_shared<ReservoirSnapshot>(*snapshot());
+    auto& state = next->phases[PhaseKey{body}];
+    state.frozen = add(state.frozen, accepted);
+    if (day >= 0) state.appliedDay = day;
+    ReservoirChange change;
+    updateLevel(*next, *shape, body, change);
+    change.phaseOwners.push_back(PhaseKey{body});
+    ++serial;
+    publish(std::move(next), change);
+    return accepted;
+}
+
+WaterVolume Reservoirs::thaw(uint32_t body, WaterVolume amount, double day) {
+    if (!body || amount <= 0) return 0;
+    const auto* shape = curve(body);
+    if (!shape) return 0;
+    auto next = std::make_shared<ReservoirSnapshot>(*snapshot());
+    const auto found = next->phases.find(PhaseKey{body});
+    if (found == next->phases.end() || found->second.frozen <= 0) return 0;
+    const auto available = std::min(amount, found->second.frozen);
+    const auto before = volume(body);
+    const auto accepted = std::max<WaterVolume>(
+        0, std::min(available, shape->capacity() - before));
+    const auto overflow = available - accepted;
+    if (accepted > 0) stores[body] = before + accepted;
+    found->second.frozen -= available;
+    if (day >= 0) found->second.appliedDay = day;
+    if (overflow > 0)
+        totals[size_t(ReservoirExchange::Disposal)] =
+            add(totals[size_t(ReservoirExchange::Disposal)], -overflow);
+    ReservoirChange change;
+    if (accepted > 0) updateLevel(*next, *shape, body, change);
+    change.phaseOwners.push_back(PhaseKey{body});
+    ++serial;
+    publish(std::move(next), change);
+    return available;
+}
+
+WaterVolume Reservoirs::freezeLocal(TilePos cell, WaterVolume amount,
+                                    double day) {
+    if (amount <= 0 || cell.x < 0 || cell.z < 0 || cell.y < 0 ||
+        cell.y >= WORLD_HEIGHT_Y)
+        return 0;
+    const auto current = snapshot();
+    const int fill = current->cells.fill(cell);
+    const auto accepted = std::min<WaterVolume>(amount, fill);
+    if (accepted <= 0) return 0;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->cells.set(cell, uint8_t(fill - accepted));
+    auto& state = next->phases[PhaseKey{0, cell.x, int16_t(cell.y), cell.z}];
+    state.frozen = add(state.frozen, accepted);
+    if (day >= 0) state.appliedDay = day;
+    ReservoirChange change;
+    change.local = cell;
+    change.locals.push_back(cell);
+    change.phaseOwners.push_back(PhaseKey{0, cell.x, int16_t(cell.y), cell.z});
+    ++serial;
+    publish(std::move(next), change);
+    return accepted;
+}
+
+WaterVolume Reservoirs::thawLocal(TilePos cell, WaterVolume amount,
+                                  double day) {
+    if (amount <= 0 || cell.x < 0 || cell.z < 0 || cell.y < 0 ||
+        cell.y >= WORLD_HEIGHT_Y)
+        return 0;
+    const auto current = snapshot();
+    const PhaseKey key{0, cell.x, int16_t(cell.y), cell.z};
+    const auto found = current->phases.find(key);
+    if (found == current->phases.end() || found->second.frozen <= 0) return 0;
+    const auto available = std::min(amount, found->second.frozen);
+    ProfileView profiles(profileQuery, generated ? generated->periodX() : 0);
+    const int fill = current->cells.fill(cell);
+    const auto accepted = std::max<WaterVolume>(
+        0, std::min<WaterVolume>(available,
+                                 WaterVolume(profiles.capacity(cell) - fill)));
+    const auto overflow = available - accepted;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->cells.set(cell, uint8_t(fill + accepted));
+    next->phases[key].frozen -= available;
+    if (day >= 0) next->phases[key].appliedDay = day;
+    if (overflow > 0)
+        totals[size_t(ReservoirExchange::Disposal)] =
+            add(totals[size_t(ReservoirExchange::Disposal)], -overflow);
+    ReservoirChange change;
+    change.local = cell;
+    change.locals.push_back(cell);
+    change.phaseOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return available;
+}
+
+WaterVolume Reservoirs::adoptLocal(TilePos cell, uint8_t fill) {
+    if (!fill || cell.x < 0 || cell.z < 0 || cell.y < 0 ||
+        cell.y >= WORLD_HEIGHT_Y)
+        return 0;
+    const auto current = snapshot();
+    if (current->cells.contains(cell)) return 0;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->cells.set(cell, fill);
+    ReservoirChange change;
+    change.local = cell;
+    change.locals.push_back(cell);
+    ++serial;
+    publish(std::move(next), change);
+    return fill;
+}
+
+WaterVolume Reservoirs::frozen(uint32_t body) const {
+    return body ? snapshot()->frozen(PhaseKey{body}) : 0;
+}
+
+WaterVolume Reservoirs::frozenLocal(TilePos cell) const {
+    return snapshot()->frozen(PhaseKey{0, cell.x, int16_t(cell.y), cell.z});
+}
+
+WaterVolume Reservoirs::frozenTotal() const {
+    WaterVolume total = 0;
+    for (const auto& [key, state] : snapshot()->phases) {
+        (void)key;
+        total = add(total, state.frozen);
+    }
+    return total;
+}
+
+WaterVolume Reservoirs::liquidTotal() const {
+    WaterVolume total = 0;
+    std::set<uint32_t> ids;
+    for (const auto& [id, volume] : stores) {
+        (void)volume;
+        ids.insert(id);
+    }
+    for (const auto& [id, shape] : curves) {
+        (void)shape;
+        ids.insert(id);
+    }
+    for (const auto id : ids) {
+        if (const auto it = stores.find(id); it != stores.end())
+            total = add(total, it->second);
+        else if (const auto it = curves.find(id); it != curves.end())
+            total = add(total, it->second.capacity());
+    }
+    snapshot()->cells.forEach([&](TilePos p, uint8_t fill) {
+        (void)p;
+        total = add(total, fill);
+    });
+    return total;
+}
+
+WaterVolume Reservoirs::pendingTransfers() const {
+    WaterVolume total = 0;
+    for (const auto& [body, amount] : pendingInflow) {
+        (void)body;
+        total = add(total, amount);
+    }
+    for (const auto& [reach, delivery] : deliveries) {
+        (void)reach;
+        total = add(total, delivery.held);
+    }
+    return total;
+}
+
+void Reservoirs::setPhaseProgress(const PhaseKey& key, int64_t progress,
+                                  double day) {
+    auto next = std::make_shared<ReservoirSnapshot>(*snapshot());
+    auto& state = next->phases[key];
+    if (state.progress == progress && (day < 0 || state.appliedDay == day))
+        return;
+    state.progress = progress;
+    if (day >= 0) state.appliedDay = day;
+    ReservoirChange change;
+    change.phaseOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+}
+
+bool Reservoirs::clearPhase(const PhaseKey& key) {
+    auto next = std::make_shared<ReservoirSnapshot>(*snapshot());
+    if (!next->phases.erase(key)) return false;
+    ReservoirChange change;
+    change.phaseOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return true;
+}
+
+bool Reservoirs::clearLocal(TilePos cell) {
+    if (cell.x < 0 || cell.z < 0 || cell.y < 0 || cell.y >= WORLD_HEIGHT_Y)
+        return false;
+    const auto current = snapshot();
+    const PhaseKey key{0, cell.x, int16_t(cell.y), cell.z};
+    const int fill = current->cells.fill(cell);
+    const auto found = current->phases.find(key);
+    const WaterVolume ice =
+        found == current->phases.end() ? 0 : found->second.frozen;
+    if (!fill && !ice && found == current->phases.end()) return false;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->cells.set(cell, 0);
+    next->phases.erase(key);
+    if (fill)
+        totals[size_t(ReservoirExchange::Disposal)] =
+            add(totals[size_t(ReservoirExchange::Disposal)], -fill);
+    removedIce_ = add(removedIce_, ice);
+    ReservoirChange change;
+    change.local = cell;
+    change.locals.push_back(cell);
+    change.phaseOwners.push_back(key);
+    ++serial;
+    publish(std::move(next), change);
+    return true;
+}
+
+WaterVolume Reservoirs::acceptInput(const WaterInput& input,
+                                    WaterVolume amount) {
+    if (amount <= 0) return 0;
+    if (input.reach) {
+        // Reach input joins the next budget step exactly like a portal or
+        // channel arrival; the reach graph owns downstream delivery.
+        if (!springRates.contains(input.reach)) return 0;
+        deliveries[input.reach].held =
+            add(deliveries[input.reach].held, amount);
+        return amount;
+    }
+    if (input.body) {
+        const auto* shape = curve(input.body);
+        if (!shape) return 0;
+        const auto before = volume(input.body);
+        const auto accepted =
+            std::min<WaterVolume>(amount, shape->capacity() - before);
+        if (accepted <= 0) return 0;
+        stores[input.body] = before + accepted;
+        auto next = std::make_shared<ReservoirSnapshot>(*snapshot());
+        ReservoirChange change;
+        updateLevel(*next, *shape, input.body, change);
+        ++serial;
+        publish(std::move(next), change);
+        return accepted;
+    }
+    if (input.cell.x < 0 || input.cell.z < 0 || input.cell.y < 0 ||
+        input.cell.y >= WORLD_HEIGHT_Y)
+        return 0;
+    const auto current = snapshot();
+    ProfileView profiles(profileQuery, generated ? generated->periodX() : 0);
+    const int fill = current->cells.fill(input.cell);
+    const auto accepted = std::max<WaterVolume>(
+        0, std::min<WaterVolume>(amount, profiles.capacity(input.cell) - fill));
+    if (accepted <= 0) return 0;
+    auto next = std::make_shared<ReservoirSnapshot>(*current);
+    next->cells.set(input.cell, uint8_t(fill + accepted));
+    ReservoirChange change;
+    change.local = input.cell;
+    change.locals.push_back(input.cell);
+    ++serial;
+    publish(std::move(next), change);
+    return accepted;
+}
+
+WaterInputResult Reservoirs::applyInput(const WaterInput& input) {
+    WaterInputResult result;
+    if (input.amount <= 0) return result;
+    TilePos cell = input.cell;
+    if (generated && cell.x >= 0)
+        cell.x = int(WorldWrap::mod(cell.x, generated->periodX()));
+    const InputKey key{cell.x, cell.z, input.body, input.reach,
+                       uint8_t(input.kind)};
+    const auto cursor = inputCursors.find(key);
+    if (cursor != inputCursors.end() && input.interval <= cursor->second) {
+        result.duplicate = true;
+        return result;
+    }
+    auto request = input;
+    request.cell = cell;
+    result.accepted = acceptInput(request, input.amount);
+    result.overflow = input.amount - result.accepted;
+    totals[size_t(ReservoirExchange::Input)] =
+        add(totals[size_t(ReservoirExchange::Input)], input.amount);
+    if (result.overflow > 0) {
+        // A full body keeps its surplus as a pending transfer; a local or
+        // unresolved receiver books the surplus as accounted outflow.
+        if (input.body && curve(input.body))
+            pendingInflow[input.body] =
+                add(pendingInflow[input.body], result.overflow);
+        else
+            totals[size_t(ReservoirExchange::Disposal)] = add(
+                totals[size_t(ReservoirExchange::Disposal)], -result.overflow);
+    }
+    inputCursors[key] = input.interval;
+    ++serial;
+    return result;
+}
+
+WaterVolume Reservoirs::addMeltwater(TilePos cell, uint32_t body,
+                                     uint32_t reach, int64_t bulkSnowCm3,
+                                     int64_t interval) {
+    if (bulkSnowCm3 <= 0) return 0;
+    if (generated && cell.x >= 0)
+        cell.x = int(WorldWrap::mod(cell.x, generated->periodX()));
+    const InputKey key{cell.x, cell.z, body, reach,
+                       uint8_t(WaterInput::Kind::Meltwater)};
+    if (const auto cursor = inputCursors.find(key);
+        cursor != inputCursors.end() && interval <= cursor->second)
+        return 0;
+    const auto numerator = bulkSnowCm3 * 255 + inputRemainder_;
+    const auto units = numerator / InputRemainderDenominator;
+    inputRemainder_ = numerator % InputRemainderDenominator;
+    ++serial;
+    if (units <= 0) return 0;
+    WaterInput input;
+    input.interval = interval;
+    input.cell = cell;
+    input.body = body;
+    input.reach = reach;
+    input.amount = units;
+    input.kind = WaterInput::Kind::Meltwater;
+    return applyInput(input).accepted;
+}
+
+WaterVolume Reservoirs::addRain(TilePos cell, uint32_t body, uint32_t reach,
+                                int64_t liquidCm3, int64_t interval) {
+    if (liquidCm3 <= 0) return 0;
+    if (generated && cell.x >= 0)
+        cell.x = int(WorldWrap::mod(cell.x, generated->periodX()));
+    const InputKey key{cell.x, cell.z, body, reach,
+                       uint8_t(WaterInput::Kind::Rain)};
+    if (const auto cursor = inputCursors.find(key);
+        cursor != inputCursors.end() && interval <= cursor->second)
+        return 0;
+    const auto numerator = liquidCm3 * 255 * 5 + inputRemainder_;
+    const auto units = numerator / InputRemainderDenominator;
+    inputRemainder_ = numerator % InputRemainderDenominator;
+    ++serial;
+    if (units <= 0) return 0;
+    WaterInput input;
+    input.interval = interval;
+    input.cell = cell;
+    input.body = body;
+    input.reach = reach;
+    input.amount = units;
+    input.kind = WaterInput::Kind::Rain;
+    return applyInput(input).accepted;
 }
 
 bool Reservoirs::setReachDelivery(uint32_t reach, unsigned percent,
@@ -948,6 +1405,7 @@ bool Reservoirs::openDam(uint32_t reach, TilePos p, BreachSurvey survey,
     // now run out through the mouth, or stay behind if completely enclosed.
     constexpr int radius = ReservoirSnapshot::RiverStage::DamRadius;
     WaterVolume remaining = 0;
+    ProfileView profiles(profileQuery, stage.periodX);
     for (int dz = -radius; dz <= radius; ++dz)
         for (int dx = -radius; dx <= radius; ++dx) {
             const int x = int(WorldWrap::mod(p.x + dx, stage.periodX)),
@@ -969,9 +1427,10 @@ bool Reservoirs::openDam(uint32_t reach, TilePos p, BreachSurvey survey,
                     remaining = volume(body);
                 }
                 const auto fill = next->cells.fill(cell);
+                const int target =
+                    profiles.unitsAt(cell, water.fillAt(y, ground) / 255.f);
                 const int moved = int(std::min<WaterVolume>(
-                    remaining,
-                    std::max(0, int(water.fillAt(y, ground)) - fill)));
+                    remaining, std::max(0, target - fill)));
                 if (!moved) continue;
                 next->cells.set(cell, uint8_t(fill + moved));
                 remaining -= moved;
@@ -1628,10 +2087,12 @@ void Reservoirs::reconcile() {
     auto next = std::make_shared<ReservoirSnapshot>(*current);
     ReservoirChange change;
     bool moved = any;
+    ProfileView profiles(profileQuery, generated ? generated->periodX() : 0);
     for (const auto& [cell, body] : current->portals) {
         const auto* shape = curve(body);
         if (!shape) continue;
         const int fill = next->cells.fill(cell);
+        const int capacity = profiles.capacity(cell);
         // The cell's head is its fill fraction of one block above the tile
         // floor (cell.y). The body's surface is its level. Water moves
         // toward the lower head: an empty cell fills only while the body's
@@ -1661,8 +2122,10 @@ void Reservoirs::reconcile() {
             continue;
         }
         const bool refill = level > cell.y + 1 || !fill;
-        const auto delta = refill ? std::min<WaterVolume>(255 - fill, 1)
-                                  : -std::min<WaterVolume>(fill, 1);
+        const auto delta =
+            refill ? std::max<WaterVolume>(
+                         0, std::min<WaterVolume>(capacity - fill, 1))
+                   : -std::min<WaterVolume>(fill, 1);
         if (!delta) continue;
         const auto before = volume(body);
         const auto net = -delta;
@@ -1708,6 +2171,7 @@ size_t Reservoirs::flow(size_t budget, const CellQuery& access, int periodX,
     std::shared_ptr<ReservoirSnapshot> next;
     ReservoirChange change;
     const auto visited = std::min(budget, activeCells.size());
+    ProfileView profiles(profileQuery, periodX);
     auto fillAt = [&](TilePos p) -> int {
         const auto& cells = next ? next->cells : current->cells;
         return cells.fill(p);
@@ -1751,11 +2215,44 @@ size_t Reservoirs::flow(size_t budget, const CellQuery& access, int periodX,
             dest = canonical(dest);
             if (dest == source || dest.y < 0) return;
             const int from = fillAt(source);
-            const int offered =
-                downward ? from : std::clamp((from - fillAt(dest)) / 2, 0, 32);
-            if (!offered) return;
+            const auto shared = profiles.opening(source, dest);
+            if (!shared) return;
+            int offered = 0;
+            if (downward) {
+                offered = from;
+            } else {
+                const float sourceLevel = profiles.levelOf(source, from);
+                const float destLevel = profiles.levelOf(dest, fillAt(dest));
+                if (sourceLevel <= destLevel + 1e-4f ||
+                    std::max(sourceLevel, destLevel) <= *shared + 1e-4f)
+                    return;
+                offered = std::clamp((from - fillAt(dest)) / 2, 0, 32);
+                // Do not raise the receiver past the source, nor drain the
+                // source below the receiver on a geometry-dependent curve.
+                offered =
+                    std::min(offered, profiles.unitsAt(dest, sourceLevel) -
+                                          fillAt(dest));
+                offered = std::min(offered,
+                                   from - profiles.unitsAt(source, destLevel));
+                // The source level falls as it drains. With unequal
+                // capacities the fixed rate cap can overshoot the receiver;
+                // reduce it until the two levels meet.
+                int low = 0, high = std::max(0, offered);
+                while (low < high) {
+                    const auto mid = (low + high + 1) / 2;
+                    const auto afterSource = from - mid;
+                    const auto afterDest = fillAt(dest) + mid;
+                    if (profiles.levelOf(source, afterSource) + 1e-4f >=
+                        profiles.levelOf(dest, afterDest))
+                        low = mid;
+                    else
+                        high = mid - 1;
+                }
+                offered = low;
+            }
+            if (offered <= 0) return;
             if ((downward && absorb(dest, offered)) || !open(dest) ||
-                fillAt(dest) == 255)
+                fillAt(dest) >= profiles.capacity(dest))
                 return;
             const int entryY = dest.y;
             // A parcel can fall through a loaded air column in one sweep.
@@ -1763,13 +2260,17 @@ size_t Reservoirs::flow(size_t budget, const CellQuery& access, int periodX,
             for (TilePos below{dest.x, dest.y - 1, dest.z}; below.y >= 0;
                  --below.y) {
                 if (absorb(below, offered)) return;
-                if (!open(below) || fillAt(below) == 255) break;
+                if (!open(below) || fillAt(below) >= profiles.capacity(below) ||
+                    !profiles.opening(dest, below))
+                    break;
                 dest = below;
             }
             int remaining = offered;
             for (; remaining && dest.y <= entryY; ++dest.y) {
                 const int to = fillAt(dest);
-                const int amount = std::min(remaining, 255 - to);
+                const int amount =
+                    std::min(remaining, profiles.capacity(dest) - to);
+                if (amount <= 0) break;
                 remove(amount);
                 next->cells.set(dest, uint8_t(to + amount));
                 change.locals.push_back(dest);
@@ -1779,7 +2280,9 @@ size_t Reservoirs::flow(size_t budget, const CellQuery& access, int periodX,
         transfer({source.x, source.y - 1, source.z}, true);
         const int film = fillAt(source);
         const TilePos above{source.x, source.y + 1, source.z};
-        if (film > 0 && film < 20 && open(above) && !fillAt(above) &&
+        if (film > 0 && film < 20 &&
+            profiles.levelOf(source, film) < 20.f / 255 && open(above) &&
+            !fillAt(above) && profiles.opening(source, above) &&
             !current->portals.contains(source)) {
             activeCells.insert(source);
             const auto since = filmSince.try_emplace(source, budgetStep).first;
@@ -1817,7 +2320,8 @@ size_t Reservoirs::flow(size_t budget, const CellQuery& access, int periodX,
                 const auto p = canonical({at.x + d.x, at.y, at.z + d.y});
                 if (std::any_of(pending.begin(), pending.begin() + count,
                                 [&](const Search& e) { return e.cell == p; }) ||
-                    fillAt(p) + 1 >= fillAt(source) || !open(p))
+                    fillAt(p) + 1 >= fillAt(source) || !open(p) ||
+                    !profiles.opening(at, p))
                     continue;
                 pending[count++] = {p, distance ? first : p, distance + 1};
             }
@@ -2201,6 +2705,7 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
     std::unordered_map<Node, WaterVolume> incoming;
     std::shared_ptr<ReservoirSnapshot> next;
     ReservoirChange change;
+    ProfileView profiles(profileQuery, periodX);
     drainChannels(elapsed, next, change);
     // Arrivals at full bodies continue through the budget graph; a body
     // outside it is terminal, so they leave as disposal.
@@ -2291,22 +2796,26 @@ void Reservoirs::advanceTo(uint64_t step, std::span<const RiverIntake> intakes,
                     const auto current = snapshot();
                     const auto& cells = next ? next->cells : current->cells;
                     const int fill = cells.fill(intake->cell);
-                    const auto head = [&](int y, WaterVolume) {
-                        return intake->head.fillAt(y, -1);
+                    const auto head = [&](TilePos p, WaterVolume) {
+                        return profiles.unitsAt(
+                            p, intake->head.fillAt(p.y, -1) / 255.f);
+                    };
+                    const auto connected = [&](TilePos a, TilePos b) {
+                        return profiles.opening(a, b).has_value();
                     };
                     if (access && amount &&
-                        (elapsed > 1 || fill >= head(intake->cell.y, 0))) {
+                        (elapsed > 1 || fill >= head(intake->cell, 0))) {
                         const auto distanceLimit =
                             elapsed == 1 ? uint64_t(MaxVolume) : elapsed;
                         amount -=
                             fillCut(*current, next, change, intake->cell,
                                     std::min(amount, scale(255, elapsed)),
                                     distanceLimit, elapsed == 1 ? 512 : 4096,
-                                    access, periodX, head);
+                                    access, periodX, head, connected);
                         continue;
                     }
                     const auto accepted = std::clamp<WaterVolume>(
-                        int(head(intake->cell.y, 0)) - fill, 0, amount);
+                        int(head(intake->cell, 0)) - fill, 0, amount);
                     if (!accepted) continue;
                     if (!next)
                         next = std::make_shared<ReservoirSnapshot>(*current);
@@ -2603,15 +3112,43 @@ Bytes Reservoirs::encode() const {
         out.write(reach);
         out.write(step);
     }
+    // v10 records whether partial solids share their cell with liquid. Older
+    // ledgers keep the whole-cell barrier rule so a saved dam cannot drain
+    // through a newly recognised side gap.
+    out.write(uint8_t(partialCells ? 1 : 0));
+    // v11 keeps authoritative ice state beside the liquid it was converted
+    // from, plus the exact conversion remainder and dated input cursors.
+    out.write<int64_t>(inputRemainder_);
+    out.write<WaterVolume>(removedIce_);
+    const auto phaseSnapshot = snapshot();
+    out.write<uint32_t>(phaseSnapshot->phases.size());
+    for (const auto& [key, state] : phaseSnapshot->phases) {
+        out.write(key.body);
+        out.write(key.x);
+        out.write(key.y);
+        out.write(key.z);
+        out.write(state.frozen);
+        out.write(state.progress);
+        out.write(state.appliedDay);
+    }
+    out.write<uint32_t>(inputCursors.size());
+    for (const auto& [key, interval] : inputCursors) {
+        out.write(key.x);
+        out.write(key.z);
+        out.write(key.body);
+        out.write(key.reach);
+        out.write(key.kind);
+        out.write(interval);
+    }
     SectionContainer file;
-    file.put("RSVR", 9, out.take());
+    file.put("RSVR", 11, out.take());
     return file.encode();
 }
 
 void Reservoirs::restore(ByteView bytes) {
     const auto file = SectionContainer::decode(bytes);
     const auto* section = file.find("RSVR");
-    if (!section || section->version > 9 || !section->version)
+    if (!section || section->version > 11 || !section->version)
         throw SerializationError("Unsupported reservoir ledger");
     BinaryReader in(section->data);
     const auto savedStep = in.read<uint64_t>();
@@ -2892,7 +3429,58 @@ void Reservoirs::restore(ByteView bytes) {
                 !savedReopenedAt.contains(reach))
                 throw SerializationError("Orphaned spring closure time");
     }
+    const bool savedPartialCells =
+        section->version >= 10 ? in.read<uint8_t>() != 0 : false;
+    int64_t savedRemainder = 0;
+    WaterVolume savedRemovedIce = 0;
+    std::map<PhaseKey, PhaseState> savedPhases;
+    std::map<InputKey, int64_t> savedCursors;
+    if (section->version >= 11) {
+        savedRemainder = in.read<int64_t>();
+        savedRemovedIce = in.read<WaterVolume>();
+        if (savedRemainder < 0 || savedRemainder >= InputRemainderDenominator ||
+            savedRemovedIce < 0)
+            throw SerializationError("Invalid water input remainder");
+        const auto phaseCount = in.read<uint32_t>();
+        if (phaseCount > (1u << 20))
+            throw SerializationError("Invalid water phase count");
+        for (uint32_t i = 0; i < phaseCount; ++i) {
+            PhaseKey key;
+            key.body = in.read<uint32_t>();
+            key.x = in.read<int32_t>();
+            key.y = in.read<int16_t>();
+            key.z = in.read<int32_t>();
+            PhaseState state;
+            state.frozen = in.read<WaterVolume>();
+            state.progress = in.read<int64_t>();
+            state.appliedDay = in.read<double>();
+            if (state.frozen < 0 || !std::isfinite(state.appliedDay) ||
+                state.appliedDay < 0 ||
+                (key.body ? !savedCurve(key.body)
+                          : (key.x < 0 || key.z < 0 || key.y < 0 ||
+                             key.y >= WORLD_HEIGHT_Y)) ||
+                !savedPhases.emplace(key, state).second)
+                throw SerializationError("Invalid water phase");
+        }
+        const auto cursorCount = in.read<uint32_t>();
+        if (cursorCount > (1u << 21))
+            throw SerializationError("Invalid water input cursor count");
+        for (uint32_t i = 0; i < cursorCount; ++i) {
+            InputKey key;
+            key.x = in.read<int32_t>();
+            key.z = in.read<int32_t>();
+            key.body = in.read<uint32_t>();
+            key.reach = in.read<uint32_t>();
+            key.kind = in.read<uint8_t>();
+            const auto interval = in.read<int64_t>();
+            if (key.x < 0 || key.z < 0 || key.kind > 2 || interval < 0 ||
+                (key.body && key.reach) ||
+                !savedCursors.emplace(key, interval).second)
+                throw SerializationError("Invalid water input cursor");
+        }
+    }
     if (!in.atEnd()) throw SerializationError("Trailing reservoir data");
+    partialCells = savedPartialCells;
     auto recoveredOrder = routes(savedDeliveries);
     if (!recoveredOrder) throw SerializationError("Cyclic reservoir route");
     order = std::move(*recoveredOrder);
@@ -2952,6 +3540,10 @@ void Reservoirs::restore(ByteView bytes) {
     const auto stagedReaches = change.reaches;
     for (const auto reach : stagedReaches)
         updateRiverStage(reach, next, change);
+    next->phases = std::move(savedPhases);
+    inputCursors = std::move(savedCursors);
+    inputRemainder_ = savedRemainder;
+    removedIce_ = savedRemovedIce;
     view.store(std::move(next));
     ++serial;
 }

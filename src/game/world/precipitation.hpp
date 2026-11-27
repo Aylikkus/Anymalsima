@@ -99,11 +99,13 @@ inline double meltVolume(float temperatureC, double hours) {
 // surrounding measured air. Historical replay uses the owner's current room
 // state; that approximation is documented in the weather handoff.
 template <typename SampleAt, typename Wet,
-          typename LocalOffset = std::nullptr_t>
+          typename LocalOffset = std::nullptr_t,
+          typename RainAt = std::nullptr_t>
 double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
                  int x, int z, double target, bool lapse, SampleAt sampleAt,
                  Wet wetAt, LocalOffset localOffsetAt = LocalOffset{},
-                 int batchIntervals = weather_history::MaxBatchIntervals) {
+                 int batchIntervals = weather_history::MaxBatchIntervals,
+                 RainAt rainAt = RainAt{}) {
     using namespace weather_history;
     x = terrain.wrapX(x);
     const double start = snow.weatherDay(x, z);
@@ -146,6 +148,8 @@ double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
         receiver.height = double(column.baseY) + column.baseLocal;
         receiver.original = receiver.remaining = column.volume;
     }
+    std::array<double, 4> wetHeights{};
+    size_t wetRays = 0;
     for (const auto& hit : hits) {
         if (!hit->height) continue;
         if (hit->packed) {
@@ -154,7 +158,10 @@ double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
         }
         const auto wet = wetAt(*hit->height);
         if (!wet) return start;
-        if (*wet) continue;
+        if (*wet) {
+            wetHeights[wetRays++] = *hit->height;
+            continue;
+        }
         const int fromY = hit->cellY + 1;
         const auto support = snow.weatherSupport(x, z, fromY);
         // A full solid at the world ceiling routes directly to the sink.
@@ -176,7 +183,7 @@ double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
                 return hit->height && hit->cellY <= baseY;
             }));
     }
-    if (receivers.empty() && !packed.rays) {
+    if (receivers.empty() && !packed.rays && !wetRays) {
         snow.markWeatherApplied(x, z, limit);
         return limit;
     }
@@ -203,6 +210,18 @@ double reconcile(snow::SnowSettlement& snow, const snow::SnowTerrain& terrain,
                         : 0) +
                    float(local);
         };
+        if constexpr (!std::is_same_v<RainAt, std::nullptr_t>) {
+            // Rain that lands on an existing liquid surface is a dated water
+            // input. Snow fraction follows the same measured temperature as
+            // accumulation, so a freezing transition splits the same water.
+            for (size_t ray = 0; ray < wetRays; ++ray) {
+                const auto fraction = 1.f - world_weather::snowFractionAt(
+                                                temperatureAt(wetHeights[ray]));
+                const auto cm3 = double(sample.precipitationRate) * fraction *
+                                 hours * QuarterArea * Cm3PerMillimetre;
+                if (cm3 > 0) rainAt(x, z, wetHeights[ray], cm3, interval);
+            }
+        }
         const auto advance = [&](Receiver& receiver) {
             const auto melt =
                 std::llround(meltVolume(temperatureAt(receiver.height), hours) *

@@ -1256,6 +1256,17 @@ void TerrainLodManager::render(RenderTarget& target, IRenderer& renderer,
     underwater = false;
     if (const Tile* tile = chunks.tileAt(x, y, z)) {
         underwater = WaterSurface{}.submerged(eye.y, -1, tile);
+        // A partially solid cell owns only its open space. The eye inside
+        // the ramp, slab or wall is not submerged even when liquid shares
+        // the cell.
+        if (underwater) {
+            if (const auto cell = chunks.solidCellAt({x, y, z});
+                cell && cell->cell.usesGeometry() &&
+                cell->cell.geometry().contains({eye.x - std::floor(eye.x),
+                                                eye.y - std::floor(eye.y),
+                                                eye.z - std::floor(eye.z)}))
+                underwater = false;
+        }
     } else if (y >= 0 && z >= 0 && z < detailSampler.depth() &&
                (periodX > 0 || (x >= 0 && x < detailSampler.width()))) {
         underwater = detailSampler.submerged(x, z, eye.y, true);
